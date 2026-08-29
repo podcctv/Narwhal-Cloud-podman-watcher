@@ -193,10 +193,10 @@ auto_remediate_xrayr="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_AU
 panel_detection_enabled="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_PANEL_PAIRING_DETECTION_ENABLED "true")"
 default_allowed_panel_domains="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_ALLOWED_PANEL_DOMAINS "")"
 panel_process_patterns="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_PANEL_PROCESS_PATTERNS "xboard-node,xrayr,v2bx,soga,sspanel-uim-node")"
-panel_config_paths="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_PANEL_CONFIG_PATHS "/etc/XrayR/config.yml,/etc/V2bX/config.json,/etc/V2bX/config.json.bak,/usr/local/V2bX/config.json,/usr/local/V2bX/config.json.bak,/etc/xboard-node/config.yml,/etc/xboard-node/config.yaml,/opt/xboard-node/config.yml,/app/config/config.yml,/etc/soga/soga.conf,/etc/soga/config.yml")"
+panel_config_paths="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_PANEL_CONFIG_PATHS "/etc/XrayR/config.yml,/etc/V2bX/config.json,/etc/V2bX/config.json.bak,/usr/local/V2bX/config.json,/usr/local/V2bX/config.json.bak,/etc/xboard-node/config.yml,/etc/xboard-node/config.yaml,/usr/local/etc/bby-agent.yml,/opt/xboard-node/config.yml,/app/config/config.yml,/etc/soga/soga.conf,/etc/soga/config.yml")"
 socks_config_paths="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_SOCKS_CONFIG_PATHS "/etc/danted.conf,/etc/sockd.conf,/etc/3proxy/3proxy.cfg,/etc/3proxy.cfg,/etc/xray/config.json,/usr/local/etc/xray/config.json,/etc/v2ray/config.json,/usr/local/etc/v2ray/config.json,/etc/sing-box/config.json,/etc/sing-box.json,/etc/gost/config.yaml,/etc/gost/config.json")"
 socks_auth_enforcement_file="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_SOCKS_AUTH_ENFORCEMENT_FILE "/opt/narwhal-monitor/socks-auth-enforcement.json")"
-for required_panel_path in /etc/V2bX/config.json.bak /usr/local/V2bX/config.json /usr/local/V2bX/config.json.bak; do
+for required_panel_path in /etc/V2bX/config.json.bak /usr/local/V2bX/config.json /usr/local/V2bX/config.json.bak /usr/local/etc/bby-agent.yml; do
   if [[ ",${panel_config_paths}," != *",${required_panel_path},"* ]]; then
     panel_config_paths="${panel_config_paths},${required_panel_path}"
   fi

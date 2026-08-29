@@ -3375,7 +3375,7 @@ def collect_panel_pairing_indicators(
 
     raw_paths = os.getenv(
         "SECURITY_PANEL_CONFIG_PATHS",
-        "/etc/XrayR/config.yml,/etc/V2bX/config.json,/etc/xboard-node/config.yml,/etc/xboard-node/config.yaml,/opt/xboard-node/config.yml,/app/config/config.yml,/etc/soga/soga.conf,/etc/soga/config.yml",
+        "/etc/XrayR/config.yml,/etc/V2bX/config.json,/etc/xboard-node/config.yml,/etc/xboard-node/config.yaml,/usr/local/etc/bby-agent.yml,/opt/xboard-node/config.yml,/app/config/config.yml,/etc/soga/soga.conf,/etc/soga/config.yml",
     )
     paths = [path.strip() for path in raw_paths.split(",") if re.fullmatch(r"/[A-Za-z0-9_./-]+", path.strip())]
     quoted_paths = " ".join(shlex.quote(path) for path in paths)
@@ -4790,7 +4790,7 @@ def _configured_panel_process_patterns() -> List[str]:
 def _configured_panel_config_paths() -> List[str]:
     raw = os.getenv(
         "SECURITY_PANEL_CONFIG_PATHS",
-        "/etc/XrayR/config.yml,/etc/V2bX/config.json,/etc/V2bX/config.json.bak,/usr/local/V2bX/config.json,/usr/local/V2bX/config.json.bak,/etc/xboard-node/config.yml,/etc/xboard-node/config.yaml,/opt/xboard-node/config.yml,/app/config/config.yml,/etc/soga/soga.conf,/etc/soga/config.yml",
+        "/etc/XrayR/config.yml,/etc/V2bX/config.json,/etc/V2bX/config.json.bak,/usr/local/V2bX/config.json,/usr/local/V2bX/config.json.bak,/etc/xboard-node/config.yml,/etc/xboard-node/config.yaml,/usr/local/etc/bby-agent.yml,/opt/xboard-node/config.yml,/app/config/config.yml,/etc/soga/soga.conf,/etc/soga/config.yml",
     )
     return sorted(
         {
@@ -4825,7 +4825,7 @@ def _incus_host_namespace_kill(
         if isinstance(item, int) and 1 < item <= 4194304
     )
     script = (
-        "matched=0; killed=0; errors=0; "
+        "set -f; matched=0; killed=0; errors=0; "
         f"requested_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')}; "
         f"for pattern in {safe_patterns}; do "
         "for proc in /proc/[0-9]*; do pid=${proc##*/}; "
@@ -4834,7 +4834,9 @@ def _incus_host_namespace_kill(
         "comm=$(cat \"$proc/comm\" 2>/dev/null || true); "
         "argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
         "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); found=0; "
-        "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
+        "extra_candidates=''; if [ -n \"$requested_pids\" ]; then "
+        "extra_candidates=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | sed 's#.*/##'); fi; "
+        "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\" $extra_candidates; do "
         "candidate=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); "
         "[ \"$candidate\" = \"$pattern\" ] && found=1; done; "
         "[ \"$found\" -eq 1 ] || continue; "
@@ -5207,14 +5209,16 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "};\n"
             "for ud in /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system /run/systemd/system; do "
             "[ -d \"$ud\" ] || continue; "
-            "for u in $(find \"$ud\" -type f,l \\( -iname \"*${_pat}*.service\" -o -iname \"*${_pat}*.timer\" -o -iname \"*${_pat}*.socket\" -o -iname \"*${_pat}*.path\" \\) 2>/dev/null); do rem_unit \"$u\"; done; "
+            "for u in $(find \"$ud\" \\( -type f -o -type l \\) \\( -iname \"*${_pat}*.service\" -o -iname \"*${_pat}*.timer\" -o -iname \"*${_pat}*.socket\" -o -iname \"*${_pat}*.path\" \\) 2>/dev/null); do rem_unit \"$u\"; done; "
             "for u in $(grep -rIl --include='*.service' --include='*.timer' --include='*.socket' \"${_pat}\" \"$ud\" 2>/dev/null); do "
             "if grep -E '^[[:space:]]*Exec(Start|StartPre|StartPost)=' \"$u\" 2>/dev/null | grep -Fqi -- \"${_pat}\"; then rem_unit \"$u\"; fi; "
             "done; "
             "done; "
-            "for f in $(find /etc/init.d -maxdepth 2 -type f,l 2>/dev/null); do "
+            "for f in $(find /etc/init.d -maxdepth 2 \\( -type f -o -type l \\) 2>/dev/null); do "
             "if printf '%s' \"${f##*/}\" | grep -Fiq -- \"${_pat}\" || grep -Fiq -- \"${_pat}\" \"$f\" 2>/dev/null; then "
-            "\"$f\" stop >/dev/null 2>&1 || true; "
+            "svc=${f##*/}; "
+            "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 || \"$f\" stop >/dev/null 2>&1 || true; "
+            "command -v rc-update >/dev/null 2>&1 && rc-update del \"$svc\" >/dev/null 2>&1 || true; "
             "if rm -f -- \"$f\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; "
             "fi; done; "
             "command -v rc-update >/dev/null 2>&1 && rc-update del \"${_pat}\" >/dev/null 2>&1 || true; "
@@ -5278,7 +5282,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     }
     if runtime_kind == "incus" and patterns:
         _, host_killed, host_errors, host_output = _incus_host_namespace_kill(
-            runtime_bin, container_name, project, patterns
+            runtime_bin, container_name, project, patterns, process_pids
         )
         if host_killed or host_errors:
             counts["killed_processes"] = counts.get("killed_processes", 0) + host_killed

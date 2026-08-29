@@ -574,6 +574,9 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(command[:5], ["incus", "--project", "default", "exec", "node1"])
         self.assertIn("/etc/V2bX/config.json", command[-1])
         self.assertIn("/proc/4321", command[-1])
+        self.assertNotIn("-type f,l", command[-1])
+        self.assertIn("\\( -type f -o -type l \\)", command[-1])
+        self.assertIn('rc-update del "$svc"', command[-1])
         self.assertNotIn(" stop node1", " ".join(command))
 
     def test_panel_remediation_reports_zero_changes_as_failure(self):
@@ -622,6 +625,15 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(host_command[:5], ["nsenter", "-t", "9876", "-p", "-m"])
         self.assertEqual(host_command[6], "/bin/sh")
         self.assertIn('"$candidate" = "$pattern"', host_command[-1])
+        self.assertIn("extra_candidates=", host_command[-1])
+        self.assertIn(" 4321 ", host_command[-1])
+
+    def test_panel_defaults_include_bby_agent_config(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIn(
+                "/usr/local/etc/bby-agent.yml",
+                agent._configured_panel_config_paths(),
+            )
 
     def test_confirmed_panel_domain_is_silently_auto_remediated(self):
         with tempfile.TemporaryDirectory() as tmp:
