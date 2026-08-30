@@ -182,7 +182,7 @@ Timer 每 15 分钟比较 GitHub `origin/main` 与已部署提交。自动更新
 - Client 更新前通过 HMAC 签名接口 `/api/v1/update/version` 核对 Server 的实际运行版本。Server 未升级、接口尚不可用或暂时无法连接时，Client 保持原版本并在下个 timer 周期自动重试。
 - 首次人工安装 Client 时，若目标是尚无版本接口的旧 Server（旧版会返回 HTTP 401），安装器会明确警告并继续安装；这是为了避免新节点无法部署。后续自动更新仍执行严格的 Server-first 门禁。
 - 更新成功才写入部署版本；失败会保留当前服务，并在下一周期重试。
-- 自动更新 systemd oneshot 的启动超时为 30 分钟，覆盖 GHCR 多架构镜像最长约 15 分钟的等待窗口；更新单元使用 `KillMode=process`，Server/Caddy 容器显式使用独立 cgroup，避免 oneshot 退出时 systemd 误杀 Podman `conmon` 并留下孤立容器进程。
+- 自动更新 systemd oneshot 的启动超时为 30 分钟，覆盖 GHCR 多架构镜像最长约 15 分钟的等待窗口；Server/Caddy 会显式运行在独立的 `narwhal-monitor.slice`，更新单元使用 `KillMode=control-group`。这样更新任务退出或超时时可完整清理自身子进程，同时不会误杀容器，也不会因残留 `conmon` 导致下次启动报 `Device or resource busy`。
 - Server 更新不是只检查 Podman 的 `Running=true`：安装器还会校验镜像/运行时版本并实际访问回环后端 HTTP。Server 或 Caddy 任一步失败时，自动恢复上一版本容器和 Caddy 配置。
 - 原有共享密钥、Dashboard 登录凭据、TLS 配置、数据库、Client CA 和节点域名白名单均保留。
 
@@ -198,18 +198,17 @@ sudo tail -n 100 /opt/narwhal-monitor/client-auto-update.log
 
 日志出现 `update deferred: waiting for Server to run the target version` 表示 Server-first 版本门禁正常生效，不是 Client 故障。若 Server 长时间没有升级，重点检查 `server-auto-update.log` 中的 `tracked local changes`、`GHCR image ... was not ready`、`deployment drift` 或 `deployment verification failed`。仅在灾难恢复且明确接受版本不一致时，才可人工设置 `NARWHAL_SKIP_SERVER_VERSION_GATE=1` 跳过 Client 门禁；不建议用于日常更新。
 
-旧版本生成的更新单元如果执行 `systemctl start narwhal-monitor-server-update.service` 后显示 `timeout was exceeded`，可在 Server 主机一次性增加超时覆盖并重新启动：
+旧版本生成的更新单元如果执行 `systemctl start narwhal-monitor-server-update.service` 后显示 `timeout was exceeded` 或 `Device or resource busy`，说明旧 Server/Caddy 仍可能挂在 updater cgroup 下。不要直接把旧单元的 `KillMode` 改为 `control-group`，否则可能同时终止仍在提供服务的旧容器。请先从普通终端执行一次新版安装器，让容器迁移到独立 slice：
 
 ```bash
-sudo mkdir -p /etc/systemd/system/narwhal-monitor-server-update.service.d
-printf '[Service]\nKillMode=process\nDelegate=yes\nTimeoutStartSec=30min\nTimeoutStopSec=2min\n' | \
-  sudo tee /etc/systemd/system/narwhal-monitor-server-update.service.d/timeout.conf >/dev/null
-sudo systemctl daemon-reload
+cd /opt/Narwhal-Cloud-podman-watcher
+sudo git pull --ff-only
+sudo env NARWHAL_AUTO_UPDATE=1 bash scripts/install-server.sh update
 sudo systemctl reset-failed narwhal-monitor-server-update.service
 sudo systemctl start narwhal-monitor-server-update.service
 ```
 
-新版本安装/更新后会把相同配置直接写入主单元。若仍失败，执行 `sudo journalctl -u narwhal-monitor-server-update.service -n 150 --no-pager` 查看真正的后续错误。
+上述 `update` 会保留数据库、共享密钥、登录凭据和证书。完成后，`systemctl status` 的 updater cgroup 不应再包含 `conmon`、Server 或 Caddy 进程；若仍失败，执行 `sudo journalctl -u narwhal-monitor-server-update.service -n 150 --no-pager` 查看真正的后续错误。
 
 如需暂停某一端自动更新，将对应配置中的 `AUTO_UPDATE_ENABLED=true` 改为 `false`：
 

@@ -42,12 +42,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=$UPDATER $SIDE
-# Podman conmon may remain a descendant of the updater process.  The default
-# KillMode=control-group kills it when this oneshot exits, leaving the OCI
-# payload orphaned and the published port unusable.  Containers are managed by
-# Podman and must outlive this short-lived updater process.
-KillMode=process
-Delegate=yes
+# Server/Caddy are launched into narwhal-monitor.slice by install-server.sh,
+# outside this short-lived updater cgroup.  Therefore a timeout may safely stop
+# every updater subprocess without touching the running containers.
+KillMode=control-group
 TimeoutStartSec=30min
 TimeoutStopSec=2min
 EOF_SERVICE

@@ -13,6 +13,10 @@ TLS_CONTAINER_NAME="narwhal-monitor-caddy"
 DEPLOY_LOCK_FILE="/run/narwhal-monitor-server-deploy-v2.lock"
 # 专用网络：避免使用 Podman 默认 10.88.0.0/16，规避与宿主机已有私网网卡冲突。
 NARWHAL_NETWORK_NAME="narwhal-monitor-net"
+# Long-running Server/Caddy processes must not remain in the short-lived
+# automatic updater's cgroup.  The concrete arguments are selected after
+# Podman is available (see configure_container_cgroup_args).
+PODMAN_CGROUP_ARGS=( --cgroups=split )
 # shellcheck source=scripts/lib/interactive.sh
 source "$ROOT_DIR/scripts/lib/interactive.sh"
 
@@ -435,6 +439,23 @@ stage_container_replacement() {
   fi
 }
 
+configure_container_cgroup_args() {
+  local cgroup_manager=""
+  cgroup_manager="$(podman info --format '{{.Host.CgroupManager}}' 2>/dev/null || true)"
+  if [[ "$cgroup_manager" == "systemd" ]]; then
+    # --cgroups=split alone still nests conmon and the payload underneath the
+    # invoking oneshot service.  That leaves the updater cgroup populated and
+    # systemd refuses the next start with "Device or resource busy".  An
+    # explicit slice makes both processes siblings of the updater instead.
+    PODMAN_CGROUP_ARGS=( --cgroups=enabled --cgroup-parent=narwhal-monitor.slice )
+    echo "[INFO] Server/Caddy 将运行在独立 systemd cgroup: narwhal-monitor.slice。"
+  else
+    # Preserve compatibility with cgroupfs-based Podman hosts.
+    PODMAN_CGROUP_ARGS=( --cgroups=split )
+    echo "[INFO] Podman cgroup manager=${cgroup_manager:-unknown}，使用 split 模式。"
+  fi
+}
+
 rollback_container_replacement() {
   local container_name="$1"
   local display_name="$2"
@@ -554,7 +575,7 @@ replace_server_container() {
   local tried_default_net="no"
   for attempt in 1 2 3 4 5; do
     # 注意：不要写成 `... && break`，否则 podman run 失败时 set -e 会静默中止整个脚本。
-    new_id="$(podman run -d --cgroups=split --name "$CONTAINER_NAME" \
+    new_id="$(podman run -d "${PODMAN_CGROUP_ARGS[@]}" --name "$CONTAINER_NAME" \
       --restart=always \
       "${net_args[@]}" \
       -p "$port_binding" \
@@ -780,7 +801,7 @@ CADDY
   fi
 
   local -a podman_args=(
-    run -d --cgroups=split --name "$TLS_CONTAINER_NAME"
+    run -d "${PODMAN_CGROUP_ARGS[@]}" --name "$TLS_CONTAINER_NAME"
     --restart=always
     --network host
     -v "$TLS_DIR/Caddyfile:/etc/caddy/Caddyfile:ro"
@@ -937,6 +958,7 @@ EOF_HTTPS_GUIDE
 
 main() {
   ensure_root_and_deps
+  configure_container_cgroup_args
   acquire_deploy_lock
   if [[ "$MODE" == "reset-password" ]]; then
     reset_server_password
