@@ -182,7 +182,7 @@ Timer 每 15 分钟比较 GitHub `origin/main` 与已部署提交。自动更新
 - Client 更新前通过 HMAC 签名接口 `/api/v1/update/version` 核对 Server 的实际运行版本。Server 未升级、接口尚不可用或暂时无法连接时，Client 保持原版本并在下个 timer 周期自动重试。
 - 首次人工安装 Client 时，若目标是尚无版本接口的旧 Server（旧版会返回 HTTP 401），安装器会明确警告并继续安装；这是为了避免新节点无法部署。后续自动更新仍执行严格的 Server-first 门禁。
 - 更新成功才写入部署版本；失败会保留当前服务，并在下一周期重试。
-- 自动更新 systemd oneshot 的启动超时为 30 分钟，覆盖 GHCR 多架构镜像最长约 15 分钟的等待窗口；Server/Caddy 会显式运行在独立的 `narwhal-monitor.slice`，更新单元使用 `KillMode=control-group`。这样更新任务退出或超时时可完整清理自身子进程，同时不会误杀容器，也不会因残留 `conmon` 导致下次启动报 `Device or resource busy`。
+- 自动更新 systemd oneshot 的启动超时为 30 分钟，覆盖 GHCR 多架构镜像最长约 15 分钟的等待窗口；Server/Caddy 会显式运行在独立的 `narwhal-monitor.slice`，更新单元使用 `Delegate=yes` 允许 Podman 同时迁移 payload 与 `conmon`，并使用 `KillMode=control-group` 清理更新任务自身子进程。这样不会误杀容器，也不会因残留 `conmon` 导致下次启动报 `Device or resource busy`。若历史错误单元已经杀死 conmon，安装器会在确认 payload 已停止后清理孤儿元数据并继续重建。
 - Server 更新不是只检查 Podman 的 `Running=true`：安装器还会校验镜像/运行时版本并实际访问回环后端 HTTP。Server 或 Caddy 任一步失败时，自动恢复上一版本容器和 Caddy 配置。
 - Server 数据库使用 WAL 与 15 秒 busy timeout，节点写入和 Dashboard 读取可并行；历史清理使用 `reports(ts)` 索引、每批最多 5000 行且默认每 5 分钟至多执行一次，避免大库在每次上报/刷新时全表扫描并制造 IO 与锁竞争。
 - 原有共享密钥、Dashboard 登录凭据、TLS 配置、数据库、Client CA 和节点域名白名单均保留。

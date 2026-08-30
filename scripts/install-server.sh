@@ -429,6 +429,30 @@ stage_container_replacement() {
   fi
   echo "[INFO] 暂存现有 $display_name 容器用于失败回滚。"
   if ! podman stop --time 10 "$container_name" >/dev/null; then
+    # A previously misconfigured updater may have killed conmon while leaving
+    # the OCI payload alive.  Podman can then stop the payload successfully but
+    # still return an internal error because no exit file was written.  Only
+    # clean up when Podman now proves the payload is stopped and conmon is gone.
+    local stopped=""
+    local payload_pid=""
+    local conmon_file=""
+    local conmon_pid=""
+    stopped="$(podman inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || true)"
+    payload_pid="$(podman inspect -f '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
+    conmon_file="$(podman inspect -f '{{.ConmonPidFile}}' "$container_name" 2>/dev/null || true)"
+    if [[ -n "$conmon_file" ]]; then
+      conmon_pid="$(cat "$conmon_file" 2>/dev/null || true)"
+    fi
+    if [[ "$stopped" == "false" && "${payload_pid:-0}" == "0" \
+      && ( -z "$conmon_pid" || ! -d "/proc/$conmon_pid" ) ]]; then
+      echo "[WARN] $display_name 已停止但 conmon 未写入退出状态；清理孤儿元数据后继续重建。"
+      podman container cleanup --rm "$container_name" >/dev/null 2>&1 \
+        || podman rm -f --time 0 "$container_name" >/dev/null 2>&1 \
+        || true
+      if ! podman container inspect "$container_name" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
     echo "[ERROR] 无法停止现有 $display_name 容器，保留原服务并中止更新。"
     return 1
   fi
