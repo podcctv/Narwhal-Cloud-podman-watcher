@@ -93,7 +93,10 @@ run_installer() {
     both)
       echo "[INFO] 先处理 Server，再处理 Client。"
       bash "$ROOT_DIR/scripts/install-server.sh" "$mode" "${server_extra_args[@]}"
-      bash "$ROOT_DIR/scripts/install-client.sh" "$mode"
+      # The Client installer reads the just-created local Server config when
+      # this marker is present. This keeps both installs on one shared URL and
+      # secret without exposing the secret in argv or the process environment.
+      NARWHAL_INSTALL_BOTH=1 bash "$ROOT_DIR/scripts/install-client.sh" "$mode"
       ;;
     *)
       echo "[ERROR] 不支持的安装目标: $target"

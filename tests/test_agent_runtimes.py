@@ -106,6 +106,30 @@ class RuntimeDiscoveryTests(unittest.TestCase):
         self.assertEqual(containers[-1]["pid"], "4321")
         self.assertEqual(containers[-1]["project"], "default")
 
+    def test_incus_all_projects_are_discovered_in_one_bounded_list(self):
+        payload = json.dumps(
+            [
+                {"name": "default-node", "type": "container", "status": "Running", "project": "default"},
+                {"name": "tenant-node", "type": "container", "status": "Running", "project": "tenant-a"},
+            ]
+        )
+
+        def fake_run(cmd):
+            if cmd[:2] == ["incus", "list"]:
+                self.assertIn("--all-projects", cmd)
+                return payload
+            return "[]"
+
+        with mock.patch.dict(
+            os.environ,
+            {"INCUS_PROJECT": "all", "MONITORED_INCUS_PATTERNS": "*"},
+            clear=False,
+        ), mock.patch.object(agent, "run", side_effect=fake_run):
+            containers = agent._incus_containers("incus")
+
+        self.assertEqual([item["name"] for item in containers], ["default-node", "tenant-node"])
+        self.assertEqual([item["project"] for item in containers], ["default", "tenant-a"])
+
     def test_wildcard_includes_panel_and_service_images(self):
         with mock.patch.object(
             agent,

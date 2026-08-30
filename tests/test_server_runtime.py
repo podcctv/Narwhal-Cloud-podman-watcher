@@ -365,6 +365,19 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertNotIn("podman rm", diagnostic)
         self.assertNotIn("systemctl restart", diagnostic)
 
+    def test_both_install_reuses_server_identity_and_checks_incus_visibility(self):
+        install_entry = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+        client_installer = (ROOT / "scripts" / "install-client.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("NARWHAL_INSTALL_BOTH=1", install_entry)
+        self.assertIn("derive_local_server_url", client_installer)
+        self.assertIn("LOCAL_SERVER_ENV_FILE", client_installer)
+        self.assertIn("both 安装已自动复用本机 Server URL 与共享密钥", client_installer)
+        self.assertIn('INCUS_PROJECT "all"', client_installer)
+        self.assertIn("check_incus_visibility", client_installer)
+        self.assertIn("incus list --all-projects", client_installer)
+
     def test_signed_agent_version_endpoint_reports_runtime_server_version(self):
         original_version = server.APP_VERSION
         server.APP_VERSION = "1.5.0"

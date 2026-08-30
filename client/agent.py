@@ -3875,8 +3875,12 @@ def _oci_network_exposure(inspect_data: Dict[str, object]) -> List[Dict[str, str
 
 
 def _incus_containers(runtime: str) -> List[Dict[str, str]]:
-    project = os.getenv("INCUS_PROJECT", "").strip()
-    cmd = _runtime_base(runtime, project) + ["list", "type=container", "status=running", "--format=json"]
+    project = os.getenv("INCUS_PROJECT", "all").strip()
+    all_projects = not project or project.lower() in ("all", "*")
+    if all_projects:
+        cmd = [runtime, "list", "--all-projects", "type=container", "status=running", "--format=json"]
+    else:
+        cmd = _runtime_base(runtime, project) + ["list", "type=container", "status=running", "--format=json"]
     output = run(cmd)
     try:
         payload = json.loads(output) if output else []
@@ -3907,7 +3911,7 @@ def _incus_containers(runtime: str) -> List[Dict[str, str]]:
         )
         if not _image_matches(f"{name} {image}", patterns):
             continue
-        item_project = project or str(item.get("project") or "default")
+        item_project = str(item.get("project") or ("default" if all_projects else project))
         state = item.get("state") if isinstance(item.get("state"), dict) else {}
         network = state.get("network") if isinstance(state.get("network"), dict) else {}
         network_addresses: List[str] = []
@@ -3935,11 +3939,16 @@ def _incus_containers(runtime: str) -> List[Dict[str, str]]:
                 "network_addresses": sorted(set(network_addresses)),
             }
         )
-    forward_mappings = _incus_network_forward_mappings(runtime, project)
+    forward_mappings_by_project: Dict[str, List[Dict[str, str]]] = {}
     for item in items:
+        item_project = str(item.get("project") or "default")
+        if item_project not in forward_mappings_by_project:
+            forward_mappings_by_project[item_project] = _incus_network_forward_mappings(
+                runtime, item_project
+            )
         addresses = set(item.get("network_addresses") or [])
         exposures = item.get("network_exposure") if isinstance(item.get("network_exposure"), list) else []
-        for mapping in forward_mappings:
+        for mapping in forward_mappings_by_project[item_project]:
             _, target_host, _ = _parse_exposure_endpoint(str(mapping.get("target") or ""))
             if target_host in addresses:
                 exposures.append(dict(mapping))

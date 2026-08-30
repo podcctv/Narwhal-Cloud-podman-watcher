@@ -8,6 +8,8 @@ CLIENT_INSTALL_ENV_FILE="/opt/narwhal-monitor/client-install.env"
 CLIENT_APP_DIR="/opt/narwhal-monitor/client-agent"
 CLIENT_VENV_DIR="$CLIENT_APP_DIR/.venv"
 CLIENT_CA_FILE="/opt/narwhal-monitor/server-ca.crt"
+LOCAL_SERVER_ENV_FILE="/opt/narwhal-monitor/server.env"
+LOCAL_SERVER_INSTALL_ENV_FILE="/opt/narwhal-monitor/server-install.env"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/narwhal-monitor-client.service"
 MODE="${1:-install}"
 # shellcheck source=scripts/lib/interactive.sh
@@ -85,6 +87,74 @@ is_truthy() {
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" ]]
 }
 
+derive_local_server_url() {
+  local tls_enable tls_host port
+  tls_enable="$(load_kv_from_file "$LOCAL_SERVER_INSTALL_ENV_FILE" TLS_ENABLE || true)"
+  tls_host="$(load_kv_from_file "$LOCAL_SERVER_INSTALL_ENV_FILE" TLS_HOST || true)"
+  port="$(load_kv_from_file "$LOCAL_SERVER_INSTALL_ENV_FILE" PORT || true)"
+  if is_truthy "$tls_enable" && [[ -n "$tls_host" ]]; then
+    printf 'https://%s\n' "$tls_host"
+  elif [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )); then
+    printf 'http://127.0.0.1:%s\n' "$port"
+  fi
+}
+
+runtime_selection_includes_incus() {
+  local value
+  value="$(printf '%s' "${1:-auto}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  [[ -z "$value" || ",$value," == *,auto,* || ",$value," == *,incus,* ]]
+}
+
+check_incus_visibility() {
+  local runtimes_value="$1"
+  local project_value="$2"
+  project_value="$(printf '%s' "$project_value" | tr '[:upper:]' '[:lower:]')"
+  runtime_selection_includes_incus "$runtimes_value" || return 0
+
+  if ! command -v incus >/dev/null 2>&1; then
+    if [[ "$(printf '%s' "$runtimes_value" | tr '[:upper:]' '[:lower:]')" == *incus* ]]; then
+      echo "[WARN] 已显式启用 Incus，但宿主机 PATH 中没有 incus 命令。"
+    else
+      echo "[INFO] 未检测到 Incus CLI，跳过 Incus 可见性检查。"
+    fi
+    return 0
+  fi
+
+  local -a list_cmd=(incus list type=container status=running --format=csv -c n)
+  if [[ "$project_value" == "all" || "$project_value" == "*" || -z "$project_value" ]]; then
+    list_cmd=(incus list --all-projects type=container status=running --format=csv -c n)
+  else
+    list_cmd=(incus --project "$project_value" list type=container status=running --format=csv -c n)
+  fi
+
+  local output=""
+  if ! output="$(timeout 30s "${list_cmd[@]}" 2>&1)"; then
+    echo "[WARN] Incus 可见性检查失败，Client 可能无法采集 Incus 容器。"
+    echo "[WARN] 请确认 root 可执行: ${list_cmd[*]}"
+    echo "[WARN] Incus 返回: $(printf '%s' "$output" | head -n 1)"
+    return 0
+  fi
+
+  local visible_count=0
+  visible_count="$(printf '%s\n' "$output" | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+  if (( visible_count > 0 )); then
+    echo "[OK] Incus 可见性检查通过：项目范围 ${project_value:-all}，运行中容器 $visible_count 个。"
+    return 0
+  fi
+
+  if [[ "$project_value" != "all" && "$project_value" != "*" && -n "$project_value" ]]; then
+    local all_output="" all_count=0
+    all_output="$(timeout 30s incus list --all-projects type=container status=running --format=csv -c n 2>/dev/null || true)"
+    all_count="$(printf '%s\n' "$all_output" | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+    if (( all_count > 0 )); then
+      echo "[WARN] Incus 项目 '$project_value' 没有运行中容器，但其他项目共有 $all_count 个。"
+      echo "[WARN] 将 $CLIENT_ENV_FILE 中 INCUS_PROJECT 改为 all 后重启 Client，可采集全部项目。"
+      return 0
+    fi
+  fi
+  echo "[INFO] Incus CLI 可访问，但当前项目范围没有运行中的容器。"
+}
+
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Please run as root: sudo bash scripts/install-client.sh ${MODE}"
   exit 1
@@ -144,8 +214,19 @@ ensure_client_venv() {
   python3 -m venv "$CLIENT_VENV_DIR"
 }
 
-default_server_url="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SERVER_URL "http://127.0.0.1:8080")"
-default_secret="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SHARED_SECRET "$(generate_secret)")"
+both_server_url=""
+both_server_secret=""
+if is_truthy "${NARWHAL_INSTALL_BOTH:-0}"; then
+  both_server_url="$(derive_local_server_url)"
+  both_server_secret="$(load_kv_from_file "$LOCAL_SERVER_ENV_FILE" SHARED_SECRET || true)"
+  if [[ -z "$both_server_url" || -z "$both_server_secret" ]]; then
+    echo "[ERROR] both 安装未能读取本机 Server URL 或共享密钥，拒绝生成无法上报的 Client 配置。"
+    exit 1
+  fi
+  echo "[INFO] both 安装已自动复用本机 Server URL 与共享密钥。"
+fi
+default_server_url="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SERVER_URL "${both_server_url:-http://127.0.0.1:8080}")"
+default_secret="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SHARED_SECRET "${both_server_secret:-$(generate_secret)}")"
 default_tls_ca_file="$(load_kv_from_file "$CLIENT_ENV_FILE" SERVER_TLS_CA_FILE || true)"
 default_host_id="$(load_non_empty_or_default "$CLIENT_ENV_FILE" HOST_ID "$(hostname)")"
 default_interval="$(load_non_empty_or_default "$CLIENT_ENV_FILE" REPORT_INTERVAL "300")"
@@ -155,7 +236,7 @@ default_runtimes="$(load_non_empty_or_default "$CLIENT_ENV_FILE" CONTAINER_RUNTI
 default_docker_monitor_mode="$(load_non_empty_or_default "$CLIENT_ENV_FILE" DOCKER_MONITOR_MODE "notice")"
 default_monitored_patterns="$(load_non_empty_or_default "$CLIENT_ENV_FILE" MONITORED_IMAGE_PATTERNS "*")"
 default_monitored_incus_patterns="$(load_non_empty_or_default "$CLIENT_ENV_FILE" MONITORED_INCUS_PATTERNS "*")"
-default_incus_project="$(load_non_empty_or_default "$CLIENT_ENV_FILE" INCUS_PROJECT "default")"
+default_incus_project="$(load_non_empty_or_default "$CLIENT_ENV_FILE" INCUS_PROJECT "all")"
 default_security_enabled="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_MONITOR_ENABLED "true")"
 default_access_log_paths="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_ACCESS_LOG_PATHS "/var/log/nginx/access.log,/var/log/caddy/access.log")"
 default_container_access_log_paths="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_CONTAINER_ACCESS_LOG_PATHS "/var/log/nginx/access.log,/var/log/caddy/access.log")"
@@ -224,7 +305,7 @@ docker_monitor_mode="$(ask_choice_with_default "请选择 Docker 处理方式" "
   "off|关闭 Docker 发现")"
 monitored_patterns="$(ask_with_default "Podman/Docker image patterns (comma-separated substring match)" "$default_monitored_patterns")"
 monitored_incus_patterns="$(ask_with_default "Incus name/image patterns (* for all)" "$default_monitored_incus_patterns")"
-incus_project="$(ask_with_default "Incus project" "$default_incus_project")"
+incus_project="$(ask_with_default "Incus project (all or exact project name)" "$default_incus_project")"
 security_enabled="$(ask_choice_with_default "是否启用 DDoS/CC/滥用/扫描监测" "$default_security_enabled" \
   "true|启用（推荐）" \
   "false|禁用")"
@@ -393,6 +474,7 @@ systemctl daemon-reload
 systemctl enable narwhal-monitor-client.service >/dev/null
 systemctl restart narwhal-monitor-client.service
 bash "$ROOT_DIR/scripts/setup-auto-update.sh" client "$ROOT_DIR"
+check_incus_visibility "$runtimes" "$incus_project"
 
 cat <<EOF_SUM
 

@@ -69,13 +69,15 @@ sudo bash scripts/install.sh
 4. 记录共享密钥、访问地址和端口，以及安装摘要中随机生成的 `Dashboard Username` / `Dashboard Password`。镜像来源可选 `local` 本地构建，或 `github` 拉取镜像；拉取失败时会回退到本地构建。
 5. 按需配置 Caddy HTTPS 与告警 Webhook。公网部署建议启用 HTTPS。
 
+选择 `both` 时，Client 会从本机受保护的 Server 配置文件自动复用 `Client Server URL` 与共享密钥，不需要复制粘贴，也不会在进程参数中暴露密钥。Server 配置不完整时安装器会停止并明确报错，不会留下一个服务已启动但永远无法上报的 Client。
+
 安装每台 Client 时依次选择：
 
 1. 操作选择 `install`，目标选择 `client`。
 2. `Server URL` 填写 Server 安装摘要中的 `Client Server URL`，例如 `https://monitor.example.com` 或 `https://10.0.0.2`。启用 Caddy 时不要追加随机 Backend Port；HTTPS 默认使用 443。
 3. `Shared secret` 必须与 Server 完全一致；`Host ID` 必须在所有节点中唯一。
 4. Client 会先使用系统 CA 验证 Server；如果是 IP/internal 模式，则通过 HMAC 认证接口获取公开根证书、验证响应签名并再次完成 TLS 校验。不会下载或传输 Caddy 根私钥。
-5. 运行时建议保留 `auto`。Podman 与 Incus 默认完整监测；Docker 默认仅发现并提醒，不做深度扫描。
+5. 运行时建议保留 `auto`。Podman 与 Incus 默认完整监测；Docker 默认仅发现并提醒，不做深度扫描。新安装默认使用 `INCUS_PROJECT=all` 发现全部 Incus 项目；需要隔离时再填写一个精确项目名。
 6. `Allowed airport panel domains` 填写允许对接的面板域名，多个域名用英文逗号分隔；留空表示不允许任何外部面板域名。
 
 首次部署后的检查命令：
@@ -308,10 +310,17 @@ CONTAINER_RUNTIMES=auto
 DOCKER_MONITOR_MODE=notice
 MONITORED_IMAGE_PATTERNS=*
 MONITORED_INCUS_PATTERNS=*
-INCUS_PROJECT=default
+INCUS_PROJECT=all
 ```
 
-`auto` 会发现主机上可用的 Podman、Docker、Incus。Podman 和 Incus 默认做完整采集，两个过滤项默认都是 `*`，所以其中的 Xboard、xboard-node、Nginx/Caddy、数据库及其他运行中容器都会进入监测；只有明确需要缩小范围时才改成镜像或实例名关键字。Incus 虚拟机不在本项目的容器采集范围内。
+`auto` 会发现主机上可用的 Podman、Docker、Incus。Podman 和 Incus 默认做完整采集，两个过滤项默认都是 `*`，所以其中的 Xboard、xboard-node、Nginx/Caddy、数据库及其他运行中容器都会进入监测；只有明确需要缩小范围时才改成镜像或实例名关键字。`INCUS_PROJECT=all` 使用一次 `incus list --all-projects` 发现所有项目，再按实例的真实项目采集，不会把同名实例混在一起；已有 Client 更新时保留原项目设置。Incus 虚拟机不在本项目的容器采集范围内。
+
+Client 安装结束会执行一次只读、30 秒超时的 Incus 可见性检查，并显示当前项目范围内运行中容器数量。若精确项目为空但其他项目有容器，会提示改为 `all`。旧部署需要修复时可执行：
+
+```bash
+sudo sed -i 's/^INCUS_PROJECT=.*/INCUS_PROJECT=all/' /opt/narwhal-monitor/client.env
+sudo systemctl restart narwhal-monitor-client.service
+```
 
 Docker 默认采用 `notice`：只枚举容器、执行一次轻量 `df` 获取容器根盘容量，并在仪表盘产生信息提醒；不执行 stats、进程/连接/日志读取、镜像层尺寸计算或安全判断。可改为 `full` 启用与 Podman 相同的完整监测，或改为 `off` 完全忽略。信息级 Docker 提醒默认不会触发 `warning` 级别的 Webhook；需要推送时把 Server 的 `ALERT_WEBHOOK_MIN_SEVERITY` 改为 `info`。
 
