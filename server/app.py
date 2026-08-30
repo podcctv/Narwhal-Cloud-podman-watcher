@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,11 @@ STALE_SECONDS = int(os.getenv("STALE_SECONDS", "900"))
 OFFLINE_HIDE_SECONDS = int(os.getenv("OFFLINE_HIDE_SECONDS", str(24 * 3600)))
 OFFLINE_HOST_PURGE_SECONDS = int(os.getenv("OFFLINE_HOST_PURGE_SECONDS", str(24 * 3600)))
 PURGE_SECONDS = int(os.getenv("PURGE_SECONDS", str(30 * 24 * 3600)))
+DB_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("DB_BUSY_TIMEOUT_MS", "15000")))
+REPORT_CLEANUP_INTERVAL_SECONDS = max(
+    60, int(os.getenv("REPORT_CLEANUP_INTERVAL_SECONDS", "300"))
+)
+REPORT_CLEANUP_BATCH_SIZE = max(100, int(os.getenv("REPORT_CLEANUP_BATCH_SIZE", "5000")))
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "").strip()
 ALERT_WEBHOOK_MIN_SEVERITY = os.getenv("ALERT_WEBHOOK_MIN_SEVERITY", "warning").strip().lower()
 TLS_CA_CERT_PATH = os.getenv("TLS_CA_CERT_PATH", "/tls-ca/root.crt")
@@ -36,6 +42,8 @@ DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 UTC8 = timezone(timedelta(hours=8))
+_cleanup_lock = threading.Lock()
+_next_cleanup_monotonic = 0.0
 
 
 def format_utc8(ts: int) -> str:
@@ -90,13 +98,18 @@ async def dashboard_basic_auth(request: Request, call_next):
 
 
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_MS / 1000.0)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
 def init_db() -> None:
     conn = db()
+    # WAL lets dashboard reads coexist with frequent agent writes.  This is
+    # especially important once monitor.db contains large JSON payloads.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS reports (
@@ -121,6 +134,7 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_reports_host_ts ON reports(host_id, ts);
         CREATE INDEX IF NOT EXISTS idx_reports_host_container_ts ON reports(host_id, container_name, ts);
+        CREATE INDEX IF NOT EXISTS idx_reports_ts ON reports(ts);
         CREATE TABLE IF NOT EXISTS hosts (
             host_id TEXT PRIMARY KEY,
             last_seen INTEGER NOT NULL,
@@ -236,46 +250,75 @@ def init_db() -> None:
 def startup() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     init_db()
-    cleanup_old_reports()
+    cleanup_old_reports(force=True)
 
 
-def cleanup_old_reports(now_ts: int | None = None) -> int:
-    now = now_ts or int(time.time())
-    cutoff = now - PURGE_SECONDS
-    conn = db()
-    cur = conn.execute("DELETE FROM reports WHERE ts < ?", (cutoff,))
-    conn.execute("DELETE FROM security_alerts WHERE status='resolved' AND last_seen < ?", (cutoff,))
-    conn.execute("DELETE FROM host_security WHERE ts < ?", (cutoff,))
-    conn.execute("DELETE FROM security_actions WHERE updated_at < ?", (cutoff,))
-    conn.execute("DELETE FROM security_alert_decisions WHERE created_at < ?", (cutoff,))
-    inactive_host_cutoff = now - OFFLINE_HOST_PURGE_SECONDS
-    inactive_hosts = [
-        str(row["host_id"])
-        for row in conn.execute("SELECT host_id FROM hosts WHERE last_seen < ?", (inactive_host_cutoff,)).fetchall()
-    ]
-    for host_id in inactive_hosts:
-        conn.execute(
-            "DELETE FROM security_alert_decisions WHERE alert_id IN "
-            "(SELECT id FROM security_alerts WHERE host_id=?)",
-            (host_id,),
+def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
+    """Run bounded retention housekeeping without delaying normal requests."""
+    global _next_cleanup_monotonic
+    scheduled = now_ts is None and not force
+    monotonic_now = time.monotonic()
+    if scheduled and monotonic_now < _next_cleanup_monotonic:
+        return 0
+    if not _cleanup_lock.acquire(blocking=not scheduled):
+        return 0
+
+    conn: sqlite3.Connection | None = None
+    try:
+        monotonic_now = time.monotonic()
+        if scheduled and monotonic_now < _next_cleanup_monotonic:
+            return 0
+        now = int(time.time()) if now_ts is None else now_ts
+        cutoff = now - PURGE_SECONDS
+        conn = db()
+        # A bounded batch keeps WAL growth, lock duration and write amplification
+        # predictable.  idx_reports_ts avoids scanning large payload_json pages.
+        cur = conn.execute(
+            "DELETE FROM reports WHERE id IN ("
+            "SELECT id FROM reports INDEXED BY idx_reports_ts "
+            "WHERE ts < ? ORDER BY ts LIMIT ?)",
+            (cutoff, REPORT_CLEANUP_BATCH_SIZE),
         )
         conn.execute(
-            "DELETE FROM security_alert_policies WHERE fingerprint IN "
-            "(SELECT fingerprint FROM security_alerts WHERE host_id=?)",
-            (host_id,),
+            "DELETE FROM security_alerts WHERE status='resolved' AND last_seen < ?", (cutoff,)
         )
-        conn.execute("DELETE FROM reports WHERE host_id=?", (host_id,))
-        conn.execute("DELETE FROM security_alerts WHERE host_id=?", (host_id,))
-        conn.execute("DELETE FROM host_security WHERE host_id=?", (host_id,))
-        conn.execute("DELETE FROM security_actions WHERE host_id=?", (host_id,))
-        conn.execute("DELETE FROM connection_overloads WHERE host_id=?", (host_id,))
-    if inactive_hosts:
-        placeholders = ",".join("?" for _ in inactive_hosts)
-        conn.execute(f"DELETE FROM hosts WHERE host_id IN ({placeholders})", inactive_hosts)
-    conn.commit()
-    deleted = int(cur.rowcount or 0)
-    conn.close()
-    return deleted
+        conn.execute("DELETE FROM host_security WHERE ts < ?", (cutoff,))
+        conn.execute("DELETE FROM security_actions WHERE updated_at < ?", (cutoff,))
+        conn.execute("DELETE FROM security_alert_decisions WHERE created_at < ?", (cutoff,))
+        inactive_host_cutoff = now - OFFLINE_HOST_PURGE_SECONDS
+        inactive_hosts = [
+            str(row["host_id"])
+            for row in conn.execute(
+                "SELECT host_id FROM hosts WHERE last_seen < ?", (inactive_host_cutoff,)
+            ).fetchall()
+        ]
+        for host_id in inactive_hosts:
+            conn.execute(
+                "DELETE FROM security_alert_decisions WHERE alert_id IN "
+                "(SELECT id FROM security_alerts WHERE host_id=?)",
+                (host_id,),
+            )
+            conn.execute(
+                "DELETE FROM security_alert_policies WHERE fingerprint IN "
+                "(SELECT fingerprint FROM security_alerts WHERE host_id=?)",
+                (host_id,),
+            )
+            conn.execute("DELETE FROM reports WHERE host_id=?", (host_id,))
+            conn.execute("DELETE FROM security_alerts WHERE host_id=?", (host_id,))
+            conn.execute("DELETE FROM host_security WHERE host_id=?", (host_id,))
+            conn.execute("DELETE FROM security_actions WHERE host_id=?", (host_id,))
+            conn.execute("DELETE FROM connection_overloads WHERE host_id=?", (host_id,))
+        if inactive_hosts:
+            placeholders = ",".join("?" for _ in inactive_hosts)
+            conn.execute(f"DELETE FROM hosts WHERE host_id IN ({placeholders})", inactive_hosts)
+        conn.commit()
+        if now_ts is None:
+            _next_cleanup_monotonic = time.monotonic() + REPORT_CLEANUP_INTERVAL_SECONDS
+        return int(cur.rowcount or 0)
+    finally:
+        if conn is not None:
+            conn.close()
+        _cleanup_lock.release()
 
 
 def verify_signature(body: bytes, x_timestamp: str, x_signature: str) -> None:
@@ -642,10 +685,10 @@ async def report(
     x_timestamp: str = Header(default=""),
     x_signature: str = Header(default=""),
 ) -> Dict[str, Any]:
-    cleanup_old_reports()
     body = await request.body()
     verify_signature(body, x_timestamp, x_signature)
     data = json.loads(body)
+    cleanup_old_reports()
 
     host_id = data.get("host_id", "unknown")
     agent_version = str(data.get("agent_version") or "unknown").strip() or "unknown"

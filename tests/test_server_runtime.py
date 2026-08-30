@@ -21,6 +21,7 @@ class ServerRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         server.DB_PATH = str(Path(self.tmp.name) / "monitor.db")
+        server._next_cleanup_monotonic = 0.0
         self.original_tls_ca_path = server.TLS_CA_CERT_PATH
         server.init_db()
 
@@ -966,6 +967,40 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.close()
         self.assertIn("runtime", names)
         self.assertIn("project", names)
+
+    def test_database_uses_wal_busy_timeout_and_indexed_bounded_cleanup(self):
+        conn = server.db()
+        self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        self.assertGreaterEqual(
+            conn.execute("PRAGMA busy_timeout").fetchone()[0], server.DB_BUSY_TIMEOUT_MS
+        )
+        index_names = {
+            row[1] for row in conn.execute("PRAGMA index_list(reports)").fetchall()
+        }
+        self.assertIn("idx_reports_ts", index_names)
+        plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN DELETE FROM reports WHERE id IN ("
+                "SELECT id FROM reports INDEXED BY idx_reports_ts "
+                "WHERE ts < ? ORDER BY ts LIMIT ?)",
+                (0, server.REPORT_CLEANUP_BATCH_SIZE),
+            ).fetchall()
+        )
+        conn.close()
+        self.assertIn("idx_reports_ts", plan)
+
+    def test_scheduled_cleanup_is_throttled(self):
+        self._insert("incus", 1, timestamp=1)
+        original_purge = server.PURGE_SECONDS
+        try:
+            server.PURGE_SECONDS = 1
+            self.assertEqual(server.cleanup_old_reports(), 1)
+            next_cleanup = server._next_cleanup_monotonic
+            self.assertEqual(server.cleanup_old_reports(), 0)
+            self.assertEqual(server._next_cleanup_monotonic, next_cleanup)
+        finally:
+            server.PURGE_SECONDS = original_purge
 
     def test_legacy_schema_is_migrated_without_losing_rows(self):
         conn = sqlite3.connect(server.DB_PATH)
