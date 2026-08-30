@@ -182,6 +182,7 @@ Timer 每 15 分钟比较 GitHub `origin/main` 与已部署提交。自动更新
 - Client 更新前通过 HMAC 签名接口 `/api/v1/update/version` 核对 Server 的实际运行版本。Server 未升级、接口尚不可用或暂时无法连接时，Client 保持原版本并在下个 timer 周期自动重试。
 - 首次人工安装 Client 时，若目标是尚无版本接口的旧 Server（旧版会返回 HTTP 401），安装器会明确警告并继续安装；这是为了避免新节点无法部署。后续自动更新仍执行严格的 Server-first 门禁。
 - 更新成功才写入部署版本；失败会保留当前服务，并在下一周期重试。
+- Timer 使用固定 15 分钟日历调度，并在安装器重写 unit 后主动重启。若旧节点显示 `active (elapsed)`、`Trigger: n/a` 或没有下一次触发时间，重新执行一次新版 Client/Server `update` 即可修复；新版不会再出现“Timer 看似启用但不再运行”的状态。
 - 自动更新 systemd oneshot 的启动超时为 30 分钟，覆盖 GHCR 多架构镜像最长约 15 分钟的等待窗口；每个 Server/Caddy 会由唯一 transient scope 启动，payload 与 `conmon` 均位于独立的 `narwhal-monitor.slice`，不再继承 updater unit。更新单元使用 `Delegate=yes` 与 `KillMode=control-group`，可清理更新任务自身进程而不误杀容器，也不会因残留 `conmon` 导致下次启动报 `Device or resource busy`。容器退出后 scope 自动回收；若历史错误单元已经杀死 conmon，安装器会在确认 payload 已停止后清理孤儿元数据并继续重建。
 - Server 更新不是只检查 Podman 的 `Running=true`：安装器还会校验镜像/运行时版本并实际访问回环后端 HTTP。Server 或 Caddy 任一步失败时，自动恢复上一版本容器和 Caddy 配置。
 - Server 数据库使用 WAL 与 15 秒 busy timeout，节点写入和 Dashboard 读取可并行；历史清理使用 `reports(ts)` 索引、每批最多 5000 行且默认每 5 分钟至多执行一次，避免大库在每次上报/刷新时全表扫描并制造 IO 与锁竞争。
@@ -422,7 +423,7 @@ SOCKS 检测复用本轮已经读取的容器进程列表；只有发现 SOCKS �
 
 活动告警在总览页提供三个处置入口：
 
-- **禁止**：只出现在证据完整的 Podman/Incus `unauthorized_panel_pairing` 告警上。Server 把经过 HMAC 签名的定向动作发送给对应节点。Agent 不停止或删除容器，只在目标容器内部终止本次检测命中的机场节点进程，停用并删除同名 systemd/OpenRC 服务定义，并删除本次检测到且同时属于 `SECURITY_PANEL_CONFIG_PATHS` 的配置文件。Agent 会再次校验容器、运行时、进程特征和配置路径，不接受任意 Shell 或任意文件路径。首次人工清理成功后，本次命中的具体面板域名会写入节点侧 `SECURITY_PANEL_AUTO_REMEDIATE_FILE`；同一域名以后再次出现时会自动执行清理且不再向 Server 提醒，新域名仍正常告警。
+- **禁止**：只出现在证据完整的 Podman/Incus `unauthorized_panel_pairing` 告警上。Server 把经过 HMAC 签名的定向动作发送给对应节点。Agent 不停止或删除容器，只在目标容器内部终止本次检测命中的机场节点进程，停用并删除对应 systemd/OpenRC 服务定义，并删除本次检测到且同时属于 `SECURITY_PANEL_CONFIG_PATHS` 的配置文件。PID 在上报后被守护器重启也不会阻断清理：Agent 会重新扫描当前精确进程身份，并从 cgroup 反查 `bby-agent` 这类与程序不同名的真实服务。Agent 会再次校验容器、运行时、进程特征和配置路径，不接受任意 Shell 或任意文件路径。首次人工清理成功后，本次命中的具体面板域名会写入节点侧 `SECURITY_PANEL_AUTO_REMEDIATE_FILE`；同一域名以后再次出现时会自动执行清理且不再向 Server 提醒，新域名仍正常告警。
 - **XMRig 自动清理**：XMRig 是加密货币挖矿程序。Podman/Incus 中只有进程名、`argv[0]` 或可执行文件 basename 精确等于 `xmrig` 时才自动处理；处理范围限于 XMRig 进程、同名 systemd/OpenRC 服务以及内置的精确配置/二进制路径，不做模糊文件搜索，不停止容器。其他可疑进程特征只告警，不自动删除。
 - **XrayR 自动清理**：XrayR 是支持多种机场面板的代理节点后端，本身不等同于恶意软件。只有节点侧检测到 XrayR 且面板未被域名白名单明确允许时才自动定向清理；在“允许且不再提醒”中放行对应域名后不会处理。撤销忽略时，Server 会同步从节点动态白名单删除该精确域名。
 - **允许且不再提醒**：永久抑制该告警指纹。机场面板告警按具体域名形成指纹，并把域名写入节点的 `SECURITY_PANEL_ALLOWLIST_FILE`；其他告警按主机、运行时、项目、容器和类型抑制。更新 Client/Server 后策略保留。

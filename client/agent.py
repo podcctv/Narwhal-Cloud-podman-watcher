@@ -4991,14 +4991,8 @@ def _incus_host_namespace_kill(
     if init_pid <= 1 or not shutil.which("nsenter") or not patterns:
         return 0, 0, 0, "host namespace fallback unavailable"
     safe_patterns = " ".join(shlex.quote(item) for item in patterns)
-    safe_pids = " ".join(
-        str(item)
-        for item in (process_pids or [])
-        if isinstance(item, int) and 1 < item <= 4194304
-    )
     script = (
         "set -f; matched=0; killed=0; errors=0; "
-        f"requested_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')}; "
         f"for pattern in {safe_patterns}; do "
         "for proc in /proc/[0-9]*; do pid=${proc##*/}; "
         "[ \"$pid\" = 1 ] && continue; [ \"$pid\" = \"$$\" ] && continue; "
@@ -5006,14 +5000,14 @@ def _incus_host_namespace_kill(
         "comm=$(cat \"$proc/comm\" 2>/dev/null || true); "
         "argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
         "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); found=0; "
-        "extra_candidates=''; if [ -n \"$requested_pids\" ]; then "
-        "extra_candidates=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | sed 's#.*/##'); fi; "
+        "extra_candidates=''; lower_comm=$(printf '%s' \"$comm\" | tr '[:upper:]' '[:lower:]'); "
+        "case \"$lower_comm\" in supervise-daemo|supervise-daemon) "
+        "extra_candidates=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | sed 's#.*/##');; esac; "
         "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\" $extra_candidates; do "
         "candidate=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); "
         "[ \"$candidate\" = \"$pattern\" ] && found=1; done; "
         "[ \"$found\" -eq 1 ] || continue; "
-        "if [ -n \"$requested_pids\" ]; then case \"$requested_pids\" in "
-        "*\" $pid \"*) ;; *) continue;; esac; fi; matched=$((matched+1)); "
+        "matched=$((matched+1)); "
         "if kill -TERM \"$pid\" 2>/dev/null; then killed=$((killed+1)); "
         "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; "
         "else errors=$((errors+1)); fi; done; done; "
@@ -5400,31 +5394,31 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "for cf in $(grep -rIl \"${_pat}\" /etc/cron.d /etc/cron.daily /etc/cron.hourly /var/spool/cron 2>/dev/null); do "
             "grep -vF \"${_pat}\" \"$cf\" > \"$cf.tmp\" 2>/dev/null && mv -f \"$cf.tmp\" \"$cf\" || true; done"
         )
-        if process_pids:
-            for pid in process_pids:
-                script_parts.append(
-                    f"if [ -r /proc/{pid}/stat ]; then "
-                    f"state=$(awk '{{print $3}}' /proc/{pid}/stat 2>/dev/null || true); "
-                    f"identity=$(printf '%s ' \"$(cat /proc/{pid}/comm 2>/dev/null || true)\"; "
-                    f"tr '\\000' ' ' < /proc/{pid}/cmdline 2>/dev/null || true); "
-                    f"if [ \"$state\" != Z ] && printf '%s\\n' \"$identity\" | grep -Fqi -- {quoted_pattern}; then "
-                    f"if kill -TERM {pid} 2>/dev/null; then killed_processes=$((killed_processes+1)); "
-                    f"sleep 1; [ -d /proc/{pid} ] && kill -KILL {pid} 2>/dev/null || true; fi; fi; fi"
-                )
-        else:
-            script_parts.append(
-                "for proc in /proc/[0-9]*; do "
-                "pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
-                "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null || true); [ \"$state\" = Z ] && continue; "
-                "comm=$(cat \"$proc/comm\" 2>/dev/null || true); "
-                "argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
-                "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); matched=0; "
-                "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
-                f"[ \"$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]')\" = {quoted_pattern} ] && matched=1; done; "
-                "if [ \"$matched\" -eq 1 ]; then "
-                "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); "
-                "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; fi; done"
-            )
+        # PID evidence can become stale while a supervisor respawns the child.
+        # Re-resolve the exact allowlisted identity and derive OpenRC/systemd
+        # aliases from cgroups before signalling the current process.
+        script_parts.append(
+            "for proc in /proc/[0-9]*; do "
+            "pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
+            "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null || true); [ \"$state\" = Z ] && continue; "
+            "comm=$(cat \"$proc/comm\" 2>/dev/null || true); "
+            "argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
+            "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); matched=0; "
+            "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
+            f"[ \"$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]')\" = {quoted_pattern} ] && matched=1; done; "
+            "[ \"$matched\" -eq 1 ] || continue; "
+            "svc=$(sed -n 's#.*[/]openrc\\.\\([^/]*\\)$#\\1#p' \"$proc/cgroup\" 2>/dev/null | head -n 1); "
+            "case \"$svc\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *) "
+            "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 || true; "
+            "command -v rc-update >/dev/null 2>&1 && rc-update del \"$svc\" >/dev/null 2>&1 || true; "
+            "sf=\"/etc/init.d/$svc\"; if [ -e \"$sf\" ] || [ -L \"$sf\" ]; then "
+            "if rm -f -- \"$sf\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; fi;; esac; "
+            "unit=$(sed -n 's#.*[/]\\([^/]*\\.service\\)$#\\1#p' \"$proc/cgroup\" 2>/dev/null | head -n 1); "
+            "case \"$unit\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *.service) "
+            "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"$unit\" >/dev/null 2>&1 || true;; esac; "
+            "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); "
+            "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done"
+        )
     for config_file in config_files:
         quoted_file = shlex.quote(config_file)
         script_parts.append(

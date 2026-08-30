@@ -645,7 +645,8 @@ class SecurityTelemetryTests(unittest.TestCase):
         command = runner.call_args.args[0]
         self.assertEqual(command[:5], ["incus", "--project", "default", "exec", "node1"])
         self.assertIn("/etc/V2bX/config.json", command[-1])
-        self.assertIn("/proc/4321", command[-1])
+        self.assertIn("for proc in /proc/[0-9]*", command[-1])
+        self.assertIn("openrc\\.", command[-1])
         self.assertNotIn("-type f,l", command[-1])
         self.assertIn("\\( -type f -o -type l \\)", command[-1])
         self.assertIn('rc-update del "$svc"', command[-1])
@@ -755,7 +756,8 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(host_command[6], "/bin/sh")
         self.assertIn('"$candidate" = "$pattern"', host_command[-1])
         self.assertIn("extra_candidates=", host_command[-1])
-        self.assertIn(" 4321 ", host_command[-1])
+        self.assertIn("supervise-daemo|supervise-daemon", host_command[-1])
+        self.assertNotIn("requested_pids", host_command[-1])
 
     def test_panel_defaults_include_bby_agent_config(self):
         with mock.patch.dict(os.environ, {}, clear=True):

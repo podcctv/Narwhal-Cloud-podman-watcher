@@ -59,8 +59,9 @@ Description=Check Narwhal Monitor $SIDE updates every 15 minutes
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=15min
+OnCalendar=*:0/15
 RandomizedDelaySec=2min
+AccuracySec=1min
 Persistent=true
 Unit=$SERVICE_NAME
 
@@ -72,5 +73,8 @@ current_commit="$(git -C "$REPO_DIR" rev-parse HEAD)"
 printf '%s\n' "$current_commit" >"$BASE_DIR/${SIDE}-auto-update.version"
 chmod 0600 "$BASE_DIR/${SIDE}-auto-update.version"
 systemctl daemon-reload
-systemctl enable --now "$TIMER_NAME" >/dev/null
+systemctl enable "$TIMER_NAME" >/dev/null
+# A timer rewritten by its own updater can otherwise remain active(elapsed)
+# forever with no NextElapse timestamp on some systemd releases.
+systemctl restart "$TIMER_NAME"
 echo "[INFO] Automatic $SIDE updates enabled: $TIMER_NAME (origin/main, every 15 minutes)"
