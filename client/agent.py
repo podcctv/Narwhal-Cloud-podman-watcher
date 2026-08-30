@@ -17,16 +17,24 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+try:
+    import maxminddb
+except ImportError:  # Optional at import time for source-only/test environments.
+    maxminddb = None
+
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 
 _warned_missing_bins = set()
+_warned_timeout_commands = set()
 _podman_bin = None
 _container_bin = None
 _runtime_bins = None
 _net_counters: Dict[str, Dict[str, float]] = {}
 _cpu_counters: Dict[str, Dict[str, float]] = {}
 _warned_parse_paths = set()
-_geoip_country_cache: Dict[str, str] = {}
+_geoip_country_cache: Dict[str, Tuple[str, float]] = {}
+_geoip_reader = None
+_geoip_reader_path = ""
 _incus_metrics_cache: Dict[str, object] = {"ts": 0.0, "text": "", "parsed": {}}
 _incus_forward_cache: Dict[str, Dict[str, object]] = {}
 _packet_counters: Dict[str, Dict[str, float]] = {}
@@ -141,7 +149,15 @@ def get_container_bin() -> str:
     return _container_bin
 
 
-def run(cmd: List[str]) -> str:
+def _runtime_command_timeout() -> float:
+    try:
+        configured = float(os.getenv("RUNTIME_COMMAND_TIMEOUT_SECONDS", "30"))
+    except ValueError:
+        configured = 30.0
+    return max(5.0, min(300.0, configured))
+
+
+def run(cmd: List[str], timeout: float | None = None) -> str:
     env = None
     if cmd and cmd[0] == "podman-remote":
         socket_path = os.getenv("PODMAN_SOCKET", "/run/podman/podman.sock")
@@ -149,11 +165,23 @@ def run(cmd: List[str]) -> str:
             env = os.environ.copy()
             env["CONTAINER_HOST"] = f"unix://{socket_path}"
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=_runtime_command_timeout() if timeout is None else timeout,
+        )
     except FileNotFoundError:
         if cmd and cmd[0] not in _warned_missing_bins:
             _warned_missing_bins.add(cmd[0])
             print(f"missing command: {cmd[0]}")
+        return ""
+    except subprocess.TimeoutExpired:
+        command_name = cmd[0] if cmd else "unknown"
+        if command_name not in _warned_timeout_commands:
+            _warned_timeout_commands.add(command_name)
+            print(f"runtime command timed out and was skipped: {command_name}")
         return ""
     if p.returncode != 0:
         return ""
@@ -887,30 +915,146 @@ def _collect_socket_process_details(
     }
 
 
+def _geoip_cache_limits() -> Tuple[int, float, float]:
+    try:
+        max_entries = int(os.getenv("GEOIP_CACHE_MAX_ENTRIES", "4096"))
+    except ValueError:
+        max_entries = 4096
+    try:
+        ttl = float(os.getenv("GEOIP_CACHE_TTL_SECONDS", "86400"))
+    except ValueError:
+        ttl = 86400.0
+    try:
+        negative_ttl = float(os.getenv("GEOIP_NEGATIVE_CACHE_TTL_SECONDS", "900"))
+    except ValueError:
+        negative_ttl = 900.0
+    return (
+        max(100, min(50000, max_entries)),
+        max(300.0, min(2592000.0, ttl)),
+        max(60.0, min(86400.0, negative_ttl)),
+    )
+
+
+def _geoip_cache_get(ip: str, now: float) -> str:
+    cached = _geoip_country_cache.get(ip)
+    if cached is None:
+        return ""
+    country, expires_at = cached
+    if expires_at <= now:
+        _geoip_country_cache.pop(ip, None)
+        return ""
+    # Refresh insertion order so trimming behaves like a small LRU cache.
+    _geoip_country_cache.pop(ip, None)
+    _geoip_country_cache[ip] = (country, expires_at)
+    return country
+
+
+def _geoip_cache_put(ip: str, country: str, now: float) -> None:
+    max_entries, ttl, negative_ttl = _geoip_cache_limits()
+    normalized = country.strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", normalized):
+        normalized = "UN"
+    _geoip_country_cache.pop(ip, None)
+    _geoip_country_cache[ip] = (
+        normalized,
+        now + (negative_ttl if normalized == "UN" else ttl),
+    )
+    while len(_geoip_country_cache) > max_entries:
+        _geoip_country_cache.pop(next(iter(_geoip_country_cache)))
+
+
+def _geoip_local_country_batch(ips: List[str]) -> Dict[str, str]:
+    global _geoip_reader, _geoip_reader_path
+    if not ips or maxminddb is None:
+        return {}
+    configured_path = os.getenv(
+        "GEOIP_MMDB_PATH", "/usr/share/GeoIP/GeoLite2-Country.mmdb"
+    ).strip()
+    if not configured_path or not os.path.isfile(configured_path):
+        return {}
+    if _geoip_reader is None or _geoip_reader_path != configured_path:
+        if _geoip_reader is not None:
+            try:
+                _geoip_reader.close()
+            except Exception:
+                pass
+        try:
+            _geoip_reader = maxminddb.open_database(configured_path)
+            _geoip_reader_path = configured_path
+        except Exception:
+            _geoip_reader = None
+            _geoip_reader_path = ""
+            return {}
+    result: Dict[str, str] = {}
+    for ip in ips:
+        try:
+            record = _geoip_reader.get(ip) or {}
+            country = str((record.get("country") or {}).get("iso_code") or "")
+        except Exception:
+            country = ""
+        if re.fullmatch(r"[A-Za-z]{2}", country):
+            result[ip] = country.upper()
+    return result
+
+
+def _geoip_https_country_batch(ips: List[str]) -> Dict[str, str]:
+    if not ips or os.getenv("GEOIP_HTTPS_ENABLED", "true").strip().lower() in (
+        "0", "false", "no", "off"
+    ):
+        return {}
+    endpoint = os.getenv("GEOIP_HTTPS_ENDPOINT", "https://api.country.is/").strip()
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return {}
+    try:
+        response = requests.post(
+            endpoint,
+            json=ips[:100],
+            headers={"User-Agent": f"Narwhal-Monitor/{APP_VERSION}"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        values = response.json()
+    except Exception:
+        return {}
+    if not isinstance(values, list):
+        return {}
+    result: Dict[str, str] = {}
+    requested = set(ips)
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        ip = str(item.get("ip") or "")
+        country = str(item.get("country") or "").upper()
+        if ip in requested and re.fullmatch(r"[A-Z]{2}", country):
+            result[ip] = country
+    return result
+
+
 def _geoip_country_batch(ip_counts: Dict[str, int]) -> List[Dict[str, int | str]]:
     if not ip_counts:
         return []
-    unresolved = [ip for ip in ip_counts.keys() if ip not in _geoip_country_cache]
+    now = time.monotonic()
+    countries = {ip: _geoip_cache_get(ip, now) for ip in ip_counts}
+    unresolved = [ip for ip, country in countries.items() if not country]
     if unresolved:
-        try:
-            payload = [{"query": ip} for ip in unresolved[:100]]
-            resp = requests.post("http://ip-api.com/batch?fields=status,query,countryCode", json=payload, timeout=8)
-            if resp.ok:
-                for item in resp.json():
-                    query = str(item.get("query") or "")
-                    if not query:
-                        continue
-                    if item.get("status") == "success":
-                        _geoip_country_cache[query] = str(item.get("countryCode") or "UN")
-                    else:
-                        _geoip_country_cache[query] = "UN"
-        except Exception:
-            for ip in unresolved:
-                _geoip_country_cache[ip] = "UN"
+        public_unresolved = [ip for ip in unresolved if _is_public_source_ip(ip)]
+        resolved = (
+            _geoip_local_country_batch(public_unresolved)
+            if public_unresolved
+            else {}
+        )
+        still_unresolved = [ip for ip in public_unresolved if ip not in resolved]
+        if still_unresolved:
+            resolved.update(_geoip_https_country_batch(still_unresolved))
+        for ip in unresolved:
+            country = resolved.get(ip, "UN")
+            _geoip_cache_put(ip, country, now)
+            countries[ip] = country
 
     country_counter: Dict[str, Dict[str, int | str]] = {}
     for ip, cnt in ip_counts.items():
-        country = _geoip_country_cache.get(ip, "UN")
+        country = countries.get(ip) or "UN"
         if country not in country_counter:
             country_counter[country] = {"country": country, "connections": 0, "ip_count": 0}
         country_counter[country]["connections"] = int(country_counter[country]["connections"]) + int(cnt)
@@ -3372,6 +3516,25 @@ def collect_panel_pairing_indicators(
             break
     process_patterns = sorted(process_patterns_set)
     identity_patterns = sorted({pattern for pattern in patterns if pattern in combined_identity})
+    panel_process_pids = sorted(
+        {
+            int(item.get("pid") or 0)
+            for item in process_matches
+            if isinstance(item, dict) and int(item.get("pid") or 0) > 1
+        }
+    )
+    env_scan_max = max(
+        0,
+        min(
+            256,
+            int(_env_float("SECURITY_PANEL_ENV_SCAN_MAX_PROCESSES", 32)),
+        ),
+    )
+    env_max_bytes = max(
+        1024,
+        min(65536, int(_env_float("SECURITY_PANEL_ENV_MAX_BYTES", 16384))),
+    )
+    candidate_pid_text = " ".join(str(pid) for pid in panel_process_pids)
 
     raw_paths = os.getenv(
         "SECURITY_PANEL_CONFIG_PATHS",
@@ -3389,13 +3552,22 @@ def collect_panel_pairing_indicators(
             "grep -Eio 'ApiHost|ApiKey|NodeID|MachineToken|machine_token|panel[.]url|api_host' \"$p\" 2>/dev/null "
             "| sort -u | sed 's/^/@@KEY:/'; "
             "fi; done; echo '@@ENV'; "
-            "for f in /proc/[0-9]*/environ; do "
-            "[ -r \"$f\" ] || continue; "
-            "tr '\\000' '\\n' < \"$f\" 2>/dev/null "
-            "| grep -Ei '^(apiHost|API_HOST|PANEL_URL|webapi)=https?://' | head -n 20; "
-            "tr '\\000' '\\n' < \"$f\" 2>/dev/null "
-            "| grep -Eio '^(apiKey|API_KEY|MACHINE_TOKEN|nodeID|NODE_ID)=' "
+            f"env_scan_max={env_scan_max}; env_max_bytes={env_max_bytes}; "
+            "env_scanned=0; env_seen=' '; "
+            "scan_panel_env() { "
+            "[ \"$env_scanned\" -lt \"$env_scan_max\" ] || return 0; "
+            "pid=$1; case \"$env_seen\" in *\" $pid \"*) return 0;; esac; "
+            "f=\"/proc/$pid/environ\"; [ -r \"$f\" ] || return 0; "
+            "env_seen=\"$env_seen$pid \"; env_scanned=$((env_scanned+1)); "
+            "env_dump=$(dd if=\"$f\" bs=\"$env_max_bytes\" count=1 2>/dev/null | tr '\\000' '\\n'); "
+            "printf '%s\\n' \"$env_dump\" | grep -Ei '^(apiHost|API_HOST|PANEL_URL|webapi)=https?://' | head -n 20; "
+            "printf '%s\\n' \"$env_dump\" | grep -Eio '^(apiKey|API_KEY|MACHINE_TOKEN|nodeID|NODE_ID)=' "
             "| cut -d= -f1 | sed 's/^/@@KEY:/'; "
+            "}; "
+            f"for pid in {candidate_pid_text or '0'}; do [ \"$pid\" -gt 1 ] 2>/dev/null && scan_panel_env \"$pid\"; done; "
+            "for f in /proc/[0-9]*/environ; do "
+            "[ \"$env_scanned\" -lt \"$env_scan_max\" ] || break; "
+            "pid=${f#/proc/}; pid=${pid%/environ}; scan_panel_env \"$pid\"; "
             "done"
         )
         evidence_output = run(_runtime_exec_cmd(runtime, name, shell_command, project))

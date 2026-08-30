@@ -347,6 +347,15 @@ SECURITY_SOCKET_SNAPSHOT_MAX=500
 SECURITY_COMMUNICATION_DETAIL_MAX=100
 SECURITY_CONNTRACK_SNAPSHOT_MAX=5000
 SECURITY_HOST_PROXY_SOCKET_MAX=5000
+RUNTIME_COMMAND_TIMEOUT_SECONDS=30
+SECURITY_PANEL_ENV_SCAN_MAX_PROCESSES=32
+SECURITY_PANEL_ENV_MAX_BYTES=16384
+GEOIP_MMDB_PATH=/usr/share/GeoIP/GeoLite2-Country.mmdb
+GEOIP_HTTPS_ENABLED=true
+GEOIP_HTTPS_ENDPOINT=https://api.country.is/
+GEOIP_CACHE_MAX_ENTRIES=4096
+GEOIP_CACHE_TTL_SECONDS=86400
+GEOIP_NEGATIVE_CACHE_TTL_SECONDS=900
 
 ALERT_DDOS_RX_BPS=100000000
 ALERT_DDOS_RX_PPS=50000
@@ -385,6 +394,19 @@ ACTION_POLL_INTERVAL=10
 ALERT_WEB_SCAN_REQUESTS=10
 ALERT_AUTH_FAILURES_PER_IP=20
 ```
+
+为避免异常容器拖住整台节点，所有只读运行时采集命令默认最多执行
+`RUNTIME_COMMAND_TIMEOUT_SECONDS=30` 秒，超时后跳过该项并继续其他容器。机场特征的
+环境变量检查优先读取已经命中的进程，并将每个容器的环境扫描限制为最多 32 个进程、
+每个进程最多 16 KiB；每个 `/proc/<pid>/environ` 只读取一次，不会递归扫描容器文件系统。
+
+连接来源国家解析优先使用 `GEOIP_MMDB_PATH` 指定的本机 GeoLite2 Country MMDB；数据库
+不存在或没有对应记录时，才把最多 100 个公网 IP 通过一次 HTTPS 批量请求发送到
+`GEOIP_HTTPS_ENDPOINT`。私网 IP 不会发送到外部服务。结果使用有大小上限和过期时间的
+内存缓存。对隐私要求更高时可设置 `GEOIP_HTTPS_ENABLED=false`，此时没有本地 MMDB 的
+地址统一显示为 `UN`。GeoLite2 数据库需要按
+[MaxMind 官方说明](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)自行获取和更新；
+默认 HTTPS 回退接口为可自托管的 [country.is](https://github.com/lineofflight/country)。
 
 连接数严格大于 `500` 时产生 warning，严格大于 `1000` 时升级为 critical。Server 会独立记录每个容器的连续超限窗口；连接数严格大于 `1500` 且连续满 15 分钟时，经 HMAC 签名动作通道自动停止该容器。若相邻超限样本间隔超过 600 秒，连续计时会重新开始，避免把上报中断误判为持续超限。
 

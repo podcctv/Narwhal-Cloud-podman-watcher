@@ -30,6 +30,19 @@ class RuntimeDiscoveryTests(unittest.TestCase):
                     {"podman": "podman", "docker": "docker", "incus": "incus"},
                 )
 
+    def test_runtime_command_timeout_is_bounded_and_non_blocking(self):
+        agent._warned_timeout_commands.clear()
+        with mock.patch.dict(
+            os.environ, {"RUNTIME_COMMAND_TIMEOUT_SECONDS": "7"}, clear=False
+        ), mock.patch.object(
+            agent.subprocess,
+            "run",
+            side_effect=agent.subprocess.TimeoutExpired(["incus", "list"], 7),
+        ) as runner:
+            self.assertEqual(agent.run(["incus", "list"]), "")
+        self.assertEqual(runner.call_args.kwargs["timeout"], 7.0)
+        self.assertIn("incus", agent._warned_timeout_commands)
+
     def test_explicit_runtime_subset_is_honored(self):
         with mock.patch.dict(os.environ, {"CONTAINER_RUNTIMES": "docker,incus"}, clear=False):
             with mock.patch.object(agent.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
@@ -239,6 +252,7 @@ class SecurityTelemetryTests(unittest.TestCase):
     def setUp(self):
         agent._access_log_states.clear()
         agent._protocol_counters.clear()
+        agent._geoip_country_cache.clear()
 
     def test_reads_protocol_counters_from_container_network_namespace(self):
         snmp = (
@@ -481,7 +495,10 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(incus_exposure[0]["target"], "tcp:127.0.0.1:8080")
 
     def test_detects_panel_pairing_without_returning_api_keys(self):
+        commands = []
+
         def fake_run(cmd):
+            commands.append(cmd[-1])
             if "ps -eo pid=,stat=,comm=,args=" in cmd[-1]:
                 return "123 S xboard-node xboard-node --config /etc/xboard-node/config.yml\n"
             return (
@@ -502,8 +519,63 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(result["unapproved_domains"], ["panel.example.net"])
         self.assertEqual(result["process_matches"], [{"pid": 123, "pattern": "xboard-node"}])
         self.assertNotIn("secret", json.dumps(result))
+        evidence_command = next(item for item in commands if "scan_panel_env" in item)
+        self.assertIn("env_scan_max=32", evidence_command)
+        self.assertIn("for pid in 123", evidence_command)
+        self.assertEqual(evidence_command.count('dd if="$f"'), 1)
         self.assertTrue(agent._panel_domain_allowed("api.trusted.example.com", ["trusted.example.com"]))
         self.assertFalse(agent._panel_domain_allowed("trusted.example.com.evil.test", ["trusted.example.com"]))
+
+    def test_geoip_uses_local_results_before_batched_https(self):
+        with mock.patch.object(
+            agent,
+            "_geoip_local_country_batch",
+            return_value={"1.1.1.1": "AU"},
+        ) as local_lookup, mock.patch.object(
+            agent,
+            "_geoip_https_country_batch",
+            return_value={"8.8.8.8": "US"},
+        ) as https_lookup:
+            result = agent._geoip_country_batch({"1.1.1.1": 2, "8.8.8.8": 3})
+        local_lookup.assert_called_once_with(["1.1.1.1", "8.8.8.8"])
+        https_lookup.assert_called_once_with(["8.8.8.8"])
+        self.assertEqual(
+            {item["country"]: item["connections"] for item in result},
+            {"AU": 2, "US": 3},
+        )
+
+    def test_geoip_https_is_encrypted_batched_and_cache_is_bounded(self):
+        response = mock.Mock()
+        response.json.return_value = [
+            {"ip": "1.1.1.1", "country": "AU"},
+            {"ip": "8.8.8.8", "country": "US"},
+        ]
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GEOIP_HTTPS_ENDPOINT": "https://api.country.is/",
+                "GEOIP_CACHE_MAX_ENTRIES": "100",
+            },
+            clear=False,
+        ), mock.patch.object(agent.requests, "post", return_value=response) as post:
+            resolved = agent._geoip_https_country_batch(["1.1.1.1", "8.8.8.8"])
+            for index in range(110):
+                agent._geoip_cache_put(f"203.0.113.{index}", "UN", float(index))
+        self.assertEqual(resolved, {"1.1.1.1": "AU", "8.8.8.8": "US"})
+        self.assertEqual(post.call_args.args[0], "https://api.country.is/")
+        self.assertEqual(post.call_args.kwargs["json"], ["1.1.1.1", "8.8.8.8"])
+        self.assertLessEqual(len(agent._geoip_country_cache), 100)
+
+    def test_geoip_never_sends_private_ips_to_external_services(self):
+        with mock.patch.object(
+            agent, "_geoip_local_country_batch"
+        ) as local_lookup, mock.patch.object(
+            agent, "_geoip_https_country_batch"
+        ) as https_lookup:
+            result = agent._geoip_country_batch({"10.0.0.8": 4})
+        local_lookup.assert_not_called()
+        https_lookup.assert_not_called()
+        self.assertEqual(result, [{"country": "UN", "connections": 4, "ip_count": 1}])
 
     def test_panel_detection_ignores_zombie_processes(self):
         def fake_run(cmd):
@@ -598,6 +670,63 @@ class SecurityTelemetryTests(unittest.TestCase):
             ok, message = agent.remediate_panel_pairing(action)
         self.assertFalse(ok)
         self.assertIn("killed_processes=0", message)
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell integration requires Linux")
+    def test_panel_remediation_shell_removes_openrc_alias_service(self):
+        action = {
+            "runtime": "incus",
+            "project": "default",
+            "container_name": "node1",
+            "params": {"process_patterns": ["xboard-node"]},
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SECURITY_PANEL_PROCESS_PATTERNS": "xboard-node",
+                "SECURITY_PANEL_CONFIG_PATHS": "",
+            },
+            clear=False,
+        ), mock.patch.object(
+            agent, "get_runtime_bins", return_value={"incus": "incus"}
+        ), mock.patch.object(
+            agent, "_incus_host_namespace_kill", return_value=(0, 0, 0, "")
+        ), mock.patch.object(
+            agent, "_run_action_command", return_value=(True, "cleaned")
+        ) as runner, tempfile.TemporaryDirectory() as tmp:
+            ok, _ = agent.remediate_panel_pairing(action)
+            script = runner.call_args.args[0][-1]
+            root = Path(tmp)
+            init_dir = root / "etc" / "init.d"
+            init_dir.mkdir(parents=True)
+            alias = init_dir / "bby-agent"
+            alias.write_text(
+                "#!/bin/sh\n# xboard-node OpenRC alias\nexit 0\n",
+                encoding="utf-8",
+            )
+            alias.chmod(0o755)
+            replacements = {
+                "/etc/systemd/system": str(root / "etc-systemd"),
+                "/lib/systemd/system": str(root / "lib-systemd"),
+                "/usr/lib/systemd/system": str(root / "usr-systemd"),
+                "/run/systemd/system": str(root / "run-systemd"),
+                "/etc/init.d": str(init_dir),
+                "/etc/supervisor": str(root / "supervisor"),
+                "/etc/cron.d": str(root / "cron.d"),
+                "/etc/cron.daily": str(root / "cron.daily"),
+                "/etc/cron.hourly": str(root / "cron.hourly"),
+                "/var/spool/cron": str(root / "spool-cron"),
+                "/proc/": str(root / "proc") + "/",
+            }
+            for source, target in replacements.items():
+                script = script.replace(source, target)
+            completed = agent.subprocess.run(
+                ["sh", "-lc", script], capture_output=True, text=True, timeout=10
+            )
+            alias_removed = not alias.exists()
+        self.assertTrue(ok)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("removed_services=1", completed.stdout)
+        self.assertTrue(alias_removed)
 
     def test_incus_remediation_falls_back_to_host_user_namespace(self):
         action = {
