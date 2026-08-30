@@ -46,8 +46,8 @@ ExecStart=$UPDATER $SIDE
 # outside this short-lived updater cgroup.  Therefore a timeout may safely stop
 # every updater subprocess without touching the running containers.
 KillMode=control-group
-# Podman needs delegation to move both payload and conmon into the explicit
-# narwhal-monitor.slice when this installer runs inside a system service.
+# install-server launches Podman through a unique transient scope inside
+# narwhal-monitor.slice; delegation permits that nested cgroup operation.
 Delegate=yes
 TimeoutStartSec=30min
 TimeoutStopSec=2min

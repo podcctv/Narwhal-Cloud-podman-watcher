@@ -17,6 +17,7 @@ NARWHAL_NETWORK_NAME="narwhal-monitor-net"
 # automatic updater's cgroup.  The concrete arguments are selected after
 # Podman is available (see configure_container_cgroup_args).
 PODMAN_CGROUP_ARGS=( --cgroups=split )
+PODMAN_RUN_IN_SCOPE="no"
 # shellcheck source=scripts/lib/interactive.sh
 source "$ROOT_DIR/scripts/lib/interactive.sh"
 
@@ -472,11 +473,34 @@ configure_container_cgroup_args() {
     # systemd refuses the next start with "Device or resource busy".  An
     # explicit slice makes both processes siblings of the updater instead.
     PODMAN_CGROUP_ARGS=( --cgroups=enabled --cgroup-parent=narwhal-monitor.slice )
-    echo "[INFO] Server/Caddy 将运行在独立 systemd cgroup: narwhal-monitor.slice。"
+    if command -v systemd-run >/dev/null 2>&1; then
+      PODMAN_RUN_IN_SCOPE="yes"
+      echo "[INFO] Server/Caddy 将通过独立 transient scope 运行在 narwhal-monitor.slice。"
+    else
+      PODMAN_RUN_IN_SCOPE="no"
+      echo "[WARN] systemd-run 不可用；Server/Caddy 使用独立 cgroup parent，但无法创建 launch scope。"
+    fi
   else
     # Preserve compatibility with cgroupfs-based Podman hosts.
     PODMAN_CGROUP_ARGS=( --cgroups=split )
+    PODMAN_RUN_IN_SCOPE="no"
     echo "[INFO] Podman cgroup manager=${cgroup_manager:-unknown}，使用 split 模式。"
+  fi
+}
+
+podman_run_detached() {
+  local scope_label="$1"
+  shift
+  local -a command=( podman run -d "${PODMAN_CGROUP_ARGS[@]}" "$@" )
+  if [[ "$PODMAN_RUN_IN_SCOPE" == "yes" ]]; then
+    # Even with --cgroup-parent, conmon inherits the invoking systemd service's
+    # cgroup.  A unique transient scope makes that long-lived monitor a sibling
+    # of the updater.  --collect removes the scope after the container exits.
+    local scope_unit="narwhal-${scope_label}-launch-$(date +%s%N)-${BASHPID}"
+    systemd-run --scope --quiet --collect --slice=narwhal-monitor.slice \
+      --unit="$scope_unit" "${command[@]}"
+  else
+    "${command[@]}"
   fi
 }
 
@@ -599,7 +623,7 @@ replace_server_container() {
   local tried_default_net="no"
   for attempt in 1 2 3 4 5; do
     # 注意：不要写成 `... && break`，否则 podman run 失败时 set -e 会静默中止整个脚本。
-    new_id="$(podman run -d "${PODMAN_CGROUP_ARGS[@]}" --name "$CONTAINER_NAME" \
+    new_id="$(podman_run_detached server --name "$CONTAINER_NAME" \
       --restart=always \
       "${net_args[@]}" \
       -p "$port_binding" \
@@ -825,7 +849,7 @@ CADDY
   fi
 
   local -a podman_args=(
-    run -d "${PODMAN_CGROUP_ARGS[@]}" --name "$TLS_CONTAINER_NAME"
+    --name "$TLS_CONTAINER_NAME"
     --restart=always
     --network host
     -v "$TLS_DIR/Caddyfile:/etc/caddy/Caddyfile:ro"
@@ -838,7 +862,7 @@ CADDY
   podman_args+=( "$caddy_image" )
 
   local tls_container_id=""
-  if ! tls_container_id="$(podman "${podman_args[@]}" 2>&1)"; then
+  if ! tls_container_id="$(podman_run_detached caddy "${podman_args[@]}" 2>&1)"; then
     echo "[ERROR] TLS Proxy 容器创建失败: ${tls_container_id}"
     echo "[ERROR] 调试：请手动运行上述等价命令查看完整报错，或执行 podman logs $TLS_CONTAINER_NAME 查看 Caddy 启动日志。"
     restore_caddy_config
