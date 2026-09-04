@@ -5417,6 +5417,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             f"_req_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')};\n"
             "for proc in /proc/[0-9]*; do "
             "pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
+            "[ -r \"$proc/cmdline\" ] || continue; "
             "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null || true); [ \"$state\" = Z ] && continue; "
             "comm=$(cat \"$proc/comm\" 2>/dev/null || true); "
             "argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "

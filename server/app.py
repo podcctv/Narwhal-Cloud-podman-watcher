@@ -111,6 +111,11 @@ def db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    global _latest_cache, _latest_cache_time
+    # Tests and administrative recovery may point DB_PATH at a fresh database.
+    # Never serve a short-lived snapshot from the previous database in that case.
+    _latest_cache = None
+    _latest_cache_time = 0.0
     conn = db()
     # WAL lets dashboard reads coexist with frequent agent writes.  This is
     # especially important once monitor.db contains large JSON payloads.
@@ -459,7 +464,7 @@ def process_security_alerts(
         fingerprint = _alert_fingerprint(host_id, fingerprint_source)
         active_fingerprints.append(fingerprint)
         existing = conn.execute(
-            "SELECT status, severity, occurrence_count FROM security_alerts WHERE fingerprint=?",
+            "SELECT id, status, severity, occurrence_count FROM security_alerts WHERE fingerprint=?",
             (fingerprint,),
         ).fetchone()
         allow_policy = conn.execute(
@@ -827,9 +832,6 @@ async def report(
 @app.get("/api/v1/latest")
 def latest(include_stale: bool = False) -> JSONResponse:
     global _latest_cache, _latest_cache_time
-    now_mono = time.monotonic()
-    if not include_stale and _latest_cache is not None and now_mono - _latest_cache_time < 2.0:
-        return JSONResponse(content=_latest_cache)
 
     conn = db()
     try:
@@ -957,9 +959,6 @@ def latest(include_stale: bool = False) -> JSONResponse:
             },
         })
     res_content = {"server_version": APP_VERSION, "items": out}
-    if not include_stale:
-        _latest_cache = res_content
-        _latest_cache_time = time.monotonic()
     return JSONResponse(content=res_content)
 
 
