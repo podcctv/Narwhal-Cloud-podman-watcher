@@ -181,7 +181,7 @@ export const App: React.FC = () => {
                 activeAlerts={activeAlerts}
                 onSelectContainer={setSelectedContainer}
                 onToast={addToast}
-                onRefresh={refresh}
+                onRefresh={fetchAllData}
               />
             </>
           )}
