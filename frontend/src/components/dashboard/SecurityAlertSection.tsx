@@ -1,0 +1,176 @@
+import React, { useState } from 'react';
+import { ShieldAlert, Ban, Check, EyeOff, ExternalLink, ShieldCheck } from 'lucide-react';
+import { SecurityAlert } from '../../api/types';
+import { api } from '../../api/client';
+import { StatusBadge } from '../common/StatusBadge';
+
+interface SecurityAlertSectionProps {
+  alerts: SecurityAlert[];
+  onRefresh: () => void;
+  onViewAllHistory: () => void;
+  onToast: (type: 'success' | 'error' | 'info', message: string) => void;
+}
+
+export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
+  alerts,
+  onRefresh,
+  onViewAllHistory,
+  onToast,
+}) => {
+  const [submittingId, setSubmittingId] = useState<number | null>(null);
+
+  const handleDecision = async (
+    alertId: number,
+    decision: 'deny' | 'allow_silent' | 'dismiss_once'
+  ) => {
+    setSubmittingId(alertId);
+    try {
+      const res = await api.dispositionAlert(alertId, decision);
+      onToast('success', res.queued ? '处置指令已排队，等待节点执行' : '安全策略已更新');
+      onRefresh();
+    } catch (err: any) {
+      onToast('error', `操作失败：${err.message || err}`);
+    } finally {
+      setSubmittingId(null);
+    }
+  };
+
+  if (alerts.length === 0) {
+    return (
+      <section className="mb-6 rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-5 backdrop-blur-sm">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="rounded-xl bg-emerald-500/10 p-2.5 text-emerald-400 border border-emerald-500/30">
+              <ShieldCheck className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-emerald-300">
+                系统当前安全状态良好
+              </h2>
+              <p className="text-xs text-emerald-400/80">
+                未检测到恶意挖矿、非法面板对接或弱口令/无认证 SOCKS 代理行为。
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onViewAllHistory}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+          >
+            <span>查看处置历史</span>
+            <ExternalLink className="h-3 w-3" />
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="mb-6 rounded-2xl border border-rose-500/30 bg-slate-900/90 shadow-xl overflow-hidden backdrop-blur-sm">
+      {/* Header */}
+      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/60 px-5 py-3.5">
+        <div className="flex items-center gap-2.5">
+          <div className="rounded-lg bg-rose-950/80 p-1.5 text-rose-400 border border-rose-500/40">
+            <ShieldAlert className="h-4 w-4" />
+          </div>
+          <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+            <span>安全告警中心</span>
+            <span className="rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/40 px-2 py-0.2 text-[11px] font-mono font-bold">
+              {alerts.length} 项需处理
+            </span>
+          </h2>
+        </div>
+
+        <button
+          type="button"
+          onClick={onViewAllHistory}
+          className="flex items-center gap-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-colors"
+        >
+          <span>查看全部告警记录</span>
+          <ExternalLink className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {/* Alert List */}
+      <div className="divide-y divide-slate-800/80">
+        {alerts.map((alert) => {
+          const isProcessing = submittingId === alert.id;
+          const runtimeText = alert.project
+            ? `${alert.runtime}/${alert.project}`
+            : alert.runtime;
+
+          return (
+            <div
+              key={alert.id}
+              className="p-5 hover:bg-slate-800/30 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4"
+            >
+              {/* Alert Content */}
+              <div className="space-y-2 min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <StatusBadge status={alert.severity} size="sm" />
+                  <span className="font-semibold text-sm text-slate-100">
+                    {alert.title || alert.type}
+                  </span>
+                  <span className="rounded-md bg-slate-800 px-2 py-0.5 font-mono text-xs text-slate-400">
+                    {alert.host_id}
+                  </span>
+                  <span className="rounded-md bg-slate-800 px-2 py-0.5 font-mono text-xs text-slate-400">
+                    {runtimeText}
+                  </span>
+                  {alert.container_name && (
+                    <span className="rounded-md bg-sky-950/60 border border-sky-500/30 px-2 py-0.5 font-mono text-xs text-sky-300">
+                      {alert.container_name}
+                    </span>
+                  )}
+                  <span className="text-xs text-slate-500 tabular-nums">
+                    出现 {alert.occurrence_count || 1} 次 · 最近 {alert.last_seen_utc8 || '-'}
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  {alert.message}
+                </p>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={isProcessing}
+                  onClick={() => handleDecision(alert.id, 'deny')}
+                  className="flex items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all disabled:opacity-50"
+                  title="定向清理恶意进程或停止非合规服务（不停止整个容器）"
+                >
+                  <Ban className="h-3.5 w-3.5" />
+                  <span>{isProcessing ? '处理中...' : '定向处置'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isProcessing}
+                  onClick={() => handleDecision(alert.id, 'allow_silent')}
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 transition-all disabled:opacity-50"
+                  title="放行并永久不再提醒此项告警"
+                >
+                  <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>放行策略</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isProcessing}
+                  onClick={() => handleDecision(alert.id, 'dismiss_once')}
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 transition-all disabled:opacity-50"
+                  title="仅本次取消提醒，下次异常依旧提醒"
+                >
+                  <EyeOff className="h-3.5 w-3.5 text-slate-400" />
+                  <span>本次忽略</span>
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+};

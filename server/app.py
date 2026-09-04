@@ -12,8 +12,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
+from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+ASSETS_DIR = STATIC_DIR / "assets"
 
 DB_PATH = os.getenv("DB_PATH", "/data/monitor.db")
 SHARED_SECRET = os.getenv("SHARED_SECRET", "change-me")
@@ -1893,6 +1897,9 @@ def security_alert_history(
 @app.get("/api/v1/security/status")
 def security_status() -> JSONResponse:
     conn = db()
+    now_utc8 = datetime.now(tz=UTC8)
+    today_start_ts = int(now_utc8.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
     rows = conn.execute(
         """
         SELECT h.host_id, h.ts, h.payload_json
@@ -1905,29 +1912,109 @@ def security_status() -> JSONResponse:
         ORDER BY h.host_id
         """
     ).fetchall()
+
+    container_peaks_rows = conn.execute(
+        """
+        SELECT
+            host_id,
+            MAX(sum_conn) AS peak_conn_count,
+            MAX(sum_rx) AS peak_rx_bps,
+            MAX(sum_tx) AS peak_tx_bps,
+            MAX(sum_inbound) AS peak_inbound_ips,
+            MAX(sum_outbound) AS peak_outbound_ips
+        FROM (
+            SELECT
+                host_id,
+                ts,
+                SUM(conn_count) AS sum_conn,
+                SUM(net_rx_bps) AS sum_rx,
+                SUM(net_tx_bps) AS sum_tx,
+                SUM(COALESCE(CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS sum_inbound,
+                SUM(COALESCE(CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS sum_outbound
+            FROM reports
+            WHERE ts >= ?
+            GROUP BY host_id, ts
+        )
+        GROUP BY host_id
+        """,
+        (today_start_ts,),
+    ).fetchall()
+
+    host_sec_peaks_rows = conn.execute(
+        """
+        SELECT
+            host_id,
+            MAX(COALESCE(CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
+            MAX(COALESCE(CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps
+        FROM host_security
+        WHERE ts >= ?
+        GROUP BY host_id
+        """,
+        (today_start_ts,),
+    ).fetchall()
+
     conn.close()
+
+    peaks_by_host: Dict[str, Dict[str, Any]] = {}
+    for r in container_peaks_rows:
+        peaks_by_host[r["host_id"]] = {
+            "peak_conn_count": int(r["peak_conn_count"] or 0),
+            "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
+            "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
+            "peak_inbound_ips": int(r["peak_inbound_ips"] or 0),
+            "peak_outbound_ips": int(r["peak_outbound_ips"] or 0),
+        }
+
+    for r in host_sec_peaks_rows:
+        h = r["host_id"]
+        if h not in peaks_by_host:
+            peaks_by_host[h] = {
+                "peak_conn_count": 0,
+                "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
+                "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
+                "peak_inbound_ips": 0,
+                "peak_outbound_ips": 0,
+            }
+        else:
+            peaks_by_host[h]["peak_rx_bps"] = max(
+                peaks_by_host[h]["peak_rx_bps"], float(r["peak_rx_bps"] or 0.0)
+            )
+            peaks_by_host[h]["peak_tx_bps"] = max(
+                peaks_by_host[h]["peak_tx_bps"], float(r["peak_tx_bps"] or 0.0)
+            )
+
     items = []
     for row in rows:
+        host_id = row["host_id"]
         try:
             payload = json.loads(row["payload_json"] or "{}")
         except Exception:
             payload = {}
+        cur_rx = float(payload.get("total_rx_bps") or 0)
+        cur_tx = float(payload.get("total_tx_bps") or 0)
+        p = peaks_by_host.get(host_id, {})
         items.append(
             {
-                "host_id": row["host_id"],
+                "host_id": host_id,
                 "timestamp": int(row["ts"]),
                 "timestamp_utc8": format_utc8(int(row["ts"])),
                 "enabled": bool(payload.get("enabled")),
-                "total_rx_bps": float(payload.get("total_rx_bps") or 0),
-                "total_tx_bps": float(payload.get("total_tx_bps") or 0),
+                "total_rx_bps": cur_rx,
+                "total_tx_bps": cur_tx,
                 "total_rx_pps": float(payload.get("total_rx_pps") or 0),
                 "total_tx_pps": float(payload.get("total_tx_pps") or 0),
                 "syn_recv_count": int(payload.get("syn_recv_count") or 0),
                 "access_log": payload.get("access_log") if isinstance(payload.get("access_log"), dict) else {},
                 "active_alerts_in_sample": len(payload.get("alerts") or []),
+                "today_peak_inbound_ips": int(p.get("peak_inbound_ips", 0)),
+                "today_peak_outbound_ips": int(p.get("peak_outbound_ips", 0)),
+                "today_peak_conn_count": int(p.get("peak_conn_count", 0)),
+                "today_peak_rx_bps": max(float(p.get("peak_rx_bps", 0.0)), cur_rx),
+                "today_peak_tx_bps": max(float(p.get("peak_tx_bps", 0.0)), cur_tx),
             }
         )
     return JSONResponse(content={"items": items})
+
 
 
 @app.get("/api/v1/stats")
@@ -2071,8 +2158,20 @@ def stats(minutes: int = 720) -> JSONResponse:
     )
 
 
-@app.get("/alerts/history", response_class=HTMLResponse)
-def security_alert_history_page() -> str:
+@app.api_route("/assets/{path:path}", methods=["GET", "HEAD"])
+def serve_static_asset(path: str):
+    file_path = (ASSETS_DIR / path).resolve()
+    if file_path.is_file() and ASSETS_DIR in file_path.parents:
+        return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="Asset not found")
+
+
+
+@app.api_route("/alerts/history", methods=["GET", "HEAD"], response_class=HTMLResponse)
+def security_alert_history_page(request: Request = None) -> Any:
+    spa_index = STATIC_DIR / "index.html"
+    if request is not None and spa_index.is_file():
+        return FileResponse(spa_index)
     return """
 <!doctype html>
 <html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -2114,8 +2213,11 @@ document.getElementById('query').addEventListener('keydown',event=>{if(event.key
 """
 
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard() -> str:
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+def dashboard(request: Request = None) -> Any:
+    spa_index = STATIC_DIR / "index.html"
+    if request is not None and spa_index.is_file():
+        return FileResponse(spa_index)
     return """
 <!doctype html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Narwhal Container Monitor</title>
@@ -2669,8 +2771,11 @@ loadAndOpenRequestedDetail(); loadAlerts(); setInterval(()=>{load();loadAlerts()
 """
 
 
-@app.get("/container-detail", response_class=HTMLResponse)
-def container_detail_page() -> str:
+@app.api_route("/container-detail", methods=["GET", "HEAD"], response_class=HTMLResponse)
+def container_detail_page(request: Request = None) -> Any:
+    spa_index = STATIC_DIR / "index.html"
+    if request is not None and spa_index.is_file():
+        return FileResponse(spa_index)
     return """
 <!doctype html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
@@ -2775,8 +2880,11 @@ loadDetail();setInterval(loadDetail,15000);
 """
 
 
-@app.get("/stats", response_class=HTMLResponse)
-def stats_page() -> str:
+@app.api_route("/stats", methods=["GET", "HEAD"], response_class=HTMLResponse)
+def stats_page(request: Request = None) -> Any:
+    spa_index = STATIC_DIR / "index.html"
+    if request is not None and spa_index.is_file():
+        return FileResponse(spa_index)
     return """
 <!doctype html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Container Stats</title>
