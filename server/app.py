@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -34,7 +35,7 @@ STALE_SECONDS = int(os.getenv("STALE_SECONDS", "900"))
 OFFLINE_HIDE_SECONDS = int(os.getenv("OFFLINE_HIDE_SECONDS", str(24 * 3600)))
 OFFLINE_HOST_PURGE_SECONDS = int(os.getenv("OFFLINE_HOST_PURGE_SECONDS", str(24 * 3600)))
 PURGE_SECONDS = int(os.getenv("PURGE_SECONDS", str(30 * 24 * 3600)))
-DB_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("DB_BUSY_TIMEOUT_MS", "15000")))
+DB_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("DB_BUSY_TIMEOUT_MS", "30000")))
 REPORT_CLEANUP_INTERVAL_SECONDS = max(
     60, int(os.getenv("REPORT_CLEANUP_INTERVAL_SECONDS", "300"))
 )
@@ -250,11 +251,22 @@ def init_db() -> None:
     conn.close()
 
 
+async def _cleanup_background_loop() -> None:
+    # Allow uvicorn to start serving requests before beginning heavy cleanup
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await asyncio.to_thread(cleanup_old_reports, force=True)
+        except Exception:
+            pass
+        await asyncio.sleep(REPORT_CLEANUP_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     init_db()
-    cleanup_old_reports(force=True)
+    asyncio.create_task(_cleanup_background_loop())
 
 
 def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
@@ -319,9 +331,15 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
         if now_ts is None:
             _next_cleanup_monotonic = time.monotonic() + REPORT_CLEANUP_INTERVAL_SECONDS
         return int(cur.rowcount or 0)
+    except Exception:
+        _next_cleanup_monotonic = time.monotonic() + 60
+        return 0
     finally:
         if conn is not None:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
         _cleanup_lock.release()
 
 
@@ -692,6 +710,10 @@ def process_connection_overloads(
     return queued
 
 
+_latest_cache: Dict[str, Any] | None = None
+_latest_cache_time = 0.0
+
+
 @app.post("/api/v1/report")
 async def report(
     request: Request,
@@ -701,7 +723,6 @@ async def report(
     body = await request.body()
     verify_signature(body, x_timestamp, x_signature)
     data = json.loads(body)
-    cleanup_old_reports()
 
     host_id = data.get("host_id", "unknown")
     agent_version = str(data.get("agent_version") or "unknown").strip() or "unknown"
@@ -712,82 +733,86 @@ async def report(
 
     containers: List[Dict[str, Any]] = data.get("containers", [])
     conn = db()
-    conn.execute(
-        """
-        INSERT INTO hosts(host_id, last_seen, agent_version) VALUES(?,?,?)
-        ON CONFLICT(host_id) DO UPDATE SET
-            last_seen=excluded.last_seen,
-            agent_version=excluded.agent_version
-        """,
-        (host_id, ts, agent_version),
-    )
-    for c in containers:
-        stored_payload = dict(c)
-        stored_payload["_agent_version"] = agent_version
+    notifications: List[Dict[str, Any]] = []
+    automatic_stops_queued = 0
+    try:
         conn.execute(
             """
-            INSERT INTO reports(
-                host_id, container_name, runtime, project, cpu_percent, mem_bytes, mem_percent, net_rx_bps, net_tx_bps,
-                conn_count, disk_file, disk_size_bytes, disk_used_percent,
-                podman_network_ok_v4, podman_network_ok_v6, ts, payload_json
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO hosts(host_id, last_seen, agent_version) VALUES(?,?,?)
+            ON CONFLICT(host_id) DO UPDATE SET
+                last_seen=excluded.last_seen,
+                agent_version=excluded.agent_version
             """,
-            (
-                host_id,
-                c.get("name", "unknown"),
-                c.get("runtime", "podman"),
-                c.get("project", ""),
-                float(c.get("cpu_percent", 0)),
-                int(c.get("mem_bytes", 0)),
-                float(c.get("mem_percent", 0)),
-                float(c.get("net_rx_bps", 0)),
-                float(c.get("net_tx_bps", 0)),
-                int(c.get("conn_count", 0)),
-                c.get("disk", {}).get("file"),
-                c.get("disk", {}).get("size_bytes"),
-                c.get("disk", {}).get("used_percent"),
-                podman_v4,
-                podman_v6,
-                ts,
-                json.dumps(stored_payload, ensure_ascii=False),
-            ),
+            (host_id, ts, agent_version),
         )
-        deep_sample = c.get("deep_sample") if isinstance(c.get("deep_sample"), dict) else None
-        if deep_sample is not None:
-            try:
-                deep_action_id = int(deep_sample.get("action_id") or 0)
-            except (TypeError, ValueError):
-                deep_action_id = 0
-            if deep_action_id > 0:
-                conn.execute(
-                    """
-                    UPDATE security_actions
-                    SET status='succeeded', result_message='deep sample received', updated_at=?
-                    WHERE id=? AND alert_id=0 AND action_type='request_deep_sample'
-                      AND host_id=? AND runtime=? AND project=? AND container_name=?
-                      AND status IN ('queued','dispatched')
-                    """,
-                    (
-                        ts,
-                        deep_action_id,
-                        host_id,
-                        str(c.get("runtime") or "")[:40],
-                        str(c.get("project") or "")[:100],
-                        str(c.get("name") or "")[:200],
-                    ),
-                )
-    automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
-    notifications: List[Dict[str, Any]] = []
-    security = data.get("security")
-    if isinstance(security, dict):
-        security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
-        notifications = process_security_alerts(conn, host_id, ts, security_alerts)
-        conn.execute(
-            "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
-            (host_id, ts, json.dumps(security, ensure_ascii=False)),
-        )
-    conn.commit()
-    conn.close()
+        for c in containers:
+            stored_payload = dict(c)
+            stored_payload["_agent_version"] = agent_version
+            conn.execute(
+                """
+                INSERT INTO reports(
+                    host_id, container_name, runtime, project, cpu_percent, mem_bytes, mem_percent, net_rx_bps, net_tx_bps,
+                    conn_count, disk_file, disk_size_bytes, disk_used_percent,
+                    podman_network_ok_v4, podman_network_ok_v6, ts, payload_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    host_id,
+                    c.get("name", "unknown"),
+                    c.get("runtime", "podman"),
+                    c.get("project", ""),
+                    float(c.get("cpu_percent", 0)),
+                    int(c.get("mem_bytes", 0)),
+                    float(c.get("mem_percent", 0)),
+                    float(c.get("net_rx_bps", 0)),
+                    float(c.get("net_tx_bps", 0)),
+                    int(c.get("conn_count", 0)),
+                    c.get("disk", {}).get("file"),
+                    c.get("disk", {}).get("size_bytes"),
+                    c.get("disk", {}).get("used_percent"),
+                    podman_v4,
+                    podman_v6,
+                    ts,
+                    json.dumps(stored_payload, ensure_ascii=False),
+                ),
+            )
+            deep_sample = c.get("deep_sample") if isinstance(c.get("deep_sample"), dict) else None
+            if deep_sample is not None:
+                try:
+                    deep_action_id = int(deep_sample.get("action_id") or 0)
+                except (TypeError, ValueError):
+                    deep_action_id = 0
+                if deep_action_id > 0:
+                    conn.execute(
+                        """
+                        UPDATE security_actions
+                        SET status='succeeded', result_message='deep sample received', updated_at=?
+                        WHERE id=? AND alert_id=0 AND action_type='request_deep_sample'
+                          AND host_id=? AND runtime=? AND project=? AND container_name=?
+                          AND status IN ('queued','dispatched')
+                        """,
+                        (
+                            ts,
+                            deep_action_id,
+                            host_id,
+                            str(c.get("runtime") or "")[:40],
+                            str(c.get("project") or "")[:100],
+                            str(c.get("name") or "")[:200],
+                        ),
+                    )
+        automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
+        security = data.get("security")
+        if isinstance(security, dict):
+            security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
+            notifications = process_security_alerts(conn, host_id, ts, security_alerts)
+            conn.execute(
+                "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
+                (host_id, ts, json.dumps(security, ensure_ascii=False)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
     for alert in notifications:
         send_alert_webhook(alert)
     return {
@@ -801,38 +826,43 @@ async def report(
 
 @app.get("/api/v1/latest")
 def latest(include_stale: bool = False) -> JSONResponse:
-    cleanup_old_reports()
+    global _latest_cache, _latest_cache_time
+    now_mono = time.monotonic()
+    if not include_stale and _latest_cache is not None and now_mono - _latest_cache_time < 2.0:
+        return JSONResponse(content=_latest_cache)
+
     conn = db()
-    host_heartbeats = {
-        str(row["host_id"]): int(row["last_seen"])
-        for row in conn.execute("SELECT host_id, last_seen FROM hosts").fetchall()
-    }
-    rows = conn.execute(
-        """
-        SELECT r.* FROM reports r
-        JOIN (
-            SELECT host_id, runtime, project, container_name, MAX(ts) AS max_ts
-            FROM reports
-            GROUP BY host_id, runtime, project, container_name
-        ) m ON r.host_id=m.host_id AND r.runtime=m.runtime AND r.project=m.project
-            AND r.container_name=m.container_name AND r.ts=m.max_ts
-        ORDER BY r.host_id, r.runtime, r.project, r.container_name
-        """
-    ).fetchall()
+    try:
+        host_heartbeats = {
+            str(row["host_id"]): int(row["last_seen"])
+            for row in conn.execute("SELECT host_id, last_seen FROM hosts").fetchall()
+        }
+        rows = conn.execute(
+            """
+            SELECT r.* FROM reports r
+            JOIN (
+                SELECT host_id, runtime, project, container_name, MAX(ts) AS max_ts
+                FROM reports
+                GROUP BY host_id, runtime, project, container_name
+            ) m ON r.host_id=m.host_id AND r.runtime=m.runtime AND r.project=m.project
+                AND r.container_name=m.container_name AND r.ts=m.max_ts
+            ORDER BY r.host_id, r.runtime, r.project, r.container_name
+            """
+        ).fetchall()
 
-    host_rows = conn.execute(
-        """
-        SELECT r.host_id, r.payload_json, r.ts
-        FROM reports r
-        JOIN (
-            SELECT host_id, MAX(ts) AS max_ts
-            FROM reports
-            GROUP BY host_id
-        ) m ON r.host_id=m.host_id AND r.ts=m.max_ts
-        """
-    ).fetchall()
-
-    conn.close()
+        host_rows = conn.execute(
+            """
+            SELECT r.host_id, r.payload_json, r.ts
+            FROM reports r
+            JOIN (
+                SELECT host_id, MAX(ts) AS max_ts
+                FROM reports
+                GROUP BY host_id
+            ) m ON r.host_id=m.host_id AND r.ts=m.max_ts
+            """
+        ).fetchall()
+    finally:
+        conn.close()
 
     host_disk_map: Dict[str, Dict[str, Any]] = {}
     for h in host_rows:
@@ -926,7 +956,11 @@ def latest(include_stale: bool = False) -> JSONResponse:
                 "network": (not r["podman_network_ok_v4"]) or (not r["podman_network_ok_v6"]),
             },
         })
-    return JSONResponse(content={"server_version": APP_VERSION, "items": out})
+    res_content = {"server_version": APP_VERSION, "items": out}
+    if not include_stale:
+        _latest_cache = res_content
+        _latest_cache_time = time.monotonic()
+    return JSONResponse(content=res_content)
 
 
 @app.get("/api/v1/history")
@@ -1735,38 +1769,40 @@ async def poll_security_actions(
         raise HTTPException(status_code=400, detail="host_id is required")
     now = int(time.time())
     conn = db()
-    conn.execute("BEGIN IMMEDIATE")
-    conn.execute(
-        """
-        UPDATE security_actions
-        SET status='failed', result_message='agent did not confirm action after 3 attempts', updated_at=?
-        WHERE host_id=? AND status='dispatched' AND attempts>=3 AND updated_at < ?
-        """,
-        (now, host_id, now - 120),
-    )
-    rows = conn.execute(
-        """
-        SELECT * FROM security_actions
-        WHERE host_id=? AND attempts < 3
-          AND (status='queued' OR (status='dispatched' AND updated_at < ?))
-        ORDER BY id LIMIT 10
-        """,
-        (host_id, now - 120),
-    ).fetchall()
-    actions = []
-    for row in rows:
-        params = _refresh_remediation_process_pids(conn, row)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
-            "UPDATE security_actions SET status='dispatched', attempts=attempts+1, updated_at=?, params_json=? WHERE id=?",
-            (now, json.dumps(params, ensure_ascii=False), row["id"]),
+            """
+            UPDATE security_actions
+            SET status='failed', result_message='agent did not confirm action after 3 attempts', updated_at=?
+            WHERE host_id=? AND status='dispatched' AND attempts>=3 AND updated_at < ?
+            """,
+            (now, host_id, now - 120),
         )
-        action = _action_item(row)
-        action["params"] = params
-        action["status"] = "dispatched"
-        action["attempts"] += 1
-        actions.append(action)
-    conn.commit()
-    conn.close()
+        rows = conn.execute(
+            """
+            SELECT * FROM security_actions
+            WHERE host_id=? AND attempts < 3
+              AND (status='queued' OR (status='dispatched' AND updated_at < ?))
+            ORDER BY id LIMIT 10
+            """,
+            (host_id, now - 120),
+        ).fetchall()
+        actions = []
+        for row in rows:
+            params = _refresh_remediation_process_pids(conn, row)
+            conn.execute(
+                "UPDATE security_actions SET status='dispatched', attempts=attempts+1, updated_at=?, params_json=? WHERE id=?",
+                (now, json.dumps(params, ensure_ascii=False), row["id"]),
+            )
+            action = _action_item(row)
+            action["params"] = params
+            action["status"] = "dispatched"
+            action["attempts"] += 1
+            actions.append(action)
+        conn.commit()
+    finally:
+        conn.close()
     return signed_json_response({"ok": True, "actions": actions}, x_timestamp)
 
 
@@ -1790,34 +1826,35 @@ async def security_action_result(
     message = str(payload.get("message") or "")[:2000]
     now = int(time.time())
     conn = db()
-    row = conn.execute(
-        "SELECT host_id, status, action_type, alert_id FROM security_actions WHERE id=?",
-        (action_id,),
-    ).fetchone()
-    if row is None or row["host_id"] != host_id:
-        conn.close()
-        raise HTTPException(status_code=404, detail="action not found for host")
-    if (
-        status == "succeeded"
-        and row["action_type"] in ("remediate_panel_pairing", "remediate_malicious_process")
-        and not _remediation_changed(message)
-    ):
-        status = "failed"
-        message = f"no matching process, service or config was removed; {message}"[:2000]
-    if row["status"] not in ("succeeded", "failed"):
-        conn.execute(
-            "UPDATE security_actions SET status=?, result_message=?, updated_at=? WHERE id=?",
-            (status, message, now, action_id),
-        )
-        if status == "succeeded" and row["action_type"] in (
-            "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth"
+    try:
+        row = conn.execute(
+            "SELECT host_id, status, action_type, alert_id FROM security_actions WHERE id=?",
+            (action_id,),
+        ).fetchone()
+        if row is None or row["host_id"] != host_id:
+            raise HTTPException(status_code=404, detail="action not found for host")
+        if (
+            status == "succeeded"
+            and row["action_type"] in ("remediate_panel_pairing", "remediate_malicious_process")
+            and not _remediation_changed(message)
         ):
+            status = "failed"
+            message = f"no matching process, service or config was removed; {message}"[:2000]
+        if row["status"] not in ("succeeded", "failed"):
             conn.execute(
-                "UPDATE security_alerts SET status='remediated' WHERE id=? AND status='active'",
-                (row["alert_id"],),
+                "UPDATE security_actions SET status=?, result_message=?, updated_at=? WHERE id=?",
+                (status, message, now, action_id),
             )
-        conn.commit()
-    conn.close()
+            if status == "succeeded" and row["action_type"] in (
+                "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth"
+            ):
+                conn.execute(
+                    "UPDATE security_alerts SET status='remediated' WHERE id=? AND status='active'",
+                    (row["alert_id"],),
+                )
+            conn.commit()
+    finally:
+        conn.close()
     return signed_json_response({"ok": True, "action_id": action_id}, x_timestamp)
 
 
@@ -1939,66 +1976,73 @@ def security_alert_history(
     )
 
 
+_security_status_cache: Dict[str, Any] | None = None
+_security_status_cache_time = 0.0
+
+
 @app.get("/api/v1/security/status")
 def security_status() -> JSONResponse:
+    global _security_status_cache, _security_status_cache_time
+    now_mono = time.monotonic()
+    if _security_status_cache is not None and now_mono - _security_status_cache_time < 5.0:
+        return JSONResponse(content=_security_status_cache)
+
     conn = db()
-    now_utc8 = datetime.now(tz=UTC8)
-    today_start_ts = int(now_utc8.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    try:
+        now_utc8 = datetime.now(tz=UTC8)
+        today_start_ts = int(now_utc8.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
-    rows = conn.execute(
-        """
-        SELECT h.host_id, h.ts, h.payload_json
-        FROM host_security h
-        JOIN (
-            SELECT host_id, MAX(id) AS max_id
-            FROM host_security
-            GROUP BY host_id
-        ) latest ON h.id=latest.max_id
-        ORDER BY h.host_id
-        """
-    ).fetchall()
+        rows = conn.execute(
+            """
+            SELECT h.host_id, h.ts, h.payload_json
+            FROM host_security h
+            JOIN (
+                SELECT host_id, MAX(id) AS max_id
+                FROM host_security
+                GROUP BY host_id
+            ) latest ON h.id=latest.max_id
+            ORDER BY h.host_id
+            """
+        ).fetchall()
 
-    container_peaks_rows = conn.execute(
-        """
-        SELECT
-            host_id,
-            MAX(sum_conn) AS peak_conn_count,
-            MAX(sum_rx) AS peak_rx_bps,
-            MAX(sum_tx) AS peak_tx_bps,
-            MAX(sum_inbound) AS peak_inbound_ips,
-            MAX(sum_outbound) AS peak_outbound_ips
-        FROM (
+        container_peaks_rows = conn.execute(
+            """
             SELECT
                 host_id,
-                ts,
-                SUM(conn_count) AS sum_conn,
-                SUM(net_rx_bps) AS sum_rx,
-                SUM(net_tx_bps) AS sum_tx,
-                SUM(COALESCE(CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS sum_inbound,
-                SUM(COALESCE(CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS sum_outbound
-            FROM reports
+                MAX(sum_conn) AS peak_conn_count,
+                MAX(sum_rx) AS peak_rx_bps,
+                MAX(sum_tx) AS peak_tx_bps
+            FROM (
+                SELECT
+                    host_id,
+                    ts,
+                    SUM(conn_count) AS sum_conn,
+                    SUM(net_rx_bps) AS sum_rx,
+                    SUM(net_tx_bps) AS sum_tx
+                FROM reports
+                WHERE ts >= ?
+                GROUP BY host_id, ts
+            )
+            GROUP BY host_id
+            """,
+            (today_start_ts,),
+        ).fetchall()
+
+        host_sec_peaks_rows = conn.execute(
+            """
+            SELECT
+                host_id,
+                MAX(COALESCE(CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
+                MAX(COALESCE(CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps,
+                MAX(COALESCE(CAST(json_extract(payload_json, '$.access_log.unique_ips') AS INTEGER), 0)) AS peak_inbound_ips
+            FROM host_security
             WHERE ts >= ?
-            GROUP BY host_id, ts
-        )
-        GROUP BY host_id
-        """,
-        (today_start_ts,),
-    ).fetchall()
-
-    host_sec_peaks_rows = conn.execute(
-        """
-        SELECT
-            host_id,
-            MAX(COALESCE(CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
-            MAX(COALESCE(CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps
-        FROM host_security
-        WHERE ts >= ?
-        GROUP BY host_id
-        """,
-        (today_start_ts,),
-    ).fetchall()
-
-    conn.close()
+            GROUP BY host_id
+            """,
+            (today_start_ts,),
+        ).fetchall()
+    finally:
+        conn.close()
 
     peaks_by_host: Dict[str, Dict[str, Any]] = {}
     for r in container_peaks_rows:
@@ -2006,18 +2050,19 @@ def security_status() -> JSONResponse:
             "peak_conn_count": int(r["peak_conn_count"] or 0),
             "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
             "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
-            "peak_inbound_ips": int(r["peak_inbound_ips"] or 0),
-            "peak_outbound_ips": int(r["peak_outbound_ips"] or 0),
+            "peak_inbound_ips": 0,
+            "peak_outbound_ips": 0,
         }
 
     for r in host_sec_peaks_rows:
         h = r["host_id"]
+        inbound = int(r["peak_inbound_ips"] or 0)
         if h not in peaks_by_host:
             peaks_by_host[h] = {
                 "peak_conn_count": 0,
                 "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
                 "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
-                "peak_inbound_ips": 0,
+                "peak_inbound_ips": inbound,
                 "peak_outbound_ips": 0,
             }
         else:
@@ -2027,6 +2072,8 @@ def security_status() -> JSONResponse:
             peaks_by_host[h]["peak_tx_bps"] = max(
                 peaks_by_host[h]["peak_tx_bps"], float(r["peak_tx_bps"] or 0.0)
             )
+            if inbound > peaks_by_host[h]["peak_inbound_ips"]:
+                peaks_by_host[h]["peak_inbound_ips"] = inbound
 
     items = []
     for row in rows:
@@ -2058,7 +2105,10 @@ def security_status() -> JSONResponse:
                 "today_peak_tx_bps": max(float(p.get("peak_tx_bps", 0.0)), cur_tx),
             }
         )
-    return JSONResponse(content={"items": items})
+    res_content = {"items": items}
+    _security_status_cache = res_content
+    _security_status_cache_time = time.monotonic()
+    return JSONResponse(content=res_content)
 
 
 
