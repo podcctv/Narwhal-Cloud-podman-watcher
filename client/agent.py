@@ -5439,8 +5439,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "case \"$unit\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *.service) "
             "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"$unit\" >/dev/null 2>&1 || true;; esac; "
             "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); "
-            "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done;\n"
-            f"if command -v pkill >/dev/null 2>&1; then if pkill -9 -f {quoted_pattern} 2>/dev/null; then killed_processes=$((killed_processes+1)); fi; fi"
+            "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done"
         )
     for config_file in config_files:
         quoted_file = shlex.quote(config_file)
