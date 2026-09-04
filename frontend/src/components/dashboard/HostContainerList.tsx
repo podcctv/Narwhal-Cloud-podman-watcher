@@ -61,32 +61,24 @@ export function evaluateContainerRisk(
 
   const sec = container.security || {};
 
-  // 2. Check SOCKS proxy risks
+  // 2. SOCKS proxy risks: only weak password or no auth counts as anomaly
   if (sec.socks_proxy?.detected) {
-    if (sec.socks_proxy.auth_mode === 'no_auth') {
-      reasons.push('检测到开放无认证 SOCKS 代理');
-      sortWeight += 900;
-    } else if (sec.socks_proxy.auth_mode === 'weak_password') {
-      reasons.push('检测到弱口令 SOCKS 代理');
-      sortWeight += 800;
-    } else {
-      reasons.push('运行 SOCKS 代理服务');
-      sortWeight += 250;
-    }
-  }
-
-  // 3. Check panel pairing
-  if (sec.panel_pairing?.detected) {
-    if (!sec.panel_pairing.approved) {
-      reasons.push('未授权面板对接活动');
+    if (sec.socks_proxy.auth_mode === 'weak_password') {
+      reasons.push('SOCKS 代理弱密码隐患');
       sortWeight += 850;
-    } else {
-      reasons.push('已配置面板对接');
-      sortWeight += 150;
+    } else if (sec.socks_proxy.auth_mode === 'no_auth') {
+      reasons.push('SOCKS 代理开放且无认证');
+      sortWeight += 900;
     }
   }
 
-  // 4. Inbound IP anomaly
+  // 3. Panel pairing: only unapproved pairing counts as anomaly
+  if (sec.panel_pairing?.detected && !sec.panel_pairing.approved) {
+    reasons.push('未授权面板对接活动');
+    sortWeight += 800;
+  }
+
+  // 4. Inbound IP flood anomaly
   const inIps = Number(sec.inbound_unique_ips || 0);
   const inThresh = Number(sec.inbound_unique_ip_threshold || 10);
   if (inIps > inThresh) {
@@ -105,24 +97,10 @@ export function evaluateContainerRisk(
     sortWeight += 950;
   }
 
-  // 6. Resource overloads
-  if (container.alerts?.conn || (container.conn_count || 0) > 1000) {
-    reasons.push(`并发连接超限 (${container.conn_count || 0})`);
-    sortWeight += 350;
-  }
-  if (container.alerts?.cpu || (container.cpu_percent || 0) > 90) {
-    reasons.push(`CPU 负载极高 (${(container.cpu_percent || 0).toFixed(1)}%)`);
-    sortWeight += 300;
-  }
-  if (container.alerts?.memory || (container.mem_percent || 0) > 90) {
-    reasons.push(`内存占用超限 (${(container.mem_percent || 0).toFixed(1)}%)`);
-    sortWeight += 300;
-  }
-
-  // 7. Stale / offline
-  if (container.alerts?.stale) {
-    reasons.push('容器状态失联或已停止上报');
-    sortWeight += 150;
+  // 6. Extreme connection flood
+  if (container.alerts?.conn || (container.conn_count || 0) > 1500) {
+    reasons.push(`并发连接异常泛洪 (${container.conn_count || 0})`);
+    sortWeight += 450;
   }
 
   const hasRisk = sortWeight > 0;
@@ -422,7 +400,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                               </span>
                               <span
                                 className={`tabular-nums font-bold ${
-                                  mem > 85 ? 'text-rose-400' : 'text-slate-200'
+                                  mem > 90 ? 'text-amber-400' : 'text-slate-200'
                                 }`}
                               >
                                 {mem.toFixed(1)}% ({memUsed} / {memLimit})
@@ -431,7 +409,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                             <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
                               <div
                                 className={`h-full transition-all duration-500 ${
-                                  mem > 85 ? 'bg-rose-500' : 'bg-emerald-500'
+                                  mem > 90 ? 'bg-amber-500' : 'bg-emerald-500'
                                 }`}
                                 style={{ width: `${Math.min(100, Math.max(0, mem))}%` }}
                               />
