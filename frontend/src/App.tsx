@@ -180,6 +180,8 @@ export const App: React.FC = () => {
                 serverVersion={serverVersion}
                 activeAlerts={activeAlerts}
                 onSelectContainer={setSelectedContainer}
+                onToast={addToast}
+                onRefresh={refresh}
               />
             </>
           )}

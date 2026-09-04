@@ -467,8 +467,17 @@ def process_security_alerts(
             elif automatically_remediated:
                 should_notify = False
             elif previous_status == "dismissed":
-                next_status = "dismissed"
-                should_notify = False
+                dismiss_decision = conn.execute(
+                    "SELECT created_at FROM security_alert_decisions WHERE alert_id=? AND decision='dismiss_once' ORDER BY id DESC LIMIT 1",
+                    (existing["id"],),
+                ).fetchone()
+                dismiss_ts = int(dismiss_decision["created_at"]) if dismiss_decision else 0
+                if dismiss_ts > 0 and (ts - dismiss_ts) > 3600:
+                    next_status = "active"
+                    should_notify = True
+                else:
+                    next_status = "dismissed"
+                    should_notify = False
             else:
                 should_notify = previous_status == "resolved" or _SEVERITY_RANK[severity] > _SEVERITY_RANK.get(str(existing["severity"]), 0)
             conn.execute(
@@ -1497,10 +1506,10 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     decision = str(payload.get("decision") or "").strip().lower()
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen"):
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve"):
         raise HTTPException(
             status_code=400,
-            detail="decision must be deny, allow_silent, dismiss_once or reopen",
+            detail="decision must be deny, allow_silent, dismiss_once, reopen or resolve",
         )
 
     conn = db()
@@ -1509,7 +1518,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     if alert is None:
         conn.close()
         raise HTTPException(status_code=404, detail="alert not found")
-    if alert["status"] != "active" and decision not in ("deny", "reopen"):
+    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve"):
         conn.close()
         raise HTTPException(status_code=409, detail="alert is no longer active")
 
@@ -1632,6 +1641,8 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
             )
     elif decision == "dismiss_once":
         conn.execute("UPDATE security_alerts SET status='dismissed' WHERE id=?", (alert_id,))
+    elif decision == "resolve":
+        conn.execute("UPDATE security_alerts SET status='resolved' WHERE id=?", (alert_id,))
     else:
         conn.execute(
             "DELETE FROM security_alert_policies WHERE fingerprint=?",
@@ -1671,6 +1682,40 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
             "action": _action_item(action) if action is not None else None,
         },
     )
+
+
+@app.post("/api/v1/containers/disposition")
+async def set_container_disposition(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    host_id = str(payload.get("host_id") or "").strip()[:200]
+    runtime = str(payload.get("runtime") or "").strip()[:80]
+    project = str(payload.get("project") or "").strip()[:100]
+    container_name = str(payload.get("container_name") or "").strip()[:200]
+    decision = str(payload.get("decision") or "").strip().lower()
+    if not host_id or not runtime or not container_name:
+        raise HTTPException(
+            status_code=400, detail="host_id, runtime, and container_name are required"
+        )
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve"):
+        raise HTTPException(status_code=400, detail="invalid decision")
+
+    conn = db()
+    alert = conn.execute(
+        """
+        SELECT * FROM security_alerts
+        WHERE host_id=? AND runtime=? AND (project=? OR project='' OR ?='') AND container_name=?
+        ORDER BY (CASE WHEN status='active' THEN 0 ELSE 1 END), id DESC
+        LIMIT 1
+        """,
+        (host_id, runtime, project, project, container_name),
+    ).fetchone()
+    conn.close()
+    if alert is not None:
+        return await set_security_alert_disposition(alert["id"], request)
+    raise HTTPException(status_code=404, detail="未找到该容器对应的安全告警记录")
 
 
 @app.post("/api/v1/actions/poll")

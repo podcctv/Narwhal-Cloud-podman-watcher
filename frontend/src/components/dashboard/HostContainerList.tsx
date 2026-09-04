@@ -13,16 +13,20 @@ import {
   AlertCircle,
   Layers,
   Sparkles,
+  Ban,
+  Check,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, SecurityAlert } from '../../api/types';
 import { StatusBadge } from '../common/StatusBadge';
-import { fmtBytes, fmtMbps } from '../../api/client';
+import { api, fmtBytes, fmtMbps } from '../../api/client';
 
 interface HostContainerListProps {
   containers: ContainerItem[];
   serverVersion: string;
   activeAlerts?: SecurityAlert[];
   onSelectContainer: (id: ContainerIdentity) => void;
+  onToast?: (type: 'success' | 'error' | 'info', message: string) => void;
+  onRefresh?: () => void;
 }
 
 export interface ContainerRiskInfo {
@@ -121,7 +125,33 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   serverVersion,
   activeAlerts = [],
   onSelectContainer,
+  onToast,
+  onRefresh,
 }) => {
+  const [submittingKey, setSubmittingKey] = useState<string | null>(null);
+
+  const handleContainerDisposition = async (
+    target: ContainerIdentity,
+    decision: 'deny' | 'allow_silent'
+  ) => {
+    const key = `${target.host_id}-${target.runtime}-${target.project || ''}-${target.container_name}`;
+    setSubmittingKey(key);
+    try {
+      const res = await api.dispositionContainer(target, decision);
+      onToast?.(
+        'success',
+        decision === 'deny'
+          ? (res.queued ? '处置指令已下发节点执行' : '安全处置已处理')
+          : '已成功添加放行策略'
+      );
+      onRefresh?.();
+    } catch (err: any) {
+      onToast?.('error', `操作失败：${err.message || err}`);
+    } finally {
+      setSubmittingKey(null);
+    }
+  };
+
   // Group by host_id
   const hostMap: Record<string, ContainerItem[]> = {};
   containers.forEach((c) => {
@@ -485,30 +515,96 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                         </div>
                       </div>
 
-                      {/* Inspect Button */}
-                      <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                      {/* Actions Footer */}
+                      <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2 flex-wrap">
                         <span className="text-[10px] text-slate-500 font-mono">
                           {c.timestamp_iso_utc8?.split(' ')[1] || ''}
                         </span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onSelectContainer({
-                              host_id: c.host_id,
-                              runtime: c.runtime,
-                              project: c.project,
-                              container_name: c.container_name,
-                            })
-                          }
-                          className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all shadow-sm ${
-                            risk.isCritical
-                              ? 'border-rose-500/60 bg-rose-950/70 text-rose-200 hover:border-rose-400 hover:bg-rose-900/80 hover:text-white'
-                              : 'border-slate-700 bg-slate-800 text-sky-400 hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750'
-                          }`}
-                        >
-                          <Sparkles className="h-3.5 w-3.5" />
-                          <span>{risk.hasRisk ? '立即排查' : '深度排查'}</span>
-                        </button>
+
+                        {risk.hasRisk ? (
+                          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                            <button
+                              type="button"
+                              disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleContainerDisposition(
+                                  {
+                                    host_id: c.host_id,
+                                    runtime: c.runtime,
+                                    project: c.project,
+                                    container_name: c.container_name,
+                                  },
+                                  'deny'
+                                );
+                              }}
+                              className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all disabled:opacity-50 shadow-sm"
+                              title="定向处置违规进程或停止非合规服务"
+                            >
+                              <Ban className="h-3 w-3" />
+                              <span>
+                                {submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`
+                                  ? '处理中...'
+                                  : '定向处置'}
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleContainerDisposition(
+                                  {
+                                    host_id: c.host_id,
+                                    runtime: c.runtime,
+                                    project: c.project,
+                                    container_name: c.container_name,
+                                  },
+                                  'allow_silent'
+                                );
+                              }}
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
+                              title="添加放行策略不再告警"
+                            >
+                              <Check className="h-3 w-3 text-emerald-400" />
+                              <span>放行</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onSelectContainer({
+                                  host_id: c.host_id,
+                                  runtime: c.runtime,
+                                  project: c.project,
+                                  container_name: c.container_name,
+                                })
+                              }
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-all"
+                              title="查看容器详细指标与诊断"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              <span>排查</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onSelectContainer({
+                                host_id: c.host_id,
+                                runtime: c.runtime,
+                                project: c.project,
+                                container_name: c.container_name,
+                              })
+                            }
+                            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 text-sky-400 px-3 py-1.5 text-xs font-semibold hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750 transition-all shadow-sm"
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            <span>深度排查</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

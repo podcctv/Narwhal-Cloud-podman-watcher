@@ -28,17 +28,17 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry })
 
       <div className="overflow-x-auto">
         <table className="w-full text-left text-xs text-slate-300">
-          <thead className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+          <thead className="border-b border-slate-800 bg-slate-950/70 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
             <tr>
-              <th className="px-4 py-3">主机</th>
-              <th className="px-4 py-3 text-right">实时速率 (下行 / 上行)</th>
-              <th className="px-4 py-3 text-right">当天最高下载</th>
-              <th className="px-4 py-3 text-right">当天最高上传</th>
-              <th className="px-4 py-3 text-right">当天最高连接</th>
-              <th className="px-4 py-3 text-right">最高入站 IP</th>
-              <th className="px-4 py-3 text-right">最高出站 IP</th>
-              <th className="px-4 py-3 text-center">访问日志</th>
-              <th className="px-4 py-3 text-right">采样时间</th>
+              <th className="px-5 py-3.5 whitespace-nowrap">主机</th>
+              <th className="px-4 py-3.5 text-right whitespace-nowrap">实时速率 (下行 / 上行)</th>
+              <th className="px-4 py-3.5 text-right whitespace-nowrap">当天最高下载</th>
+              <th className="px-4 py-3.5 text-right whitespace-nowrap">当天最高上传</th>
+              <th className="px-4 py-3.5 text-center whitespace-nowrap">当天最高连接</th>
+              <th className="px-4 py-3.5 text-center whitespace-nowrap">最高入站 IP</th>
+              <th className="px-4 py-3.5 text-center whitespace-nowrap">最高出站 IP</th>
+              <th className="px-4 py-3.5 text-center whitespace-nowrap">访问日志</th>
+              <th className="px-5 py-3.5 text-right whitespace-nowrap">采样时间</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60">
@@ -51,82 +51,82 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry })
 
               return (
                 <tr key={t.host_id} className="hover:bg-slate-800/40 transition-colors">
-                  <td className="px-4 py-3 font-semibold text-slate-200">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-mono">{t.host_id}</span>
+                  <td className="px-5 py-3 whitespace-nowrap font-medium text-slate-200">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-slate-100">{t.host_id}</span>
                       {synAlert && (
-                        <span className="rounded bg-rose-950/80 border border-rose-500/40 px-1 py-0.2 text-[10px] font-bold text-rose-300 animate-pulse">
+                        <span className="rounded bg-rose-950/80 border border-rose-500/40 px-1.5 py-0.5 text-[10px] font-bold text-rose-300 animate-pulse whitespace-nowrap">
                           SYN {t.syn_recv}
                         </span>
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    <div className="flex flex-col items-end">
-                      <div className="flex items-center gap-1.5 font-semibold">
+                  <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+                    <div className="flex flex-col items-end gap-0.5">
+                      <div className="flex items-center gap-1.5 font-mono text-xs font-bold">
                         <span className="text-emerald-400 flex items-center">
-                          <ArrowDown className="h-3 w-3 inline mr-0.5" />
+                          <ArrowDown className="h-3 w-3 inline mr-0.5 text-emerald-400/80" />
                           {curRx.mbps}
                         </span>
-                        <span className="text-slate-600">/</span>
+                        <span className="text-slate-600 font-normal">/</span>
                         <span className="text-sky-400 flex items-center">
-                          <ArrowUp className="h-3 w-3 inline mr-0.5" />
+                          <ArrowUp className="h-3 w-3 inline mr-0.5 text-sky-400/80" />
                           {curTx.mbps}
                         </span>
                       </div>
-                      <span className="text-[10px] text-slate-500 font-mono">
+                      <span className="text-[10px] text-slate-500 font-mono tracking-tight">
                         ↓ {fmtBytes(t.rx_bps)}/s · ↑ {fmtBytes(t.tx_bps)}/s
                       </span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    <div className="flex flex-col items-end">
-                      <span className="font-semibold text-emerald-400 font-mono">
+                  <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span className="font-mono text-xs font-bold text-emerald-400">
                         {peakRx.mbps}
                       </span>
-                      <span className="text-[10px] text-slate-500 font-mono">
+                      <span className="text-[10px] text-slate-500 font-mono tracking-tight">
                         {peakRx.bytesPerSec}
                       </span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    <div className="flex flex-col items-end">
-                      <span className="font-semibold text-sky-400 font-mono">
+                  <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span className="font-mono text-xs font-bold text-sky-400">
                         {peakTx.mbps}
                       </span>
-                      <span className="text-[10px] text-slate-500 font-mono">
+                      <span className="text-[10px] text-slate-500 font-mono tracking-tight">
                         {peakTx.bytesPerSec}
                       </span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    <span className="inline-block rounded-md bg-amber-950/40 border border-amber-500/30 px-2 py-0.5 text-xs font-bold text-amber-300 font-mono">
+                  <td className="px-4 py-3 text-center tabular-nums whitespace-nowrap">
+                    <span className="inline-flex min-w-[56px] justify-center items-center rounded-md bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 text-xs font-bold text-amber-300 font-mono shadow-sm">
                       {fmtNumber(t.today_peak_conn_count, 0)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    <span className="inline-block rounded-md bg-rose-950/30 border border-rose-500/30 px-2 py-0.5 text-xs font-bold text-rose-300 font-mono">
+                  <td className="px-4 py-3 text-center tabular-nums whitespace-nowrap">
+                    <span className="inline-flex min-w-[48px] justify-center items-center rounded-md bg-rose-500/10 border border-rose-500/30 px-2.5 py-1 text-xs font-bold text-rose-300 font-mono shadow-sm">
                       {fmtNumber(t.today_peak_inbound_ips, 0)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    <span className="inline-block rounded-md bg-cyan-950/30 border border-cyan-500/30 px-2 py-0.5 text-xs font-bold text-cyan-300 font-mono">
+                  <td className="px-4 py-3 text-center tabular-nums whitespace-nowrap">
+                    <span className="inline-flex min-w-[48px] justify-center items-center rounded-md bg-cyan-500/10 border border-cyan-500/30 px-2.5 py-1 text-xs font-bold text-cyan-300 font-mono shadow-sm">
                       {fmtNumber(t.today_peak_outbound_ips, 0)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-center">
+                  <td className="px-4 py-3 text-center whitespace-nowrap">
                     {(() => {
                       const logText = typeof t.access_log === 'string' ? t.access_log : '正常';
                       const isOk = logText.includes('正常');
                       const isWarn = logText === '未配置' || logText === '待采集';
                       return (
                         <span
-                          className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${
+                          className={`inline-flex items-center px-2.5 py-1 rounded-md border text-[11px] font-medium whitespace-nowrap ${
                             isOk
-                              ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-400'
+                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
                               : isWarn
-                              ? 'border-slate-700 bg-slate-800 text-slate-400'
-                              : 'border-rose-500/30 bg-rose-950/40 text-rose-400'
+                              ? 'border-slate-700 bg-slate-800/80 text-slate-400'
+                              : 'border-rose-500/30 bg-rose-500/10 text-rose-400'
                           }`}
                         >
                           {logText}
@@ -134,7 +134,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry })
                       );
                     })()}
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums text-slate-400 font-mono text-[11px]">
+                  <td className="px-5 py-3 text-right tabular-nums text-slate-400 font-mono text-[11px] whitespace-nowrap">
                     {t.timestamp_iso_utc8 || '-'}
                   </td>
                 </tr>

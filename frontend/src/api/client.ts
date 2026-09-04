@@ -106,10 +106,22 @@ export const api = {
     }>(`/api/v1/security/history?${qs}`);
   },
 
-  dispositionAlert: (alertId: number, decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen') =>
+  dispositionAlert: (
+    alertId: number,
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve'
+  ) =>
     request<{ queued?: boolean; detail?: string }>(`/api/v1/security/alerts/${alertId}/disposition`, {
       method: 'POST',
       body: JSON.stringify({ decision }),
+    }),
+
+  dispositionContainer: (
+    identity: ContainerIdentity,
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve'
+  ) =>
+    request<{ queued?: boolean; detail?: string }>('/api/v1/containers/disposition', {
+      method: 'POST',
+      body: JSON.stringify({ ...identity, decision }),
     }),
 
   getContainerHistory: (identity: ContainerIdentity, minutes = 1440) => {

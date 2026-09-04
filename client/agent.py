@@ -5000,8 +5000,10 @@ def _incus_host_namespace_kill(
     if init_pid <= 1 or not shutil.which("nsenter") or not patterns:
         return 0, 0, 0, "host namespace fallback unavailable"
     safe_patterns = " ".join(shlex.quote(item) for item in patterns)
+    safe_pids = " ".join(str(p) for p in (process_pids or []) if isinstance(p, int) and p > 1)
     script = (
         "set -f; matched=0; killed=0; errors=0; "
+        f"req_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')}; "
         f"for pattern in {safe_patterns}; do "
         "for proc in /proc/[0-9]*; do pid=${proc##*/}; "
         "[ \"$pid\" = 1 ] && continue; [ \"$pid\" = \"$$\" ] && continue; "
@@ -5015,6 +5017,10 @@ def _incus_host_namespace_kill(
         "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\" $extra_candidates; do "
         "candidate=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); "
         "[ \"$candidate\" = \"$pattern\" ] && found=1; done; "
+        "if [ \"$found\" -eq 0 ] && [ -r \"$proc/cmdline\" ]; then "
+        "if tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | grep -Fqi -- \"$pattern\"; then found=1; fi; fi; "
+        "if [ \"$found\" -eq 0 ] && [ -n \"$req_pids\" ]; then "
+        "case \"$req_pids\" in *\" $pid \"*) found=1;; esac; fi; "
         "[ \"$found\" -eq 1 ] || continue; "
         "matched=$((matched+1)); "
         "if kill -TERM \"$pid\" 2>/dev/null; then killed=$((killed+1)); "
@@ -5358,6 +5364,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     if not patterns and not config_files:
         return False, "no locally approved remediation targets"
 
+    safe_pids = " ".join(str(p) for p in process_pids if p > 1)
     script_parts = [
         "set -u",
         "removed_services=0",
@@ -5407,6 +5414,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
         # Re-resolve the exact allowlisted identity and derive OpenRC/systemd
         # aliases from cgroups before signalling the current process.
         script_parts.append(
+            f"_req_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')};\n"
             "for proc in /proc/[0-9]*; do "
             "pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
             "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null || true); [ \"$state\" = Z ] && continue; "
@@ -5415,6 +5423,10 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); matched=0; "
             "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
             f"[ \"$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]')\" = {quoted_pattern} ] && matched=1; done; "
+            "if [ \"$matched\" -eq 0 ] && [ -r \"$proc/cmdline\" ]; then "
+            f"if tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | grep -Fqi -- {quoted_pattern}; then matched=1; fi; fi; "
+            "if [ \"$matched\" -eq 0 ] && [ -n \"$_req_pids\" ]; then "
+            "case \"$_req_pids\" in *\" $pid \"*) matched=1;; esac; fi; "
             "[ \"$matched\" -eq 1 ] || continue; "
             "svc=$(sed -n 's#.*[/]openrc\\.\\([^/]*\\)$#\\1#p' \"$proc/cgroup\" 2>/dev/null | head -n 1); "
             "case \"$svc\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *) "
@@ -5426,7 +5438,8 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "case \"$unit\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *.service) "
             "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"$unit\" >/dev/null 2>&1 || true;; esac; "
             "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); "
-            "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done"
+            "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done;\n"
+            f"if command -v pkill >/dev/null 2>&1; then if pkill -9 -f {quoted_pattern} 2>/dev/null; then killed_processes=$((killed_processes+1)); fi; fi"
         )
     for config_file in config_files:
         quoted_file = shlex.quote(config_file)

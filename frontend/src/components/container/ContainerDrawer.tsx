@@ -7,6 +7,10 @@ import {
   HardDrive,
   Network,
   Shield,
+  AlertTriangle,
+  Ban,
+  Check,
+  CheckCircle2,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData } from '../../api/types';
 import { api, fmtBytes, fmtNumber } from '../../api/client';
@@ -31,6 +35,38 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const [container, setContainer] = useState<ContainerItem | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [diagnostic, setDiagnostic] = useState<DiagnosticData | null>(null);
+  const [isDrawerActionLoading, setIsDrawerActionLoading] = useState(false);
+
+  const handleDrawerDisposition = async (
+    decision: 'deny' | 'allow_silent' | 'resolve'
+  ) => {
+    if (!identity) return;
+    setIsDrawerActionLoading(true);
+    try {
+      const res = await api.dispositionContainer(identity, decision);
+      onToast(
+        'success',
+        decision === 'deny'
+          ? (res.queued ? '处置指令已下发节点执行' : '安全处置已更新')
+          : decision === 'resolve'
+          ? '风险已标记为已解决'
+          : '已成功添加放行策略'
+      );
+      const latestData = await api.getLatest(true);
+      const found = latestData.items.find(
+        (c) =>
+          c.host_id === identity.host_id &&
+          c.runtime === identity.runtime &&
+          (c.project || '') === (identity.project || '') &&
+          c.container_name === identity.container_name
+      );
+      setContainer(found || null);
+    } catch (err: any) {
+      onToast('error', `操作失败：${err.message || err}`);
+    } finally {
+      setIsDrawerActionLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!identity) {
@@ -254,6 +290,55 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* If Risk is detected in SOCKS or Panel, show Quick Disposition Controls */}
+              {((socks?.detected && (socks.auth_mode === 'no_auth' || socks.auth_mode === 'weak_password')) ||
+                (pairing?.detected && !pairing.approved)) && (
+                <div className="rounded-xl border border-rose-500/50 bg-rose-950/40 p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-rose-300 font-bold text-xs">
+                      <AlertTriangle className="h-4 w-4 text-rose-400 animate-pulse" />
+                      <span>检测到非合规安全风险需处置</span>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    {socks?.detected && socks.auth_mode === 'no_auth'
+                      ? '当前容器正在运行开放且无认证的 SOCKS 代理服务，极易被利用为跳板。'
+                      : pairing?.detected && !pairing.approved
+                      ? '当前容器检测到未经放行的第三方机场节点对接活动与内部特征。'
+                      : '检测到运行风险，建议定向处置或加入安全白名单。'}
+                  </p>
+                  <div className="flex items-center gap-2 pt-1 flex-wrap">
+                    <button
+                      type="button"
+                      disabled={isDrawerActionLoading}
+                      onClick={() => handleDrawerDisposition('deny')}
+                      className="flex items-center gap-1.5 rounded-lg border border-rose-500/60 bg-rose-950/90 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900 transition-all disabled:opacity-50 shadow-sm"
+                    >
+                      <Ban className="h-3.5 w-3.5" />
+                      <span>{isDrawerActionLoading ? '处理中...' : '定向处置违规服务'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDrawerActionLoading}
+                      onClick={() => handleDrawerDisposition('allow_silent')}
+                      className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/90 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
+                    >
+                      <Check className="h-3.5 w-3.5 text-emerald-400" />
+                      <span>放行此策略</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDrawerActionLoading}
+                      onClick={() => handleDrawerDisposition('resolve')}
+                      className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-900/60 transition-all disabled:opacity-50"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                      <span>标记已解决</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Listening Ports & Exposure */}
               <div className="font-mono text-xs space-y-1 text-slate-300 pt-1">
