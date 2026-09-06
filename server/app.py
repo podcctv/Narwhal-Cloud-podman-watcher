@@ -745,6 +745,30 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
             host_id = f"{host_id[:150]} [{node_id[:12]}]"
         if previous is not None and previous["host_id"] != host_id:
             old = str(previous["host_id"])
+            # Fingerprints include the display host name. Preserve alert history,
+            # suppressions and remediation policy when the label is corrected.
+            alerts = conn.execute("SELECT * FROM security_alerts WHERE host_id=?", (old,)).fetchall()
+            for alert in alerts:
+                try:
+                    details = json.loads(alert["details_json"] or "{}")
+                except (TypeError, ValueError):
+                    details = {}
+                fingerprint = _alert_fingerprint(host_id, {
+                    "runtime": alert["runtime"], "project": alert["project"],
+                    "container_name": alert["container_name"], "type": alert["alert_type"],
+                    "message": alert["message"], "unapproved_domains": details.get("unapproved_domains"),
+                })
+                existing = conn.execute("SELECT id FROM security_alerts WHERE fingerprint=?", (fingerprint,)).fetchone()
+                old_fingerprint = str(alert["fingerprint"])
+                if existing is not None:
+                    conn.execute("UPDATE security_actions SET alert_id=? WHERE alert_id=?", (existing["id"], alert["id"]))
+                    conn.execute("UPDATE security_alert_decisions SET alert_id=? WHERE alert_id=?", (existing["id"], alert["id"]))
+                    conn.execute("DELETE FROM security_alerts WHERE id=?", (alert["id"],))
+                else:
+                    conn.execute("UPDATE security_alerts SET fingerprint=? WHERE id=?", (fingerprint, alert["id"]))
+                conn.execute("UPDATE OR IGNORE security_alert_policies SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
+                conn.execute("DELETE FROM security_alert_policies WHERE fingerprint=?", (old_fingerprint,))
+                conn.execute("UPDATE security_alert_decisions SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
             for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads"):
                 conn.execute(f"UPDATE {table} SET host_id=? WHERE host_id=?", (host_id, old))
             conn.execute("DELETE FROM hosts WHERE host_id=?", (old,))

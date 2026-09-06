@@ -32,6 +32,7 @@ fi
 rm -rf /opt/narwhal-monitor/client-agent
 rm -f /opt/narwhal-monitor/client.env /opt/narwhal-monitor/client-install.env \
   /opt/narwhal-monitor/client-auto-update.env /opt/narwhal-monitor/client-auto-update.log \
+  /opt/narwhal-monitor/client-auto-update.version /opt/narwhal-monitor/auto-update.sh \
   /opt/narwhal-monitor/server-ca.crt /opt/narwhal-monitor/client-self-uninstall.sh
 # Keep /var/lib/narwhal-monitor/node-id: reinstalling this same machine must merge
 # into its previous identity rather than create a duplicate due to a renamed label.

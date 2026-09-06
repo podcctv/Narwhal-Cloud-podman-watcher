@@ -161,6 +161,20 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.close()
         self.assertEqual(rows, [("香港移动快乐机 2号", "node-immutable-1")])
 
+    def test_rename_preserves_alert_allow_silent_policy(self):
+        alert = {"type": "unauthorized_panel_pairing", "severity": "warning", "title": "panel", "message": "未授权面板域名 old.example", "runtime": "incus", "project": "default", "container_name": "node", "unapproved_domains": ["old.example"]}
+        conn = server.db()
+        server._reconcile_host(conn, "旧名称", "node-1", 10, "1.6.36", {})
+        server.process_security_alerts(conn, "旧名称", 10, [alert])
+        old_fingerprint = conn.execute("SELECT fingerprint FROM security_alerts").fetchone()["fingerprint"]
+        conn.execute("INSERT INTO security_alert_policies(fingerprint,mode,requested_by,created_at,updated_at) VALUES(?, 'allow_silent', 'test', 10, 10)", (old_fingerprint,))
+        server._reconcile_host(conn, "新名称", "node-1", 11, "1.6.36", {})
+        policy = conn.execute("SELECT fingerprint FROM security_alert_policies").fetchone()
+        renamed = conn.execute("SELECT host_id, fingerprint FROM security_alerts").fetchone()
+        conn.commit(); conn.close()
+        self.assertEqual(renamed["host_id"], "新名称")
+        self.assertEqual(policy["fingerprint"], renamed["fingerprint"])
+
     def test_tls_ca_endpoint_authenticates_request_and_response(self):
         certificate = b"-----BEGIN CERTIFICATE-----\ntest-public-ca\n-----END CERTIFICATE-----\n"
         ca_path = Path(self.tmp.name) / "root.crt"
