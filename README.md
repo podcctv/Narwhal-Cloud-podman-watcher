@@ -43,7 +43,7 @@
 
 ### 首次部署
 
-方式一：直接执行引导脚本。脚本会把仓库克隆到 `/opt/Narwhal-Cloud-podman-watcher`；目录已经存在时会以 fast-forward 方式更新，然后进入交互式安装器。
+方式一：直接执行引导脚本。脚本会把仓库克隆到 `/opt/Narwhal-Cloud-podman-watcher`；目录已经存在时会同步到远端当前分支，再进入交互式安装器。若仓库有已跟踪或未跟踪的本地文件，脚本会先将它们保存到 Git stash，并显示恢复命令；若本地提交已与远端分叉，还会创建 `narwhal-bootstrap-backup-*` 备份分支。不会使用 `git clean`，因此被 Git 忽略的部署配置（如 `.env`）不会被删除。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/podcctv/Narwhal-Cloud-podman-watcher/main/scripts/bootstrap-install.sh \
