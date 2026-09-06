@@ -135,9 +135,15 @@ export interface SecurityStatusItem {
   rx_mbps: number;
   tx_mbps: number;
   rx_pps: number;
+  tx_pps: number;
   syn_recv: number;
   http_rps: number;
   top_ip_rps: number;
+  http_4xx_rate: number;
+  http_5xx_rate: number;
+  access_requests: number;
+  access_unique_ips: number;
+  active_alerts: number;
   access_log?: string;
   timestamp_iso_utc8?: string;
   today_peak_rx_bps: number;

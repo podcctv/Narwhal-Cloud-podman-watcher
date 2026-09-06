@@ -139,6 +139,20 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(latest_body["server_version"], server.APP_VERSION)
         self.assertEqual(latest_body["items"][0]["agent_version"], "1.0.0")
 
+    def test_telemetry_view_exposes_cc_ddos_signals_without_fixed_column_overlap(self):
+        telemetry = (ROOT / "frontend" / "src" / "components" / "dashboard" / "TelemetrySection.tsx").read_text(
+            encoding="utf-8"
+        )
+        client = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
+        self.assertIn("overflow-x-auto", telemetry)
+        self.assertIn("min-w-[1680px]", telemetry)
+        self.assertNotIn("table-fixed", telemetry)
+        self.assertIn("DDoS 网络信号", telemetry)
+        self.assertIn("CC / HTTP 信号", telemetry)
+        self.assertIn("SYN_RECV", telemetry)
+        self.assertIn("http_4xx_rate", client)
+        self.assertIn("top_ip_requests_per_second", client)
+
     def test_stable_node_id_merges_a_renamed_host(self):
         now = int(time.time())
 

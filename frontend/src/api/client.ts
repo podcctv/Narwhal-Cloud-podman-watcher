@@ -70,6 +70,7 @@ export const api = {
       const txBps = Number(item.total_tx_bps || 0);
       const peakRxBps = Number(item.today_peak_rx_bps || 0);
       const peakTxBps = Number(item.today_peak_tx_bps || 0);
+      const accessRequests = Number(access.requests || 0);
 
       return {
         host_id: String(item.host_id || ''),
@@ -80,9 +81,15 @@ export const api = {
         rx_mbps: (rxBps * 8) / 1000000,
         tx_mbps: (txBps * 8) / 1000000,
         rx_pps: Number(item.total_rx_pps || 0),
+        tx_pps: Number(item.total_tx_pps || 0),
         syn_recv: Number(item.syn_recv_count || 0),
         http_rps: Number(access.requests_per_second || 0),
         top_ip_rps: Number(access.top_ip_requests_per_second || 0),
+        http_4xx_rate: accessRequests > 0 ? Number(access.status_4xx || 0) / accessRequests : 0,
+        http_5xx_rate: accessRequests > 0 ? Number(access.status_5xx || 0) / accessRequests : 0,
+        access_requests: accessRequests,
+        access_unique_ips: Number(access.unique_ips || 0),
+        active_alerts: Number(item.active_alerts_in_sample || 0),
         access_log: logState,
         timestamp_iso_utc8: item.timestamp_utc8 || '-',
         today_peak_rx_bps: peakRxBps,
