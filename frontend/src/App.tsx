@@ -52,6 +52,9 @@ export const App: React.FC = () => {
 
   // Polling controls
   const POLL_INTERVAL = 10;
+  const HIDDEN_POLL_INTERVAL = 60;
+  const [isDocumentHidden, setIsDocumentHidden] = useState(() => document.hidden);
+  const effectivePollInterval = isDocumentHidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL;
   const [countdown, setCountdown] = useState(POLL_INTERVAL);
   const [isPaused, setIsPaused] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -77,13 +80,23 @@ export const App: React.FC = () => {
           .toString()
           .padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
       );
-      setCountdown(POLL_INTERVAL);
+      setCountdown(isDocumentHidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL);
     } catch (err: any) {
       addToast('error', `数据获取失败：${err.message || err}`);
     } finally {
       setIsRefreshing(false);
     }
-  }, [addToast]);
+  }, [addToast, isDocumentHidden]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      const hidden = document.hidden;
+      setIsDocumentHidden(hidden);
+      setCountdown(hidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
 
   // Initial load
   useEffect(() => {
@@ -98,14 +111,14 @@ export const App: React.FC = () => {
       setCountdown((prev) => {
         if (prev <= 1) {
           fetchAllData();
-          return POLL_INTERVAL;
+          return effectivePollInterval;
         }
         return prev - 1;
       });
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [isPaused, fetchAllData]);
+  }, [isPaused, fetchAllData, effectivePollInterval]);
 
   // Keyboard shortcut listener (Ctrl+K, Escape)
   useEffect(() => {
