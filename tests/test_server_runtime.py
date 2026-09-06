@@ -181,6 +181,32 @@ class ServerRuntimeTests(unittest.TestCase):
         with self.assertRaises(server.HTTPException):
             server._validate_host_config({"report_interval": 1})
 
+    def test_host_config_action_is_bound_to_stable_node(self):
+        conn = server.db()
+        server._reconcile_host(conn, "host", "node-1", 10, "1.6.37", {})
+        conn.commit(); conn.close()
+
+        class DashboardRequest:
+            state = type("State", (), {"dashboard_user": "tester"})()
+            async def json(self):
+                return {"report_interval": 120}
+
+        response = asyncio.run(server.update_host_config("host", DashboardRequest()))
+        self.assertTrue(json.loads(response.body)["ok"])
+        body = json.dumps({"host_id": "host", "node_id": "node-1"}).encode()
+        stamp = str(int(time.time()))
+        signature = hmac.new(server.SHARED_SECRET.encode(), body + stamp.encode(), hashlib.sha256).hexdigest()
+
+        class PollRequest:
+            async def body(self):
+                return body
+
+        action_response = asyncio.run(server.poll_security_actions(PollRequest(), stamp, signature))
+        actions = json.loads(action_response.body)["actions"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action_type"], "update_host_config")
+        self.assertEqual(actions[0]["params"]["expected_node_id"], "node-1")
+
     def test_tls_ca_endpoint_authenticates_request_and_response(self):
         certificate = b"-----BEGIN CERTIFICATE-----\ntest-public-ca\n-----END CERTIFICATE-----\n"
         ca_path = Path(self.tmp.name) / "root.crt"
