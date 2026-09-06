@@ -735,6 +735,44 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     conn.execute("DELETE FROM hosts WHERE host_id=?", (host_id,))
 
 
+def _validate_host_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {"host_id", "report_interval", "action_poll_interval", "container_runtimes", "docker_monitor_mode", "incus_project", "security_monitor_enabled"}
+    config = {key: value for key, value in payload.items() if key in allowed}
+    if not config:
+        raise HTTPException(status_code=400, detail="没有可更新的配置")
+    if "host_id" in config:
+        value = str(config["host_id"]).strip()
+        if not value or len(value) > 200 or any(char in value for char in "\r\n=\\\"'"):
+            raise HTTPException(status_code=400, detail="主机名称无效")
+        config["host_id"] = value
+    for key, lower, upper in (("report_interval", 60, 3600), ("action_poll_interval", 5, 300)):
+        if key in config:
+            try:
+                config[key] = int(config[key])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{key} 必须为整数")
+            if not lower <= config[key] <= upper:
+                raise HTTPException(status_code=400, detail=f"{key} 必须在 {lower}-{upper} 秒之间")
+    if "container_runtimes" in config:
+        value = str(config["container_runtimes"]).lower().replace(" ", "")
+        if not value or any(item not in {"auto", "incus", "podman", "docker"} for item in value.split(",")):
+            raise HTTPException(status_code=400, detail="运行时仅支持 auto/incus/podman/docker")
+        config["container_runtimes"] = value
+    if "docker_monitor_mode" in config:
+        value = str(config["docker_monitor_mode"]).lower()
+        if value not in {"notice", "full", "off"}:
+            raise HTTPException(status_code=400, detail="Docker 模式仅支持 notice/full/off")
+        config["docker_monitor_mode"] = value
+    if "incus_project" in config:
+        value = str(config["incus_project"]).strip()
+        if len(value) > 100 or any(char in value for char in "\r\n=\\\"'"):
+            raise HTTPException(status_code=400, detail="Incus 项目无效")
+        config["incus_project"] = value or "all"
+    if "security_monitor_enabled" in config:
+        config["security_monitor_enabled"] = bool(config["security_monitor_enabled"])
+    return config
+
+
 def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any]) -> str:
     host_id = host_id[:200] or "unknown"
     node_id = node_id[:128]
@@ -1812,10 +1850,7 @@ async def update_host_config(host_id: str, request: Request) -> JSONResponse:
     payload = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="配置必须为 JSON 对象")
-    allowed = {"host_id", "report_interval", "action_poll_interval", "container_runtimes", "docker_monitor_mode", "incus_project", "security_monitor_enabled"}
-    config = {key: value for key, value in payload.items() if key in allowed}
-    if not config:
-        raise HTTPException(status_code=400, detail="没有可更新的配置")
+    config = _validate_host_config(payload)
     now = int(time.time())
     conn = db()
     try:

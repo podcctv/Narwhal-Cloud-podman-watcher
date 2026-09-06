@@ -175,6 +175,12 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(renamed["host_id"], "新名称")
         self.assertEqual(policy["fingerprint"], renamed["fingerprint"])
 
+    def test_host_config_validation_is_allowlisted_and_bounded(self):
+        config = server._validate_host_config({"report_interval": "120", "container_runtimes": "incus,podman", "ignored": "x"})
+        self.assertEqual(config, {"report_interval": 120, "container_runtimes": "incus,podman"})
+        with self.assertRaises(server.HTTPException):
+            server._validate_host_config({"report_interval": 1})
+
     def test_tls_ca_endpoint_authenticates_request_and_response(self):
         certificate = b"-----BEGIN CERTIFICATE-----\ntest-public-ca\n-----END CERTIFICATE-----\n"
         ca_path = Path(self.tmp.name) / "root.crt"
