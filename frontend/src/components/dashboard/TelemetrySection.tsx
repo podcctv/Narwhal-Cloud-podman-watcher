@@ -32,19 +32,19 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         </div>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs text-slate-300">
+      <div className="w-full">
+        <table className="w-full table-fixed text-left text-xs text-slate-300">
           <thead className="border-b border-slate-800 bg-slate-950/70 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
             <tr>
               <th className="px-5 py-3.5 whitespace-nowrap">主机</th>
               <th className="px-4 py-3.5 text-right whitespace-nowrap">实时速率 (下行 / 上行)</th>
-              <th className="px-4 py-3.5 text-right whitespace-nowrap">当天最高下载</th>
-              <th className="px-4 py-3.5 text-right whitespace-nowrap">当天最高上传</th>
-              <th className="px-4 py-3.5 text-center whitespace-nowrap">当天最高连接</th>
-              <th className="px-4 py-3.5 text-center whitespace-nowrap">最高入站 IP</th>
-              <th className="px-4 py-3.5 text-center whitespace-nowrap">最高出站 IP</th>
+              <th className="hidden 2xl:table-cell px-4 py-3.5 text-right whitespace-nowrap">当天最高下载</th>
+              <th className="hidden 2xl:table-cell px-4 py-3.5 text-right whitespace-nowrap">当天最高上传</th>
+              <th className="hidden xl:table-cell px-4 py-3.5 text-center whitespace-nowrap">当天最高连接</th>
+              <th className="hidden xl:table-cell px-4 py-3.5 text-center whitespace-nowrap">最高入站 IP</th>
+              <th className="hidden 2xl:table-cell px-4 py-3.5 text-center whitespace-nowrap">最高出站 IP</th>
               <th className="px-4 py-3.5 text-center whitespace-nowrap">访问日志</th>
-              <th className="px-5 py-3.5 text-right whitespace-nowrap">采样时间</th>
+              <th className="hidden lg:table-cell px-5 py-3.5 text-right whitespace-nowrap">采样时间</th>
               <th className="px-5 py-3.5 text-right whitespace-nowrap">操作</th>
             </tr>
           </thead>
@@ -68,7 +68,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+                  <td className="hidden 2xl:table-cell px-4 py-3 text-right tabular-nums whitespace-nowrap">
                     <div className="flex flex-col items-end gap-0.5">
                       <div className="flex items-center gap-1.5 font-mono text-xs font-bold">
                         <span className="text-emerald-400 flex items-center">
@@ -86,7 +86,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                       </span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+                  <td className="hidden 2xl:table-cell px-4 py-3 text-right tabular-nums whitespace-nowrap">
                     <div className="flex flex-col items-end gap-0.5">
                       <span className="font-mono text-xs font-bold text-emerald-400">
                         {peakRx.mbps}
@@ -106,17 +106,17 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                       </span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-center tabular-nums whitespace-nowrap">
+                  <td className="hidden xl:table-cell px-4 py-3 text-center tabular-nums whitespace-nowrap">
                     <span className="inline-flex min-w-[56px] justify-center items-center rounded-md bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 text-xs font-bold text-amber-300 font-mono shadow-sm">
                       {fmtNumber(t.today_peak_conn_count, 0)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-center tabular-nums whitespace-nowrap">
+                  <td className="hidden xl:table-cell px-4 py-3 text-center tabular-nums whitespace-nowrap">
                     <span className="inline-flex min-w-[48px] justify-center items-center rounded-md bg-rose-500/10 border border-rose-500/30 px-2.5 py-1 text-xs font-bold text-rose-300 font-mono shadow-sm">
                       {fmtNumber(t.today_peak_inbound_ips, 0)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-center tabular-nums whitespace-nowrap">
+                  <td className="hidden 2xl:table-cell px-4 py-3 text-center tabular-nums whitespace-nowrap">
                     <span className="inline-flex min-w-[48px] justify-center items-center rounded-md bg-cyan-500/10 border border-cyan-500/30 px-2.5 py-1 text-xs font-bold text-cyan-300 font-mono shadow-sm">
                       {fmtNumber(t.today_peak_outbound_ips, 0)}
                     </span>
@@ -141,7 +141,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                       );
                     })()}
                   </td>
-                  <td className="px-5 py-3 text-right tabular-nums text-slate-400 font-mono text-[11px] whitespace-nowrap">
+                  <td className="hidden lg:table-cell px-5 py-3 text-right tabular-nums text-slate-400 font-mono text-[11px] whitespace-nowrap">
                     {t.timestamp_iso_utc8 || '-'}
                   </td>
                   <td className="px-5 py-3 text-right whitespace-nowrap">
