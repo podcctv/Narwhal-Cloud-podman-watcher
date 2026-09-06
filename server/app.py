@@ -148,7 +148,9 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS hosts (
             host_id TEXT PRIMARY KEY,
             last_seen INTEGER NOT NULL,
-            agent_version TEXT NOT NULL DEFAULT 'unknown'
+            agent_version TEXT NOT NULL DEFAULT 'unknown',
+            node_id TEXT NOT NULL DEFAULT '',
+            config_json TEXT NOT NULL DEFAULT '{}'
         );
         CREATE INDEX IF NOT EXISTS idx_hosts_last_seen ON hosts(last_seen);
         CREATE TABLE IF NOT EXISTS security_alerts (
@@ -242,6 +244,12 @@ def init_db() -> None:
         conn.execute("ALTER TABLE reports ADD COLUMN runtime TEXT NOT NULL DEFAULT 'podman'")
     if "project" not in col_names:
         conn.execute("ALTER TABLE reports ADD COLUMN project TEXT NOT NULL DEFAULT ''")
+    host_cols = {str(c["name"]) for c in conn.execute("PRAGMA table_info(hosts)").fetchall()}
+    if "node_id" not in host_cols:
+        conn.execute("ALTER TABLE hosts ADD COLUMN node_id TEXT NOT NULL DEFAULT ''")
+    if "config_json" not in host_cols:
+        conn.execute("ALTER TABLE hosts ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_node_id_unique ON hosts(node_id) WHERE node_id <> ''")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reports_host_runtime_project_container_ts "
         "ON reports(host_id, runtime, project, container_name, ts)"
@@ -719,6 +727,36 @@ _latest_cache: Dict[str, Any] | None = None
 _latest_cache_time = 0.0
 
 
+def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
+    conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
+    conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
+    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads"):
+        conn.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
+    conn.execute("DELETE FROM hosts WHERE host_id=?", (host_id,))
+
+
+def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any]) -> str:
+    host_id = host_id[:200] or "unknown"
+    node_id = node_id[:128]
+    if node_id:
+        previous = conn.execute("SELECT host_id FROM hosts WHERE node_id=?", (node_id,)).fetchone()
+        collision = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if collision is not None and str(collision["node_id"] or "") not in ("", node_id):
+            host_id = f"{host_id[:150]} [{node_id[:12]}]"
+        if previous is not None and previous["host_id"] != host_id:
+            old = str(previous["host_id"])
+            for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads"):
+                conn.execute(f"UPDATE {table} SET host_id=? WHERE host_id=?", (host_id, old))
+            conn.execute("DELETE FROM hosts WHERE host_id=?", (old,))
+    conn.execute(
+        "INSERT INTO hosts(host_id,last_seen,agent_version,node_id,config_json) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(host_id) DO UPDATE SET last_seen=excluded.last_seen,agent_version=excluded.agent_version,"
+        "node_id=CASE WHEN excluded.node_id<>'' THEN excluded.node_id ELSE hosts.node_id END,config_json=excluded.config_json",
+        (host_id, ts, agent_version, node_id, json.dumps(config, ensure_ascii=False)),
+    )
+    return host_id
+
+
 @app.post("/api/v1/report")
 async def report(
     request: Request,
@@ -729,7 +767,9 @@ async def report(
     verify_signature(body, x_timestamp, x_signature)
     data = json.loads(body)
 
-    host_id = data.get("host_id", "unknown")
+    host_id = str(data.get("host_id") or "unknown")[:200]
+    node_id = str(data.get("node_id") or "")[:128]
+    client_config = data.get("client_config") if isinstance(data.get("client_config"), dict) else {}
     agent_version = str(data.get("agent_version") or "unknown").strip() or "unknown"
     ts = int(data.get("timestamp", time.time()))
     network_status = data.get("container_network") or data.get("podman_network") or {}
@@ -741,15 +781,7 @@ async def report(
     notifications: List[Dict[str, Any]] = []
     automatic_stops_queued = 0
     try:
-        conn.execute(
-            """
-            INSERT INTO hosts(host_id, last_seen, agent_version) VALUES(?,?,?)
-            ON CONFLICT(host_id) DO UPDATE SET
-                last_seen=excluded.last_seen,
-                agent_version=excluded.agent_version
-            """,
-            (host_id, ts, agent_version),
-        )
+        host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config)
         for c in containers:
             stored_payload = dict(c)
             stored_payload["_agent_version"] = agent_version
@@ -1751,6 +1783,60 @@ async def set_container_disposition(request: Request) -> JSONResponse:
     raise HTTPException(status_code=404, detail="未找到该容器对应的安全告警记录")
 
 
+@app.post("/api/v1/hosts/{host_id}/config")
+async def update_host_config(host_id: str, request: Request) -> JSONResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="配置必须为 JSON 对象")
+    allowed = {"host_id", "report_interval", "action_poll_interval", "container_runtimes", "docker_monitor_mode", "incus_project", "security_monitor_enabled"}
+    config = {key: value for key, value in payload.items() if key in allowed}
+    if not config:
+        raise HTTPException(status_code=400, detail="没有可更新的配置")
+    now = int(time.time())
+    conn = db()
+    try:
+        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if host is None:
+            raise HTTPException(status_code=404, detail="主机不存在")
+        if not host["node_id"]:
+            raise HTTPException(status_code=409, detail="该主机需要先升级 Client，才能远程配置")
+        cur = conn.execute(
+            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,'host','','__host__','update_host_config',?,'queued',?,?,?)",
+            (host_id, json.dumps({"config": config, "expected_node_id": host["node_id"]}, ensure_ascii=False), getattr(request.state, "dashboard_user", "dashboard"), now, now),
+        )
+        conn.commit()
+        return JSONResponse({"ok": True, "action_id": cur.lastrowid})
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/hosts/{host_id}/delete")
+async def delete_host(host_id: str, request: Request) -> JSONResponse:
+    payload = await request.json()
+    mode = str(payload.get("mode") or "uninstall") if isinstance(payload, dict) else ""
+    if mode not in {"uninstall", "records_only"}:
+        raise HTTPException(status_code=400, detail="无效删除方式")
+    conn = db()
+    try:
+        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if host is None:
+            raise HTTPException(status_code=404, detail="主机不存在")
+        if mode == "records_only":
+            _purge_host(conn, host_id); conn.commit()
+            return JSONResponse({"ok": True})
+        if not host["node_id"]:
+            raise HTTPException(status_code=409, detail="该主机需要先升级 Client，才能远程卸载")
+        now = int(time.time())
+        cur = conn.execute(
+            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,'host','','__host__','self_uninstall',?,'queued',?,?,?)",
+            (host_id, json.dumps({"expected_node_id": host["node_id"]}), getattr(request.state, "dashboard_user", "dashboard"), now, now),
+        )
+        conn.commit()
+        return JSONResponse({"ok": True, "action_id": cur.lastrowid})
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/actions/poll")
 async def poll_security_actions(
     request: Request,
@@ -1764,6 +1850,7 @@ async def poll_security_actions(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="invalid JSON body")
     host_id = str(payload.get("host_id") or "")[:200]
+    node_id = str(payload.get("node_id") or "")[:128]
     if not host_id:
         raise HTTPException(status_code=400, detail="host_id is required")
     now = int(time.time())
@@ -1789,6 +1876,9 @@ async def poll_security_actions(
         ).fetchall()
         actions = []
         for row in rows:
+            stored = json.loads(row["params_json"] or "{}")
+            if row["action_type"] in {"update_host_config", "self_uninstall"} and stored.get("expected_node_id") != node_id:
+                continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
                 "UPDATE security_actions SET status='dispatched', attempts=attempts+1, updated_at=?, params_json=? WHERE id=?",
@@ -1819,19 +1909,23 @@ async def security_action_result(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="invalid action result")
     host_id = str(payload.get("host_id") or "")[:200]
+    node_id = str(payload.get("node_id") or "")[:128]
     status = str(payload.get("status") or "").lower()
-    if status not in ("succeeded", "failed"):
-        raise HTTPException(status_code=400, detail="status must be succeeded or failed")
+    if status not in ("succeeded", "failed", "running"):
+        raise HTTPException(status_code=400, detail="status must be succeeded, failed, or running")
     message = str(payload.get("message") or "")[:2000]
     now = int(time.time())
     conn = db()
     try:
         row = conn.execute(
-            "SELECT host_id, status, action_type, alert_id FROM security_actions WHERE id=?",
+            "SELECT host_id, status, action_type, alert_id, params_json FROM security_actions WHERE id=?",
             (action_id,),
         ).fetchone()
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
+        params = json.loads(row["params_json"] or "{}")
+        if row["action_type"] in {"update_host_config", "self_uninstall"} and params.get("expected_node_id") != node_id:
+            raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"
             and row["action_type"] in ("remediate_panel_pairing", "remediate_malicious_process")
@@ -1844,6 +1938,8 @@ async def security_action_result(
                 "UPDATE security_actions SET status=?, result_message=?, updated_at=? WHERE id=?",
                 (status, message, now, action_id),
             )
+            if status == "succeeded" and row["action_type"] == "self_uninstall":
+                _purge_host(conn, host_id)
             if status == "succeeded" and row["action_type"] in (
                 "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth"
             ):
@@ -1991,18 +2087,29 @@ def security_status() -> JSONResponse:
         now_utc8 = datetime.now(tz=UTC8)
         today_start_ts = int(now_utc8.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
-        rows = conn.execute(
-            """
-            SELECT h.host_id, h.ts, h.payload_json
-            FROM host_security h
-            JOIN (
-                SELECT host_id, MAX(id) AS max_id
-                FROM host_security
-                GROUP BY host_id
-            ) latest ON h.id=latest.max_id
-            ORDER BY h.host_id
-            """
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """
+                SELECT hosts.host_id, hosts.last_seen AS ts, hosts.node_id, hosts.config_json, h.payload_json
+                FROM hosts
+                LEFT JOIN host_security h ON h.id = (
+                    SELECT hs.id FROM host_security hs WHERE hs.host_id=hosts.host_id ORDER BY hs.id DESC LIMIT 1
+                )
+                ORDER BY hosts.host_id
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Keep a rolling upgrade readable if an old database is queried
+            # before the application startup migration has run.
+            rows = conn.execute(
+                """
+                SELECT hosts.host_id, hosts.last_seen AS ts, '' AS node_id, '{}' AS config_json, h.payload_json
+                FROM hosts
+                LEFT JOIN host_security h ON h.id = (
+                    SELECT hs.id FROM host_security hs WHERE hs.host_id=hosts.host_id ORDER BY hs.id DESC LIMIT 1
+                ) ORDER BY hosts.host_id
+                """
+            ).fetchall()
 
         container_peaks_rows = conn.execute(
             """
@@ -2087,6 +2194,8 @@ def security_status() -> JSONResponse:
         items.append(
             {
                 "host_id": host_id,
+                "node_id": str(row["node_id"] or ""),
+                "host_config": json.loads(row["config_json"] or "{}"),
                 "timestamp": int(row["ts"]),
                 "timestamp_utc8": format_utc8(int(row["ts"])),
                 "enabled": bool(payload.get("enabled")),

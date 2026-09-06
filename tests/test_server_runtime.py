@@ -139,6 +139,28 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(latest_body["server_version"], server.APP_VERSION)
         self.assertEqual(latest_body["items"][0]["agent_version"], "1.0.0")
 
+    def test_stable_node_id_merges_a_renamed_host(self):
+        now = int(time.time())
+
+        async def submit(host_id):
+            payload = {"host_id": host_id, "node_id": "node-immutable-1", "agent_version": "1.6.36", "timestamp": now, "containers": [], "security": {"alerts": []}}
+            body = json.dumps(payload).encode()
+            stamp = str(now)
+            signature = hmac.new(server.SHARED_SECRET.encode(), body + stamp.encode(), hashlib.sha256).hexdigest()
+
+            class Request:
+                async def body(self):
+                    return body
+
+            return await server.report(Request(), stamp, signature)
+
+        asyncio.run(submit("香港移动快乐机 12号"))
+        asyncio.run(submit("香港移动快乐机 2号"))
+        conn = sqlite3.connect(server.DB_PATH)
+        rows = conn.execute("SELECT host_id, node_id FROM hosts").fetchall()
+        conn.close()
+        self.assertEqual(rows, [("香港移动快乐机 2号", "node-immutable-1")])
+
     def test_tls_ca_endpoint_authenticates_request_and_response(self):
         certificate = b"-----BEGIN CERTIFICATE-----\ntest-public-ca\n-----END CERTIFICATE-----\n"
         ca_path = Path(self.tmp.name) / "root.crt"

@@ -8,6 +8,8 @@ CLIENT_INSTALL_ENV_FILE="/opt/narwhal-monitor/client-install.env"
 CLIENT_APP_DIR="/opt/narwhal-monitor/client-agent"
 CLIENT_VENV_DIR="$CLIENT_APP_DIR/.venv"
 CLIENT_CA_FILE="/opt/narwhal-monitor/server-ca.crt"
+NODE_ID_STATE_FILE="/var/lib/narwhal-monitor/node-id"
+SELF_UNINSTALL_SCRIPT="/opt/narwhal-monitor/client-self-uninstall.sh"
 LOCAL_SERVER_ENV_FILE="/opt/narwhal-monitor/server.env"
 LOCAL_SERVER_INSTALL_ENV_FILE="/opt/narwhal-monitor/server-install.env"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/narwhal-monitor-client.service"
@@ -229,6 +231,17 @@ default_server_url="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SERVER_URL "$
 default_secret="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SHARED_SECRET "${both_server_secret:-$(generate_secret)}")"
 default_tls_ca_file="$(load_kv_from_file "$CLIENT_ENV_FILE" SERVER_TLS_CA_FILE || true)"
 default_host_id="$(load_non_empty_or_default "$CLIENT_ENV_FILE" HOST_ID "$(hostname)")"
+default_node_id="$(load_kv_from_file "$CLIENT_ENV_FILE" NODE_ID || true)"
+if [[ -z "$default_node_id" && -f "$NODE_ID_STATE_FILE" ]]; then
+  default_node_id="$(tr -d '[:space:]' < "$NODE_ID_STATE_FILE")"
+fi
+if [[ -z "$default_node_id" ]]; then
+  default_node_id="$(tr -d '-' </proc/sys/kernel/random/uuid)"
+fi
+mkdir -p "$(dirname "$NODE_ID_STATE_FILE")"
+printf '%s\n' "$default_node_id" > "$NODE_ID_STATE_FILE"
+chmod 0700 "$(dirname "$NODE_ID_STATE_FILE")"
+chmod 0600 "$NODE_ID_STATE_FILE"
 default_interval="$(load_non_empty_or_default "$CLIENT_ENV_FILE" REPORT_INTERVAL "300")"
 default_action_poll_interval="$(load_non_empty_or_default "$CLIENT_ENV_FILE" ACTION_POLL_INTERVAL "10")"
 runtime_command_timeout="$(load_non_empty_or_default "$CLIENT_ENV_FILE" RUNTIME_COMMAND_TIMEOUT_SECONDS "30")"
@@ -369,6 +382,7 @@ SERVER_URL=$server_url
 SHARED_SECRET=$secret
 SERVER_TLS_CA_FILE=$tls_ca_file
 HOST_ID=$host_id
+NODE_ID=$default_node_id
 REPORT_INTERVAL=$interval
 ACTION_POLL_INTERVAL=$default_action_poll_interval
 RUNTIME_COMMAND_TIMEOUT_SECONDS=$runtime_command_timeout
@@ -444,6 +458,8 @@ docker rm -f narwhal-monitor-client >/dev/null 2>&1 || true
 mkdir -p "$CLIENT_APP_DIR"
 cp "$ROOT_DIR/client/agent.py" "$CLIENT_APP_DIR/agent.py"
 cp "$ROOT_DIR/client/requirements.txt" "$CLIENT_APP_DIR/requirements.txt"
+cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"
+chmod 0700 "$SELF_UNINSTALL_SCRIPT"
 
 ensure_client_venv
 

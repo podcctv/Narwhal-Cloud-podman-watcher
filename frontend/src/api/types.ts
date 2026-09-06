@@ -128,6 +128,8 @@ export interface SecurityAlert {
 
 export interface SecurityStatusItem {
   host_id: string;
+  node_id?: string;
+  host_config?: Record<string, any>;
   rx_bps: number;
   tx_bps: number;
   rx_mbps: number;

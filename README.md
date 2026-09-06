@@ -33,6 +33,12 @@
 
 ## 部署、更新与卸载
 
+### 主机身份、远程配置与删除
+
+- Client 首次安装会生成不可变 `NODE_ID`，保存在 `/var/lib/narwhal-monitor/node-id`。面板中的 `HOST_ID` 只是显示名称；同一台机器重新安装、修改名称或纠正名称时，Server 会按 `NODE_ID` 合并历史，不会留下重复主机。
+- 在“主机网络与安全遥测”表格可点击“配置”，下发主机名、上报/动作轮询间隔、容器运行时、Docker 监测模式和 Incus 项目。节点会在下一次动作轮询时原子写入并重启 Agent。
+- 点击“删除”默认选择“远程卸载 Client”：节点会删除 Narwhal Client、配置、自动更新 timer 与 systemd 单元，不会停止或删除任何 Incus、Podman 或 Docker 业务容器。`NODE_ID` 会保留，以保证日后重新安装仍正确合并身份。旧版 Client 没有 `NODE_ID` 时需先升级；“只删除面板记录”会在节点下次上报后重新出现。
+
 ### 支持环境与部署方式
 
 - 自动安装脚本面向 Debian / Ubuntu，依赖安装使用 `apt-get`，需要 root 权限。

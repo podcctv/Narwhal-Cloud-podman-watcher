@@ -73,6 +73,8 @@ export const api = {
 
       return {
         host_id: String(item.host_id || ''),
+        node_id: String(item.node_id || ''),
+        host_config: item.host_config || {},
         rx_bps: rxBps,
         tx_bps: txBps,
         rx_mbps: (rxBps * 8) / 1000000,
@@ -94,6 +96,16 @@ export const api = {
     });
     return { items };
   },
+
+  updateHostConfig: (hostId: string, config: Record<string, any>) =>
+    request<{ ok: boolean; action_id: number }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/config`, {
+      method: 'POST', body: JSON.stringify(config),
+    }),
+
+  deleteHost: (hostId: string, mode: 'uninstall' | 'records_only') =>
+    request<{ ok: boolean; action_id?: number }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/delete`, {
+      method: 'POST', body: JSON.stringify({ mode }),
+    }),
 
   getAlertHistory: (params: Record<string, string>) => {
     const qs = new URLSearchParams(params).toString();

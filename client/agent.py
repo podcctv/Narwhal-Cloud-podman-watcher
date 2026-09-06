@@ -5624,20 +5624,89 @@ def _pending_deep_sample_for(container: Dict[str, object]) -> Dict[str, object] 
     )
 
 
-def process_security_actions(server: str, secret: str, host_id: str) -> bool:
-    response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id})
+def _apply_host_config(action: Dict, node_id: str) -> Tuple[bool, str]:
+    params = action.get("params") if isinstance(action.get("params"), dict) else {}
+    if not node_id or str(params.get("expected_node_id") or "") != node_id:
+        return False, "host action node identity mismatch"
+    config = params.get("config") if isinstance(params.get("config"), dict) else {}
+    allowed = {
+        "host_id": "HOST_ID", "report_interval": "REPORT_INTERVAL", "action_poll_interval": "ACTION_POLL_INTERVAL",
+        "container_runtimes": "CONTAINER_RUNTIMES", "docker_monitor_mode": "DOCKER_MONITOR_MODE",
+        "incus_project": "INCUS_PROJECT", "security_monitor_enabled": "SECURITY_MONITOR_ENABLED",
+    }
+    env_file = os.getenv("NARWHAL_CLIENT_ENV_FILE", "/opt/narwhal-monitor/client.env")
+    if not os.path.isfile(env_file):
+        return False, "client environment file not found"
+    try:
+        values: Dict[str, str] = {}
+        for key, value in config.items():
+            target = allowed.get(key)
+            if target is None:
+                continue
+            if key == "security_monitor_enabled":
+                values[target] = "true" if bool(value) else "false"
+            else:
+                text = str(value).strip()
+                if any(c in text for c in "\r\n=\\\"'"):
+                    return False, f"invalid config value: {key}"
+                values[target] = text
+        if not values:
+            return False, "no valid host configuration"
+        lines = open(env_file, "r", encoding="utf-8", errors="replace").read().splitlines()
+        seen = set()
+        output = []
+        for line in lines:
+            key = line.split("=", 1)[0]
+            if key in values:
+                output.append(f"{key}={values[key]}")
+                seen.add(key)
+            else:
+                output.append(line)
+        output.extend(f"{key}={value}" for key, value in values.items() if key not in seen)
+        tmp = f"{env_file}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(output) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, env_file)
+        return True, "configuration saved; agent will restart"
+    except OSError as exc:
+        return False, f"unable to update client configuration: {exc}"
+
+
+def _schedule_self_uninstall(action: Dict, node_id: str) -> Tuple[bool, str]:
+    params = action.get("params") if isinstance(action.get("params"), dict) else {}
+    action_id = int(action.get("id") or 0)
+    if action_id <= 0 or not node_id or str(params.get("expected_node_id") or "") != node_id:
+        return False, "host action node identity mismatch"
+    script = "/opt/narwhal-monitor/client-self-uninstall.sh"
+    if not os.path.isfile(script):
+        return False, "self-uninstall helper is unavailable; update Client first"
+    try:
+        subprocess.Popen([script, str(action_id)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        return False, f"unable to schedule self-uninstall: {exc}"
+    return True, "self-uninstall scheduled"
+
+
+def process_security_actions(server: str, secret: str, host_id: str, node_id: str = "") -> bool:
+    response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
     actions = response.get("actions") if isinstance(response.get("actions"), list) else []
     changed = False
     for action in actions:
         if not isinstance(action, dict):
             continue
         action_id = int(action.get("id") or 0)
-        if str(action.get("action_type") or "") == "request_deep_sample":
+        action_type = str(action.get("action_type") or "")
+        if action_type == "request_deep_sample":
             ok, message = _schedule_deep_sample(action)
             if ok:
                 print(f"diagnostic action {action_id} accepted: {message}")
                 changed = True
                 continue
+        elif action_type == "update_host_config":
+            ok, message = _apply_host_config(action, node_id)
+        elif action_type == "self_uninstall":
+            ok, message = _schedule_self_uninstall(action, node_id)
         else:
             ok, message = execute_security_action(action)
         signed_post_json(
@@ -5647,12 +5716,15 @@ def process_security_actions(server: str, secret: str, host_id: str) -> bool:
             {
                 "action_id": action_id,
                 "host_id": host_id,
-                "status": "succeeded" if ok else "failed",
+                "node_id": node_id,
+                "status": "running" if ok and action_type == "self_uninstall" else ("succeeded" if ok else "failed"),
                 "message": message,
             },
         )
         print(f"security action {action_id} {'succeeded' if ok else 'failed'}: {message}")
         changed = changed or ok
+        if ok and action_type == "update_host_config":
+            raise SystemExit(0)
     return changed
 
 
@@ -5678,6 +5750,7 @@ def main() -> None:
     parser.add_argument("--secret", default=os.getenv("SHARED_SECRET", "change-me"))
     parser.add_argument("--interval", type=int, default=int(os.getenv("REPORT_INTERVAL", "300")))
     parser.add_argument("--host-id", default=os.getenv("HOST_ID", socket.gethostname()))
+    parser.add_argument("--node-id", default=os.getenv("NODE_ID", ""))
     args = parser.parse_args()
 
     while True:
@@ -5754,6 +5827,16 @@ def main() -> None:
         security = collect_security_summary(collected, security_interval)
         payload = {
             "host_id": args.host_id,
+            "node_id": args.node_id,
+            "client_config": {
+                "host_id": args.host_id,
+                "report_interval": args.interval,
+                "action_poll_interval": int(os.getenv("ACTION_POLL_INTERVAL", "10")),
+                "container_runtimes": os.getenv("CONTAINER_RUNTIMES", "auto"),
+                "docker_monitor_mode": os.getenv("DOCKER_MONITOR_MODE", "notice"),
+                "incus_project": os.getenv("INCUS_PROJECT", "all"),
+                "security_monitor_enabled": security_enabled,
+            },
             "agent_version": APP_VERSION,
             "timestamp": int(time.time()),
             "container_network": {"ipv4_ok": v4, "ipv6_ok": v6},
@@ -5780,7 +5863,7 @@ def main() -> None:
                 break
             time.sleep(min(action_poll_interval, remaining))
             try:
-                if process_security_actions(args.server, args.secret, args.host_id):
+                if process_security_actions(args.server, args.secret, args.host_id, args.node_id):
                     break
             except Exception as action_error:
                 print(f"security action poll failed: {action_error}")

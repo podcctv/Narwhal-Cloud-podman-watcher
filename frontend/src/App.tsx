@@ -172,7 +172,7 @@ export const App: React.FC = () => {
               />
 
               {/* Host Security Telemetry */}
-              <TelemetrySection telemetry={securityStatus} />
+              <TelemetrySection telemetry={securityStatus} onToast={addToast} onRefresh={fetchAllData} />
 
               {/* Host Topologies and Container Cards */}
               <HostContainerList
