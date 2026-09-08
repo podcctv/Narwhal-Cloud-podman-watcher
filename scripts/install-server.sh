@@ -1049,13 +1049,14 @@ main() {
   default_tls_cert_mode="$(load_non_empty_or_default "$SERVER_INSTALL_ENV_FILE" TLS_CERT_MODE "$default_tls_cert_mode")"
   default_cloudflare_api_token="$(load_non_empty_or_default "$SERVER_INSTALL_ENV_FILE" CLOUDFLARE_API_TOKEN "$default_cloudflare_api_token")"
 
-  local env_secret env_th env_alert_webhook_url env_alert_webhook_min_severity env_public_base_url env_dashboard_username env_dashboard_password
+  local env_secret env_th env_alert_webhook_url env_alert_webhook_min_severity env_public_base_url env_telegram_proxy_url env_dashboard_username env_dashboard_password
   local env_conn_warning_threshold env_conn_critical_threshold env_connection_stop_threshold env_connection_stop_duration_seconds env_connection_stop_max_gap_seconds env_offline_host_purge_seconds
   env_secret="$(load_kv_from_file "$SERVER_ENV_FILE" SHARED_SECRET || true)"
   env_th="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_DISK_THRESHOLD_PERCENT || true)"
   env_alert_webhook_url="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_WEBHOOK_URL || true)"
   env_alert_webhook_min_severity="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_WEBHOOK_MIN_SEVERITY || true)"
   env_public_base_url="$(load_kv_from_file "$SERVER_ENV_FILE" PUBLIC_BASE_URL || true)"
+  env_telegram_proxy_url="$(load_kv_from_file "$SERVER_ENV_FILE" TELEGRAM_PROXY_URL || true)"
   env_dashboard_username="$(load_kv_from_file "$SERVER_ENV_FILE" DASHBOARD_USERNAME || true)"
   env_dashboard_password="$(load_kv_from_file "$SERVER_ENV_FILE" DASHBOARD_PASSWORD || true)"
   env_conn_warning_threshold="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_CONN_WARNING_THRESHOLD || true)"
@@ -1069,6 +1070,7 @@ main() {
   default_alert_webhook_url="${env_alert_webhook_url:-$default_alert_webhook_url}"
   default_alert_webhook_min_severity="${env_alert_webhook_min_severity:-$default_alert_webhook_min_severity}"
   local default_public_base_url="${env_public_base_url:-}"
+  local default_telegram_proxy_url="${env_telegram_proxy_url:-}"
   default_dashboard_username="${env_dashboard_username:-$default_dashboard_username}"
   default_dashboard_password="${env_dashboard_password:-$default_dashboard_password}"
   default_conn_warning_threshold="${env_conn_warning_threshold:-$default_conn_warning_threshold}"
@@ -1078,7 +1080,7 @@ main() {
   default_connection_stop_max_gap_seconds="${env_connection_stop_max_gap_seconds:-$default_connection_stop_max_gap_seconds}"
   default_offline_host_purge_seconds="${env_offline_host_purge_seconds:-$default_offline_host_purge_seconds}"
 
-  local image_source github_image port secret th tls_enable tls_host tls_email tls_cert_mode cloudflare_api_token caddy_image alert_webhook_url alert_webhook_min_severity public_base_url
+  local image_source github_image port secret th tls_enable tls_host tls_email tls_cert_mode cloudflare_api_token caddy_image alert_webhook_url alert_webhook_min_severity public_base_url telegram_proxy_url
 
   image_source="$(ask_choice_with_default "请选择 Server 镜像来源" "$default_image_source" \
     "github|GitHub Container Registry（推荐）" \
@@ -1093,12 +1095,14 @@ main() {
     alert_webhook_url="$default_alert_webhook_url"
     alert_webhook_min_severity="$default_alert_webhook_min_severity"
     public_base_url="$default_public_base_url"
+    telegram_proxy_url="$default_telegram_proxy_url"
   else
     alert_webhook_url="$(ask_with_default "Security alert webhook URL (empty to disable)" "$default_alert_webhook_url")"
     alert_webhook_min_severity="$(ask_choice_with_default "请选择 Webhook 最低告警级别" "$default_alert_webhook_min_severity" \
       "warning|warning 及以上" \
       "critical|仅 critical")"
     public_base_url="$(ask_with_default "Public HTTPS dashboard URL for Telegram callbacks (empty to disable buttons)" "$default_public_base_url")"
+    telegram_proxy_url="$(ask_with_default "Telegram HTTP/HTTPS proxy URL (empty for direct connection)" "$default_telegram_proxy_url")"
   fi
   tls_enable="$(ask_choice_with_default "是否启用 HTTPS 反向代理" "$default_tls_enable" \
     "yes|启用（推荐）" \
@@ -1165,6 +1169,7 @@ OFFLINE_HOST_PURGE_SECONDS=$default_offline_host_purge_seconds
 ALERT_WEBHOOK_URL=$alert_webhook_url
 ALERT_WEBHOOK_MIN_SEVERITY=$alert_webhook_min_severity
 PUBLIC_BASE_URL=${public_base_url%/}
+TELEGRAM_PROXY_URL=$telegram_proxy_url
 DB_PATH=/data/monitor.db
 TLS_CA_CERT_PATH=/tls-ca/root.crt
 DASHBOARD_USERNAME=$default_dashboard_username

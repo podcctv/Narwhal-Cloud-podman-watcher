@@ -4,6 +4,7 @@ import binascii
 import hashlib
 import hmac
 import html
+import http.client
 import json
 import os
 import re
@@ -11,6 +12,8 @@ import sqlite3
 import threading
 import time
 import secrets
+import socket
+import ssl
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -49,6 +52,7 @@ TLS_CA_CERT_PATH = os.getenv("TLS_CA_CERT_PATH", "/tls-ca/root.crt")
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "").strip()
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 UTC8 = timezone(timedelta(hours=8))
 _cleanup_lock = threading.Lock()
@@ -640,13 +644,19 @@ def _notification_bot_item(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = json.dumps(payload, ensure_ascii=False).encode()
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/{method}",
-        data=json.dumps(payload, ensure_ascii=False).encode(),
+        data=data,
         headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"}, method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
+        if TELEGRAM_PROXY_URL:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": TELEGRAM_PROXY_URL, "https": TELEGRAM_PROXY_URL}))
+            response_context = opener.open(request, timeout=8)
+        else:
+            response_context = urllib.request.urlopen(request, timeout=8)
+        with response_context as response:
             result = json.loads(response.read(1024 * 1024).decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
@@ -654,9 +664,50 @@ def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str,
         except Exception:
             detail = ""
         raise RuntimeError(str(detail or f"Telegram HTTP {exc.code}")) from exc
+    except urllib.error.URLError as exc:
+        if TELEGRAM_PROXY_URL:
+            raise RuntimeError(f"Telegram 代理连接失败：{exc.reason}") from exc
+        try:
+            result = _telegram_api_ipv4(token, method, data)
+        except Exception as ipv4_exc:
+            raise RuntimeError(
+                f"Telegram 网络不可达（常规连接：{exc.reason}；IPv4 回退：{ipv4_exc}）。"
+                "请检查 Server 容器出站网络，或配置 TELEGRAM_PROXY_URL。"
+            ) from ipv4_exc
     if not result.get("ok"):
         raise RuntimeError(str(result.get("description") or "Telegram rejected the request"))
     return result
+
+
+def _telegram_api_ipv4(token: str, method: str, data: bytes) -> Dict[str, Any]:
+    host = "api.telegram.org"
+    last_error: Exception | None = None
+    for family, socktype, proto, _, sockaddr in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM):
+        raw_sock = socket.socket(family, socktype, proto)
+        try:
+            raw_sock.settimeout(8)
+            raw_sock.connect(sockaddr)
+            tls_sock = ssl.create_default_context().wrap_socket(raw_sock, server_hostname=host)
+            conn = http.client.HTTPSConnection(host, 443, timeout=8)
+            conn.sock = tls_sock
+            conn.request(
+                "POST", f"/bot{token}/{method}", body=data,
+                headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"},
+            )
+            response = conn.getresponse()
+            body = response.read(1024 * 1024)
+            conn.close()
+            result = json.loads(body.decode("utf-8"))
+            if response.status >= 400:
+                raise RuntimeError(str(result.get("description") or f"Telegram HTTP {response.status}"))
+            return result
+        except Exception as exc:
+            last_error = exc
+            try:
+                raw_sock.close()
+            except Exception:
+                pass
+    raise RuntimeError(str(last_error or "没有可用的 Telegram IPv4 地址"))
 
 
 def _record_bot_delivery(bot_id: int, succeeded: bool, error: str = "") -> None:
