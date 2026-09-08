@@ -17,10 +17,11 @@ import { StatsAnalyticsView } from './components/stats/StatsAnalyticsView';
 import { CommandPalette } from './components/common/CommandPalette';
 import { ToastContainer, ToastMessage } from './components/common/Toast';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { NotificationSettingsView } from './components/notifications/NotificationSettingsView';
 
 export const App: React.FC = () => {
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'stats'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'stats' | 'notifications'>('dashboard');
 
   // Selected container for slide-over drawer
   const [selectedContainer, setSelectedContainer] = useState<ContainerIdentity | null>(null);
@@ -213,6 +214,7 @@ export const App: React.FC = () => {
               onBackToDashboard={() => setActiveTab('dashboard')}
             />
           )}
+          {activeTab === 'notifications' && <NotificationSettingsView onToast={addToast} />}
         </ErrorBoundary>
       </main>
 

@@ -6,6 +6,7 @@ import {
   DiagnosticData,
   StatsResponse,
   ContainerIdentity,
+  NotificationBot,
 } from './types';
 
 export class ApiError extends Error {
@@ -45,6 +46,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  getNotificationBots: () => request<{ items: NotificationBot[]; callback_ready: boolean }>('/api/v1/notifications/bots'),
+  createNotificationBot: (data: { name: string; token: string; target: string; min_severity: string }) =>
+    request<{ item: NotificationBot; callback_ready: boolean }>('/api/v1/notifications/bots', { method: 'POST', body: JSON.stringify(data) }),
+  deleteNotificationBot: (id: number) => request<{ ok: boolean }>(`/api/v1/notifications/bots/${id}`, { method: 'DELETE' }),
+  testNotificationBot: (id: number) => request<{ ok: boolean; callback_ready: boolean }>(`/api/v1/notifications/bots/${id}/test`, { method: 'POST' }),
   getLatest: (includeStale = true) =>
     request<LatestResponse>(`/api/v1/latest?include_stale=${includeStale}`),
 

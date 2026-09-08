@@ -3368,7 +3368,10 @@ def _collect_socks_config_evidence(
         return result
     quoted_paths = " ".join(shlex.quote(path) for path in paths)
     socks_pattern = r"socks5|socksmethod|(^|[[:space:]])socks([[:space:]]|$)|['\"]?(protocol|type)['\"]?[[:space:]]*:[[:space:]]*['\"]?socks"
-    no_auth_pattern = r"socksmethod[[:space:]]*:[^#]*(none)|auth[[:space:]]+(none)|['\"]?(auth|method)['\"]?[[:space:]]*:[[:space:]]*['\"]?(noauth|none)"
+    # `clientmethod: none` in Dante controls only outbound client behaviour;
+    # it must not be treated as an unauthenticated SOCKS listener.  Match
+    # standalone config keys so the `method` suffix cannot match inside it.
+    no_auth_pattern = r"socksmethod[[:space:]]*:[^#]*(none)|auth[[:space:]]+(none)|(^|[[:space:],{])['\"]?(auth|method)['\"]?[[:space:]]*:[[:space:]]*['\"]?(noauth|none)"
     weak_pattern = r"((password|passwd|pass)[[:space:]\"']*[:=][[:space:]\"']*|users[[:space:]]+[^[:space:]:]+:CL:)(123456|12345678|123123|admin|admin123|changeme|default|guest|letmein|pass|password|qwerty|root|socks5?|test|toor)([[:space:]\"',}]|$)"
     auth_pattern = r"socksmethod[[:space:]]*:[^#]*(username|pam)|['\"]?(username|password|users)['\"]?[[:space:]]*[:=]"
     command = (

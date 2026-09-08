@@ -1,0 +1,37 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import { Bell, Bot, Send, Trash2 } from 'lucide-react';
+import { api } from '../../api/client';
+import { NotificationBot } from '../../api/types';
+import { ToastMessage } from '../common/Toast';
+
+export const NotificationSettingsView: React.FC<{ onToast: (type: ToastMessage['type'], message: string) => void }> = ({ onToast }) => {
+  const [bots, setBots] = useState<NotificationBot[]>([]);
+  const [callbackReady, setCallbackReady] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ name: 'Telegram 告警机器人', token: '', target: '', min_severity: 'critical' });
+  const load = useCallback(async () => {
+    try { const data = await api.getNotificationBots(); setBots(data.items); setCallbackReady(data.callback_ready); }
+    catch (err: any) { onToast('error', `无法读取通知配置：${err.message || err}`); }
+  }, [onToast]);
+  useEffect(() => { load(); }, [load]);
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault(); setSaving(true);
+    try { await api.createNotificationBot(form); setForm({ name: 'Telegram 告警机器人', token: '', target: '', min_severity: 'critical' }); await load(); onToast('success', '机器人已保存；Token 不会再显示。'); }
+    catch (err: any) { onToast('error', err.message || '保存失败'); } finally { setSaving(false); }
+  };
+  return <section className="space-y-5">
+    <div className="rounded-2xl border border-sky-500/25 bg-gradient-to-br from-sky-950/60 to-slate-900 p-5">
+      <div className="flex items-start gap-3"><div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-2"><Bell className="h-5 w-5 text-sky-400" /></div><div><h2 className="text-lg font-bold text-slate-100">告警推送</h2><p className="mt-1 text-sm text-slate-400">按最低严重级别推送到 Telegram。推送卡片可直接忽略本次告警或标记为已处理。</p></div></div>
+      {!callbackReady && <p className="mt-4 rounded-lg border border-amber-700/60 bg-amber-950/40 p-3 text-sm text-amber-200">已可发送通知；要启用推送内操作，请在 Server 环境配置 <code>PUBLIC_BASE_URL</code> 为公网 HTTPS 面板地址，然后点击测试以注册回调。</p>}
+    </div>
+    <form onSubmit={save} className="grid gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5 md:grid-cols-2">
+      <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-slate-200"><Bot className="h-4 w-4 text-sky-400" />添加 Telegram 机器人</div>
+      <label className="text-sm text-slate-300">名称<input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-sky-500" /></label>
+      <label className="text-sm text-slate-300">最低推送级别<select value={form.min_severity} onChange={e => setForm({ ...form, min_severity: e.target.value })} className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-sky-500"><option value="critical">仅严重告警</option><option value="warning">警告及以上</option><option value="info">全部告警</option></select></label>
+      <label className="text-sm text-slate-300">Bot Token<input required type="password" autoComplete="new-password" value={form.token} onChange={e => setForm({ ...form, token: e.target.value })} placeholder="123456:AA..." className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-sky-500" /></label>
+      <label className="text-sm text-slate-300">推送目标（Chat ID 或 @频道）<input required value={form.target} onChange={e => setForm({ ...form, target: e.target.value })} placeholder="-1001234567890 或 @channel" className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-sky-500" /></label>
+      <div className="md:col-span-2"><button disabled={saving} className="inline-flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-60"><Bell className="h-4 w-4" />{saving ? '保存中…' : '保存机器人'}</button></div>
+    </form>
+    <div className="space-y-3">{bots.map(bot => <div key={bot.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 p-4"><div><p className="font-semibold text-slate-100">{bot.name} <span className="ml-2 text-xs font-normal text-slate-400">{bot.target}</span></p><p className="mt-1 text-xs text-slate-400">Telegram · {bot.min_severity === 'critical' ? '仅严重告警' : bot.min_severity === 'warning' ? '警告及以上' : '全部告警'} · Token 已脱敏</p></div><div className="flex gap-2"><button onClick={async () => { try { await api.testNotificationBot(bot.id); onToast('success', '测试消息已发送。'); } catch (e: any) { onToast('error', e.message); } }} className="inline-flex items-center gap-1 rounded-lg border border-sky-700/60 px-3 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-950"><Send className="h-3.5 w-3.5" />测试</button><button onClick={async () => { try { await api.deleteNotificationBot(bot.id); await load(); onToast('success', '机器人已删除'); } catch (e: any) { onToast('error', e.message); } }} className="rounded-lg border border-rose-800/60 p-2 text-rose-300 hover:bg-rose-950" aria-label="删除机器人"><Trash2 className="h-4 w-4" /></button></div></div>)}{bots.length === 0 && <p className="rounded-xl border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">尚未配置推送机器人</p>}</div>
+  </section>;
+};

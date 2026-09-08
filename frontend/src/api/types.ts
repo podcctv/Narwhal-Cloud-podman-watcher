@@ -234,3 +234,14 @@ export interface ContainerIdentity {
   project?: string;
   container_name: string;
 }
+
+export interface NotificationBot {
+  id: number;
+  name: string;
+  kind: 'telegram' | string;
+  target: string;
+  min_severity: 'info' | 'warning' | 'critical' | string;
+  enabled: boolean;
+  token_configured: boolean;
+  created_at_utc8?: string;
+}

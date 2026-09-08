@@ -20,6 +20,7 @@
 - **告警快速处理**：活动告警可选择“禁止/持续拦截”“允许且不再提醒”或“本次取消提醒”；Podman/Incus 的机场面板对接告警支持定向清理，无认证 SOCKS 告警支持停止服务并持续拦截，Docker 不执行处理。
 - **XMRig / XrayR 自动处置**：Podman/Incus 中精确命中的 XMRig 挖矿进程默认自动终止并清理明确的服务、配置和二进制；未获允许的 XrayR 节点后端默认自动定向清理。已加入域名白名单的合法 XrayR 不处理，Docker 仍只提醒。
 - **告警历史与重新处置**：总览页可进入“告警历史”，按状态、级别、类型、主机和关键词筛选活动、已忽略、已处理及已恢复记录；可以对忽略记录重新禁止，也可以撤销“不再提醒”策略。
+- **Telegram 告警机器人**：在“推送设置”中可保存多个 Bot Token 与 Chat ID/频道目标，并分别选择“仅严重告警”“警告及以上”或“全部告警”。Token 仅保存在 Server 数据库中，接口和页面始终只返回“已配置”状态。每条推送可直接“本次忽略”或“标记已处理”，操作会记录为 Telegram 来源的告警决策。
 - **无认证 SOCKS 持续拦截**：Incus/Podman 的无认证或空密码 SOCKS 告警可一键停止对应进程/服务并保存节点侧策略；以后再次无认证启动会自动停止，检测到非空认证后自动解除策略。不会停止容器，也不会删除 SOCKS 配置或服务文件。
 - **按需深度上报**：可在容器详情页对可疑的 Podman/Incus 容器发起一次性深度采样，在下一 Client 周期查看瞬时流量、详细进程、连接 IP 及进程归属；Docker 默认仅提醒，不执行该任务。
 - **Server-first 自动更新**：Server 与 Client 默认每 15 分钟检查 GitHub `main`；Client 必须通过共享密钥签名确认 Server 已运行目标版本才会升级，避免 Client 版本提前。更新只进行安全的 fast-forward 并记录日志。
@@ -105,6 +106,18 @@ sudo journalctl -u narwhal-monitor-client -n 100 --no-pager
 ```bash
 sudo awk -F= '$1=="DASHBOARD_USERNAME" || $1=="DASHBOARD_PASSWORD" {print $1"="substr($0,index($0,"=")+1)}' /opt/narwhal-monitor/server.env
 ```
+
+### 配置 Telegram 推送与推送内操作
+
+进入面板顶栏的“推送设置”，添加 Telegram Bot Token 和目标 Chat ID（私聊/群组 ID）或频道用户名。点击“测试”会向目标发送一条测试消息，并在配置了公网回调地址时注册 Telegram 回调。
+
+若需要从 Telegram 消息内直接操作，Server 必须可被 Telegram 以 HTTPS 访问。在 Server 的环境文件中增加实际的面板公网地址后更新 Server：
+
+```bash
+PUBLIC_BASE_URL=https://monitor.example.com
+```
+
+不要在该变量中包含路径或结尾 `/`。系统为每个机器人生成独立、不可预测的回调路径；Bot Token 不会显示到浏览器、日志或 API 返回中。群组中请先让机器人收到一条消息，以便取得正确的 Chat ID。
 
 ### 更新现有部署
 

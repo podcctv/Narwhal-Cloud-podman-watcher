@@ -1,10 +1,10 @@
 import React from 'react';
-import { ShieldAlert, BarChart3, LayoutDashboard, Search } from 'lucide-react';
+import { ShieldAlert, BarChart3, LayoutDashboard, Search, Bell } from 'lucide-react';
 import { CountdownTimer } from '../common/CountdownTimer';
 
 interface AppHeaderProps {
-  activeTab: 'dashboard' | 'alerts' | 'stats';
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats') => void;
+  activeTab: 'dashboard' | 'alerts' | 'stats' | 'notifications';
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'notifications') => void;
   serverVersion: string;
   activeAlertCount: number;
   countdown: number;
@@ -65,6 +65,9 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           >
             <LayoutDashboard className="h-3.5 w-3.5" />
             <span>总览看板</span>
+          </button>
+          <button type="button" onClick={() => onSelectTab('notifications')} className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${activeTab === 'notifications' ? 'bg-sky-500 text-slate-950 shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}>
+            <Bell className="h-3.5 w-3.5" /><span>推送设置</span>
           </button>
 
           <button

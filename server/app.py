@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+import secrets
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
@@ -45,6 +46,7 @@ ALERT_WEBHOOK_MIN_SEVERITY = os.getenv("ALERT_WEBHOOK_MIN_SEVERITY", "warning").
 TLS_CA_CERT_PATH = os.getenv("TLS_CA_CERT_PATH", "/tls-ca/root.crt")
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 UTC8 = timezone(timedelta(hours=8))
 _cleanup_lock = threading.Lock()
@@ -73,6 +75,10 @@ _AGENT_ONLY_PATHS = {
     "/api/v1/update/version",
 }
 
+# Telegram sends updates without the dashboard's Basic credentials.  The opaque
+# per-bot path secret below is the authentication boundary for this endpoint.
+_BOT_CALLBACK_PREFIX = "/api/v1/notifications/telegram/"
+
 
 def dashboard_user_from_authorization(authorization: str) -> str | None:
     if not DASHBOARD_USERNAME or not DASHBOARD_PASSWORD or not authorization.startswith("Basic "):
@@ -89,7 +95,7 @@ def dashboard_user_from_authorization(authorization: str) -> str | None:
 
 @app.middleware("http")
 async def dashboard_basic_auth(request: Request, call_next):
-    if request.url.path in _AGENT_ONLY_PATHS:
+    if request.url.path in _AGENT_ONLY_PATHS or request.url.path.startswith(_BOT_CALLBACK_PREFIX):
         return await call_next(request)
     username = dashboard_user_from_authorization(request.headers.get("authorization", ""))
     if username is None:
@@ -234,6 +240,18 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_connection_overloads_last_seen
             ON connection_overloads(last_seen);
+        CREATE TABLE IF NOT EXISTS notification_bots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'telegram',
+            token TEXT NOT NULL,
+            target TEXT NOT NULL,
+            min_severity TEXT NOT NULL DEFAULT 'critical',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            callback_secret TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         """
     )
     cols = conn.execute("PRAGMA table_info(reports)").fetchall()
@@ -558,7 +576,10 @@ def process_security_alerts(
                 ),
             )
         if should_notify:
-            notifications.append(normalized)
+            notification = dict(normalized)
+            row = conn.execute("SELECT id FROM security_alerts WHERE fingerprint=?", (fingerprint,)).fetchone()
+            notification["id"] = int(row["id"]) if row is not None else 0
+            notifications.append(notification)
 
     if active_fingerprints:
         placeholders = ",".join("?" for _ in active_fingerprints)
@@ -593,6 +614,168 @@ def send_alert_webhook(alert: Dict[str, Any]) -> None:
             response.read(1)
     except Exception as exc:
         print(f"alert webhook failed: {exc}")
+
+
+def _notification_bot_item(row: sqlite3.Row) -> Dict[str, Any]:
+    """Return a dashboard-safe notification profile; bot tokens never leave the server."""
+    return {
+        "id": int(row["id"]), "name": str(row["name"]), "kind": str(row["kind"]),
+        "target": str(row["target"]), "min_severity": str(row["min_severity"]),
+        "enabled": bool(row["enabled"]), "token_configured": bool(row["token"]),
+        "created_at_utc8": format_utc8(int(row["created_at"])),
+        "updated_at_utc8": format_utc8(int(row["updated_at"])),
+    }
+
+
+def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/{method}",
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        result = json.loads(response.read(1024 * 1024).decode("utf-8"))
+    if not result.get("ok"):
+        raise RuntimeError(str(result.get("description") or "Telegram rejected the request"))
+    return result
+
+
+def send_configured_bot_notifications(alert: Dict[str, Any]) -> None:
+    """Fan out a newly raised/escalated alert without making agent reporting fail."""
+    alert_id = int(alert.get("id") or 0)
+    if alert_id <= 0:
+        return
+    conn = db()
+    try:
+        bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
+    finally:
+        conn.close()
+    severity = str(alert.get("severity") or "warning")
+    for bot in bots:
+        if _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
+            continue
+        scope = "/".join(x for x in (str(alert.get("runtime") or ""), str(alert.get("project") or "")) if x)
+        text = (
+            f"<b>Narwhal {severity.upper()} 告警</b>\n"
+            f"<b>{alert.get('title') or alert.get('type')}</b>\n"
+            f"主机：<code>{alert.get('host_id') or '-'}</code>\n"
+            f"容器：<code>{scope or '-'} {alert.get('container_name') or '-'}</code>\n"
+            f"{alert.get('message') or ''}"
+        )[:3900]
+        keyboard = {"inline_keyboard": [[
+            {"text": "本次忽略", "callback_data": f"narwhal:{alert_id}:dismiss"},
+            {"text": "标记已处理", "callback_data": f"narwhal:{alert_id}:resolve"},
+        ]]}
+        try:
+            _telegram_api(str(bot["token"]), "sendMessage", {
+                "chat_id": str(bot["target"]), "text": text, "parse_mode": "HTML",
+                "reply_markup": keyboard, "disable_web_page_preview": True,
+            })
+        except Exception as exc:
+            print(f"telegram notification {bot['id']} failed: {exc}")
+
+
+@app.get("/api/v1/notifications/bots")
+def notification_bots() -> JSONResponse:
+    conn = db()
+    try:
+        rows = conn.execute("SELECT * FROM notification_bots ORDER BY id DESC").fetchall()
+        return JSONResponse(content={"items": [_notification_bot_item(row) for row in rows], "callback_ready": bool(PUBLIC_BASE_URL)})
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/notifications/bots")
+async def save_notification_bot(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    name = str(payload.get("name") or "Telegram 通知").strip()[:80]
+    token = str(payload.get("token") or "").strip()
+    target = str(payload.get("target") or "").strip()[:200]
+    severity = str(payload.get("min_severity") or "critical").lower()
+    if not token or len(token) > 256 or not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", token):
+        raise HTTPException(status_code=400, detail="请输入有效的 Telegram Bot Token")
+    if not target or severity not in _SEVERITY_RANK:
+        raise HTTPException(status_code=400, detail="目标和最低告警级别是必填项")
+    now = int(time.time())
+    conn = db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            (name, "telegram", token, target, severity, secrets.token_urlsafe(32), now, now),
+        )
+        row = conn.execute("SELECT * FROM notification_bots WHERE id=?", (cur.lastrowid,)).fetchone()
+        conn.commit()
+        return JSONResponse(status_code=201, content={"item": _notification_bot_item(row), "callback_ready": bool(PUBLIC_BASE_URL)})
+    finally:
+        conn.close()
+
+
+@app.delete("/api/v1/notifications/bots/{bot_id}")
+def delete_notification_bot(bot_id: int) -> JSONResponse:
+    conn = db()
+    try:
+        cur = conn.execute("DELETE FROM notification_bots WHERE id=?", (bot_id,))
+        conn.commit()
+        if not cur.rowcount:
+            raise HTTPException(status_code=404, detail="notification bot not found")
+        return JSONResponse(content={"ok": True})
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/notifications/bots/{bot_id}/test")
+def test_notification_bot(bot_id: int) -> JSONResponse:
+    conn = db()
+    try:
+        bot = conn.execute("SELECT * FROM notification_bots WHERE id=?", (bot_id,)).fetchone()
+    finally:
+        conn.close()
+    if bot is None:
+        raise HTTPException(status_code=404, detail="notification bot not found")
+    try:
+        _telegram_api(str(bot["token"]), "sendMessage", {"chat_id": str(bot["target"]), "text": "Narwhal 通知机器人连接测试成功。"})
+        if PUBLIC_BASE_URL:
+            _telegram_api(str(bot["token"]), "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{bot['callback_secret']}", "allowed_updates": ["callback_query"]})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Telegram 测试失败：{exc}")
+    return JSONResponse(content={"ok": True, "callback_ready": bool(PUBLIC_BASE_URL)})
+
+
+@app.post("/api/v1/notifications/telegram/{bot_id}/{callback_secret}")
+async def telegram_callback(bot_id: int, callback_secret: str, request: Request) -> JSONResponse:
+    conn = db()
+    try:
+        bot = conn.execute("SELECT * FROM notification_bots WHERE id=? AND callback_secret=? AND enabled=1", (bot_id, callback_secret)).fetchone()
+        if bot is None:
+            raise HTTPException(status_code=404, detail="unknown notification bot")
+        payload = await request.json()
+        callback = payload.get("callback_query") if isinstance(payload, dict) else None
+        data = str(callback.get("data") or "") if isinstance(callback, dict) else ""
+        match = re.fullmatch(r"narwhal:(\d+):(dismiss|resolve)", data)
+        if not match:
+            return JSONResponse(content={"ok": True})
+        alert_id, decision = int(match.group(1)), match.group(2)
+        alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
+        if alert is None or alert["status"] != "active":
+            message = "该告警已不再处于活动状态"
+        else:
+            status = "dismissed" if decision == "dismiss" else "resolved"
+            now = int(time.time())
+            conn.execute("UPDATE security_alerts SET status=? WHERE id=?", (status, alert_id))
+            conn.execute("INSERT INTO security_alert_decisions(alert_id,fingerprint,decision,requested_by,created_at) VALUES(?,?,?,?,?)", (alert_id, alert["fingerprint"], "dismiss_once" if decision == "dismiss" else "resolve", f"telegram:{bot_id}", now))
+            conn.commit()
+            message = "已忽略本次告警" if decision == "dismiss" else "已标记为已处理"
+    finally:
+        conn.close()
+    try:
+        if isinstance(callback, dict):
+            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": message})
+    except Exception:
+        pass
+    return JSONResponse(content={"ok": True})
 
 
 def process_connection_overloads(
@@ -914,6 +1097,7 @@ async def report(
 
     for alert in notifications:
         send_alert_webhook(alert)
+        send_configured_bot_notifications(alert)
     return {
         "ok": True,
         "server_version": APP_VERSION,

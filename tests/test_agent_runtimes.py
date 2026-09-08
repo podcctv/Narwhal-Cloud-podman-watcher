@@ -941,6 +941,22 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(result["auth_mode"], "no_auth")
         self.assertEqual(result["config_files"], ["/etc/danted.conf"])
 
+    def test_dante_clientmethod_none_is_not_matched_as_no_auth(self):
+        commands = []
+
+        def capture_run(cmd):
+            commands.append(cmd[-1])
+            return ""
+
+        with mock.patch.object(agent, "run", side_effect=capture_run):
+            result = agent._collect_socks_config_evidence(
+                "incus", "proxy", "default", True
+            )
+        self.assertEqual(result["auth_mode"], "unknown")
+        command = commands[0]
+        self.assertIn("(^|[[:space:],{])", command)
+        self.assertNotIn("|['\\\"]?(auth|method)", command)
+
     def test_config_confirmed_xray_socks_keeps_safe_process_target(self):
         process_output = "12 S xray /usr/bin/xray run -config /etc/xray/config.json\n"
         markers = "@@SOCKS:/etc/xray/config.json\n@@NOAUTH:/etc/xray/config.json\n"
