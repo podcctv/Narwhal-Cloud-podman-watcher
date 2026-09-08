@@ -115,6 +115,11 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
             ? `${alert.runtime}/${alert.project}`
             : alert.runtime;
           const isActionFailed = alert.latest_action?.status === 'failed';
+          const canRemediate =
+            (alert.runtime === 'incus' || alert.runtime === 'podman') &&
+            (alert.type === 'unauthorized_panel_pairing' ||
+              alert.type === 'socks_weak_auth' ||
+              alert.type === 'malicious_process');
 
           return (
             <div
@@ -169,7 +174,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
               {/* Action Buttons */}
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                <button
+                {canRemediate && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => handleDecision(alert.id, 'deny')}
@@ -184,7 +189,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                       ? '重试定向处置'
                       : '定向处置'}
                   </span>
-                </button>
+                </button>}
 
                 <button
                   type="button"

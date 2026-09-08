@@ -103,6 +103,7 @@ class ServerRuntimeTests(unittest.TestCase):
                     "runtime": "incus",
                     "project": "prod",
                     "cpu_percent": 2.5,
+                    "security": {"inbound_unique_ips": 7},
                 }
             ],
         }
@@ -135,6 +136,7 @@ class ServerRuntimeTests(unittest.TestCase):
         status = json.loads(server.security_status().body)
         self.assertEqual(status["items"][0]["total_rx_bps"], 1234)
         self.assertEqual(status["items"][0]["access_log"]["requests_per_second"], 2)
+        self.assertEqual(status["items"][0]["today_peak_inbound_ips"], 7)
         latest_body = json.loads(server.latest().body)
         self.assertEqual(latest_body["server_version"], server.APP_VERSION)
         self.assertEqual(latest_body["items"][0]["agent_version"], "1.0.0")
@@ -145,7 +147,8 @@ class ServerRuntimeTests(unittest.TestCase):
         )
         client = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         self.assertIn("overflow-x-auto", telemetry)
-        self.assertIn("min-w-[1680px]", telemetry)
+        self.assertIn("min-w-[1530px]", telemetry)
+        self.assertNotIn(">访问日志</th>", telemetry)
         self.assertNotIn("table-fixed", telemetry)
         self.assertIn("DDoS 网络信号", telemetry)
         self.assertIn("CC / HTTP 信号", telemetry)
@@ -308,7 +311,7 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("/container-detail?", html)
         self.assertIn("versionBadge(latest.agent_version,d.server_version)", html)
         self.assertIn("容器安全与运行状态中心", html)
-        self.assertIn("容器日志正常", html)
+        self.assertNotIn("<th>访问日志</th>", html)
         self.assertIn("主机 IPv4", html)
         self.assertIn("入站去重 IP", html)
         self.assertNotIn("<table id='t'", html)

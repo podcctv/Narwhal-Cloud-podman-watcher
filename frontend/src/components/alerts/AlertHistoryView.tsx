@@ -244,6 +244,11 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
         ) : (
           items.map((alert) => {
             const isHistorical = alert.status !== 'active';
+            const canRemediate =
+              (alert.runtime === 'incus' || alert.runtime === 'podman') &&
+              (alert.type === 'unauthorized_panel_pairing' ||
+                alert.type === 'socks_weak_auth' ||
+                alert.type === 'malicious_process');
 
             return (
               <div
@@ -290,14 +295,14 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <button
+                    {canRemediate && <button
                       type="button"
                       onClick={() => handleDecision(alert.id, 'deny')}
                       className="flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-950/60 px-2.5 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900/80 transition-colors"
                     >
                       <Ban className="h-3 w-3" />
                       <span>{isHistorical ? '重新定向处置' : '定向处置'}</span>
-                    </button>
+                    </button>}
 
                     {(alert.status === 'suppressed' || alert.status === 'dismissed') && (
                       <button

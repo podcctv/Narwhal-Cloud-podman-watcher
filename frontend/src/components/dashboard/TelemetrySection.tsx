@@ -33,7 +33,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
       </div>
 
       <div className="w-full overflow-x-auto">
-        <table className="min-w-[1680px] w-full table-auto text-left text-xs text-slate-300">
+        <table className="min-w-[1530px] w-full table-auto text-left text-xs text-slate-300">
           <thead className="border-b border-slate-800 bg-slate-950/70 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
             <tr>
               <th className="min-w-[210px] px-5 py-3.5">主机</th>
@@ -42,7 +42,6 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <th className="hidden 2xl:table-cell min-w-[210px] px-4 py-3.5 text-center whitespace-nowrap">CC / HTTP 信号</th>
               <th className="hidden xl:table-cell min-w-[120px] px-4 py-3.5 text-center whitespace-nowrap">最高连接</th>
               <th className="hidden 2xl:table-cell min-w-[120px] px-4 py-3.5 text-center whitespace-nowrap">最高入站 IP</th>
-              <th className="min-w-[150px] px-4 py-3.5 text-center whitespace-nowrap">访问日志</th>
               <th className="hidden lg:table-cell min-w-[180px] px-5 py-3.5 text-right whitespace-nowrap">采样时间</th>
               <th className="min-w-[150px] px-5 py-3.5 text-right whitespace-nowrap">操作</th>
             </tr>
@@ -110,26 +109,6 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                     <span className="inline-flex min-w-[48px] justify-center items-center rounded-md bg-rose-500/10 border border-rose-500/30 px-2.5 py-1 text-xs font-bold text-rose-300 font-mono shadow-sm">
                       {fmtNumber(t.today_peak_inbound_ips, 0)}
                     </span>
-                  </td>
-                  <td className="px-4 py-3 text-center whitespace-nowrap">
-                    {(() => {
-                      const logText = typeof t.access_log === 'string' ? t.access_log : '正常';
-                      const isOk = logText.includes('正常');
-                      const isWarn = logText === '未配置' || logText === '待采集';
-                      return (
-                        <span
-                          className={`inline-flex items-center px-2.5 py-1 rounded-md border text-[11px] font-medium whitespace-nowrap ${
-                            isOk
-                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
-                              : isWarn
-                              ? 'border-slate-700 bg-slate-800/80 text-slate-400'
-                              : 'border-rose-500/30 bg-rose-500/10 text-rose-400'
-                          }`}
-                        >
-                          {logText}
-                        </span>
-                      );
-                    })()}
                   </td>
                   <td className="hidden lg:table-cell px-5 py-3 text-right tabular-nums text-slate-400 font-mono text-[11px] whitespace-nowrap">
                     {t.timestamp_iso_utc8 || '-'}

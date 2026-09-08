@@ -437,7 +437,7 @@ ALERT_AUTH_FAILURES_PER_IP=20
 [MaxMind 官方说明](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)自行获取和更新；
 默认 HTTPS 回退接口为可自托管的 [country.is](https://github.com/lineofflight/country)。
 
-连接数严格大于 `500` 时产生 warning，严格大于 `1000` 时升级为 critical。Server 会独立记录每个容器的连续超限窗口；连接数严格大于 `1500` 且连续满 15 分钟时，经 HMAC 签名动作通道自动停止该容器。若相邻超限样本间隔超过 600 秒，连续计时会重新开始，避免把上报中断误判为持续超限。
+连接数严格大于 `500` 时产生 warning，严格大于 `1000` 时升级为 critical。Server 会独立记录每个容器的连续超限窗口；连接数严格大于 `1500` 且连续满 15 分钟时，经 HMAC 签名动作通道自动停止整个容器（调用对应运行时的 `stop`），不是终止容器内某个进程。若相邻超限样本间隔超过 600 秒，连续计时会重新开始，避免把上报中断误判为持续超限。该告警不提供人工“定向处置”按钮，避免把整容器停止误解为进程清理；人工定向处置仅用于机场面板、SOCKS 和恶意进程等有明确安全目标的告警。
 
 Agent 会同时读取宿主机 `SECURITY_ACCESS_LOG_PATHS`，并通过对应的 Podman/Docker/Incus 运行时进入每个容器读取 `SECURITY_CONTAINER_ACCESS_LOG_PATHS`。因此面板或反代日志既可以位于宿主机，也可以只存在于容器内部；文件不存在的容器会自动跳过。也可以把容器日志只读挂载到宿主机后，仅保留宿主机路径。日志不可读时网络层检测仍正常运行，但该容器不会产生 HTTP/CC 日志告警。
 
@@ -473,7 +473,7 @@ SOCKS 检测复用本轮已经读取的容器进程列表；只有发现 SOCKS �
 - “容器根盘(/ 总量/可用)”来自容器内 `df -P /`，表示容器看到的根文件系统容量，不是镜像层大小。
 - “宿主机主盘”优先读取 `/data`；节点没有 `/data` 时自动回退到 `/`，页面同时显示实际挂载点，不再把不存在的 `/data` 显示为 `0 B / 0 B`。
 - 主机 IPv4/IPv6 指示器先用宿主机路由做无数据包探测，再按需使用容器网络探测，不再因容器没有安装 `curl` 或 `ip.sb` 不可达而把正常宿主机误报为异常。
-- “访问日志”会区分宿主机日志正常、容器日志正常、日志文件未发现、权限不足和未配置。节点侧 Agent 以 root 运行；若显示“未发现日志文件”，请将实际 Nginx/Caddy access log 路径加入 `SECURITY_ACCESS_LOG_PATHS`（宿主机）或 `SECURITY_CONTAINER_ACCESS_LOG_PATHS`（容器内），更新 Client 后生效。
+- 访问日志仍会在节点侧用于计算 HTTP RPS、单 IP RPS、4xx 比例和敏感路径扫描，但“主机网络与安全遥测”不再单独展示访问日志状态列。需要启用 HTTP/CC 检测时，请将实际 Nginx/Caddy access log 路径加入 `SECURITY_ACCESS_LOG_PATHS`（宿主机）或 `SECURITY_CONTAINER_ACCESS_LOG_PATHS`（容器内）。
 - 入站去重 IP 优先通过宿主机 conntrack 与端口映射还原真实公网来源，兼容 Incus proxy、`incus network forward`、宿主机 iptables/nftables DNAT、唯一 PID 用户态转发和 Podman 端口映射；`10.x` 等代理网关地址不会冒充公网来源，不可还原时明确回退到容器网络命名空间的 `/proc/net`。默认只有数量大于 `ALERT_INBOUND_UNIQUE_IPS=10` 才产生重点告警。每轮最多读取 5000 条 conntrack 和 5000 条宿主机代理 socket 记录，Incus 网络转发配置每 4 分钟最多读取一次，并通过一次最多 500 条的容器 `ss` 快照把目标端口归属到通信进程，默认最多上报 100 条活动连接；全程不抓包、不扫描文件，不持续占用 CPU。同一代理 PID 对应多个容器目标时不会猜测归属，避免误告警。
 - 宿主机磁盘结果缓存 30 秒，同一轮多个容器复用；容器侧只读取文件系统元数据，不遍历目录、不计算目录大小。镜像层 `inspect --size` 默认关闭；确需采集时可在 Client 环境中设置 `CONTAINER_LAYER_SIZE_ENABLED=true`，但这可能增加 IO。
 - 统计页的 Top10、“全部容器”和总览容器卡片均跳转到独立的容器详情页，不再借用首页弹窗。详情展示容器内部 CPU/内存/连接/进程/网络命名空间、历史速率曲线、监听端口、NAT/代理映射、通信进程与端点、文件系统和配置风险；页面刷新只复用既有上报，不额外触发节点采集。

@@ -61,16 +61,6 @@ export const api = {
     const raw = await request<{ items: any[] }>('/api/v1/security/status');
     const items: SecurityStatusItem[] = (raw.items || []).map((item) => {
       const access = item.access_log || {};
-      const source = String(access.source || '');
-      const containerLogs = Number(access.container_readable_files || 0);
-      let logState = '未配置';
-      if (access.enabled) {
-        if (source === 'host') logState = '宿主机正常';
-        else if (source === 'container') logState = `容器日志正常 (${containerLogs})`;
-        else if (source === 'permission_denied') logState = '权限不足';
-        else if (source === 'not_found') logState = '未发现日志文件';
-        else logState = '待采集';
-      }
 
       const rxBps = Number(item.total_rx_bps || 0);
       const txBps = Number(item.total_tx_bps || 0);
@@ -96,7 +86,6 @@ export const api = {
         access_requests: accessRequests,
         access_unique_ips: Number(access.unique_ips || 0),
         active_alerts: Number(item.active_alerts_in_sample || 0),
-        access_log: logState,
         timestamp_iso_utc8: item.timestamp_utc8 || '-',
         today_peak_rx_bps: peakRxBps,
         today_peak_tx_bps: peakTxBps,

@@ -144,7 +144,6 @@ export interface SecurityStatusItem {
   access_requests: number;
   access_unique_ips: number;
   active_alerts: number;
-  access_log?: string;
   timestamp_iso_utc8?: string;
   today_peak_rx_bps: number;
   today_peak_tx_bps: number;

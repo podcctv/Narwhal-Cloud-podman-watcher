@@ -2360,14 +2360,16 @@ def security_status() -> JSONResponse:
                 host_id,
                 MAX(sum_conn) AS peak_conn_count,
                 MAX(sum_rx) AS peak_rx_bps,
-                MAX(sum_tx) AS peak_tx_bps
+                MAX(sum_tx) AS peak_tx_bps,
+                MAX(max_inbound_ips) AS peak_inbound_ips
             FROM (
                 SELECT
                     host_id,
                     ts,
                     SUM(conn_count) AS sum_conn,
                     SUM(net_rx_bps) AS sum_rx,
-                    SUM(net_tx_bps) AS sum_tx
+                    SUM(net_tx_bps) AS sum_tx,
+                    MAX(COALESCE(CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips
                 FROM reports
                 WHERE ts >= ?
                 GROUP BY host_id, ts
@@ -2382,8 +2384,7 @@ def security_status() -> JSONResponse:
             SELECT
                 host_id,
                 MAX(COALESCE(CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
-                MAX(COALESCE(CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps,
-                MAX(COALESCE(CAST(json_extract(payload_json, '$.access_log.unique_ips') AS INTEGER), 0)) AS peak_inbound_ips
+                MAX(COALESCE(CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps
             FROM host_security
             WHERE ts >= ?
             GROUP BY host_id
@@ -2399,19 +2400,18 @@ def security_status() -> JSONResponse:
             "peak_conn_count": int(r["peak_conn_count"] or 0),
             "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
             "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
-            "peak_inbound_ips": 0,
+            "peak_inbound_ips": int(r["peak_inbound_ips"] or 0),
             "peak_outbound_ips": 0,
         }
 
     for r in host_sec_peaks_rows:
         h = r["host_id"]
-        inbound = int(r["peak_inbound_ips"] or 0)
         if h not in peaks_by_host:
             peaks_by_host[h] = {
                 "peak_conn_count": 0,
                 "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
                 "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
-                "peak_inbound_ips": inbound,
+                "peak_inbound_ips": 0,
                 "peak_outbound_ips": 0,
             }
         else:
@@ -2421,8 +2421,6 @@ def security_status() -> JSONResponse:
             peaks_by_host[h]["peak_tx_bps"] = max(
                 peaks_by_host[h]["peak_tx_bps"], float(r["peak_tx_bps"] or 0.0)
             )
-            if inbound > peaks_by_host[h]["peak_inbound_ips"]:
-                peaks_by_host[h]["peak_inbound_ips"] = inbound
 
     items = []
     for row in rows:
@@ -2775,7 +2773,7 @@ table{background:var(--surface);color:var(--text)}th,td{border-color:var(--borde
 <header class='app-header'><div class='brand'><span class='brand-mark' aria-hidden='true'>NW</span><div><h1>Narwhal Monitor</h1><p>容器安全与运行状态中心</p></div></div><div class='header-actions'><span id='server-version' class='pill'>Server 正在连接</span><span id='last-refresh' class='refresh-time'>尚未刷新</span><a class='nav-link' href='/alerts/history'>告警历史</a><a class='nav-link' href='/stats'>数据统计</a></div></header>
 <section class='kpi-grid' aria-label='运行概览'><article class='kpi-card'><span class='kpi-label'>在线主机</span><strong id='kpi-hosts' class='kpi-value'>0</strong></article><article class='kpi-card'><span class='kpi-label'>监控容器</span><strong id='kpi-containers' class='kpi-value'>0</strong></article><article class='kpi-card'><span class='kpi-label'>活动告警</span><strong id='kpi-alerts' class='kpi-value danger'>0</strong></article><article class='kpi-card'><span class='kpi-label'>离线容器</span><strong id='kpi-offline' class='kpi-value'>0</strong></article></section>
 <section class='section-card'><header class='section-head'><div><h2>安全告警 <span class='pill pill-bad'>活动 <span id='active-alert-count'>0</span></span></h2><p>机场组件禁止操作执行定向清理；无认证 SOCKS 操作只停止对应服务并持续拦截，均不会停止容器。</p></div></header><div class='section-body'><table id='security-alerts'><thead><tr><th>级别</th><th>主机</th><th>运行时/项目</th><th>容器</th><th>类型</th><th>说明</th><th>最近出现</th><th>次数</th><th>操作</th></tr></thead><tbody></tbody></table></div></section>
-<section class='section-card'><header class='section-head'><div><h2>主机安全遥测</h2><p>低开销汇总网络、连接与访问日志状态。</p></div></header><div class='section-body'><table id='security-status'><thead><tr><th>主机</th><th>RX Mbps</th><th>RX pps</th><th>SYN_RECV</th><th>HTTP RPS</th><th>最高单IP RPS</th><th>访问日志</th><th>采样时间</th></tr></thead><tbody></tbody></table></div></section>
+<section class='section-card'><header class='section-head'><div><h2>主机安全遥测</h2><p>低开销汇总网络与连接状态。</p></div></header><div class='section-body'><table id='security-status'><thead><tr><th>主机</th><th>RX Mbps</th><th>RX pps</th><th>SYN_RECV</th><th>HTTP RPS</th><th>最高单IP RPS</th><th>采样时间</th></tr></thead><tbody></tbody></table></div></section>
 <section class='section-card'><header class='section-head'><div><h2>容器状态</h2><p>按主机折叠；版本、在线状态与运行时分布集中显示。</p></div></header><div class='section-body'><div id='host-containers' class='host-list' aria-live='polite'><div class='empty-state'>正在加载节点数据…</div></div></div></section>
 </main>
 <div id='modal'><div id='card'>
@@ -2956,16 +2954,13 @@ async function loadAlerts(){
   const statusBody=document.querySelector('#security-status tbody'); statusBody.innerHTML='';
   for(const item of (statusData.items||[])){
     const access=item.access_log||{};
-    const source=String(access.source||'');
-    const containerLogs=Number(access.container_readable_files||0);
-    const logState=!access.enabled?'未配置':(source==='host'?'宿主机正常':(source==='container'?`容器日志正常 (${containerLogs})`:(source==='permission_denied'?'权限不足':(source==='not_found'?'未发现日志文件':'待采集'))));
     const tr=document.createElement('tr');
     tr.innerHTML=`<td>${escapeHtml(item.host_id)}</td>`+
       `<td>${formatSmallNumber(bpsToMbps(item.total_rx_bps),2)}</td>`+
       `<td>${formatSmallNumber(item.total_rx_pps,1)}</td><td>${Number(item.syn_recv_count||0)}</td>`+
       `<td>${formatSmallNumber(access.requests_per_second,1)}</td>`+
       `<td>${formatSmallNumber(access.top_ip_requests_per_second,1)} ${escapeHtml(access.top_ip||'')}</td>`+
-      `<td class='${source==='host'||source==='container'?'ok':(source==='not_found'?'':'bad')}'>${escapeHtml(logState)}</td><td>${escapeHtml(item.timestamp_utc8)}</td>`;
+      `<td>${escapeHtml(item.timestamp_utc8)}</td>`;
     statusBody.appendChild(tr);
   }
 }
