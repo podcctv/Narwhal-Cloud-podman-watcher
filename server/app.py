@@ -16,8 +16,11 @@ import socket
 import ssl
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
+
+import socks
 
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -645,6 +648,15 @@ def _notification_bot_item(row: sqlite3.Row) -> Dict[str, Any]:
 
 def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode()
+    proxy_scheme = urllib.parse.urlsplit(TELEGRAM_PROXY_URL).scheme.lower() if TELEGRAM_PROXY_URL else ""
+    if proxy_scheme in ("socks5", "socks5h"):
+        try:
+            result = _telegram_api_socks5(token, method, data, TELEGRAM_PROXY_URL)
+        except Exception as exc:
+            raise RuntimeError(f"Telegram SOCKS5 代理连接失败：{exc}") from exc
+        if not result.get("ok"):
+            raise RuntimeError(str(result.get("description") or "Telegram rejected the request"))
+        return result
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/{method}",
         data=data,
@@ -677,6 +689,45 @@ def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str,
     if not result.get("ok"):
         raise RuntimeError(str(result.get("description") or "Telegram rejected the request"))
     return result
+
+
+def _telegram_api_socks5(token: str, method: str, data: bytes, proxy_url: str) -> Dict[str, Any]:
+    parsed = urllib.parse.urlsplit(proxy_url)
+    if not parsed.hostname:
+        raise ValueError("代理地址缺少主机名")
+    proxy_rdns = parsed.scheme.lower() == "socks5h"
+    proxy_sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        proxy_sock.set_proxy(
+            socks.SOCKS5,
+            parsed.hostname,
+            parsed.port or 1080,
+            rdns=proxy_rdns,
+            username=urllib.parse.unquote(parsed.username) if parsed.username else None,
+            password=urllib.parse.unquote(parsed.password) if parsed.password else None,
+        )
+        proxy_sock.settimeout(8)
+        proxy_sock.connect(("api.telegram.org", 443))
+        tls_sock = ssl.create_default_context().wrap_socket(proxy_sock, server_hostname="api.telegram.org")
+        conn = http.client.HTTPSConnection("api.telegram.org", 443, timeout=8)
+        conn.sock = tls_sock
+        conn.request(
+            "POST", f"/bot{token}/{method}", body=data,
+            headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"},
+        )
+        response = conn.getresponse()
+        body = response.read(1024 * 1024)
+        conn.close()
+        result = json.loads(body.decode("utf-8"))
+        if response.status >= 400:
+            raise RuntimeError(str(result.get("description") or f"Telegram HTTP {response.status}"))
+        return result
+    except Exception:
+        try:
+            proxy_sock.close()
+        except Exception:
+            pass
+        raise
 
 
 def _telegram_api_ipv4(token: str, method: str, data: bytes) -> Dict[str, Any]:

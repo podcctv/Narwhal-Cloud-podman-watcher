@@ -1376,6 +1376,18 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(row["last_delivery_error"], "")
         self.assertGreater(row["last_sent_at"], 0)
 
+    def test_telegram_socks5h_proxy_routes_through_socks_transport(self):
+        original_proxy = server.TELEGRAM_PROXY_URL
+        server.TELEGRAM_PROXY_URL = "socks5h://user:pass@proxy.example:1080"
+        try:
+            with mock.patch.object(server, "_telegram_api_socks5", return_value={"ok": True}) as transport:
+                result = server._telegram_api("123456:abcdefghijklmnopqrstuvwxyz", "sendMessage", {"chat_id": "1", "text": "test"})
+        finally:
+            server.TELEGRAM_PROXY_URL = original_proxy
+        self.assertTrue(result["ok"])
+        self.assertEqual(transport.call_args.args[3], "socks5h://user:pass@proxy.example:1080")
+        self.assertIn(b'"text": "test"', transport.call_args.args[2])
+
 
 if __name__ == "__main__":
     unittest.main()

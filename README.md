@@ -115,7 +115,7 @@ sudo awk -F= '$1=="DASHBOARD_USERNAME" || $1=="DASHBOARD_PASSWORD" {print $1"="s
 
 ```bash
 PUBLIC_BASE_URL=https://monitor.example.com
-TELEGRAM_PROXY_URL=
+TELEGRAM_PROXY_URL=socks5h://代理地址:1080
 ```
 
 不要在该变量中包含路径或结尾 `/`。系统为每个机器人生成独立、不可预测的回调路径；Bot Token 不会显示到浏览器、日志或 API 返回中。群组中请先让机器人收到一条消息，以便取得正确的 Chat ID。
@@ -510,7 +510,7 @@ Webhook 仅在告警首次出现、级别升级或恢复后再次出现时发送
 
 Telegram 机器人保存时会立即向目标发送一条配置验证消息，并在已配置 `PUBLIC_BASE_URL` 时自动注册告警卡片的操作回调；Token、Chat ID 或频道权限无效会直接返回 Telegram 的具体错误，不会静默保存。机器人列表会显示最近一次发送成功时间或失败原因。告警正文会按 Telegram HTML 规则转义，进程参数和比较符号不会再导致整条消息被拒绝。告警推送仍只发生在新告警首次出现、严重级别升级或告警恢复后再次出现时；保存机器人不会重复推送已经处于活动状态的旧告警。
 
-Telegram 连接会在常规连接失败后自动使用 IPv4 重试。若 Server 所在网络无法直连 Telegram，可在 `server.env` 设置 `TELEGRAM_PROXY_URL=http://代理地址:端口`（也支持 HTTPS 代理），然后执行 Server `update`。页面会区分常规连接、IPv4 回退和代理连接错误。
+Telegram 连接会在常规连接失败后自动使用 IPv4 重试。若 Server 所在网络无法直连 Telegram，可在 `server.env` 设置 `TELEGRAM_PROXY_URL`，支持 `http://`、`https://`、`socks5://` 和 `socks5h://`；需要用户名密码时可使用 `socks5h://用户名:密码@代理地址:端口`。推荐 `socks5h://`，Telegram 域名会由代理端解析，可绕过 Server 本地 DNS 或 IPv6 路由问题。修改后执行 Server `update`。页面会区分常规连接、IPv4 回退和代理连接错误。
 
 活动告警可在总览页面查看，也可查询：
 
