@@ -1339,7 +1339,7 @@ class SecurityTelemetryTests(unittest.TestCase):
             "params": {
                 "reason": "sustained_connection_overload",
                 "connection_count": 1600,
-                "duration_seconds": 900,
+                "duration_seconds": 3600,
             },
         }
         with mock.patch.object(

@@ -1017,17 +1017,16 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(server.process_connection_overloads(conn, "host", 900, [container]), 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM connection_overloads").fetchone()[0], 0)
         container["conn_count"] += 1
-        self.assertEqual(server.process_connection_overloads(conn, "host", 1000, [container]), 0)
-        self.assertEqual(server.process_connection_overloads(conn, "host", 1300, [container]), 0)
-        self.assertEqual(server.process_connection_overloads(conn, "host", 1600, [container]), 0)
-        self.assertEqual(server.process_connection_overloads(conn, "host", 1900, [container]), 1)
-        self.assertEqual(server.process_connection_overloads(conn, "host", 2200, [container]), 0)
+        for ts in (1000, 1600, 2200, 2800, 3400, 4000):
+            self.assertEqual(server.process_connection_overloads(conn, "host", ts, [container]), 0)
+        self.assertEqual(server.process_connection_overloads(conn, "host", 4600, [container]), 1)
+        self.assertEqual(server.process_connection_overloads(conn, "host", 4900, [container]), 0)
         action = conn.execute("SELECT * FROM security_actions").fetchone()
         state = conn.execute("SELECT sample_count, stop_action_id FROM connection_overloads").fetchone()
         conn.close()
         self.assertEqual(action["action_type"], "stop_container")
         self.assertEqual(action["requested_by"], "system:connection-guard")
-        self.assertEqual(tuple(state), (5, action["id"]))
+        self.assertEqual(tuple(state), (8, action["id"]))
 
     def test_connection_overload_gap_resets_continuous_timer(self):
         container = {

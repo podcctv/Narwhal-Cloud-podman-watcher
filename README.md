@@ -437,7 +437,7 @@ ALERT_AUTH_FAILURES_PER_IP=20
 [MaxMind 官方说明](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)自行获取和更新；
 默认 HTTPS 回退接口为可自托管的 [country.is](https://github.com/lineofflight/country)。
 
-连接数严格大于 `500` 时产生 warning，严格大于 `1000` 时升级为 critical。Server 会独立记录每个容器的连续超限窗口；连接数严格大于 `1500` 且连续满 15 分钟时，经 HMAC 签名动作通道自动停止整个容器（调用对应运行时的 `stop`），不是终止容器内某个进程。若相邻超限样本间隔超过 600 秒，连续计时会重新开始，避免把上报中断误判为持续超限。该告警不提供人工“定向处置”按钮，避免把整容器停止误解为进程清理；人工定向处置仅用于机场面板、SOCKS 和恶意进程等有明确安全目标的告警。
+连接数严格大于 `500` 时产生 warning，严格大于 `1000` 时升级为 critical。Server 会独立记录每个容器的连续超限窗口；连接数严格大于 `1500` 且连续满 1 小时后，才经 HMAC 签名动作通道自动停止整个容器（调用对应运行时的 `stop`），不是终止容器内某个进程。连接数恢复到阈值以内会清除连续超限状态；若相邻超限样本间隔超过 600 秒，连续计时也会重新开始，因此偶发的短时高峰不会触发处置。该告警不提供人工“定向处置”按钮，避免把整容器停止误解为进程清理；人工定向处置仅用于机场面板、SOCKS 和恶意进程等有明确安全目标的告警。
 
 Agent 会同时读取宿主机 `SECURITY_ACCESS_LOG_PATHS`，并通过对应的 Podman/Docker/Incus 运行时进入每个容器读取 `SECURITY_CONTAINER_ACCESS_LOG_PATHS`。因此面板或反代日志既可以位于宿主机，也可以只存在于容器内部；文件不存在的容器会自动跳过。也可以把容器日志只读挂载到宿主机后，仅保留宿主机路径。日志不可读时网络层检测仍正常运行，但该容器不会产生 HTTP/CC 日志告警。
 
@@ -494,7 +494,7 @@ ALERT_WEBHOOK_MIN_SEVERITY=warning
 ALERT_CONN_WARNING_THRESHOLD=500
 ALERT_CONN_CRITICAL_THRESHOLD=1000
 CONNECTION_STOP_THRESHOLD=1500
-CONNECTION_STOP_DURATION_SECONDS=900
+CONNECTION_STOP_DURATION_SECONDS=3600
 CONNECTION_STOP_MAX_GAP_SECONDS=600
 OFFLINE_HOST_PURGE_SECONDS=86400
 DASHBOARD_USERNAME=安装时随机生成
@@ -518,7 +518,7 @@ curl -su "$dashboard_user:$dashboard_password" http://127.0.0.1:8080/api/v1/secu
 curl -su "$dashboard_user:$dashboard_password" http://127.0.0.1:8080/api/v1/security/actions | jq
 ```
 
-> 阈值必须按机器带宽、正常高峰 RPS 和业务连接模型校准。除连接数严格大于 1500 持续 15 分钟会自动停止目标容器，以及管理员在页面二次确认的机场对接“快速清理”外，其余配置风险只告警，不会自动修改 Incus/Podman 配置或封禁流量。扫描检测基于内核累计计数器与采样时仍存在的 socket，是轻量级异常检测；如果需要逐次 `execve/connect/open` 事件、反弹 Shell、落地新二进制和容器逃逸检测，应在节点额外部署 Falco/eBPF 运行时安全组件。“滥用”表示行为异常线索，最终定性仍需结合供应商投诉、认证日志和业务审计。
+> 阈值必须按机器带宽、正常高峰 RPS 和业务连接模型校准。除连接数严格大于 1500 连续满 1 小时会自动停止目标容器，以及管理员在页面二次确认的机场对接“快速清理”外，其余配置风险只告警，不会自动修改 Incus/Podman 配置或封禁流量。扫描检测基于内核累计计数器与采样时仍存在的 socket，是轻量级异常检测；如果需要逐次 `execve/connect/open` 事件、反弹 Shell、落地新二进制和容器逃逸检测，应在节点额外部署 Falco/eBPF 运行时安全组件。“滥用”表示行为异常线索，最终定性仍需结合供应商投诉、认证日志和业务审计。
 
 ## HTTPS 配置指引
 

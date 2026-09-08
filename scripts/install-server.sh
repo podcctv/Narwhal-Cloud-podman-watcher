@@ -1032,7 +1032,7 @@ main() {
   local default_conn_warning_threshold="500"
   local default_conn_critical_threshold="1000"
   local default_connection_stop_threshold="1500"
-  local default_connection_stop_duration_seconds="900"
+  local default_connection_stop_duration_seconds="3600"
   local default_connection_stop_max_gap_seconds="600"
   local default_offline_host_purge_seconds="86400"
   local default_dashboard_username
