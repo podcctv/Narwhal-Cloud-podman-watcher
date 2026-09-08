@@ -3,6 +3,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import threading
 import time
 import secrets
 import urllib.request
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -267,6 +269,13 @@ def init_db() -> None:
         conn.execute("ALTER TABLE hosts ADD COLUMN node_id TEXT NOT NULL DEFAULT ''")
     if "config_json" not in host_cols:
         conn.execute("ALTER TABLE hosts ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'")
+    bot_cols = {str(c["name"]) for c in conn.execute("PRAGMA table_info(notification_bots)").fetchall()}
+    if "last_delivery_status" not in bot_cols:
+        conn.execute("ALTER TABLE notification_bots ADD COLUMN last_delivery_status TEXT NOT NULL DEFAULT 'never'")
+    if "last_delivery_error" not in bot_cols:
+        conn.execute("ALTER TABLE notification_bots ADD COLUMN last_delivery_error TEXT NOT NULL DEFAULT ''")
+    if "last_sent_at" not in bot_cols:
+        conn.execute("ALTER TABLE notification_bots ADD COLUMN last_sent_at INTEGER NOT NULL DEFAULT 0")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_node_id_unique ON hosts(node_id) WHERE node_id <> ''")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reports_host_runtime_project_container_ts "
@@ -624,6 +633,9 @@ def _notification_bot_item(row: sqlite3.Row) -> Dict[str, Any]:
         "enabled": bool(row["enabled"]), "token_configured": bool(row["token"]),
         "created_at_utc8": format_utc8(int(row["created_at"])),
         "updated_at_utc8": format_utc8(int(row["updated_at"])),
+        "last_delivery_status": str(row["last_delivery_status"]),
+        "last_delivery_error": str(row["last_delivery_error"]),
+        "last_sent_at_utc8": format_utc8(int(row["last_sent_at"])) if int(row["last_sent_at"]) else "",
     }
 
 
@@ -633,11 +645,30 @@ def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str,
         data=json.dumps(payload, ensure_ascii=False).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"}, method="POST",
     )
-    with urllib.request.urlopen(request, timeout=8) as response:
-        result = json.loads(response.read(1024 * 1024).decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            result = json.loads(response.read(1024 * 1024).decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read(1024 * 1024).decode("utf-8")).get("description")
+        except Exception:
+            detail = ""
+        raise RuntimeError(str(detail or f"Telegram HTTP {exc.code}")) from exc
     if not result.get("ok"):
         raise RuntimeError(str(result.get("description") or "Telegram rejected the request"))
     return result
+
+
+def _record_bot_delivery(bot_id: int, succeeded: bool, error: str = "") -> None:
+    conn = db()
+    try:
+        conn.execute(
+            "UPDATE notification_bots SET last_delivery_status=?, last_delivery_error=?, last_sent_at=? WHERE id=?",
+            ("succeeded" if succeeded else "failed", "" if succeeded else str(error)[:1000], int(time.time()) if succeeded else 0, bot_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def send_configured_bot_notifications(alert: Dict[str, Any]) -> None:
@@ -655,12 +686,13 @@ def send_configured_bot_notifications(alert: Dict[str, Any]) -> None:
         if _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
             continue
         scope = "/".join(x for x in (str(alert.get("runtime") or ""), str(alert.get("project") or "")) if x)
+        container_label = f"{scope or '-'} {alert.get('container_name') or '-'}"
         text = (
             f"<b>Narwhal {severity.upper()} 告警</b>\n"
-            f"<b>{alert.get('title') or alert.get('type')}</b>\n"
-            f"主机：<code>{alert.get('host_id') or '-'}</code>\n"
-            f"容器：<code>{scope or '-'} {alert.get('container_name') or '-'}</code>\n"
-            f"{alert.get('message') or ''}"
+            f"<b>{html.escape(str(alert.get('title') or alert.get('type') or '-'))}</b>\n"
+            f"主机：<code>{html.escape(str(alert.get('host_id') or '-'))}</code>\n"
+            f"容器：<code>{html.escape(container_label)}</code>\n"
+            f"{html.escape(str(alert.get('message') or ''))}"
         )[:3900]
         keyboard = {"inline_keyboard": [[
             {"text": "本次忽略", "callback_data": f"narwhal:{alert_id}:dismiss"},
@@ -671,7 +703,9 @@ def send_configured_bot_notifications(alert: Dict[str, Any]) -> None:
                 "chat_id": str(bot["target"]), "text": text, "parse_mode": "HTML",
                 "reply_markup": keyboard, "disable_web_page_preview": True,
             })
+            _record_bot_delivery(int(bot["id"]), True)
         except Exception as exc:
+            _record_bot_delivery(int(bot["id"]), False, str(exc))
             print(f"telegram notification {bot['id']} failed: {exc}")
 
 
@@ -706,9 +740,32 @@ async def save_notification_bot(request: Request) -> JSONResponse:
             "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
             (name, "telegram", token, target, severity, secrets.token_urlsafe(32), now, now),
         )
-        row = conn.execute("SELECT * FROM notification_bots WHERE id=?", (cur.lastrowid,)).fetchone()
+        bot_id = int(cur.lastrowid)
+        row = conn.execute("SELECT * FROM notification_bots WHERE id=?", (bot_id,)).fetchone()
         conn.commit()
-        return JSONResponse(status_code=201, content={"item": _notification_bot_item(row), "callback_ready": bool(PUBLIC_BASE_URL)})
+    finally:
+        conn.close()
+    try:
+        _telegram_api(token, "sendMessage", {"chat_id": target, "text": "Narwhal 通知机器人已配置成功。后续将按设定的严重级别推送新告警。"})
+        _record_bot_delivery(bot_id, True)
+    except Exception as exc:
+        conn = db()
+        try:
+            conn.execute("DELETE FROM notification_bots WHERE id=?", (bot_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        raise HTTPException(status_code=502, detail=f"Telegram 配置验证失败：{exc}")
+    callback_error = ""
+    if PUBLIC_BASE_URL:
+        try:
+            _telegram_api(token, "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{row['callback_secret']}", "allowed_updates": ["callback_query"]})
+        except Exception as exc:
+            callback_error = str(exc)[:500]
+    conn = db()
+    try:
+        row = conn.execute("SELECT * FROM notification_bots WHERE id=?", (bot_id,)).fetchone()
+        return JSONResponse(status_code=201, content={"item": _notification_bot_item(row), "callback_ready": bool(PUBLIC_BASE_URL) and not callback_error, "callback_error": callback_error})
     finally:
         conn.close()
 
@@ -739,7 +796,9 @@ def test_notification_bot(bot_id: int) -> JSONResponse:
         _telegram_api(str(bot["token"]), "sendMessage", {"chat_id": str(bot["target"]), "text": "Narwhal 通知机器人连接测试成功。"})
         if PUBLIC_BASE_URL:
             _telegram_api(str(bot["token"]), "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{bot['callback_secret']}", "allowed_updates": ["callback_query"]})
+        _record_bot_delivery(bot_id, True)
     except Exception as exc:
+        _record_bot_delivery(bot_id, False, str(exc))
         raise HTTPException(status_code=502, detail=f"Telegram 测试失败：{exc}")
     return JSONResponse(content={"ok": True, "callback_ready": bool(PUBLIC_BASE_URL)})
 

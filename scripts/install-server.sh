@@ -1146,6 +1146,11 @@ main() {
     caddy_image=""
   fi
 
+  if [[ -z "$public_base_url" && "$tls_enable" == "yes" && "$tls_cert_mode" != "internal" && -n "$tls_host" ]]; then
+    public_base_url="https://${tls_host}"
+    echo "[INFO] Telegram 回调地址自动设置为 ${public_base_url}"
+  fi
+
   mkdir -p "$SERVER_DATA_DIR" "$TLS_CA_EXPORT_DIR"
   cat >"$SERVER_ENV_FILE" <<ENV
 NARWHAL_VERSION=$PROJECT_VERSION

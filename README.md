@@ -507,6 +507,8 @@ Webhook 仅在告警首次出现、级别升级或恢复后再次出现时发送
 {"event":"narwhal.security_alert","alert":{"host_id":"host-1","type":"ddos_packets","severity":"warning","message":"..."}}
 ```
 
+Telegram 机器人保存时会立即向目标发送一条配置验证消息，并在已配置 `PUBLIC_BASE_URL` 时自动注册告警卡片的操作回调；Token、Chat ID 或频道权限无效会直接返回 Telegram 的具体错误，不会静默保存。机器人列表会显示最近一次发送成功时间或失败原因。告警正文会按 Telegram HTML 规则转义，进程参数和比较符号不会再导致整条消息被拒绝。告警推送仍只发生在新告警首次出现、严重级别升级或告警恢复后再次出现时；保存机器人不会重复推送已经处于活动状态的旧告警。
+
 活动告警可在总览页面查看，也可查询：
 
 ```bash

@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1349,6 +1350,31 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", history_html)
         self.assertIn("/api/v1/security/history", history_html)
         self.assertIn("href='/alerts/history'", server.dashboard())
+
+    def test_telegram_notification_escapes_html_and_records_delivery(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("ops", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "-1001", "critical", "secret", 1, 1),
+        )
+        conn.commit()
+        conn.close()
+        alert = {
+            "id": 7, "severity": "critical", "title": "CPU < 目标 & 告警",
+            "host_id": "host<&>", "runtime": "incus", "project": "default",
+            "container_name": "node<&>", "message": "连接数 > 1500 & 持续",
+        }
+        with mock.patch.object(server, "_telegram_api", return_value={"ok": True}) as telegram:
+            server.send_configured_bot_notifications(alert)
+        payload = telegram.call_args.args[2]
+        self.assertIn("CPU &lt; 目标 &amp; 告警", payload["text"])
+        self.assertIn("连接数 &gt; 1500 &amp; 持续", payload["text"])
+        conn = server.db()
+        row = conn.execute("SELECT last_delivery_status, last_delivery_error, last_sent_at FROM notification_bots").fetchone()
+        conn.close()
+        self.assertEqual(row["last_delivery_status"], "succeeded")
+        self.assertEqual(row["last_delivery_error"], "")
+        self.assertGreater(row["last_sent_at"], 0)
 
 
 if __name__ == "__main__":

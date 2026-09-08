@@ -243,4 +243,8 @@ export interface NotificationBot {
   enabled: boolean;
   token_configured: boolean;
   created_at_utc8?: string;
+  updated_at_utc8?: string;
+  last_delivery_status?: 'never' | 'succeeded' | 'failed' | string;
+  last_delivery_error?: string;
+  last_sent_at_utc8?: string;
 }
