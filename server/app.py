@@ -656,17 +656,22 @@ def process_security_alerts(
 
 
 def queue_connection_alert_deep_samples(
-    conn: sqlite3.Connection, notifications: List[Dict[str, Any]], now: int
+    conn: sqlite3.Connection, host_id: str, now: int
 ) -> int:
     """Queue one bounded evidence snapshot for each new high-connection incident."""
     queued = 0
-    for notification in notifications:
-        if str(notification.get("type") or "") != "container_connection_count":
+    alerts = conn.execute(
+        """
+        SELECT * FROM security_alerts
+        WHERE host_id=? AND alert_type='container_connection_count'
+          AND status='active' AND last_seen=?
+        """,
+        (host_id, now),
+    ).fetchall()
+    for alert in alerts:
+        if str(alert["runtime"]) not in ("incus", "podman"):
             continue
-        alert_id = int(notification.get("id") or 0)
-        alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
-        if alert is None or str(alert["runtime"]) not in ("incus", "podman"):
-            continue
+        alert_id = int(alert["id"])
         existing = conn.execute(
             """
             SELECT id FROM security_actions
@@ -1673,7 +1678,7 @@ async def report(
         if isinstance(security, dict):
             security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
             notifications = process_security_alerts(conn, host_id, ts, security_alerts)
-            automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, notifications, ts)
+            automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, host_id, ts)
             conn.execute(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
                 (host_id, ts, json.dumps(security, ensure_ascii=False)),

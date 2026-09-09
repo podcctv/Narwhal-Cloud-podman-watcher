@@ -1225,8 +1225,8 @@ class ServerRuntimeTests(unittest.TestCase):
         }
         conn = server.db()
         notifications = server.process_security_alerts(conn, "host1", now - 10, [alert])
-        self.assertEqual(server.queue_connection_alert_deep_samples(conn, notifications, now - 10), 1)
-        self.assertEqual(server.queue_connection_alert_deep_samples(conn, notifications, now - 10), 0)
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn, "host1", now - 10), 1)
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn, "host1", now - 10), 0)
         action = conn.execute("SELECT * FROM security_actions WHERE alert_id>0").fetchone()
         conn.commit()
         conn.close()
