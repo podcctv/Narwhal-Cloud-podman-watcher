@@ -1763,9 +1763,13 @@ def latest(include_stale: bool = False) -> JSONResponse:
         hidden_offline = stale_seconds > OFFLINE_HIDE_SECONDS
         host_last_seen = host_heartbeats.get(str(r["host_id"]), int(r["ts"]))
         host_stale = now - host_last_seen > STALE_SECONDS
-        if host_stale and not include_stale:
+        # include_stale keeps a short diagnostic window for offline hosts and
+        # disappeared containers, but must not bypass the configured panel
+        # retention limit. Otherwise deleted containers remain visible until
+        # the much longer database retention cleanup runs.
+        if hidden_offline:
             continue
-        if hidden_offline and not include_stale:
+        if host_stale and not include_stale:
             continue
         container_disk = payload.get("container_disk", {})
         top_cpu_process = payload.get("top_cpu_process", {})

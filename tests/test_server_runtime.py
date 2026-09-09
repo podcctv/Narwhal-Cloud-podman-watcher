@@ -991,6 +991,37 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(len(stale_items), 1)
         self.assertTrue(stale_items[0]["alerts"]["host_stale"])
 
+    def test_latest_removes_expired_container_even_when_stale_items_are_requested(self):
+        now = int(time.time())
+        expired_ts = now - server.OFFLINE_HIDE_SECONDS - 1
+        self._insert("incus", 20, "default", timestamp=expired_ts)
+        conn = sqlite3.connect(server.DB_PATH)
+        conn.execute(
+            "INSERT INTO hosts(host_id,last_seen,agent_version) VALUES(?,?,?)",
+            ("host", now, "1.6.53"),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(json.loads(server.latest(include_stale=True).body)["items"], [])
+
+    def test_latest_keeps_recently_missing_container_for_short_diagnostic_window(self):
+        now = int(time.time())
+        stale_ts = now - server.STALE_SECONDS - 1
+        self._insert("incus", 20, "default", timestamp=stale_ts)
+        conn = sqlite3.connect(server.DB_PATH)
+        conn.execute(
+            "INSERT INTO hosts(host_id,last_seen,agent_version) VALUES(?,?,?)",
+            ("host", now, "1.6.53"),
+        )
+        conn.commit()
+        conn.close()
+
+        items = json.loads(server.latest(include_stale=True).body)["items"]
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["alerts"]["stale"])
+        self.assertFalse(items[0]["alerts"]["host_stale"])
+
     def test_latest_exposes_warning_and_critical_connection_levels(self):
         now = int(time.time())
         self._insert("podman", 1, timestamp=now)
