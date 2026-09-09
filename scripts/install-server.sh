@@ -355,6 +355,53 @@ wait_for_port_free() {
   return 0
 }
 
+# Docker may install a global FORWARD policy of DROP. Its DOCKER-USER chain is
+# evaluated before netavark's Podman forwarding chain, so explicitly allow only
+# the dedicated Narwhal subnet and its established return traffic. A timer
+# restores the rules after Docker or firewall reloads without opening host ports.
+install_narwhal_forwarding_compat() {
+  [[ -n "$NARWHAL_NETWORK_NAME" ]] || return 0
+  command -v iptables >/dev/null 2>&1 || return 0
+  local subnet=""
+  subnet="$(podman network inspect "$NARWHAL_NETWORK_NAME" --format '{{range .Subnets}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
+  [[ -n "$subnet" ]] || return 0
+
+  install -d -m 0755 /opt/narwhal-monitor
+  cat >/opt/narwhal-monitor/ensure-forwarding.sh <<EOF_FORWARD
+#!/bin/sh
+set -eu
+iptables -nL DOCKER-USER >/dev/null 2>&1 || exit 0
+iptables -C DOCKER-USER -d $subnet -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -d $subnet -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -C DOCKER-USER -s $subnet -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -s $subnet -j ACCEPT
+EOF_FORWARD
+  chmod 0755 /opt/narwhal-monitor/ensure-forwarding.sh
+  cat >/etc/systemd/system/narwhal-monitor-forwarding.service <<'EOF_SERVICE'
+[Unit]
+Description=Restore Narwhal Podman forwarding rules after Docker firewall changes
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/narwhal-monitor/ensure-forwarding.sh
+EOF_SERVICE
+  cat >/etc/systemd/system/narwhal-monitor-forwarding.timer <<'EOF_TIMER'
+[Unit]
+Description=Periodically verify Narwhal Podman forwarding rules
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=narwhal-monitor-forwarding.service
+
+[Install]
+WantedBy=timers.target
+EOF_TIMER
+  systemctl daemon-reload
+  systemctl enable --now narwhal-monitor-forwarding.timer
+  systemctl start narwhal-monitor-forwarding.service
+}
+
 wait_for_backend_http() {
   local host_port="$1"
   local attempt=""
@@ -1221,6 +1268,7 @@ ENV
 
   # 创建专用网络并规避与宿主机已有私网（如 10.88.0.0/16）的冲突。
   ensure_narwhal_network
+  install_narwhal_forwarding_compat
 
   # 镜像版本必须与安装脚本一致；校验发生在删除当前 Server 之前。
   verify_server_image_version "$image_name"

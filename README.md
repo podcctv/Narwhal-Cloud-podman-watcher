@@ -512,6 +512,8 @@ Telegram 机器人保存时会立即向目标发送一条配置验证消息，�
 
 Telegram 连接会在常规连接失败后自动使用 IPv4 重试。若 Server 所在网络无法直连 Telegram，可在 `server.env` 设置 `TELEGRAM_PROXY_URL`，支持 `http://`、`https://`、`socks5://` 和 `socks5h://`；需要用户名密码时可使用 `socks5h://用户名:密码@代理地址:端口`。推荐 `socks5h://`，Telegram 域名会由代理端解析，可绕过 Server 本地 DNS 或 IPv6 路由问题。修改后执行 Server `update`。页面会区分常规连接、IPv4 回退和代理连接错误。
 
+若宿主机同时运行 Docker 与 Podman，Docker 可能把全局 `FORWARD` 策略设为 `DROP` 并先于 netavark 拦截 Narwhal Server 容器流量。安装器会为 Narwhal 专用 Podman 子网在 `DOCKER-USER` 中加入最小范围的出站与已建立回程放行，并通过 systemd timer 每分钟幂等检查；不会开放新的宿主机入站端口。
+
 活动告警可在总览页面查看，也可查询：
 
 ```bash
