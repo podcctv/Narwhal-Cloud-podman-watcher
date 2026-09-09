@@ -60,6 +60,7 @@ APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 UTC8 = timezone(timedelta(hours=8))
 _cleanup_lock = threading.Lock()
 _next_cleanup_monotonic = 0.0
+_telegram_poll_offsets: Dict[int, int] = {}
 
 
 def format_utc8(ts: int) -> str:
@@ -314,6 +315,8 @@ async def startup() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     init_db()
     asyncio.create_task(_cleanup_background_loop())
+    if not PUBLIC_BASE_URL:
+        asyncio.create_task(_telegram_polling_loop())
 
 
 def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
@@ -773,6 +776,245 @@ def _record_bot_delivery(bot_id: int, succeeded: bool, error: str = "") -> None:
         conn.close()
 
 
+def _telegram_chat_allowed(bot: sqlite3.Row, chat: Dict[str, Any]) -> bool:
+    target = str(bot["target"] or "").strip()
+    chat_id = str(chat.get("id") or "")
+    username = str(chat.get("username") or "").strip().lower()
+    if target.startswith("@"):
+        return bool(username) and username == target[1:].lower()
+    return bool(chat_id) and hmac.compare_digest(chat_id, target)
+
+
+def _telegram_active_alerts(severity: str = "all", offset: int = 0, limit: int = 5) -> tuple[List[sqlite3.Row], int]:
+    conn = db()
+    try:
+        where = "status='active'"
+        params: List[Any] = []
+        if severity in ("critical", "warning", "info"):
+            where += " AND severity=?"
+            params.append(severity)
+        total = int(conn.execute(f"SELECT COUNT(*) FROM security_alerts WHERE {where}", params).fetchone()[0])
+        rows = conn.execute(
+            f"SELECT * FROM security_alerts WHERE {where} ORDER BY CASE severity WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END DESC, last_seen DESC LIMIT ? OFFSET ?",
+            (*params, limit, max(0, offset)),
+        ).fetchall()
+        return rows, total
+    finally:
+        conn.close()
+
+
+def _telegram_actionable(alert: sqlite3.Row) -> bool:
+    if alert["runtime"] not in ("podman", "incus"):
+        return False
+    if alert["alert_type"] not in ("unauthorized_panel_pairing", "socks_weak_auth", "malicious_process"):
+        return False
+    details = _alert_action_evidence(alert)
+    if alert["alert_type"] == "unauthorized_panel_pairing":
+        return bool(details.get("process_patterns") or details.get("config_files"))
+    if alert["alert_type"] == "socks_weak_auth":
+        return details.get("socks_auth_mode") == "no_auth" and bool(details.get("socks_processes"))
+    return any(isinstance(item, dict) and item.get("process") == "xmrig" for item in details.get("malicious_processes", []))
+
+
+def _telegram_menu() -> tuple[str, Dict[str, Any]]:
+    conn = db()
+    try:
+        counts = {row["severity"]: int(row["count"]) for row in conn.execute(
+            "SELECT severity, COUNT(*) AS count FROM security_alerts WHERE status='active' GROUP BY severity"
+        ).fetchall()}
+    finally:
+        conn.close()
+    total = sum(counts.values())
+    text = (
+        "<b>Narwhal 告警控制台</b>\n"
+        f"活动告警：<b>{total}</b>\n"
+        f"严重：<b>{counts.get('critical', 0)}</b>　警告：<b>{counts.get('warning', 0)}</b>　信息：<b>{counts.get('info', 0)}</b>\n\n"
+        "请选择要查看的范围。"
+    )
+    keyboard = {"inline_keyboard": [
+        [{"text": f"全部活动告警 ({total})", "callback_data": "n:l:all:0"}],
+        [
+            {"text": f"严重 ({counts.get('critical', 0)})", "callback_data": "n:l:critical:0"},
+            {"text": f"警告 ({counts.get('warning', 0)})", "callback_data": "n:l:warning:0"},
+        ],
+        [{"text": "刷新", "callback_data": "n:m"}],
+    ]}
+    return text, keyboard
+
+
+def _telegram_alert_list(severity: str, offset: int) -> tuple[str, Dict[str, Any]]:
+    severity = severity if severity in ("all", "critical", "warning", "info") else "all"
+    offset = max(0, offset)
+    rows, total = _telegram_active_alerts(severity, offset)
+    label = {"all": "全部", "critical": "严重", "warning": "警告", "info": "信息"}[severity]
+    text = f"<b>{label}活动告警</b>\n共 {total} 条，第 {offset + 1 if total else 0}-{min(offset + len(rows), total)} 条。"
+    buttons: List[List[Dict[str, str]]] = []
+    severity_label = {"critical": "严重", "warning": "警告", "info": "信息"}
+    for row in rows:
+        title = str(row["title"] or row["alert_type"] or "告警")
+        buttons.append([{"text": f"{severity_label.get(row['severity'], '告警')} #{row['id']} {title[:26]}", "callback_data": f"n:d:{row['id']}:{severity}:{offset}"}])
+    nav: List[Dict[str, str]] = []
+    if offset > 0:
+        nav.append({"text": "上一页", "callback_data": f"n:l:{severity}:{max(0, offset - 5)}"})
+    if offset + len(rows) < total:
+        nav.append({"text": "下一页", "callback_data": f"n:l:{severity}:{offset + 5}"})
+    if nav:
+        buttons.append(nav)
+    buttons.append([{"text": "刷新", "callback_data": f"n:l:{severity}:{offset}"}, {"text": "返回主菜单", "callback_data": "n:m"}])
+    return text, {"inline_keyboard": buttons}
+
+
+def _telegram_alert_detail(alert_id: int, severity: str, offset: int) -> tuple[str, Dict[str, Any]]:
+    conn = db()
+    try:
+        alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
+    finally:
+        conn.close()
+    if alert is None:
+        return "该告警不存在或已被清理。", {"inline_keyboard": [[{"text": "返回列表", "callback_data": f"n:l:{severity}:{offset}"}]]}
+    scope = "/".join(x for x in (str(alert["runtime"] or ""), str(alert["project"] or "")) if x) or "-"
+    text = (
+        f"<b>{html.escape(str(alert['title'] or alert['alert_type']))}</b>\n"
+        f"状态：<b>{html.escape(str(alert['status']))}</b>　级别：<b>{html.escape(str(alert['severity']))}</b>\n"
+        f"主机：<code>{html.escape(str(alert['host_id']))}</code>\n"
+        f"容器：<code>{html.escape(scope)} {html.escape(str(alert['container_name'] or '-'))}</code>\n"
+        f"出现次数：{int(alert['occurrence_count'])}\n"
+        f"最近出现：{format_utc8(int(alert['last_seen']))}\n\n"
+        f"{html.escape(str(alert['message'] or ''))}"
+    )[:3900]
+    buttons: List[List[Dict[str, str]]] = []
+    if alert["status"] == "active":
+        buttons.append([
+            {"text": "本次忽略", "callback_data": f"n:c:{alert_id}:dismiss_once:{severity}:{offset}"},
+            {"text": "标记已处理", "callback_data": f"n:c:{alert_id}:resolve:{severity}:{offset}"},
+        ])
+        buttons.append([{"text": "永久不再提醒", "callback_data": f"n:c:{alert_id}:allow_silent:{severity}:{offset}"}])
+        if _telegram_actionable(alert):
+            buttons.append([{"text": "定向处置", "callback_data": f"n:c:{alert_id}:deny:{severity}:{offset}"}])
+    buttons.append([{"text": "返回列表", "callback_data": f"n:l:{severity}:{offset}"}, {"text": "主菜单", "callback_data": "n:m"}])
+    return text, {"inline_keyboard": buttons}
+
+
+async def _telegram_apply_decision(alert_id: int, decision: str, bot_id: int) -> str:
+    class TelegramRequest:
+        def __init__(self) -> None:
+            self.state = type("State", (), {"dashboard_user": f"telegram:{bot_id}"})()
+        async def json(self) -> Dict[str, str]:
+            return {"decision": decision}
+    response = await set_security_alert_disposition(alert_id, TelegramRequest())
+    body = json.loads(response.body)
+    if decision == "deny":
+        return "定向处置已排队，等待节点执行。" if body.get("queued") else "已有相同处置正在执行。"
+    return {"dismiss_once": "已忽略本次告警。", "resolve": "已标记为已处理。", "allow_silent": "已设置为永久不再提醒。"}.get(decision, "处理完成。")
+
+
+def _telegram_confirm(alert_id: int, decision: str, severity: str, offset: int) -> tuple[str, Dict[str, Any]]:
+    descriptions = {
+        "dismiss_once": "只隐藏本次连续事件；以后再次发生仍会提醒。",
+        "resolve": "将当前记录标记为已处理；若风险仍存在，下次上报会重新出现。",
+        "allow_silent": "永久抑制此告警指纹，并可能同步放行节点策略。",
+        "deny": "向节点下发定向处置动作，仅处理告警明确识别的目标。",
+    }
+    text = f"<b>确认操作</b>\n告警 #{alert_id}\n\n{descriptions.get(decision, '确认执行此操作？')}"
+    keyboard = {"inline_keyboard": [
+        [{"text": "确认执行", "callback_data": f"n:x:{alert_id}:{decision}:{severity}:{offset}"}],
+        [{"text": "取消并返回", "callback_data": f"n:d:{alert_id}:{severity}:{offset}"}],
+    ]}
+    return text, keyboard
+
+
+def _telegram_send_view(bot: sqlite3.Row, update: Dict[str, Any], text: str, keyboard: Dict[str, Any]) -> None:
+    callback = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
+    message = callback.get("message") if callback and isinstance(callback.get("message"), dict) else None
+    if message:
+        _telegram_api(str(bot["token"]), "editMessageText", {
+            "chat_id": str(message.get("chat", {}).get("id")), "message_id": int(message.get("message_id") or 0),
+            "text": text, "parse_mode": "HTML", "reply_markup": keyboard, "disable_web_page_preview": True,
+        })
+    else:
+        incoming = update.get("message") if isinstance(update.get("message"), dict) else {}
+        _telegram_api(str(bot["token"]), "sendMessage", {
+            "chat_id": str(incoming.get("chat", {}).get("id")), "text": text,
+            "parse_mode": "HTML", "reply_markup": keyboard, "disable_web_page_preview": True,
+        })
+
+
+async def _handle_telegram_update(bot: sqlite3.Row, update: Dict[str, Any]) -> None:
+    callback = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
+    message = callback.get("message") if callback and isinstance(callback.get("message"), dict) else update.get("message")
+    if not isinstance(message, dict) or not _telegram_chat_allowed(bot, message.get("chat") or {}):
+        if callback:
+            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": "此聊天未获授权"})
+        return
+    if callback:
+        data = str(callback.get("data") or "")
+        legacy = re.fullmatch(r"narwhal:(\d+):(dismiss|resolve)", data)
+        if legacy:
+            decision = "dismiss_once" if legacy.group(2) == "dismiss" else "resolve"
+            try:
+                message_text = await _telegram_apply_decision(int(legacy.group(1)), decision, int(bot["id"]))
+            except HTTPException as exc:
+                message_text = str(exc.detail)
+            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": message_text[:180]})
+            return
+        parts = data.split(":")
+        try:
+            if data == "n:m":
+                text, keyboard = _telegram_menu()
+            elif len(parts) == 4 and parts[:2] == ["n", "l"]:
+                text, keyboard = _telegram_alert_list(parts[2], int(parts[3]))
+            elif len(parts) == 5 and parts[:2] == ["n", "d"]:
+                text, keyboard = _telegram_alert_detail(int(parts[2]), parts[3], int(parts[4]))
+            elif len(parts) == 6 and parts[:2] == ["n", "c"]:
+                text, keyboard = _telegram_confirm(int(parts[2]), parts[3], parts[4], int(parts[5]))
+            elif len(parts) == 6 and parts[:2] == ["n", "x"]:
+                result = await _telegram_apply_decision(int(parts[2]), parts[3], int(bot["id"]))
+                detail, keyboard = _telegram_alert_detail(int(parts[2]), parts[4], int(parts[5]))
+                text = f"<b>{html.escape(result)}</b>\n\n{detail}"
+            else:
+                text, keyboard = _telegram_menu()
+            _telegram_send_view(bot, update, text, keyboard)
+            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or "")})
+        except (ValueError, HTTPException, RuntimeError) as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": str(detail)[:180], "show_alert": True})
+        return
+    command = str(message.get("text") or "").split()[0].split("@", 1)[0].lower()
+    if command in ("/start", "/menu", "/alerts"):
+        text, keyboard = _telegram_menu() if command != "/alerts" else _telegram_alert_list("all", 0)
+        _telegram_send_view(bot, update, text, keyboard)
+
+
+async def _telegram_polling_loop() -> None:
+    await asyncio.sleep(5)
+    while True:
+        conn = db()
+        try:
+            bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
+        finally:
+            conn.close()
+        for bot in bots:
+            bot_id = int(bot["id"])
+            try:
+                if bot_id not in _telegram_poll_offsets:
+                    await asyncio.to_thread(_telegram_api, str(bot["token"]), "deleteWebhook", {"drop_pending_updates": True})
+                    await asyncio.to_thread(_telegram_api, str(bot["token"]), "setMyCommands", {"commands": [
+                        {"command": "menu", "description": "打开交互式告警控制台"},
+                        {"command": "alerts", "description": "查看活动告警"},
+                    ]})
+                    _telegram_poll_offsets[bot_id] = 0
+                result = await asyncio.to_thread(_telegram_api, str(bot["token"]), "getUpdates", {
+                    "offset": _telegram_poll_offsets[bot_id], "timeout": 0,
+                    "allowed_updates": ["message", "callback_query"], "limit": 20,
+                })
+                for update in result.get("result") or []:
+                    _telegram_poll_offsets[bot_id] = max(_telegram_poll_offsets[bot_id], int(update.get("update_id") or 0) + 1)
+                    await _handle_telegram_update(bot, update)
+            except Exception as exc:
+                _record_bot_delivery(bot_id, False, f"Telegram polling: {exc}")
+        await asyncio.sleep(3)
+
+
 def send_configured_bot_notifications(alert: Dict[str, Any]) -> None:
     """Fan out a newly raised/escalated alert without making agent reporting fail."""
     alert_id = int(alert.get("id") or 0)
@@ -797,8 +1039,8 @@ def send_configured_bot_notifications(alert: Dict[str, Any]) -> None:
             f"{html.escape(str(alert.get('message') or ''))}"
         )[:3900]
         keyboard = {"inline_keyboard": [[
-            {"text": "本次忽略", "callback_data": f"narwhal:{alert_id}:dismiss"},
-            {"text": "标记已处理", "callback_data": f"narwhal:{alert_id}:resolve"},
+            {"text": "查看并处理", "callback_data": f"n:d:{alert_id}:all:0"},
+            {"text": "活动告警", "callback_data": "n:l:all:0"},
         ]]}
         try:
             _telegram_api(str(bot["token"]), "sendMessage", {
@@ -861,7 +1103,8 @@ async def save_notification_bot(request: Request) -> JSONResponse:
     callback_error = ""
     if PUBLIC_BASE_URL:
         try:
-            _telegram_api(token, "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{row['callback_secret']}", "allowed_updates": ["callback_query"]})
+            _telegram_api(token, "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{row['callback_secret']}", "allowed_updates": ["message", "callback_query"]})
+            _telegram_api(token, "setMyCommands", {"commands": [{"command": "menu", "description": "打开交互式告警控制台"}, {"command": "alerts", "description": "查看活动告警"}]})
         except Exception as exc:
             callback_error = str(exc)[:500]
     conn = db()
@@ -897,7 +1140,8 @@ def test_notification_bot(bot_id: int) -> JSONResponse:
     try:
         _telegram_api(str(bot["token"]), "sendMessage", {"chat_id": str(bot["target"]), "text": "Narwhal 通知机器人连接测试成功。"})
         if PUBLIC_BASE_URL:
-            _telegram_api(str(bot["token"]), "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{bot['callback_secret']}", "allowed_updates": ["callback_query"]})
+            _telegram_api(str(bot["token"]), "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{bot['callback_secret']}", "allowed_updates": ["message", "callback_query"]})
+        _telegram_api(str(bot["token"]), "setMyCommands", {"commands": [{"command": "menu", "description": "打开交互式告警控制台"}, {"command": "alerts", "description": "查看活动告警"}]})
         _record_bot_delivery(bot_id, True)
     except Exception as exc:
         _record_bot_delivery(bot_id, False, str(exc))
@@ -913,29 +1157,10 @@ async def telegram_callback(bot_id: int, callback_secret: str, request: Request)
         if bot is None:
             raise HTTPException(status_code=404, detail="unknown notification bot")
         payload = await request.json()
-        callback = payload.get("callback_query") if isinstance(payload, dict) else None
-        data = str(callback.get("data") or "") if isinstance(callback, dict) else ""
-        match = re.fullmatch(r"narwhal:(\d+):(dismiss|resolve)", data)
-        if not match:
-            return JSONResponse(content={"ok": True})
-        alert_id, decision = int(match.group(1)), match.group(2)
-        alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
-        if alert is None or alert["status"] != "active":
-            message = "该告警已不再处于活动状态"
-        else:
-            status = "dismissed" if decision == "dismiss" else "resolved"
-            now = int(time.time())
-            conn.execute("UPDATE security_alerts SET status=? WHERE id=?", (status, alert_id))
-            conn.execute("INSERT INTO security_alert_decisions(alert_id,fingerprint,decision,requested_by,created_at) VALUES(?,?,?,?,?)", (alert_id, alert["fingerprint"], "dismiss_once" if decision == "dismiss" else "resolve", f"telegram:{bot_id}", now))
-            conn.commit()
-            message = "已忽略本次告警" if decision == "dismiss" else "已标记为已处理"
     finally:
         conn.close()
-    try:
-        if isinstance(callback, dict):
-            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": message})
-    except Exception:
-        pass
+    if isinstance(payload, dict):
+        await _handle_telegram_update(bot, payload)
     return JSONResponse(content={"ok": True})
 
 

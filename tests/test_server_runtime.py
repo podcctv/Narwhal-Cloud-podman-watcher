@@ -1369,6 +1369,7 @@ class ServerRuntimeTests(unittest.TestCase):
         payload = telegram.call_args.args[2]
         self.assertIn("CPU &lt; 目标 &amp; 告警", payload["text"])
         self.assertIn("连接数 &gt; 1500 &amp; 持续", payload["text"])
+        self.assertEqual(payload["reply_markup"]["inline_keyboard"][0][0]["text"], "查看并处理")
         conn = server.db()
         row = conn.execute("SELECT last_delivery_status, last_delivery_error, last_sent_at FROM notification_bots").fetchone()
         conn.close()
@@ -1387,6 +1388,48 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(transport.call_args.args[3], "socks5h://user:pass@proxy.example:1080")
         self.assertIn(b'"text": "test"', transport.call_args.args[2])
+
+    def test_telegram_interactive_menu_is_authorized_and_button_driven(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("ops", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "596532562", "critical", "secret", 1, 1),
+        )
+        bot = conn.execute("SELECT * FROM notification_bots").fetchone()
+        conn.commit()
+        conn.close()
+        authorized = {"update_id": 1, "message": {"message_id": 2, "chat": {"id": 596532562}, "text": "/menu"}}
+        with mock.patch.object(server, "_telegram_api", return_value={"ok": True}) as telegram:
+            asyncio.run(server._handle_telegram_update(bot, authorized))
+        payload = telegram.call_args.args[2]
+        self.assertIn("Narwhal 告警控制台", payload["text"])
+        self.assertEqual(payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"], "n:l:all:0")
+
+        unauthorized = {"update_id": 2, "message": {"message_id": 3, "chat": {"id": 999}, "text": "/menu"}}
+        with mock.patch.object(server, "_telegram_api", return_value={"ok": True}) as telegram:
+            asyncio.run(server._handle_telegram_update(bot, unauthorized))
+        telegram.assert_not_called()
+
+    def test_telegram_alert_detail_requires_confirmation_for_actions(self):
+        alert = {
+            "runtime": "incus", "project": "default", "container_name": "node1",
+            "type": "container_connection_count", "severity": "critical",
+            "title": "连接数过高", "message": "持续超限", "value": 1600, "threshold": 1000,
+        }
+        conn = server.db()
+        notifications = server.process_security_alerts(conn, "host1", 100, [alert])
+        conn.commit()
+        conn.close()
+        alert_id = notifications[0]["id"]
+        text, keyboard = server._telegram_alert_detail(alert_id, "all", 0)
+        self.assertIn("连接数过高", text)
+        callbacks = [button["callback_data"] for row in keyboard["inline_keyboard"] for button in row]
+        self.assertIn(f"n:c:{alert_id}:dismiss_once:all:0", callbacks)
+        self.assertIn(f"n:c:{alert_id}:resolve:all:0", callbacks)
+        self.assertNotIn(f"n:c:{alert_id}:deny:all:0", callbacks)
+        confirm_text, confirm_keyboard = server._telegram_confirm(alert_id, "resolve", "all", 0)
+        self.assertIn("确认操作", confirm_text)
+        self.assertEqual(confirm_keyboard["inline_keyboard"][0][0]["callback_data"], f"n:x:{alert_id}:resolve:all:0")
 
 
 if __name__ == "__main__":
