@@ -1215,6 +1215,40 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(status["sample"]["process_count"], 7)
         self.assertEqual(status["sample"]["agent_version"], "1.1.0")
 
+    def test_container_diagnostic_rejects_stale_container(self):
+        self._insert(
+            "incus",
+            2,
+            "default",
+            timestamp=int(time.time()) - server.STALE_SECONDS - 1,
+        )
+
+        class State:
+            dashboard_user = "operator"
+
+        class DiagnosticRequest:
+            state = State()
+
+            async def json(self):
+                return {
+                    "host_id": "host",
+                    "runtime": "incus",
+                    "project": "default",
+                    "container_name": "same-name",
+                }
+
+        with self.assertRaises(server.HTTPException) as raised:
+            asyncio.run(server.request_container_diagnostic(DiagnosticRequest()))
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("采样已过期", raised.exception.detail)
+
+        conn = server.db()
+        action_count = conn.execute(
+            "SELECT COUNT(*) FROM security_actions WHERE action_type='request_deep_sample'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(action_count, 0)
+
     def test_high_connection_alert_queues_and_preserves_automatic_evidence(self):
         now = int(time.time())
         alert = {

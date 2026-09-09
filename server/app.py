@@ -1926,7 +1926,7 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
     conn = db()
     latest = conn.execute(
         """
-        SELECT payload_json FROM reports
+        SELECT ts, payload_json FROM reports
         WHERE host_id=? AND runtime=? AND project=? AND container_name=?
         ORDER BY ts DESC LIMIT 1
         """,
@@ -1935,6 +1935,16 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
     if latest is None:
         conn.close()
         raise HTTPException(status_code=404, detail="container not found")
+    sample_age = max(0, int(time.time()) - int(latest["ts"] or 0))
+    if sample_age > STALE_SECONDS:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"容器采样已过期（{sample_age // 60} 分钟未上报），"
+                "无法下发深度采样；请确认容器仍在运行并恢复监控后重试"
+            ),
+        )
     try:
         latest_payload = json.loads(latest["payload_json"] or "{}")
     except (TypeError, ValueError):

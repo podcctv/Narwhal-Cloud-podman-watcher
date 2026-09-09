@@ -371,6 +371,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
             <DiagnosticPanel
               identity={identity}
               diagnostic={diagnostic}
+              isStale={Boolean(container?.alerts?.stale)}
               onRefresh={() => {
                 api.getContainerDiagnostic(identity).then(setDiagnostic);
               }}

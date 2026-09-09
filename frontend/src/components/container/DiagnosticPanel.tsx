@@ -6,6 +6,7 @@ import { api, fmtBytes, fmtMbps, fmtNumber } from '../../api/client';
 interface DiagnosticPanelProps {
   identity: ContainerIdentity;
   diagnostic: DiagnosticData | null;
+  isStale?: boolean;
   onRefresh: () => void;
   onToast: (type: 'success' | 'error' | 'info', message: string) => void;
 }
@@ -13,6 +14,7 @@ interface DiagnosticPanelProps {
 export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   identity,
   diagnostic,
+  isStale = false,
   onRefresh,
   onToast,
 }) => {
@@ -55,7 +57,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
 
         <button
           type="button"
-          disabled={submitting || isQueuedOrDispatched || !isSupportedRuntime}
+          disabled={submitting || isQueuedOrDispatched || !isSupportedRuntime || isStale}
           onClick={handleRequest}
           className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 transition-all disabled:opacity-50 shadow-sm shrink-0"
         >
@@ -65,6 +67,8 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
               ? '提交中...'
               : isQueuedOrDispatched
               ? '等待上报中'
+              : isStale
+              ? '采样已过期'
               : '请求深度上报'}
           </span>
         </button>
@@ -75,6 +79,11 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
         {!isSupportedRuntime ? (
           <div className="rounded-lg border border-amber-500/30 bg-amber-950/40 p-2.5 text-xs text-amber-300">
             Docker 默认仅提醒，当前节点不支持深度快照采集。
+          </div>
+        ) : isStale ? (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-950/40 p-2.5 text-xs text-amber-300">
+            <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
+            <span>该容器的监控采样已过期，无法向 Agent 下发任务。请确认容器仍在运行并恢复监控后重试。</span>
           </div>
         ) : action?.status === 'queued' ? (
           <div className="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-950/40 p-2.5 text-xs text-sky-300">
