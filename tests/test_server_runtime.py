@@ -1510,7 +1510,12 @@ class ServerRuntimeTests(unittest.TestCase):
             alert_id = conn.execute("SELECT id FROM security_alerts WHERE host_id='host1'").fetchone()[0]
             conn.execute(
                 "INSERT INTO security_alert_evidence(alert_id,action_id,captured_at,evidence_json) VALUES(?,?,?,?)",
-                (alert_id, 99, 110, json.dumps({"inbound_unique_ips": 8, "outbound_unique_ips": 2, "inbound_process_count": 1, "outbound_process_count": 1})),
+                (alert_id, 99, 110, json.dumps({
+                    "inbound_unique_ips": 8, "outbound_unique_ips": 2,
+                    "inbound_process_count": 1, "outbound_process_count": 1,
+                    "inbound_ips": [{"ip": "1.1.1.1", "country": "AU", "city": "Sydney", "isp": "Cloudflare", "inbound": 8}],
+                    "outbound_ips": [{"ip": "8.8.8.8", "country": "US", "city": "Mountain View", "isp": "Google", "outbound": 2}],
+                })),
             )
             conn.commit()
             conn.close()
@@ -1524,6 +1529,8 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(telegram.call_args_list[0].args[1], "sendMessage")
         self.assertEqual(telegram.call_args_list[1].args[1], "editMessageText")
         self.assertIn("自动深度取证", telegram.call_args_list[1].args[2]["text"])
+        self.assertIn("公网客户端：1.1.1.1(AU Sydney / Cloudflare, 8)", telegram.call_args_list[1].args[2]["text"])
+        self.assertIn("公网出站目标：8.8.8.8(US Mountain View / Google, 2)", telegram.call_args_list[1].args[2]["text"])
         recovery = telegram.call_args_list[2].args[2]
         self.assertEqual(recovery["message_id"], 77)
         self.assertIn("已恢复", recovery["text"])

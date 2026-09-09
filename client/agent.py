@@ -12,6 +12,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
 from urllib.parse import quote, urlparse
 
@@ -33,6 +34,7 @@ _net_counters: Dict[str, Dict[str, float]] = {}
 _cpu_counters: Dict[str, Dict[str, float]] = {}
 _warned_parse_paths = set()
 _geoip_country_cache: Dict[str, Tuple[str, float]] = {}
+_geoip_detail_cache: Dict[str, Tuple[Dict[str, str], float]] = {}
 _geoip_reader = None
 _geoip_reader_path = ""
 _incus_metrics_cache: Dict[str, object] = {"ts": 0.0, "text": "", "parsed": {}}
@@ -1067,6 +1069,74 @@ def _geoip_country_batch(ip_counts: Dict[str, int]) -> List[Dict[str, int | str]
         country_counter[country]["connections"] = int(country_counter[country]["connections"]) + int(cnt)
         country_counter[country]["ip_count"] = int(country_counter[country]["ip_count"]) + 1
     return sorted(country_counter.values(), key=lambda x: int(x["connections"]), reverse=True)
+
+
+def _geoip_detail_map(ips: List[str]) -> Dict[str, Dict[str, str]]:
+    """Resolve bounded public-IP location and ISP metadata for deep diagnostics."""
+    public_ips = list(dict.fromkeys(ip for ip in ips if _is_public_source_ip(ip)))[:100]
+    if not public_ips:
+        return {}
+    https_enabled = os.getenv("GEOIP_HTTPS_ENABLED", "true").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+    now = time.monotonic()
+    _, ttl, negative_ttl = _geoip_cache_limits()
+    result: Dict[str, Dict[str, str]] = {}
+    unresolved: List[str] = []
+    for ip in public_ips:
+        cached = _geoip_detail_cache.get(ip)
+        if cached and cached[1] > now:
+            result[ip] = dict(cached[0])
+        else:
+            _geoip_detail_cache.pop(ip, None)
+            unresolved.append(ip)
+
+    endpoint = os.getenv("GEOIP_DETAIL_ENDPOINT", "https://ipwho.is/{ip}").strip()
+    parsed = urlparse(endpoint.replace("{ip}", "1.1.1.1"))
+    lookup_enabled = (
+        "{ip}" in endpoint and parsed.scheme == "https" and bool(parsed.netloc)
+        and not parsed.username and not parsed.password
+    )
+
+    def lookup(ip: str) -> Tuple[str, Dict[str, str]]:
+        try:
+            response = requests.get(
+                endpoint.replace("{ip}", quote(ip, safe="")),
+                headers={"User-Agent": f"Narwhal-Monitor/{APP_VERSION}"},
+                timeout=6,
+            )
+            response.raise_for_status()
+            value = response.json()
+            if not isinstance(value, dict) or value.get("success") is False:
+                return ip, {}
+            connection = value.get("connection") if isinstance(value.get("connection"), dict) else {}
+            country = str(value.get("country_code") or value.get("countryCode") or "").upper()
+            return ip, {
+                "country": country if re.fullmatch(r"[A-Z]{2}", country) else "UN",
+                "region": str(value.get("region") or value.get("region_name") or "")[:120],
+                "city": str(value.get("city") or "")[:120],
+                "isp": str(connection.get("isp") or connection.get("org") or value.get("isp") or value.get("org") or "")[:160],
+                "asn": str(connection.get("asn") or connection.get("asn_number") or value.get("asn") or "")[:40],
+            }
+        except Exception:
+            return ip, {}
+
+    if https_enabled and lookup_enabled and unresolved:
+        with ThreadPoolExecutor(max_workers=min(8, len(unresolved))) as pool:
+            futures = [pool.submit(lookup, ip) for ip in unresolved]
+            for future in as_completed(futures):
+                ip, detail = future.result()
+                result[ip] = detail
+                _geoip_detail_cache[ip] = (dict(detail), now + (ttl if detail else negative_ttl))
+
+    fallback_countries = _geoip_country_map([ip for ip in public_ips if not result.get(ip)])
+    for ip in public_ips:
+        if not result.get(ip):
+            result[ip] = {"country": fallback_countries.get(ip, "UN"), "region": "", "city": "", "isp": "", "asn": ""}
+    max_entries, _, _ = _geoip_cache_limits()
+    while len(_geoip_detail_cache) > max_entries:
+        _geoip_detail_cache.pop(next(iter(_geoip_detail_cache)))
+    return result
 
 
 def _read_mem_usage_from_pid(pid: int) -> Tuple[int, float]:
@@ -4736,7 +4806,9 @@ def collect_container_deep_sample(
         candidates = original_ips if item.get("direction") == "inbound" and original_ips else [remote_ip]
         for ip in candidates:
             normalized = str(ip or "")
-            if not _is_trackable_ip(normalized):
+            # Bridge/proxy addresses such as 10.91.0.1 are implementation
+            # details, not an Internet client or an outbound Internet target.
+            if not _is_public_source_ip(normalized):
                 continue
             entry = ip_totals.setdefault(
                 normalized,
@@ -4754,9 +4826,10 @@ def collect_container_deep_sample(
         entry["processes"] = sorted(processes)[:20] if isinstance(processes, set) else []
         connection_ips.append(entry)
     connection_ips.sort(key=lambda item: int(item.get("connections") or 0), reverse=True)
-    country_by_ip = _geoip_country_map([str(item.get("ip") or "") for item in connection_ips])
+    detail_by_ip = _geoip_detail_map([str(item.get("ip") or "") for item in connection_ips])
     for entry in connection_ips:
-        entry["country"] = country_by_ip.get(str(entry.get("ip") or ""), "UN")
+        entry.update(detail_by_ip.get(str(entry.get("ip") or ""), {}))
+        entry.setdefault("country", "UN")
     inbound_ip_counts = {
         str(item.get("ip") or ""): int(item.get("inbound") or 0)
         for item in connection_ips if int(item.get("inbound") or 0) > 0
@@ -4765,6 +4838,8 @@ def collect_container_deep_sample(
         str(item.get("ip") or ""): int(item.get("outbound") or 0)
         for item in connection_ips if int(item.get("outbound") or 0) > 0
     }
+    inbound_ips = [item for item in connection_ips if int(item.get("inbound") or 0) > 0]
+    outbound_ips = [item for item in connection_ips if int(item.get("outbound") or 0) > 0]
     communication_processes = communication.get("communication_processes")
     communication_processes = communication_processes if isinstance(communication_processes, list) else []
     inbound_process_count = sum(
@@ -4793,6 +4868,8 @@ def collect_container_deep_sample(
         "outbound_process_count": outbound_process_count,
         "inbound_country_stats": _geoip_country_batch(inbound_ip_counts),
         "outbound_country_stats": _geoip_country_batch(outbound_ip_counts),
+        "inbound_ips": inbound_ips,
+        "outbound_ips": outbound_ips,
         "connection_ips": connection_ips[:100],
         "communication_processes": communication_processes,
         "communication_sockets": sockets,

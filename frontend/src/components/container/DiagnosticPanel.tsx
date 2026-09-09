@@ -40,6 +40,38 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   };
 
   const isSupportedRuntime = ['incus', 'podman'].includes(identity.runtime);
+  const inboundIps = sample?.inbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
+  const outboundIps = sample?.outbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.outbound || 0) > 0);
+
+  const renderIpGroup = (title: string, description: string, ips: typeof inboundIps, direction: 'inbound' | 'outbound') => (
+    <div>
+      <h4 className="text-xs font-bold text-slate-200 mb-1 flex items-center gap-1.5">
+        <Globe className={`h-3.5 w-3.5 ${direction === 'inbound' ? 'text-emerald-400' : 'text-sky-400'}`} />
+        <span>{title} ({ips.length})</span>
+      </h4>
+      <p className="mb-2 text-[11px] text-slate-500">{description}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto font-mono text-xs">
+        {ips.map((ip, idx) => (
+          <div key={`${direction}-${ip.ip}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+            <div className="flex items-center justify-between gap-2 font-bold text-slate-200">
+              <span className="break-all">{ip.ip}</span>
+              <span className="shrink-0 text-slate-400">{direction === 'inbound' ? ip.inbound : ip.outbound} conns</span>
+            </div>
+            <div className="mt-1 text-[11px] text-slate-400">
+              {[ip.country || 'UN', ip.region, ip.city].filter(Boolean).join(' · ')}
+            </div>
+            <div className="mt-0.5 break-words text-[11px] text-slate-500">
+              运营商：{ip.isp || '暂未识别'}{ip.asn ? ` · AS${ip.asn}` : ''}
+            </div>
+            <div className="mt-0.5 break-words text-[11px] text-slate-500">
+              关联进程：{ip.processes?.join('、') || 'unknown'}
+            </div>
+          </div>
+        ))}
+        {ips.length === 0 && <div className="text-[11px] text-slate-500">采样瞬间未发现可见的公网 IP。</div>}
+      </div>
+    </div>
+  );
 
   return (
     <div className="rounded-xl border border-sky-500/30 bg-gradient-to-br from-slate-900 via-slate-900/90 to-sky-950/30 p-4 shadow-sm">
@@ -166,28 +198,8 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             </div>
           )}
 
-          {/* Connection IPs Breakdown */}
-          {sample.connection_ips && sample.connection_ips.length > 0 && (
-            <div>
-              <h4 className="text-xs font-bold text-slate-200 mb-2 flex items-center gap-1.5">
-                <Globe className="h-3.5 w-3.5 text-emerald-400" />
-                <span>远端连接 IP 排查 ({sample.connection_ips.length})</span>
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto font-mono text-xs">
-                {sample.connection_ips.map((ip, idx) => (
-                  <div key={idx} className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-                    <div className="flex items-center justify-between font-bold text-slate-200">
-                      <span>{ip.ip}</span>
-                      <span className="text-slate-400">{ip.connections} conns</span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5 truncate">
-                      归属：{ip.processes?.join(', ') || 'unknown'}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          {renderIpGroup('接入容器的公网客户端', '通过监听端口或宿主机 NAT / Incus Proxy 还原的真实来源。', inboundIps, 'inbound')}
+          {renderIpGroup('容器主动访问的公网目标', '由容器内进程主动建立的公网连接；已排除网桥、代理和其他私网地址。', outboundIps, 'outbound')}
         </div>
       )}
     </div>

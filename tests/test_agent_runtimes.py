@@ -931,7 +931,10 @@ class SecurityTelemetryTests(unittest.TestCase):
              mock.patch.object(agent, "_collect_deep_process_snapshot", return_value={"available": True, "captured": 2, "items": []}), \
              mock.patch.object(agent, "_collect_socket_process_details", return_value=communication), \
              mock.patch.object(agent, "_enrich_communication_with_original_sources"), \
-             mock.patch.object(agent, "_geoip_country_map", return_value={"1.1.1.1": "AU", "8.8.8.8": "US"}), \
+             mock.patch.object(agent, "_geoip_detail_map", return_value={
+                 "1.1.1.1": {"country": "AU", "city": "Sydney", "isp": "Cloudflare", "asn": "13335"},
+                 "8.8.8.8": {"country": "US", "city": "Mountain View", "isp": "Google", "asn": "15169"},
+             }), \
              mock.patch.object(agent, "_geoip_country_batch", side_effect=lambda counts: [{"country": "AU" if "1.1.1.1" in counts else "US", "connections": 1, "ip_count": 1}]):
             result = agent.collect_container_deep_sample(
                 "node1", "incus", "incus", "default", 123,
@@ -941,6 +944,50 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(result["inbound_process_count"], 1)
         self.assertEqual(result["outbound_process_count"], 1)
         self.assertEqual({item["country"] for item in result["connection_ips"]}, {"AU", "US"})
+        self.assertEqual(result["inbound_ips"][0]["isp"], "Cloudflare")
+        self.assertEqual(result["outbound_ips"][0]["city"], "Mountain View")
+
+    def test_deep_sample_excludes_private_bridge_addresses(self):
+        communication = {
+            "communication_detail_available": True,
+            "communication_snapshot_count": 2,
+            "communication_snapshot_truncated": False,
+            "communication_processes": [{"pid": 20, "process": "sing-box", "inbound_connections": 1, "outbound_connections": 1}],
+            "communication_sockets": [
+                {"remote_ip": "10.91.0.1", "direction": "inbound", "process": "sing-box"},
+                {"remote_ip": "8.8.8.8", "direction": "outbound", "process": "sing-box"},
+            ],
+        }
+        with mock.patch.object(agent, "_read_net_stats_from_pid", return_value=(0, 0, 0, 0)), \
+             mock.patch.object(agent.time, "sleep"), \
+             mock.patch.object(agent, "_collect_deep_process_snapshot", return_value={"available": True, "captured": 1, "items": []}), \
+             mock.patch.object(agent, "_collect_socket_process_details", return_value=communication), \
+             mock.patch.object(agent, "_enrich_communication_with_original_sources"), \
+             mock.patch.object(agent, "_geoip_detail_map", return_value={"8.8.8.8": {"country": "US"}}), \
+             mock.patch.object(agent, "_geoip_country_batch", return_value=[]):
+            result = agent.collect_container_deep_sample(
+                "node1", "incus", "incus", "default", 123,
+                {"id": 8, "params": {}},
+                {"conn_count": 2, "security": {"process_count": 1, "listening_ports": [443]}},
+            )
+        self.assertEqual([item["ip"] for item in result["connection_ips"]], ["8.8.8.8"])
+        self.assertEqual(result["inbound_ips"], [])
+        self.assertEqual([item["ip"] for item in result["outbound_ips"]], ["8.8.8.8"])
+
+    def test_geoip_detail_lookup_returns_location_isp_and_asn(self):
+        response = mock.Mock()
+        response.json.return_value = {
+            "success": True, "country_code": "US", "region": "California", "city": "San Jose",
+            "connection": {"isp": "Google LLC", "asn": 15169},
+        }
+        agent._geoip_detail_cache.clear()
+        with mock.patch.object(agent.requests, "get", return_value=response) as get:
+            result = agent._geoip_detail_map(["8.8.8.8", "10.91.0.1"])
+        self.assertEqual(result["8.8.8.8"]["city"], "San Jose")
+        self.assertEqual(result["8.8.8.8"]["isp"], "Google LLC")
+        self.assertEqual(result["8.8.8.8"]["asn"], "15169")
+        self.assertNotIn("10.91.0.1", result)
+        self.assertEqual(get.call_count, 1)
 
     @unittest.skipUnless(os.path.isdir("/proc/self"), "Linux /proc is required")
     def test_deep_process_snapshot_falls_back_to_bounded_host_proc(self):

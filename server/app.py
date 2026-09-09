@@ -676,6 +676,7 @@ def queue_connection_alert_deep_samples(
             """
             SELECT id FROM security_actions
             WHERE alert_id=? AND action_type='request_deep_sample' AND created_at>=?
+              AND CAST(COALESCE(json_extract(params_json, '$.evidence_schema'), 0) AS INTEGER) >= 2
             ORDER BY id DESC LIMIT 1
             """,
             (alert_id, int(alert["first_seen"])),
@@ -692,7 +693,7 @@ def queue_connection_alert_deep_samples(
             (
                 alert_id, str(alert["host_id"]), str(alert["runtime"]),
                 str(alert["project"]), str(alert["container_name"]), "request_deep_sample",
-                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250}),
+                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 2}),
                 now, now,
             ),
         )
@@ -1141,16 +1142,24 @@ def _telegram_alert_status_card(
         outbound_ips = int(deep_evidence.get("outbound_unique_ips") or 0)
         inbound_processes = int(deep_evidence.get("inbound_process_count") or 0)
         outbound_processes = int(deep_evidence.get("outbound_process_count") or 0)
-        top_ips = deep_evidence.get("connection_ips") if isinstance(deep_evidence.get("connection_ips"), list) else []
-        top_text = "、".join(
-            f"{item.get('ip')}({item.get('country') or 'UN'},{int(item.get('connections') or 0)})"
-            for item in top_ips[:5] if isinstance(item, dict) and item.get("ip")
-        )
+        all_ips = deep_evidence.get("connection_ips") if isinstance(deep_evidence.get("connection_ips"), list) else []
+        inbound_items = deep_evidence.get("inbound_ips") if isinstance(deep_evidence.get("inbound_ips"), list) else [
+            item for item in all_ips if isinstance(item, dict) and int(item.get("inbound") or 0) > 0
+        ]
+        outbound_items = deep_evidence.get("outbound_ips") if isinstance(deep_evidence.get("outbound_ips"), list) else [
+            item for item in all_ips if isinstance(item, dict) and int(item.get("outbound") or 0) > 0
+        ]
+        def ip_summary(items: List[Dict[str, Any]], direction: str) -> str:
+            return "、".join(
+                f"{item.get('ip')}({item.get('country') or 'UN'} {item.get('city') or '-'} / {item.get('isp') or '未知运营商'}, {int(item.get(direction) or 0)})"
+                for item in items[:5] if isinstance(item, dict) and item.get("ip")
+            ) or "-"
         evidence_text = (
             f"\n<b>自动深度取证</b>\n"
             f"入站：{inbound_ips} IP / {inbound_processes} 进程\n"
             f"出站：{outbound_ips} IP / {outbound_processes} 进程\n"
-            f"主要 IP：{html.escape(top_text or '-')}\n"
+            f"公网客户端：{html.escape(ip_summary(inbound_items, 'inbound'))}\n"
+            f"公网出站目标：{html.escape(ip_summary(outbound_items, 'outbound'))}\n"
         )
     text = (
         f"<b>{heading}</b>\n"
@@ -1982,7 +1991,7 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
                 project,
                 container_name,
                 "request_deep_sample",
-                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250}),
+                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 2}),
                 str(getattr(request.state, "dashboard_user", "dashboard"))[:100],
                 now,
                 now,

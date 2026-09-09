@@ -120,14 +120,9 @@ export interface SecurityAlert {
     socket_snapshot_truncated?: boolean;
     inbound_country_stats?: { country?: string; connections?: number; ip_count?: number }[];
     outbound_country_stats?: { country?: string; connections?: number; ip_count?: number }[];
-    connection_ips?: {
-      ip?: string;
-      country?: string;
-      connections?: number;
-      inbound?: number;
-      outbound?: number;
-      processes?: string[];
-    }[];
+    inbound_ips?: DeepEvidenceIp[];
+    outbound_ips?: DeepEvidenceIp[];
+    connection_ips?: DeepEvidenceIp[];
     errors?: string[];
   } | null;
   occurrence_count?: number;
@@ -185,6 +180,19 @@ export interface HistoryPoint {
   agent_version?: string;
 }
 
+export interface DeepEvidenceIp {
+  ip?: string;
+  country?: string;
+  region?: string;
+  city?: string;
+  isp?: string;
+  asn?: string;
+  connections?: number;
+  inbound?: number;
+  outbound?: number;
+  processes?: string[];
+}
+
 export interface DiagnosticData {
   action?: {
     id: number;
@@ -215,13 +223,9 @@ export interface DiagnosticData {
       }[];
     };
     unique_connection_ips?: number;
-    connection_ips?: {
-      ip?: string;
-      connections?: number;
-      inbound?: number;
-      outbound?: number;
-      processes?: string[];
-    }[];
+    inbound_ips?: DeepEvidenceIp[];
+    outbound_ips?: DeepEvidenceIp[];
+    connection_ips?: DeepEvidenceIp[];
     connection_count?: number;
     communication_sockets?: {
       process?: string;

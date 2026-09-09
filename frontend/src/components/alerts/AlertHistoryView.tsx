@@ -301,24 +301,51 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                         出站 {alert.deep_evidence.outbound_unique_ips || 0} IP / {alert.deep_evidence.outbound_process_count || 0} 进程
                       </span>
                     </summary>
-                    <div className="mt-3 grid grid-cols-1 gap-2 border-t border-sky-900/50 pt-3 lg:grid-cols-2">
-                      {(alert.deep_evidence.connection_ips || []).slice(0, 100).map((entry, index) => (
+                    <div className="mt-3 border-t border-sky-900/50 pt-3">
+                      <h4 className="mb-2 text-xs font-semibold text-slate-200">接入容器的公网客户端</h4>
+                      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+                      {(alert.deep_evidence.inbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0)).slice(0, 100).map((entry, index) => (
                         <div key={`${entry.ip}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-[11px] text-slate-300">
                           <div className="flex items-center justify-between gap-2">
                             <code className="text-sky-300 break-all">{entry.ip || '-'}</code>
                             <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-400">{entry.country || 'UN'}</span>
                           </div>
                           <div className="mt-1 text-slate-400 tabular-nums">
-                            连接 {entry.connections || 0} · 入站 {entry.inbound || 0} · 出站 {entry.outbound || 0}
+                            接入连接 {entry.inbound || 0}
                           </div>
                           <div className="mt-1 break-words text-slate-500">
-                            进程：{(entry.processes || []).join('、') || 'unknown'}
+                            归属：{[entry.region, entry.city].filter(Boolean).join(' · ') || '暂未识别'} · 运营商：{entry.isp || '暂未识别'}{entry.asn ? ` · AS${entry.asn}` : ''}
+                          </div>
+                          <div className="mt-1 break-words text-slate-500">
+                            关联进程：{(entry.processes || []).join('、') || 'unknown'}
                           </div>
                         </div>
                       ))}
-                      {(alert.deep_evidence.connection_ips || []).length === 0 && (
+                      {(alert.deep_evidence.inbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0)).length === 0 && (
                         <div className="text-xs text-slate-500">采样瞬间未发现可见的公网连接 IP。</div>
                       )}
+                      </div>
+                    </div>
+                    <div className="mt-3 border-t border-sky-900/50 pt-3">
+                      <h4 className="mb-2 text-xs font-semibold text-slate-200">容器主动访问的公网目标</h4>
+                      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+                      {(alert.deep_evidence.outbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0)).slice(0, 100).map((entry, index) => (
+                        <div key={`${entry.ip}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-[11px] text-slate-300">
+                          <div className="flex items-center justify-between gap-2">
+                            <code className="text-sky-300 break-all">{entry.ip || '-'}</code>
+                            <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-400">{entry.country || 'UN'}</span>
+                          </div>
+                          <div className="mt-1 text-slate-400 tabular-nums">出站连接 {entry.outbound || 0}</div>
+                          <div className="mt-1 break-words text-slate-500">
+                            归属：{[entry.region, entry.city].filter(Boolean).join(' · ') || '暂未识别'} · 运营商：{entry.isp || '暂未识别'}{entry.asn ? ` · AS${entry.asn}` : ''}
+                          </div>
+                          <div className="mt-1 break-words text-slate-500">关联进程：{(entry.processes || []).join('、') || 'unknown'}</div>
+                        </div>
+                      ))}
+                      {(alert.deep_evidence.outbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0)).length === 0 && (
+                        <div className="text-xs text-slate-500">采样瞬间未发现容器主动访问的公网 IP。</div>
+                      )}
+                      </div>
                     </div>
                     {(alert.deep_evidence.errors || []).length > 0 && (
                       <p className="mt-2 text-[11px] text-amber-300">
