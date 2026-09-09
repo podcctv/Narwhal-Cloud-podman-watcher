@@ -927,10 +927,15 @@ def _telegram_send_view(bot: sqlite3.Row, update: Dict[str, Any], text: str, key
     callback = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
     message = callback.get("message") if callback and isinstance(callback.get("message"), dict) else None
     if message:
-        _telegram_api(str(bot["token"]), "editMessageText", {
-            "chat_id": str(message.get("chat", {}).get("id")), "message_id": int(message.get("message_id") or 0),
-            "text": text, "parse_mode": "HTML", "reply_markup": keyboard, "disable_web_page_preview": True,
-        })
+        try:
+            _telegram_api(str(bot["token"]), "editMessageText", {
+                "chat_id": str(message.get("chat", {}).get("id")), "message_id": int(message.get("message_id") or 0),
+                "text": text, "parse_mode": "HTML", "reply_markup": keyboard, "disable_web_page_preview": True,
+            })
+        except RuntimeError as exc:
+            # Refreshing an unchanged view is successful from the user's point of view.
+            if "message is not modified" not in str(exc).lower():
+                raise
     else:
         incoming = update.get("message") if isinstance(update.get("message"), dict) else {}
         _telegram_api(str(bot["token"]), "sendMessage", {

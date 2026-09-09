@@ -1431,6 +1431,19 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("确认操作", confirm_text)
         self.assertEqual(confirm_keyboard["inline_keyboard"][0][0]["callback_data"], f"n:x:{alert_id}:resolve:all:0")
 
+    def test_telegram_refresh_accepts_unchanged_message(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("ops", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "596532562", "critical", "secret", 1, 1),
+        )
+        bot = conn.execute("SELECT * FROM notification_bots").fetchone()
+        conn.commit()
+        conn.close()
+        update = {"callback_query": {"message": {"message_id": 2, "chat": {"id": 596532562}}}}
+        with mock.patch.object(server, "_telegram_api", side_effect=RuntimeError("Bad Request: message is not modified")):
+            server._telegram_send_view(bot, update, "unchanged", {"inline_keyboard": []})
+
 
 if __name__ == "__main__":
     unittest.main()
