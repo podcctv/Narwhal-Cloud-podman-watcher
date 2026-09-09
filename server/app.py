@@ -262,6 +262,19 @@ def init_db() -> None:
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS telegram_alert_messages (
+            bot_id INTEGER NOT NULL,
+            alert_id INTEGER NOT NULL,
+            chat_id TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            last_status TEXT NOT NULL DEFAULT 'active',
+            last_severity TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(bot_id, alert_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_telegram_alert_messages_updated
+            ON telegram_alert_messages(updated_at);
         """
     )
     cols = conn.execute("PRAGMA table_info(reports)").fetchall()
@@ -347,6 +360,9 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
         )
         conn.execute(
             "DELETE FROM security_alerts WHERE status='resolved' AND last_seen < ?", (cutoff,)
+        )
+        conn.execute(
+            "DELETE FROM telegram_alert_messages WHERE alert_id NOT IN (SELECT id FROM security_alerts)"
         )
         conn.execute("DELETE FROM host_security WHERE ts < ?", (cutoff,))
         conn.execute("DELETE FROM security_actions WHERE updated_at < ?", (cutoff,))
@@ -552,7 +568,9 @@ def process_security_alerts(
                 """
                 UPDATE security_alerts
                 SET severity=?, title=?, message=?, value=?, threshold=?, last_seen=?,
-                    occurrence_count=occurrence_count+1, status=?, details_json=?
+                    first_seen=CASE WHEN status IN ('resolved','remediated') THEN ? ELSE first_seen END,
+                    occurrence_count=CASE WHEN status IN ('resolved','remediated') THEN 1 ELSE occurrence_count+1 END,
+                    status=?, details_json=?
                 WHERE fingerprint=?
                 """,
                 (
@@ -561,6 +579,7 @@ def process_security_alerts(
                     normalized["message"],
                     normalized["value"],
                     normalized["threshold"],
+                    ts,
                     ts,
                     next_status,
                     json.dumps(raw_alert, ensure_ascii=False),
@@ -1020,42 +1039,111 @@ async def _telegram_polling_loop() -> None:
         await asyncio.sleep(3)
 
 
-def send_configured_bot_notifications(alert: Dict[str, Any]) -> None:
-    """Fan out a newly raised/escalated alert without making agent reporting fail."""
-    alert_id = int(alert.get("id") or 0)
-    if alert_id <= 0:
-        return
+def _telegram_duration_text(seconds: int) -> str:
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return "不足 1 分钟"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    hours, remaining = divmod(minutes, 60)
+    return f"{hours} 小时 {remaining} 分钟" if remaining else f"{hours} 小时"
+
+
+def _telegram_alert_status_card(alert: sqlite3.Row, now: int) -> tuple[str, Dict[str, Any]]:
+    status = str(alert["status"])
+    active = status == "active"
+    duration_end = now if active else int(alert["last_seen"])
+    duration = _telegram_duration_text(duration_end - int(alert["first_seen"]))
+    scope = "/".join(x for x in (str(alert["runtime"] or ""), str(alert["project"] or "")) if x)
+    container_label = f"{scope or '-'} {alert['container_name'] or '-'}"
+    if active:
+        heading = f"Narwhal {str(alert['severity']).upper()} 告警"
+        state_line = f"状态：<b>持续中</b>　持续：<b>{duration}</b>"
+    else:
+        state_labels = {
+            "resolved": "已恢复", "dismissed": "已忽略",
+            "suppressed": "已永久静默", "remediated": "已自动处置",
+        }
+        heading = f"Narwhal 告警{state_labels.get(status, '已结束')}"
+        state_line = f"状态：<b>{state_labels.get(status, '已结束')}</b>　持续：<b>{duration}</b>"
+    text = (
+        f"<b>{heading}</b>\n"
+        f"<b>{html.escape(str(alert['title'] or alert['alert_type'] or '-'))}</b>\n"
+        f"{state_line}\n"
+        f"主机：<code>{html.escape(str(alert['host_id'] or '-'))}</code>\n"
+        f"容器：<code>{html.escape(container_label)}</code>\n"
+        f"出现次数：{int(alert['occurrence_count'])}\n"
+        f"{html.escape(str(alert['message'] or ''))}"
+    )[:3900]
+    keyboard = {"inline_keyboard": [[
+        {"text": "查看并处理" if active else "查看历史", "callback_data": f"n:d:{alert['id']}:all:0"},
+        {"text": "活动告警", "callback_data": "n:l:all:0"},
+    ]]}
+    return text, keyboard
+
+
+def sync_configured_bot_alert_messages(host_id: str, observed_at: int) -> None:
+    """Create or refresh one Telegram status card per alert, retaining recovery history."""
+    now = int(time.time())
     conn = db()
     try:
         bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
+        alerts = conn.execute(
+            "SELECT * FROM security_alerts WHERE host_id=? AND last_seen=? AND status IN ('active','resolved','dismissed','suppressed','remediated')",
+            (host_id, observed_at),
+        ).fetchall()
+        for bot in bots:
+            bot_id = int(bot["id"])
+            for alert in alerts:
+                severity = str(alert["severity"])
+                mapping = conn.execute(
+                    "SELECT * FROM telegram_alert_messages WHERE bot_id=? AND alert_id=?",
+                    (bot_id, int(alert["id"])),
+                ).fetchone()
+                if mapping is None and str(alert["status"]) != "active":
+                    continue
+                if mapping is None and _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
+                    continue
+                text, keyboard = _telegram_alert_status_card(alert, now)
+                content_hash = hashlib.sha256((text + json.dumps(keyboard, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+                if mapping is not None:
+                    status_changed = str(mapping["last_status"]) != str(alert["status"])
+                    severity_changed = str(mapping["last_severity"]) != severity
+                    if not status_changed and not severity_changed and now - int(mapping["updated_at"]) < 60:
+                        continue
+                    if str(mapping["content_hash"]) == content_hash:
+                        continue
+                try:
+                    if mapping is None:
+                        result = _telegram_api(str(bot["token"]), "sendMessage", {
+                            "chat_id": str(bot["target"]), "text": text, "parse_mode": "HTML",
+                            "reply_markup": keyboard, "disable_web_page_preview": True,
+                        })
+                        message_id = int((result.get("result") or {}).get("message_id") or 0)
+                        if message_id <= 0:
+                            raise RuntimeError("Telegram did not return a message id")
+                        conn.execute(
+                            "INSERT INTO telegram_alert_messages(bot_id,alert_id,chat_id,message_id,last_status,last_severity,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                            (bot_id, int(alert["id"]), str(bot["target"]), message_id, str(alert["status"]), severity, content_hash, now),
+                        )
+                    else:
+                        _telegram_api(str(bot["token"]), "editMessageText", {
+                            "chat_id": str(mapping["chat_id"]), "message_id": int(mapping["message_id"]),
+                            "text": text, "parse_mode": "HTML", "reply_markup": keyboard,
+                            "disable_web_page_preview": True,
+                        })
+                        conn.execute(
+                            "UPDATE telegram_alert_messages SET last_status=?,last_severity=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
+                            (str(alert["status"]), severity, content_hash, now, bot_id, int(alert["id"])),
+                        )
+                    conn.commit()
+                    _record_bot_delivery(bot_id, True)
+                except Exception as exc:
+                    _record_bot_delivery(bot_id, False, str(exc))
+                    print(f"telegram dynamic alert {bot_id}/{alert['id']} failed: {exc}")
     finally:
         conn.close()
-    severity = str(alert.get("severity") or "warning")
-    for bot in bots:
-        if _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
-            continue
-        scope = "/".join(x for x in (str(alert.get("runtime") or ""), str(alert.get("project") or "")) if x)
-        container_label = f"{scope or '-'} {alert.get('container_name') or '-'}"
-        text = (
-            f"<b>Narwhal {severity.upper()} 告警</b>\n"
-            f"<b>{html.escape(str(alert.get('title') or alert.get('type') or '-'))}</b>\n"
-            f"主机：<code>{html.escape(str(alert.get('host_id') or '-'))}</code>\n"
-            f"容器：<code>{html.escape(container_label)}</code>\n"
-            f"{html.escape(str(alert.get('message') or ''))}"
-        )[:3900]
-        keyboard = {"inline_keyboard": [[
-            {"text": "查看并处理", "callback_data": f"n:d:{alert_id}:all:0"},
-            {"text": "活动告警", "callback_data": "n:l:all:0"},
-        ]]}
-        try:
-            _telegram_api(str(bot["token"]), "sendMessage", {
-                "chat_id": str(bot["target"]), "text": text, "parse_mode": "HTML",
-                "reply_markup": keyboard, "disable_web_page_preview": True,
-            })
-            _record_bot_delivery(int(bot["id"]), True)
-        except Exception as exc:
-            _record_bot_delivery(int(bot["id"]), False, str(exc))
-            print(f"telegram notification {bot['id']} failed: {exc}")
 
 
 @app.get("/api/v1/notifications/bots")
@@ -1488,7 +1576,7 @@ async def report(
 
     for alert in notifications:
         send_alert_webhook(alert)
-        send_configured_bot_notifications(alert)
+    sync_configured_bot_alert_messages(host_id, ts)
     return {
         "ok": True,
         "server_version": APP_VERSION,

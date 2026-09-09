@@ -1360,22 +1360,62 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.commit()
         conn.close()
         alert = {
-            "id": 7, "severity": "critical", "title": "CPU < 目标 & 告警",
+            "type": "container_connection_count", "severity": "critical", "title": "CPU < 目标 & 告警",
             "host_id": "host<&>", "runtime": "incus", "project": "default",
             "container_name": "node<&>", "message": "连接数 > 1500 & 持续",
         }
-        with mock.patch.object(server, "_telegram_api", return_value={"ok": True}) as telegram:
-            server.send_configured_bot_notifications(alert)
+        conn = server.db()
+        server.process_security_alerts(conn, "host<&>", 100, [alert])
+        conn.commit()
+        conn.close()
+        with mock.patch.object(server, "_telegram_api", return_value={"ok": True, "result": {"message_id": 44}}) as telegram:
+            server.sync_configured_bot_alert_messages("host<&>", 100)
         payload = telegram.call_args.args[2]
         self.assertIn("CPU &lt; 目标 &amp; 告警", payload["text"])
         self.assertIn("连接数 &gt; 1500 &amp; 持续", payload["text"])
         self.assertEqual(payload["reply_markup"]["inline_keyboard"][0][0]["text"], "查看并处理")
         conn = server.db()
         row = conn.execute("SELECT last_delivery_status, last_delivery_error, last_sent_at FROM notification_bots").fetchone()
+        mapping = conn.execute("SELECT message_id,last_status FROM telegram_alert_messages").fetchone()
         conn.close()
         self.assertEqual(row["last_delivery_status"], "succeeded")
         self.assertEqual(row["last_delivery_error"], "")
         self.assertGreater(row["last_sent_at"], 0)
+        self.assertEqual(mapping["message_id"], 44)
+        self.assertEqual(mapping["last_status"], "active")
+
+    def test_telegram_dynamic_alert_edits_original_message_when_recovered(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("ops", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "596532562", "warning", "secret", 1, 1),
+        )
+        alerts = [{
+            "type": "container_connection_count", "severity": "warning", "title": "高连接数问题",
+            "runtime": "incus", "project": "default", "container_name": "node1", "message": "连接数持续超限",
+        }]
+        server.process_security_alerts(conn, "host1", 100, alerts)
+        conn.commit()
+        conn.close()
+        with mock.patch.object(server, "_telegram_api", return_value={"ok": True, "result": {"message_id": 77}}) as telegram:
+            server.sync_configured_bot_alert_messages("host1", 100)
+            conn = server.db()
+            server.process_security_alerts(conn, "host1", 220, [])
+            conn.commit()
+            conn.close()
+            server.sync_configured_bot_alert_messages("host1", 220)
+        self.assertEqual(telegram.call_count, 2)
+        self.assertEqual(telegram.call_args_list[0].args[1], "sendMessage")
+        self.assertEqual(telegram.call_args_list[1].args[1], "editMessageText")
+        recovery = telegram.call_args_list[1].args[2]
+        self.assertEqual(recovery["message_id"], 77)
+        self.assertIn("已恢复", recovery["text"])
+        self.assertIn("持续：<b>2 分钟</b>", recovery["text"])
+        conn = server.db()
+        server.process_security_alerts(conn, "host1", 300, alerts)
+        row = conn.execute("SELECT first_seen,occurrence_count,status FROM security_alerts WHERE host_id='host1'").fetchone()
+        conn.close()
+        self.assertEqual(tuple(row), (300, 1, "active"))
 
     def test_telegram_socks5h_proxy_routes_through_socks_transport(self):
         original_proxy = server.TELEGRAM_PROXY_URL
