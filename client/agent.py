@@ -1031,11 +1031,11 @@ def _geoip_https_country_batch(ips: List[str]) -> Dict[str, str]:
     return result
 
 
-def _geoip_country_batch(ip_counts: Dict[str, int]) -> List[Dict[str, int | str]]:
-    if not ip_counts:
-        return []
+def _geoip_country_map(ips: List[str]) -> Dict[str, str]:
+    if not ips:
+        return {}
     now = time.monotonic()
-    countries = {ip: _geoip_cache_get(ip, now) for ip in ip_counts}
+    countries = {ip: _geoip_cache_get(ip, now) for ip in ips}
     unresolved = [ip for ip, country in countries.items() if not country]
     if unresolved:
         public_unresolved = [ip for ip in unresolved if _is_public_source_ip(ip)]
@@ -1051,6 +1051,13 @@ def _geoip_country_batch(ip_counts: Dict[str, int]) -> List[Dict[str, int | str]
             country = resolved.get(ip, "UN")
             _geoip_cache_put(ip, country, now)
             countries[ip] = country
+    return {ip: (countries.get(ip) or "UN") for ip in ips}
+
+
+def _geoip_country_batch(ip_counts: Dict[str, int]) -> List[Dict[str, int | str]]:
+    if not ip_counts:
+        return []
+    countries = _geoip_country_map(list(ip_counts))
 
     country_counter: Dict[str, Dict[str, int | str]] = {}
     for ip, cnt in ip_counts.items():
@@ -4747,6 +4754,27 @@ def collect_container_deep_sample(
         entry["processes"] = sorted(processes)[:20] if isinstance(processes, set) else []
         connection_ips.append(entry)
     connection_ips.sort(key=lambda item: int(item.get("connections") or 0), reverse=True)
+    country_by_ip = _geoip_country_map([str(item.get("ip") or "") for item in connection_ips])
+    for entry in connection_ips:
+        entry["country"] = country_by_ip.get(str(entry.get("ip") or ""), "UN")
+    inbound_ip_counts = {
+        str(item.get("ip") or ""): int(item.get("inbound") or 0)
+        for item in connection_ips if int(item.get("inbound") or 0) > 0
+    }
+    outbound_ip_counts = {
+        str(item.get("ip") or ""): int(item.get("outbound") or 0)
+        for item in connection_ips if int(item.get("outbound") or 0) > 0
+    }
+    communication_processes = communication.get("communication_processes")
+    communication_processes = communication_processes if isinstance(communication_processes, list) else []
+    inbound_process_count = sum(
+        1 for item in communication_processes
+        if isinstance(item, dict) and int(item.get("inbound_connections") or 0) > 0
+    )
+    outbound_process_count = sum(
+        1 for item in communication_processes
+        if isinstance(item, dict) and int(item.get("outbound_connections") or 0) > 0
+    )
 
     return {
         "action_id": int(action.get("id") or 0),
@@ -4759,10 +4787,14 @@ def collect_container_deep_sample(
         "processes": process_snapshot,
         "connection_count": max(int(base_report.get("conn_count") or 0), len(sockets)),
         "unique_connection_ips": len(connection_ips),
-        "inbound_unique_ips": int(security.get("inbound_unique_ips") or 0),
-        "outbound_unique_ips": int(security.get("outbound_unique_ips") or 0),
+        "inbound_unique_ips": max(int(security.get("inbound_unique_ips") or 0), len(inbound_ip_counts)),
+        "outbound_unique_ips": max(int(security.get("outbound_unique_ips") or 0), len(outbound_ip_counts)),
+        "inbound_process_count": inbound_process_count,
+        "outbound_process_count": outbound_process_count,
+        "inbound_country_stats": _geoip_country_batch(inbound_ip_counts),
+        "outbound_country_stats": _geoip_country_batch(outbound_ip_counts),
         "connection_ips": connection_ips[:100],
-        "communication_processes": communication.get("communication_processes", []),
+        "communication_processes": communication_processes,
         "communication_sockets": sockets,
         "socket_snapshot_count": int(communication.get("communication_snapshot_count") or 0),
         "socket_snapshot_truncated": bool(communication.get("communication_snapshot_truncated")),

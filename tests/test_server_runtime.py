@@ -126,6 +126,7 @@ class ServerRuntimeTests(unittest.TestCase):
                 "server_version": server.APP_VERSION,
                 "records": 1,
                 "new_alerts": 0,
+                "automatic_deep_samples_queued": 0,
                 "automatic_stops_queued": 0,
             },
         )
@@ -1214,6 +1215,47 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(status["sample"]["process_count"], 7)
         self.assertEqual(status["sample"]["agent_version"], "1.1.0")
 
+    def test_high_connection_alert_queues_and_preserves_automatic_evidence(self):
+        now = int(time.time())
+        alert = {
+            "type": "container_connection_count", "severity": "critical",
+            "title": "容器连接数严重过高", "message": "当前连接数 1600",
+            "runtime": "incus", "project": "default", "container_name": "node1",
+            "value": 1600, "threshold": 1500,
+        }
+        conn = server.db()
+        notifications = server.process_security_alerts(conn, "host1", now - 10, [alert])
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn, notifications, now - 10), 1)
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn, notifications, now - 10), 0)
+        action = conn.execute("SELECT * FROM security_actions WHERE alert_id>0").fetchone()
+        conn.commit()
+        conn.close()
+
+        sample = {
+            "action_id": int(action["id"]), "sampled_at": now,
+            "inbound_unique_ips": 12, "outbound_unique_ips": 4,
+            "inbound_process_count": 2, "outbound_process_count": 1,
+            "connection_ips": [{"ip": "1.1.1.1", "country": "AU", "connections": 8, "inbound": 8, "outbound": 0, "processes": ["proxy"]}],
+        }
+        payload = {
+            "host_id": "host1", "agent_version": "1.6.51", "timestamp": now,
+            "container_network": {"ipv4_ok": True, "ipv6_ok": True},
+            "containers": [{"name": "node1", "runtime": "incus", "project": "default", "deep_sample": sample}],
+            "security": {"alerts": [alert]},
+        }
+        body = json.dumps(payload).encode()
+        class ReportRequest:
+            async def body(self):
+                return body
+        timestamp = str(now)
+        signature = hmac.new(server.SHARED_SECRET.encode(), body + timestamp.encode(), hashlib.sha256).hexdigest()
+        asyncio.run(server.report(ReportRequest(), timestamp, signature))
+        history = json.loads(server.security_alert_history().body)
+        evidence = history["items"][0]["deep_evidence"]
+        self.assertEqual(evidence["inbound_unique_ips"], 12)
+        self.assertEqual(evidence["connection_ips"][0]["country"], "AU")
+        self.assertEqual(history["items"][0]["latest_action"]["status"], "succeeded")
+
     def test_container_detail_includes_on_demand_diagnostic_controls(self):
         html = server.container_detail_page()
         self.assertIn("请求深度上报", html)
@@ -1400,14 +1442,24 @@ class ServerRuntimeTests(unittest.TestCase):
         with mock.patch.object(server, "_telegram_api", return_value={"ok": True, "result": {"message_id": 77}}) as telegram:
             server.sync_configured_bot_alert_messages("host1", 100)
             conn = server.db()
+            alert_id = conn.execute("SELECT id FROM security_alerts WHERE host_id='host1'").fetchone()[0]
+            conn.execute(
+                "INSERT INTO security_alert_evidence(alert_id,action_id,captured_at,evidence_json) VALUES(?,?,?,?)",
+                (alert_id, 99, 110, json.dumps({"inbound_unique_ips": 8, "outbound_unique_ips": 2, "inbound_process_count": 1, "outbound_process_count": 1})),
+            )
+            conn.commit()
+            conn.close()
+            server.sync_configured_bot_alert_messages("host1", 100)
+            conn = server.db()
             server.process_security_alerts(conn, "host1", 220, [])
             conn.commit()
             conn.close()
             server.sync_configured_bot_alert_messages("host1", 220)
-        self.assertEqual(telegram.call_count, 2)
+        self.assertEqual(telegram.call_count, 3)
         self.assertEqual(telegram.call_args_list[0].args[1], "sendMessage")
         self.assertEqual(telegram.call_args_list[1].args[1], "editMessageText")
-        recovery = telegram.call_args_list[1].args[2]
+        self.assertIn("自动深度取证", telegram.call_args_list[1].args[2]["text"])
+        recovery = telegram.call_args_list[2].args[2]
         self.assertEqual(recovery["message_id"], 77)
         self.assertIn("已恢复", recovery["text"])
         self.assertIn("持续：<b>2 分钟</b>", recovery["text"])

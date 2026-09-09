@@ -7,6 +7,7 @@ import {
   Ban,
   Clock,
   ArrowRight,
+  Network,
 } from 'lucide-react';
 import { SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
@@ -287,6 +288,45 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                     出现 {alert.occurrence_count || 1} 次
                   </span>
                 </div>
+
+                {alert.deep_evidence && (
+                  <details className="rounded-xl border border-sky-900/70 bg-sky-950/20 p-3">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold text-sky-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded-md">
+                      <span className="flex items-center gap-2">
+                        <Network className="h-4 w-4 text-sky-400" />
+                        自动深度取证 · {alert.deep_evidence.captured_at_utc8 || '已采集'}
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-400">
+                        入站 {alert.deep_evidence.inbound_unique_ips || 0} IP / {alert.deep_evidence.inbound_process_count || 0} 进程　
+                        出站 {alert.deep_evidence.outbound_unique_ips || 0} IP / {alert.deep_evidence.outbound_process_count || 0} 进程
+                      </span>
+                    </summary>
+                    <div className="mt-3 grid grid-cols-1 gap-2 border-t border-sky-900/50 pt-3 lg:grid-cols-2">
+                      {(alert.deep_evidence.connection_ips || []).slice(0, 100).map((entry, index) => (
+                        <div key={`${entry.ip}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-[11px] text-slate-300">
+                          <div className="flex items-center justify-between gap-2">
+                            <code className="text-sky-300 break-all">{entry.ip || '-'}</code>
+                            <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-400">{entry.country || 'UN'}</span>
+                          </div>
+                          <div className="mt-1 text-slate-400 tabular-nums">
+                            连接 {entry.connections || 0} · 入站 {entry.inbound || 0} · 出站 {entry.outbound || 0}
+                          </div>
+                          <div className="mt-1 break-words text-slate-500">
+                            进程：{(entry.processes || []).join('、') || 'unknown'}
+                          </div>
+                        </div>
+                      ))}
+                      {(alert.deep_evidence.connection_ips || []).length === 0 && (
+                        <div className="text-xs text-slate-500">采样瞬间未发现可见的公网连接 IP。</div>
+                      )}
+                    </div>
+                    {(alert.deep_evidence.errors || []).length > 0 && (
+                      <p className="mt-2 text-[11px] text-amber-300">
+                        部分证据不可用：{alert.deep_evidence.errors?.join('；')}
+                      </p>
+                    )}
+                  </details>
+                )}
 
                 {/* Footnotes & Actions */}
                 <div className="flex items-center justify-between border-t border-slate-800/80 pt-3 text-xs">

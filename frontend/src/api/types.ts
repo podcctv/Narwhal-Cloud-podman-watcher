@@ -109,6 +109,27 @@ export interface SecurityAlert {
   value?: any;
   threshold?: any;
   details?: any;
+  deep_evidence?: {
+    captured_at_utc8?: string;
+    inbound_unique_ips?: number;
+    outbound_unique_ips?: number;
+    inbound_process_count?: number;
+    outbound_process_count?: number;
+    connection_count?: number;
+    socket_snapshot_count?: number;
+    socket_snapshot_truncated?: boolean;
+    inbound_country_stats?: { country?: string; connections?: number; ip_count?: number }[];
+    outbound_country_stats?: { country?: string; connections?: number; ip_count?: number }[];
+    connection_ips?: {
+      ip?: string;
+      country?: string;
+      connections?: number;
+      inbound?: number;
+      outbound?: number;
+      processes?: string[];
+    }[];
+    errors?: string[];
+  } | null;
   occurrence_count?: number;
   first_seen_utc8?: string;
   last_seen_utc8?: string;

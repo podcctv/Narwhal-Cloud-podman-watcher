@@ -912,6 +912,36 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertNotIn("user:pass", command)
         self.assertGreater(result["items"][0]["rss_bytes"], 0)
 
+    def test_deep_sample_counts_directional_processes_and_enriches_ip_country(self):
+        communication = {
+            "communication_detail_available": True,
+            "communication_snapshot_count": 2,
+            "communication_snapshot_truncated": False,
+            "communication_processes": [
+                {"pid": 10, "process": "server", "inbound_connections": 1, "outbound_connections": 0},
+                {"pid": 20, "process": "client", "inbound_connections": 0, "outbound_connections": 1},
+            ],
+            "communication_sockets": [
+                {"remote_ip": "1.1.1.1", "direction": "inbound", "process": "server"},
+                {"remote_ip": "8.8.8.8", "direction": "outbound", "process": "client"},
+            ],
+        }
+        with mock.patch.object(agent, "_read_net_stats_from_pid", return_value=(0, 0, 0, 0)), \
+             mock.patch.object(agent.time, "sleep"), \
+             mock.patch.object(agent, "_collect_deep_process_snapshot", return_value={"available": True, "captured": 2, "items": []}), \
+             mock.patch.object(agent, "_collect_socket_process_details", return_value=communication), \
+             mock.patch.object(agent, "_enrich_communication_with_original_sources"), \
+             mock.patch.object(agent, "_geoip_country_map", return_value={"1.1.1.1": "AU", "8.8.8.8": "US"}), \
+             mock.patch.object(agent, "_geoip_country_batch", side_effect=lambda counts: [{"country": "AU" if "1.1.1.1" in counts else "US", "connections": 1, "ip_count": 1}]):
+            result = agent.collect_container_deep_sample(
+                "node1", "incus", "incus", "default", 123,
+                {"id": 7, "params": {}},
+                {"conn_count": 2, "security": {"process_count": 2, "listening_ports": [443]}},
+            )
+        self.assertEqual(result["inbound_process_count"], 1)
+        self.assertEqual(result["outbound_process_count"], 1)
+        self.assertEqual({item["country"] for item in result["connection_ips"]}, {"AU", "US"})
+
     @unittest.skipUnless(os.path.isdir("/proc/self"), "Linux /proc is required")
     def test_deep_process_snapshot_falls_back_to_bounded_host_proc(self):
         result, private_items = agent._collect_host_proc_process_snapshot(os.getpid(), 20)

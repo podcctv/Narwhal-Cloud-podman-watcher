@@ -237,6 +237,15 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_security_alert_decisions_alert_created
             ON security_alert_decisions(alert_id, created_at);
+        CREATE TABLE IF NOT EXISTS security_alert_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER NOT NULL,
+            action_id INTEGER NOT NULL UNIQUE,
+            captured_at INTEGER NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_alert_evidence_alert_captured
+            ON security_alert_evidence(alert_id, captured_at DESC);
         CREATE TABLE IF NOT EXISTS connection_overloads (
             host_id TEXT NOT NULL,
             runtime TEXT NOT NULL,
@@ -269,6 +278,7 @@ def init_db() -> None:
             message_id INTEGER NOT NULL,
             last_status TEXT NOT NULL DEFAULT 'active',
             last_severity TEXT NOT NULL DEFAULT '',
+            last_evidence_action_id INTEGER NOT NULL DEFAULT 0,
             content_hash TEXT NOT NULL DEFAULT '',
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(bot_id, alert_id)
@@ -297,6 +307,11 @@ def init_db() -> None:
         conn.execute("ALTER TABLE notification_bots ADD COLUMN last_delivery_error TEXT NOT NULL DEFAULT ''")
     if "last_sent_at" not in bot_cols:
         conn.execute("ALTER TABLE notification_bots ADD COLUMN last_sent_at INTEGER NOT NULL DEFAULT 0")
+    telegram_message_cols = {
+        str(c["name"]) for c in conn.execute("PRAGMA table_info(telegram_alert_messages)").fetchall()
+    }
+    if "last_evidence_action_id" not in telegram_message_cols:
+        conn.execute("ALTER TABLE telegram_alert_messages ADD COLUMN last_evidence_action_id INTEGER NOT NULL DEFAULT 0")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_node_id_unique ON hosts(node_id) WHERE node_id <> ''")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reports_host_runtime_project_container_ts "
@@ -367,6 +382,7 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
         conn.execute("DELETE FROM host_security WHERE ts < ?", (cutoff,))
         conn.execute("DELETE FROM security_actions WHERE updated_at < ?", (cutoff,))
         conn.execute("DELETE FROM security_alert_decisions WHERE created_at < ?", (cutoff,))
+        conn.execute("DELETE FROM security_alert_evidence WHERE captured_at < ?", (cutoff,))
         inactive_host_cutoff = now - OFFLINE_HOST_PURGE_SECONDS
         inactive_hosts = [
             str(row["host_id"])
@@ -377,6 +393,11 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
         for host_id in inactive_hosts:
             conn.execute(
                 "DELETE FROM security_alert_decisions WHERE alert_id IN "
+                "(SELECT id FROM security_alerts WHERE host_id=?)",
+                (host_id,),
+            )
+            conn.execute(
+                "DELETE FROM security_alert_evidence WHERE alert_id IN "
                 "(SELECT id FROM security_alerts WHERE host_id=?)",
                 (host_id,),
             )
@@ -632,6 +653,46 @@ def process_security_alerts(
             (ts, host_id),
         )
     return notifications
+
+
+def queue_connection_alert_deep_samples(
+    conn: sqlite3.Connection, notifications: List[Dict[str, Any]], now: int
+) -> int:
+    """Queue one bounded evidence snapshot for each new high-connection incident."""
+    queued = 0
+    for notification in notifications:
+        if str(notification.get("type") or "") != "container_connection_count":
+            continue
+        alert_id = int(notification.get("id") or 0)
+        alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
+        if alert is None or str(alert["runtime"]) not in ("incus", "podman"):
+            continue
+        existing = conn.execute(
+            """
+            SELECT id FROM security_actions
+            WHERE alert_id=? AND action_type='request_deep_sample' AND created_at>=?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (alert_id, int(alert["first_seen"])),
+        ).fetchone()
+        if existing is not None:
+            continue
+        conn.execute(
+            """
+            INSERT INTO security_actions(
+                alert_id,host_id,runtime,project,container_name,action_type,params_json,
+                status,requested_by,created_at,updated_at
+            ) VALUES(?,?,?,?,?,? ,?,'queued','automatic:connection-alert',?,?)
+            """,
+            (
+                alert_id, str(alert["host_id"]), str(alert["runtime"]),
+                str(alert["project"]), str(alert["container_name"]), "request_deep_sample",
+                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250}),
+                now, now,
+            ),
+        )
+        queued += 1
+    return queued
 
 
 def send_alert_webhook(alert: Dict[str, Any]) -> None:
@@ -1050,7 +1111,9 @@ def _telegram_duration_text(seconds: int) -> str:
     return f"{hours} 小时 {remaining} 分钟" if remaining else f"{hours} 小时"
 
 
-def _telegram_alert_status_card(alert: sqlite3.Row, now: int) -> tuple[str, Dict[str, Any]]:
+def _telegram_alert_status_card(
+    alert: sqlite3.Row, now: int, deep_evidence: Dict[str, Any] | None = None
+) -> tuple[str, Dict[str, Any]]:
     status = str(alert["status"])
     active = status == "active"
     duration_end = now if active else int(alert["last_seen"])
@@ -1067,6 +1130,23 @@ def _telegram_alert_status_card(alert: sqlite3.Row, now: int) -> tuple[str, Dict
         }
         heading = f"Narwhal 告警{state_labels.get(status, '已结束')}"
         state_line = f"状态：<b>{state_labels.get(status, '已结束')}</b>　持续：<b>{duration}</b>"
+    evidence_text = ""
+    if isinstance(deep_evidence, dict):
+        inbound_ips = int(deep_evidence.get("inbound_unique_ips") or 0)
+        outbound_ips = int(deep_evidence.get("outbound_unique_ips") or 0)
+        inbound_processes = int(deep_evidence.get("inbound_process_count") or 0)
+        outbound_processes = int(deep_evidence.get("outbound_process_count") or 0)
+        top_ips = deep_evidence.get("connection_ips") if isinstance(deep_evidence.get("connection_ips"), list) else []
+        top_text = "、".join(
+            f"{item.get('ip')}({item.get('country') or 'UN'},{int(item.get('connections') or 0)})"
+            for item in top_ips[:5] if isinstance(item, dict) and item.get("ip")
+        )
+        evidence_text = (
+            f"\n<b>自动深度取证</b>\n"
+            f"入站：{inbound_ips} IP / {inbound_processes} 进程\n"
+            f"出站：{outbound_ips} IP / {outbound_processes} 进程\n"
+            f"主要 IP：{html.escape(top_text or '-')}\n"
+        )
     text = (
         f"<b>{heading}</b>\n"
         f"<b>{html.escape(str(alert['title'] or alert['alert_type'] or '-'))}</b>\n"
@@ -1074,6 +1154,7 @@ def _telegram_alert_status_card(alert: sqlite3.Row, now: int) -> tuple[str, Dict
         f"主机：<code>{html.escape(str(alert['host_id'] or '-'))}</code>\n"
         f"容器：<code>{html.escape(container_label)}</code>\n"
         f"出现次数：{int(alert['occurrence_count'])}\n"
+        f"{evidence_text}"
         f"{html.escape(str(alert['message'] or ''))}"
     )[:3900]
     keyboard = {"inline_keyboard": [[
@@ -1105,12 +1186,19 @@ def sync_configured_bot_alert_messages(host_id: str, observed_at: int) -> None:
                     continue
                 if mapping is None and _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
                     continue
-                text, keyboard = _telegram_alert_status_card(alert, now)
+                evidence_row = conn.execute(
+                    "SELECT action_id,evidence_json FROM security_alert_evidence WHERE alert_id=? ORDER BY captured_at DESC,id DESC LIMIT 1",
+                    (int(alert["id"]),),
+                ).fetchone()
+                deep_evidence = _alert_details(evidence_row["evidence_json"]) if evidence_row is not None else None
+                evidence_action_id = int(evidence_row["action_id"]) if evidence_row is not None else 0
+                text, keyboard = _telegram_alert_status_card(alert, now, deep_evidence)
                 content_hash = hashlib.sha256((text + json.dumps(keyboard, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
                 if mapping is not None:
                     status_changed = str(mapping["last_status"]) != str(alert["status"])
                     severity_changed = str(mapping["last_severity"]) != severity
-                    if not status_changed and not severity_changed and now - int(mapping["updated_at"]) < 60:
+                    evidence_changed = int(mapping["last_evidence_action_id"]) != evidence_action_id
+                    if not status_changed and not severity_changed and not evidence_changed and now - int(mapping["updated_at"]) < 60:
                         continue
                     if str(mapping["content_hash"]) == content_hash:
                         continue
@@ -1124,8 +1212,8 @@ def sync_configured_bot_alert_messages(host_id: str, observed_at: int) -> None:
                         if message_id <= 0:
                             raise RuntimeError("Telegram did not return a message id")
                         conn.execute(
-                            "INSERT INTO telegram_alert_messages(bot_id,alert_id,chat_id,message_id,last_status,last_severity,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                            (bot_id, int(alert["id"]), str(bot["target"]), message_id, str(alert["status"]), severity, content_hash, now),
+                            "INSERT INTO telegram_alert_messages(bot_id,alert_id,chat_id,message_id,last_status,last_severity,last_evidence_action_id,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                            (bot_id, int(alert["id"]), str(bot["target"]), message_id, str(alert["status"]), severity, evidence_action_id, content_hash, now),
                         )
                     else:
                         _telegram_api(str(bot["token"]), "editMessageText", {
@@ -1134,8 +1222,8 @@ def sync_configured_bot_alert_messages(host_id: str, observed_at: int) -> None:
                             "disable_web_page_preview": True,
                         })
                         conn.execute(
-                            "UPDATE telegram_alert_messages SET last_status=?,last_severity=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
-                            (str(alert["status"]), severity, content_hash, now, bot_id, int(alert["id"])),
+                            "UPDATE telegram_alert_messages SET last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
+                            (str(alert["status"]), severity, evidence_action_id, content_hash, now, bot_id, int(alert["id"])),
                         )
                     conn.commit()
                     _record_bot_delivery(bot_id, True)
@@ -1391,6 +1479,7 @@ _latest_cache_time = 0.0
 
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
+    conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
     for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads"):
         conn.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
@@ -1504,6 +1593,7 @@ async def report(
     conn = db()
     notifications: List[Dict[str, Any]] = []
     automatic_stops_queued = 0
+    automatic_deep_samples_queued = 0
     try:
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config)
         for c in containers:
@@ -1548,7 +1638,7 @@ async def report(
                         """
                         UPDATE security_actions
                         SET status='succeeded', result_message='deep sample received', updated_at=?
-                        WHERE id=? AND alert_id=0 AND action_type='request_deep_sample'
+                        WHERE id=? AND action_type='request_deep_sample'
                           AND host_id=? AND runtime=? AND project=? AND container_name=?
                           AND status IN ('queued','dispatched')
                         """,
@@ -1561,11 +1651,29 @@ async def report(
                             str(c.get("name") or "")[:200],
                         ),
                     )
+                    evidence_action = conn.execute(
+                        "SELECT alert_id FROM security_actions WHERE id=? AND action_type='request_deep_sample'",
+                        (deep_action_id,),
+                    ).fetchone()
+                    if evidence_action is not None and int(evidence_action["alert_id"]) > 0:
+                        conn.execute(
+                            """
+                            INSERT INTO security_alert_evidence(alert_id,action_id,captured_at,evidence_json)
+                            VALUES(?,?,?,?)
+                            ON CONFLICT(action_id) DO UPDATE SET
+                                captured_at=excluded.captured_at,evidence_json=excluded.evidence_json
+                            """,
+                            (
+                                int(evidence_action["alert_id"]), deep_action_id, ts,
+                                json.dumps(deep_sample, ensure_ascii=False),
+                            ),
+                        )
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
         security = data.get("security")
         if isinstance(security, dict):
             security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
             notifications = process_security_alerts(conn, host_id, ts, security_alerts)
+            automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, notifications, ts)
             conn.execute(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
                 (host_id, ts, json.dumps(security, ensure_ascii=False)),
@@ -1582,6 +1690,7 @@ async def report(
         "server_version": APP_VERSION,
         "records": len(containers),
         "new_alerts": len(notifications),
+        "automatic_deep_samples_queued": automatic_deep_samples_queued,
         "automatic_stops_queued": automatic_stops_queued,
     }
 
@@ -1928,6 +2037,15 @@ def _security_alert_item(conn: sqlite3.Connection, row: sqlite3.Row) -> Dict[str
         "SELECT * FROM security_alert_decisions WHERE alert_id=? ORDER BY id DESC LIMIT 1",
         (row["id"],),
     ).fetchone()
+    evidence_row = conn.execute(
+        "SELECT captured_at,evidence_json FROM security_alert_evidence WHERE alert_id=? ORDER BY captured_at DESC,id DESC LIMIT 1",
+        (row["id"],),
+    ).fetchone()
+    deep_evidence = None
+    if evidence_row is not None:
+        deep_evidence = _alert_details(evidence_row["evidence_json"])
+        deep_evidence["captured_at"] = int(evidence_row["captured_at"])
+        deep_evidence["captured_at_utc8"] = format_utc8(int(evidence_row["captured_at"]))
     return {
         "id": int(row["id"]),
         "host_id": row["host_id"],
@@ -1947,6 +2065,7 @@ def _security_alert_item(conn: sqlite3.Connection, row: sqlite3.Row) -> Dict[str
         "occurrence_count": int(row["occurrence_count"]),
         "status": row["status"],
         "details": _alert_action_evidence(row),
+        "deep_evidence": deep_evidence,
         "latest_action": _action_item(latest_action) if latest_action is not None else None,
         "latest_decision": (
             _decision_item(latest_decision) if latest_decision is not None else None
