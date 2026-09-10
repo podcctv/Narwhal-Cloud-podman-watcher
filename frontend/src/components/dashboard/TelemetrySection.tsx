@@ -32,7 +32,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         </div>
       </div>
 
-      <div className="w-full overflow-x-auto">
+      <div className="hidden lg:block">
         <table className="min-w-[1530px] w-full table-auto text-left text-xs text-slate-300">
           <thead className="border-b border-slate-800 bg-slate-950/70 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
             <tr>
@@ -122,6 +122,19 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             })}
           </tbody>
         </table>
+      </div>
+      <div className="space-y-3 p-3 lg:hidden">
+        {telemetry.map((t) => {
+          const curRx = fmtNetSpeed(t.rx_bps);
+          const curTx = fmtNetSpeed(t.tx_bps);
+          const synAlert = t.syn_recv > 50;
+          return <article key={t.host_id} className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="flex items-start justify-between gap-3"><div className="min-w-0"><h3 className="truncate font-mono text-sm font-semibold text-slate-100">{t.host_id}</h3><p className="mt-1 text-xs text-slate-400 tabular-nums">采样：{t.timestamp_iso_utc8 || '-'}</p></div>{synAlert && <span className="rounded-full border border-rose-500/40 bg-rose-950/70 px-2 py-1 text-[11px] font-semibold text-rose-200">SYN {fmtNumber(t.syn_recv, 0)}</span>}</div>
+            <div className="mt-3 grid grid-cols-2 gap-2 font-mono text-xs tabular-nums"><div className="rounded-lg bg-emerald-950/40 p-2 text-emerald-300">下行<br/><b>{curRx.mbps}</b><span className="text-emerald-400/70"> Mbps</span></div><div className="rounded-lg bg-sky-950/40 p-2 text-sky-300">上行<br/><b>{curTx.mbps}</b><span className="text-sky-400/70"> Mbps</span></div></div>
+            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs text-slate-400"><span>最高连接 <b className="float-right tabular-nums text-amber-300">{fmtNumber(t.today_peak_conn_count, 0)}</b></span><span>最高入站 IP <b className="float-right tabular-nums text-rose-300">{fmtNumber(t.today_peak_inbound_ips, 0)}</b></span><span>HTTP <b className="float-right tabular-nums text-slate-200">{fmtNumber(t.http_rps, 1)} rps</b></span><span>单 IP <b className="float-right tabular-nums text-slate-200">{fmtNumber(t.top_ip_rps, 1)} rps</b></span></div>
+            <div className="mt-4 flex gap-2"><button type="button" onClick={() => setEditing(t)} className="min-h-11 flex-1 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 text-xs font-medium text-sky-300">配置</button><button type="button" onClick={() => setDeleting(t)} className="min-h-11 flex-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 text-xs font-medium text-rose-300">删除</button></div>
+          </article>;
+        })}
       </div>
       {editing && <HostConfigDialog host={editing} busy={busy} onClose={() => setEditing(null)} onSave={async (config) => {
         setBusy(true); try { await api.updateHostConfig(editing.host_id, config); onToast('success', '配置已下发，将在节点下次轮询时生效。'); setEditing(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '配置下发失败'); } finally { setBusy(false); }

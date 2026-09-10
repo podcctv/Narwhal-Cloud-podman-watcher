@@ -143,12 +143,13 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(latest_body["server_version"], server.APP_VERSION)
         self.assertEqual(latest_body["items"][0]["agent_version"], "1.0.0")
 
-    def test_telemetry_view_exposes_cc_ddos_signals_without_fixed_column_overlap(self):
+    def test_telemetry_view_exposes_cc_ddos_signals_with_mobile_cards(self):
         telemetry = (ROOT / "frontend" / "src" / "components" / "dashboard" / "TelemetrySection.tsx").read_text(
             encoding="utf-8"
         )
         client = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
-        self.assertIn("overflow-x-auto", telemetry)
+        self.assertNotIn("overflow-x-auto", telemetry)
+        self.assertIn("lg:hidden", telemetry)
         self.assertIn("min-w-[1530px]", telemetry)
         self.assertNotIn(">访问日志</th>", telemetry)
         self.assertNotIn("table-fixed", telemetry)
