@@ -18,6 +18,7 @@ import { StatusBadge } from '../common/StatusBadge';
 import { ResourceChart } from './ResourceChart';
 import { NetworkChart } from './NetworkChart';
 import { DiagnosticPanel } from './DiagnosticPanel';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 
 interface ContainerDrawerProps {
   identity: ContainerIdentity | null;
@@ -36,6 +37,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [diagnostic, setDiagnostic] = useState<DiagnosticData | null>(null);
   const [isDrawerActionLoading, setIsDrawerActionLoading] = useState(false);
+  const [pendingDecision, setPendingDecision] = useState<'deny' | 'allow_silent' | 'resolve' | null>(null);
 
   const handleDrawerDisposition = async (
     decision: 'deny' | 'allow_silent' | 'resolve'
@@ -131,9 +133,14 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
   const socks = sec.socks_proxy;
   const pairing = sec.panel_pairing;
+  const confirmationCopy = pendingDecision === 'deny'
+    ? { title: '确认定向处置？', description: `仅处理 ${identity.container_name} 中已识别的违规进程、服务或配置，不会停止容器。`, confirmLabel: '确认处置', tone: 'danger' as const }
+    : pendingDecision === 'allow_silent'
+    ? { title: '确认放行策略？', description: '当前风险会被持续放行且不再提醒；可在告警历史中撤销。', confirmLabel: '确认放行', tone: 'primary' as const }
+    : { title: '确认标记为已解决？', description: '活动告警将转入历史记录；再次检测到风险时仍会重新告警。', confirmLabel: '标记已解决', tone: 'primary' as const };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden">
+    <div className="fixed inset-0 z-50 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="container-drawer-title">
       {/* Backdrop */}
       <div
         onClick={onClose}
@@ -151,7 +158,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <h2 className="text-base font-bold text-slate-100 truncate">
+                  <h2 id="container-drawer-title" className="text-base font-bold text-slate-100 truncate">
                     {identity.container_name}
                   </h2>
                   <StatusBadge
@@ -183,7 +190,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-100 transition-colors"
+                aria-label="关闭容器详情"
+                className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-400"
                 title="关闭抽屉 (Esc)"
               >
                 <X className="h-5 w-5" />
@@ -312,7 +320,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     <button
                       type="button"
                       disabled={isDrawerActionLoading}
-                      onClick={() => handleDrawerDisposition('deny')}
+                      onClick={() => setPendingDecision('deny')}
                       className="flex items-center gap-1.5 rounded-lg border border-rose-500/60 bg-rose-950/90 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900 transition-all disabled:opacity-50 shadow-sm"
                     >
                       <Ban className="h-3.5 w-3.5" />
@@ -321,7 +329,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     <button
                       type="button"
                       disabled={isDrawerActionLoading}
-                      onClick={() => handleDrawerDisposition('allow_silent')}
+                      onClick={() => setPendingDecision('allow_silent')}
                       className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/90 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
                     >
                       <Check className="h-3.5 w-3.5 text-emerald-400" />
@@ -330,7 +338,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     <button
                       type="button"
                       disabled={isDrawerActionLoading}
-                      onClick={() => handleDrawerDisposition('resolve')}
+                      onClick={() => setPendingDecision('resolve')}
                       className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-900/60 transition-all disabled:opacity-50"
                     >
                       <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
@@ -380,6 +388,18 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           </div>
         </div>
       </div>
+      <ConfirmDialog
+        open={Boolean(pendingDecision)}
+        {...confirmationCopy}
+        isSubmitting={isDrawerActionLoading}
+        onCancel={() => setPendingDecision(null)}
+        onConfirm={async () => {
+          if (!pendingDecision) return;
+          const decision = pendingDecision;
+          await handleDrawerDisposition(decision);
+          setPendingDecision(null);
+        }}
+      />
     </div>
   );
 };

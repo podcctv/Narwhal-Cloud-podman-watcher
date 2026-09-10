@@ -31,7 +31,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
 }) => {
   return (
     <header className="sticky top-0 z-30 mb-6 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-3 sm:px-6">
+      <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:px-6 xl:flex-row xl:items-center xl:justify-between">
         {/* Brand & Title */}
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-sky-500/40 bg-sky-950/60 shadow-inner">
@@ -53,11 +53,12 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
         </div>
 
         {/* Navigation Tabs */}
-        <nav className="flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1">
+        <nav aria-label="主导航" className="grid w-full grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1 sm:flex sm:w-auto sm:items-center">
           <button
             type="button"
             onClick={() => onSelectTab('dashboard')}
-            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
+            aria-current={activeTab === 'dashboard' ? 'page' : undefined}
+            className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
               activeTab === 'dashboard'
                 ? 'bg-sky-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
@@ -66,14 +67,15 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
             <LayoutDashboard className="h-3.5 w-3.5" />
             <span>总览看板</span>
           </button>
-          <button type="button" onClick={() => onSelectTab('notifications')} className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${activeTab === 'notifications' ? 'bg-sky-500 text-slate-950 shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}>
+          <button type="button" onClick={() => onSelectTab('notifications')} aria-current={activeTab === 'notifications' ? 'page' : undefined} className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${activeTab === 'notifications' ? 'bg-sky-500 text-slate-950 shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}>
             <Bell className="h-3.5 w-3.5" /><span>推送设置</span>
           </button>
 
           <button
             type="button"
             onClick={() => onSelectTab('alerts')}
-            className={`relative flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
+            aria-current={activeTab === 'alerts' ? 'page' : undefined}
+            className={`relative min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
               activeTab === 'alerts'
                 ? 'bg-sky-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
@@ -97,7 +99,8 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           <button
             type="button"
             onClick={() => onSelectTab('stats')}
-            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
+            aria-current={activeTab === 'stats' ? 'page' : undefined}
+            className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
               activeTab === 'stats'
                 ? 'bg-sky-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
@@ -109,12 +112,12 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
         </nav>
 
         {/* Search & Timer Tools */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center justify-between gap-2.5 xl:justify-end">
           {/* Global Search Button */}
           <button
             type="button"
             onClick={onOpenSearch}
-            className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-400 hover:border-slate-700 hover:text-slate-200 transition-all shadow-sm"
+            className="min-h-11 flex flex-1 items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-400 xl:flex-none"
           >
             <Search className="h-3.5 w-3.5" />
             <span className="hidden md:inline">全局检索...</span>

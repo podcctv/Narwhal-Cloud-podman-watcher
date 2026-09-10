@@ -14,6 +14,12 @@ body {
   overflow-x: hidden;
 }
 
+/* Keyboard focus is intentionally visible across all interactive controls. */
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid #7dd3fc;
+  outline-offset: 2px;
+}
+
 /* Tabular figures for telemetry numbers */
 .tabular-nums {
   font-variant-numeric: tabular-nums;
@@ -48,7 +54,6 @@ body {
 .card-hover-glow:hover {
   border-color: #38bdf8;
   box-shadow: 0 4px 20px -2px rgba(14, 165, 233, 0.15);
-  transform: translateY(-1px);
 }
 
 /* Pulse dot animation */
@@ -68,4 +73,13 @@ body {
 }
 .animate-ping-slow {
   animation: ping-slow 2.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

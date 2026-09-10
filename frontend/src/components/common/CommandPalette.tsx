@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Server, Box, AlertTriangle, BarChart3, X, ArrowRight } from 'lucide-react';
+import { Search, Server, Box, AlertTriangle, BarChart3, Bell, X, ArrowRight } from 'lucide-react';
 import { ContainerItem, ContainerIdentity } from '../../api/types';
 
 interface CommandPaletteProps {
@@ -7,7 +7,7 @@ interface CommandPaletteProps {
   onClose: () => void;
   containers: ContainerItem[];
   onSelectContainer: (id: ContainerIdentity) => void;
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats') => void;
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'notifications') => void;
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -18,12 +18,14 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onSelectTab,
 }) => {
   const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen) {
       setTimeout(() => inputRef.current?.focus(), 50);
       setQuery('');
+      setActiveIndex(0);
     }
   }, [isOpen]);
 
@@ -41,6 +43,44 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     );
   }).slice(0, 15);
 
+  const quickActions = !q ? [
+    { id: 'dashboard', label: '总览看板', hint: 'Overview', icon: Server, color: 'text-sky-400', run: () => onSelectTab('dashboard') },
+    { id: 'alerts', label: '安全告警历史', hint: 'Security Alerts', icon: AlertTriangle, color: 'text-amber-400', run: () => onSelectTab('alerts') },
+    { id: 'stats', label: '统计分析与排行榜', hint: 'Telemetry & Stats', icon: BarChart3, color: 'text-emerald-400', run: () => onSelectTab('stats') },
+    { id: 'notifications', label: '推送设置', hint: 'Notifications', icon: Bell, color: 'text-sky-300', run: () => onSelectTab('notifications') },
+  ] : [];
+  const resultCount = quickActions.length + filteredContainers.length;
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [query]);
+
+  const activate = (index: number) => {
+    if (index < quickActions.length) {
+      quickActions[index].run();
+      onClose();
+      return;
+    }
+    const container = filteredContainers[index - quickActions.length];
+    if (!container) return;
+    onSelectContainer({ host_id: container.host_id, runtime: container.runtime, project: container.project, container_name: container.container_name });
+    onClose();
+  };
+
+  const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!resultCount) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setActiveIndex((value) => (value + 1) % resultCount);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActiveIndex((value) => (value - 1 + resultCount) % resultCount);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      activate(activeIndex);
+    }
+  };
+
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
@@ -53,6 +93,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onInputKeyDown}
             placeholder="搜索节点、容器名称、运行时或快捷指令... (Esc 退出)"
             className="flex-1 bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-none"
           />
@@ -73,48 +114,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
               <div className="px-3 py-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                 快捷功能
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  onSelectTab('dashboard');
-                  onClose();
-                }}
-                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm text-slate-200 hover:bg-slate-800/80 transition-colors"
-              >
-                <div className="flex items-center gap-2.5">
-                  <Server className="h-4 w-4 text-sky-400" />
-                  <span>总览看板 (Overview)</span>
-                </div>
-                <ArrowRight className="h-3.5 w-3.5 text-slate-500" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onSelectTab('alerts');
-                  onClose();
-                }}
-                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm text-slate-200 hover:bg-slate-800/80 transition-colors"
-              >
-                <div className="flex items-center gap-2.5">
-                  <AlertTriangle className="h-4 w-4 text-amber-400" />
-                  <span>安全告警历史 (Security Alerts)</span>
-                </div>
-                <ArrowRight className="h-3.5 w-3.5 text-slate-500" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onSelectTab('stats');
-                  onClose();
-                }}
-                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm text-slate-200 hover:bg-slate-800/80 transition-colors"
-              >
-                <div className="flex items-center gap-2.5">
-                  <BarChart3 className="h-4 w-4 text-emerald-400" />
-                  <span>统计分析与排行榜 (Telemetry & Stats)</span>
-                </div>
-                <ArrowRight className="h-3.5 w-3.5 text-slate-500" />
-              </button>
+              {quickActions.map((action, index) => {
+                const Icon = action.icon;
+                return <button key={action.id} type="button" onMouseEnter={() => setActiveIndex(index)} onClick={() => activate(index)} className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm text-slate-200 transition-colors ${activeIndex === index ? 'bg-slate-800/90' : 'hover:bg-slate-800/80'}`}>
+                  <div className="flex items-center gap-2.5"><Icon className={`h-4 w-4 ${action.color}`} /><span>{action.label} <span className="text-slate-500">({action.hint})</span></span></div><ArrowRight className="h-3.5 w-3.5 text-slate-500" />
+                </button>;
+              })}
             </div>
           )}
 
@@ -128,20 +133,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 未找到匹配的容器
               </div>
             ) : (
-              filteredContainers.map((c) => (
+              filteredContainers.map((c, index) => (
                 <button
                   key={`${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
                   type="button"
-                  onClick={() => {
-                    onSelectContainer({
-                      host_id: c.host_id,
-                      runtime: c.runtime,
-                      project: c.project,
-                      container_name: c.container_name,
-                    });
-                    onClose();
-                  }}
-                  className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm text-slate-200 hover:bg-slate-800/80 transition-colors group"
+                  onMouseEnter={() => setActiveIndex(quickActions.length + index)}
+                  onClick={() => activate(quickActions.length + index)}
+                  className={`group flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm text-slate-200 transition-colors ${activeIndex === quickActions.length + index ? 'bg-slate-800/90' : 'hover:bg-slate-800/80'}`}
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <Box className="h-4 w-4 text-sky-400 shrink-0" />

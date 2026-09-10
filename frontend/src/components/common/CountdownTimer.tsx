@@ -74,7 +74,8 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
           type="button"
           onClick={onTogglePause}
           title={isPaused ? '恢复自动刷新' : '暂停自动刷新'}
-          className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors focus:outline-none focus:ring-1 focus:ring-sky-400"
+          aria-label={isPaused ? '恢复自动刷新' : '暂停自动刷新'}
+          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-400"
         >
           {isPaused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
         </button>
@@ -83,7 +84,8 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
           onClick={onRefreshNow}
           disabled={isRefreshing}
           title="立即手动刷新"
-          className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-sky-300 transition-colors focus:outline-none focus:ring-1 focus:ring-sky-400 disabled:opacity-50"
+          aria-label="立即手动刷新"
+          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
         >
           <RotateCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin text-sky-400' : ''}`} />
         </button>

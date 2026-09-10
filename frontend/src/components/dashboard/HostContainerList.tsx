@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, SecurityAlert } from '../../api/types';
 import { StatusBadge } from '../common/StatusBadge';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 import { api, fmtBytes, fmtMbps } from '../../api/client';
 
 interface HostContainerListProps {
@@ -129,6 +130,10 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   onRefresh,
 }) => {
   const [submittingKey, setSubmittingKey] = useState<string | null>(null);
+  const [pendingDisposition, setPendingDisposition] = useState<{
+    target: ContainerIdentity;
+    decision: 'deny' | 'allow_silent';
+  } | null>(null);
 
   const handleContainerDisposition = async (
     target: ContainerIdentity,
@@ -185,6 +190,10 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   const collapseAll = () => {
     setExpandedHosts({});
   };
+
+  const pendingCopy = pendingDisposition?.decision === 'deny'
+    ? { title: '确认定向处置？', description: `将仅处理 ${pendingDisposition.target.container_name} 中已识别的违规进程、服务或配置，不会停止容器。`, confirmLabel: '确认处置', tone: 'danger' as const }
+    : { title: '确认放行策略？', description: pendingDisposition ? `${pendingDisposition.target.container_name} 的当前风险将被持续放行且不再提醒；可从告警历史撤销。` : '', confirmLabel: '确认放行', tone: 'primary' as const };
 
   if (hostIds.length === 0) {
     return (
@@ -260,9 +269,12 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
             }`}
           >
             {/* Host Accordion Bar */}
-            <div
+            <button
+              type="button"
               onClick={() => toggleHost(hostId)}
-              className="flex items-center justify-between p-4 cursor-pointer hover:bg-slate-800/40 select-none transition-colors border-b border-transparent data-[expanded=true]:border-slate-800"
+              aria-expanded={isExpanded}
+              aria-controls={`host-containers-${hostId}`}
+              className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-800/40 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sky-400 data-[expanded=true]:border-b data-[expanded=true]:border-slate-800"
               data-expanded={isExpanded}
             >
               <div className="flex items-center gap-3">
@@ -313,11 +325,11 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                   }`}
                 />
               </div>
-            </div>
+            </button>
 
             {/* Container Grid */}
             {isExpanded && (
-              <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5 bg-slate-950/40">
+              <div id={`host-containers-${hostId}`} className="grid grid-cols-1 gap-4 bg-slate-950/40 p-4 md:grid-cols-2 lg:grid-cols-3">
                 {sortedContainers.map((c) => {
                   const risk = evaluateContainerRisk(c, activeAlerts);
                   const isStale = c.alerts?.stale;
@@ -528,15 +540,10 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                               disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleContainerDisposition(
-                                  {
-                                    host_id: c.host_id,
-                                    runtime: c.runtime,
-                                    project: c.project,
-                                    container_name: c.container_name,
-                                  },
-                                  'deny'
-                                );
+                                setPendingDisposition({
+                                  target: { host_id: c.host_id, runtime: c.runtime, project: c.project, container_name: c.container_name },
+                                  decision: 'deny',
+                                });
                               }}
                               className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all disabled:opacity-50 shadow-sm"
                               title="定向处置违规进程或停止非合规服务"
@@ -554,15 +561,10 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                               disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleContainerDisposition(
-                                  {
-                                    host_id: c.host_id,
-                                    runtime: c.runtime,
-                                    project: c.project,
-                                    container_name: c.container_name,
-                                  },
-                                  'allow_silent'
-                                );
+                                setPendingDisposition({
+                                  target: { host_id: c.host_id, runtime: c.runtime, project: c.project, container_name: c.container_name },
+                                  decision: 'allow_silent',
+                                });
                               }}
                               className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
                               title="添加放行策略不再告警"
@@ -614,6 +616,18 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
           </div>
         );
       })}
+      <ConfirmDialog
+        open={Boolean(pendingDisposition)}
+        {...pendingCopy}
+        isSubmitting={pendingDisposition ? submittingKey === `${pendingDisposition.target.host_id}-${pendingDisposition.target.runtime}-${pendingDisposition.target.project || ''}-${pendingDisposition.target.container_name}` : false}
+        onCancel={() => setPendingDisposition(null)}
+        onConfirm={async () => {
+          if (!pendingDisposition) return;
+          const disposition = pendingDisposition;
+          await handleContainerDisposition(disposition.target, disposition.decision);
+          setPendingDisposition(null);
+        }}
+      />
     </section>
   );
 };

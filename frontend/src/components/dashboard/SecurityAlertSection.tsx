@@ -12,6 +12,7 @@ import {
 import { SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 
 interface SecurityAlertSectionProps {
   alerts: SecurityAlert[];
@@ -27,6 +28,10 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   onToast,
 }) => {
   const [submittingId, setSubmittingId] = useState<number | null>(null);
+  const [pendingDecision, setPendingDecision] = useState<{
+    id: number;
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve';
+  } | null>(null);
 
   const handleDecision = async (
     alertId: number,
@@ -50,6 +55,14 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
       setSubmittingId(null);
     }
   };
+
+  const confirmationCopy = pendingDecision?.decision === 'deny'
+    ? { title: '确认执行定向处置？', description: '仅处理本告警已识别的进程、服务或配置；不会停止整个容器。节点将在下一轮上报时执行并回传结果。', confirmLabel: '确认定向处置', tone: 'danger' as const }
+    : pendingDecision?.decision === 'allow_silent'
+    ? { title: '确认建立放行策略？', description: '该告警对象将被持续放行且不再提醒。你可在告警历史中随时撤销该策略。', confirmLabel: '确认放行', tone: 'primary' as const }
+    : pendingDecision?.decision === 'resolve'
+    ? { title: '确认标记为已解决？', description: '该告警将从活动列表移入历史记录；后续再次检测到同类风险时仍会重新告警。', confirmLabel: '标记已解决', tone: 'primary' as const }
+    : { title: '确认本次忽略？', description: '仅隐藏当前活动告警。风险仍会被持续采集，并在状态变化后再次提示。', confirmLabel: '本次忽略', tone: 'primary' as const };
 
   if (alerts.length === 0) {
     return (
@@ -177,7 +190,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 {canRemediate && <button
                   type="button"
                   disabled={isProcessing}
-                  onClick={() => handleDecision(alert.id, 'deny')}
+                  onClick={() => setPendingDecision({ id: alert.id, decision: 'deny' })}
                   className="flex items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all disabled:opacity-50"
                   title="定向清理恶意进程或停止非合规服务（不停止整个容器）"
                 >
@@ -194,7 +207,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 <button
                   type="button"
                   disabled={isProcessing}
-                  onClick={() => handleDecision(alert.id, 'allow_silent')}
+                  onClick={() => setPendingDecision({ id: alert.id, decision: 'allow_silent' })}
                   className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
                   title="放行并永久不再提醒此项告警"
                 >
@@ -206,7 +219,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   <button
                     type="button"
                     disabled={isProcessing}
-                    onClick={() => handleDecision(alert.id, 'resolve')}
+                    onClick={() => setPendingDecision({ id: alert.id, decision: 'resolve' })}
                     className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/60 transition-all disabled:opacity-50"
                     title="手动确认问题已处理，直接消除此告警"
                   >
@@ -218,7 +231,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 <button
                   type="button"
                   disabled={isProcessing}
-                  onClick={() => handleDecision(alert.id, 'dismiss_once')}
+                  onClick={() => setPendingDecision({ id: alert.id, decision: 'dismiss_once' })}
                   className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
                   title="本次临时忽略"
                 >
@@ -230,6 +243,18 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           );
         })}
       </div>
+      <ConfirmDialog
+        open={Boolean(pendingDecision)}
+        {...confirmationCopy}
+        isSubmitting={pendingDecision ? submittingId === pendingDecision.id : false}
+        onCancel={() => setPendingDecision(null)}
+        onConfirm={async () => {
+          if (!pendingDecision) return;
+          const decision = pendingDecision;
+          await handleDecision(decision.id, decision.decision);
+          setPendingDecision(null);
+        }}
+      />
     </section>
   );
 };
