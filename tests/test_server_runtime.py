@@ -1502,6 +1502,37 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(mapping["message_id"], 44)
         self.assertEqual(mapping["last_status"], "active")
 
+    def test_telegram_sends_automatic_remediation_result_when_no_active_alert_remains(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("ops", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "-1001", "warning", "secret", 1, 1),
+        )
+        alert = {
+            "type": "malicious_process", "severity": "critical", "title": "XMRig 已识别",
+            "runtime": "incus", "project": "default", "container_name": "node1",
+            "message": "发现可疑挖矿进程", "automatic_remediation": {
+                "attempted": True, "succeeded": True,
+                "message": "killed_processes=1 removed_services=0 removed_configs=0",
+            },
+        }
+        notifications = server.process_security_alerts(conn, "host1", 100, [alert])
+        conn.commit()
+        conn.close()
+        self.assertEqual(notifications, [])
+
+        with mock.patch.object(server, "_telegram_api", return_value={"ok": True, "result": {"message_id": 45}}) as telegram:
+            server.sync_configured_bot_alert_messages("host1", 100)
+        payload = telegram.call_args.args[2]
+        self.assertEqual(telegram.call_args.args[1], "sendMessage")
+        self.assertIn("告警已自动处置", payload["text"])
+        self.assertIn("自动处置</b>：<b>已完成", payload["text"])
+        self.assertIn("killed_processes=1", payload["text"])
+        conn = server.db()
+        mapping = conn.execute("SELECT last_status FROM telegram_alert_messages").fetchone()
+        conn.close()
+        self.assertEqual(mapping["last_status"], "remediated")
+
     def test_telegram_dynamic_alert_edits_original_message_when_recovered(self):
         conn = server.db()
         conn.execute(

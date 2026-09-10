@@ -1136,6 +1136,20 @@ def _telegram_alert_status_card(
         }
         heading = f"Narwhal 告警{state_labels.get(status, '已结束')}"
         state_line = f"状态：<b>{state_labels.get(status, '已结束')}</b>　持续：<b>{duration}</b>"
+    details = _alert_details(alert["details_json"])
+    automatic_remediation = details.get("automatic_remediation") if isinstance(details, dict) else None
+    remediation_text = ""
+    if isinstance(automatic_remediation, dict) and automatic_remediation.get("attempted") is True:
+        remediation_result = str(
+            automatic_remediation.get("message")
+            or automatic_remediation.get("result_message")
+            or "节点已执行定向处置"
+        )[:800]
+        remediation_text = (
+            "\n<b>自动处置</b>："
+            f"<b>{'已完成' if automatic_remediation.get('succeeded') is True else '未完成'}</b>\n"
+            f"{html.escape(remediation_result)}\n"
+        )
     evidence_text = ""
     if isinstance(deep_evidence, dict):
         inbound_ips = int(deep_evidence.get("inbound_unique_ips") or 0)
@@ -1182,6 +1196,7 @@ def _telegram_alert_status_card(
         f"主机：<code>{html.escape(str(alert['host_id'] or '-'))}</code>\n"
         f"容器：<code>{html.escape(container_label)}</code>\n"
         f"出现次数：{int(alert['occurrence_count'])}\n"
+        f"{remediation_text}"
         f"{evidence_text}"
         f"{html.escape(str(alert['message'] or ''))}"
     )[:3900]
@@ -1210,7 +1225,12 @@ def sync_configured_bot_alert_messages(host_id: str, observed_at: int) -> None:
                     "SELECT * FROM telegram_alert_messages WHERE bot_id=? AND alert_id=?",
                     (bot_id, int(alert["id"])),
                 ).fetchone()
-                if mapping is None and str(alert["status"]) != "active":
+                # Automatic remediation is itself a security event worth
+                # notifying: the operator needs the evidence and result even
+                # though the alert is no longer active. Suppressed/dismissed
+                # alerts are explicit user choices; a never-sent recovery is
+                # only historical state and must not create a new message.
+                if mapping is None and str(alert["status"]) in ("suppressed", "dismissed", "resolved"):
                     continue
                 if mapping is None and _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
                     continue
