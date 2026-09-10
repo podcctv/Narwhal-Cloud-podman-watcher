@@ -128,7 +128,7 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
           <Cpu className="h-4 w-4 text-sky-400" />
           <h3 className="text-sm font-bold text-slate-100">Top 10：平均 CPU 消耗</h3>
         </div>
-        <div className="overflow-x-auto">
+        <div className="hidden md:block">
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold text-slate-400 uppercase">
               <tr>
@@ -173,6 +173,14 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
             </tbody>
           </table>
         </div>
+        <div className="space-y-2 p-3 md:hidden">
+          {(stats?.cpu_top || []).map((row, idx) => (
+            <button key={idx} type="button" onClick={() => onSelectContainer({ host_id: row.host_id, runtime: row.runtime, project: row.project, container_name: row.container_name })} className="w-full rounded-xl border border-slate-800 bg-slate-950/50 p-3 text-left focus:outline-none focus:ring-2 focus:ring-sky-400">
+              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-slate-400">{row.host_id} · {row.runtime}</p><p className="mt-1 truncate text-sm font-semibold text-slate-100">{row.container_name}</p></div><ArrowRight className="mt-1 h-4 w-4 shrink-0 text-sky-400" /></div>
+              <div className="mt-3 grid grid-cols-2 gap-2 font-mono text-xs tabular-nums"><span className="rounded-lg bg-sky-950/50 p-2 text-sky-300">平均 <b>{fmtNumber(row.avg_cpu)}%</b></span><span className="rounded-lg bg-slate-800 p-2 text-slate-300">峰值 <b>{fmtNumber(row.max_cpu)}%</b></span></div>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Top 10 Traffic Table */}
@@ -181,7 +189,7 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
           <Network className="h-4 w-4 text-emerald-400" />
           <h3 className="text-sm font-bold text-slate-100">Top 10：累计流量消耗</h3>
         </div>
-        <div className="overflow-x-auto">
+        <div className="hidden md:block">
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold text-slate-400 uppercase">
               <tr>
@@ -229,6 +237,14 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="space-y-2 p-3 md:hidden">
+          {(stats?.traffic_top || []).map((row, idx) => (
+            <button key={idx} type="button" onClick={() => onSelectContainer({ host_id: row.host_id, runtime: row.runtime, project: row.project, container_name: row.container_name })} className="w-full rounded-xl border border-slate-800 bg-slate-950/50 p-3 text-left focus:outline-none focus:ring-2 focus:ring-sky-400">
+              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-slate-400">{row.host_id} · {row.runtime}</p><p className="mt-1 truncate text-sm font-semibold text-slate-100">{row.container_name}</p></div><ArrowRight className="mt-1 h-4 w-4 shrink-0 text-sky-400" /></div>
+              <div className="mt-3 grid grid-cols-3 gap-2 font-mono text-[11px] tabular-nums"><span className="rounded-lg bg-emerald-950/50 p-2 text-emerald-300">RX<br/><b>{fmtBytes(row.total_rx_bytes)}</b></span><span className="rounded-lg bg-sky-950/50 p-2 text-sky-300">TX<br/><b>{fmtBytes(row.total_tx_bytes)}</b></span><span className="rounded-lg bg-slate-800 p-2 text-slate-200">合计<br/><b>{fmtBytes(row.total_bytes)}</b></span></div>
+            </button>
+          ))}
         </div>
       </div>
     </div>
