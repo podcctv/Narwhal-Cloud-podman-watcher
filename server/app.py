@@ -1149,17 +1149,31 @@ def _telegram_alert_status_card(
         outbound_items = deep_evidence.get("outbound_ips") if isinstance(deep_evidence.get("outbound_ips"), list) else [
             item for item in all_ips if isinstance(item, dict) and int(item.get("outbound") or 0) > 0
         ]
-        def ip_summary(items: List[Dict[str, Any]], direction: str) -> str:
-            return "、".join(
-                f"{item.get('ip')}({item.get('country') or 'UN'} {item.get('city') or '-'} / {item.get('isp') or '未知运营商'}, {int(item.get(direction) or 0)})"
-                for item in items[:5] if isinstance(item, dict) and item.get("ip")
-            ) or "-"
+        def ip_lines(items: List[Dict[str, Any]], direction: str) -> str:
+            """Telegram-friendly, one public endpoint per line, safely HTML escaped."""
+            label = "入站连接" if direction == "inbound" else "出站连接"
+            lines: List[str] = []
+            for item in items[:10]:
+                if not isinstance(item, dict) or not item.get("ip"):
+                    continue
+                location_parts = [
+                    str(item.get(key) or "").strip()
+                    for key in ("country", "region", "city")
+                    if str(item.get(key) or "").strip()
+                ]
+                location = " ".join(location_parts) or "未知归属地"
+                carrier = str(item.get("isp") or item.get("org") or item.get("asn") or "未知运营商")
+                count = int(item.get(direction) or item.get("connections") or 0)
+                lines.append(
+                    f"<code>{html.escape(str(item['ip']))}</code> ｜归属地：{html.escape(location)} ｜运营商：{html.escape(carrier)} ｜{label}：{count}"
+                )
+            return "\n".join(lines) or "-"
         evidence_text = (
             f"\n<b>自动深度取证</b>\n"
             f"入站：{inbound_ips} IP / {inbound_processes} 进程\n"
             f"出站：{outbound_ips} IP / {outbound_processes} 进程\n"
-            f"公网客户端：{html.escape(ip_summary(inbound_items, 'inbound'))}\n"
-            f"公网出站目标：{html.escape(ip_summary(outbound_items, 'outbound'))}\n"
+            f"<b>入站 IP（每行一个）</b>\n{ip_lines(inbound_items, 'inbound')}\n"
+            f"<b>出站 IP（每行一个）</b>\n{ip_lines(outbound_items, 'outbound')}\n"
         )
     text = (
         f"<b>{heading}</b>\n"

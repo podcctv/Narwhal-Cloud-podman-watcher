@@ -1529,8 +1529,10 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(telegram.call_args_list[0].args[1], "sendMessage")
         self.assertEqual(telegram.call_args_list[1].args[1], "editMessageText")
         self.assertIn("自动深度取证", telegram.call_args_list[1].args[2]["text"])
-        self.assertIn("公网客户端：1.1.1.1(AU Sydney / Cloudflare, 8)", telegram.call_args_list[1].args[2]["text"])
-        self.assertIn("公网出站目标：8.8.8.8(US Mountain View / Google, 2)", telegram.call_args_list[1].args[2]["text"])
+        evidence_text = telegram.call_args_list[1].args[2]["text"]
+        self.assertIn("入站 IP（每行一个）", evidence_text)
+        self.assertIn("<code>1.1.1.1</code> ｜归属地：AU Sydney ｜运营商：Cloudflare ｜入站连接：8", evidence_text)
+        self.assertIn("<code>8.8.8.8</code> ｜归属地：US Mountain View ｜运营商：Google ｜出站连接：2", evidence_text)
         recovery = telegram.call_args_list[2].args[2]
         self.assertEqual(recovery["message_id"], 77)
         self.assertIn("已恢复", recovery["text"])
