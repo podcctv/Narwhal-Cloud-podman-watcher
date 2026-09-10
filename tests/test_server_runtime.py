@@ -159,6 +159,16 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("http_4xx_rate", client)
         self.assertIn("top_ip_requests_per_second", client)
 
+    def test_dashboard_does_not_present_stale_container_samples_as_live_risk(self):
+        app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        cards = (ROOT / "frontend" / "src" / "components" / "dashboard" / "HostContainerList.tsx").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("api.getLatest(false)", app)
+        self.assertIn("!container.alerts?.stale", app)
+        self.assertIn("if (container.alerts?.stale)", cards)
+        self.assertIn("containers.filter((c) => !c.alerts?.stale)", cards)
+
     def test_stable_node_id_merges_a_renamed_host(self):
         now = int(time.time())
 

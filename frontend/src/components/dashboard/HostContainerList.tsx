@@ -42,6 +42,11 @@ export function evaluateContainerRisk(
   container: ContainerItem,
   activeAlerts: SecurityAlert[] = []
 ): ContainerRiskInfo {
+  // A stale sample is historical diagnostic data, never live risk evidence.
+  // It must not keep a deleted/offline container actionable on the dashboard.
+  if (container.alerts?.stale) {
+    return { hasRisk: false, isCritical: false, isWarning: false, reasons: [], sortWeight: 0 };
+  }
   const reasons: string[] = [];
   let sortWeight = 0;
 
@@ -159,7 +164,9 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
   // Group by host_id
   const hostMap: Record<string, ContainerItem[]> = {};
-  containers.forEach((c) => {
+  // The overview intentionally excludes the short stale diagnostic window.
+  // Stale data remains available only from the container-detail/history paths.
+  containers.filter((c) => !c.alerts?.stale).forEach((c) => {
     if (!hostMap[c.host_id]) hostMap[c.host_id] = [];
     hostMap[c.host_id].push(c);
   });

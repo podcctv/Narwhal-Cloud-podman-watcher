@@ -64,14 +64,27 @@ export const App: React.FC = () => {
     setIsRefreshing(true);
     try {
       const [latestRes, alertsRes, secStatusRes] = await Promise.all([
-        api.getLatest(true),
+        // The dashboard is a live operations view. Stale samples are retained
+        // server-side for history/detail diagnostics, not shown as live risk.
+        api.getLatest(false),
         api.getActiveAlerts(),
         api.getSecurityStatus(),
       ]);
 
-      setContainers(latestRes.items || []);
+      const liveContainers = latestRes.items || [];
+      setContainers(liveContainers);
       setServerVersion(latestRes.server_version || 'dev');
-      setActiveAlerts(alertsRes.items || alertsRes.alerts || []);
+      const alertItems = alertsRes.items || alertsRes.alerts || [];
+      // Host-level alerts have no container identity and remain visible. A
+      // container-specific alert is actionable only while that container has
+      // a current live sample in this dashboard response.
+      setActiveAlerts(alertItems.filter((alert) => !alert.container_name || liveContainers.some((container) =>
+        container.host_id === alert.host_id &&
+        container.runtime === alert.runtime &&
+        (container.project || '') === (alert.project || '') &&
+        container.container_name === alert.container_name &&
+        !container.alerts?.stale
+      )));
       setSecurityStatus(secStatusRes.items || []);
 
       const now = new Date();
