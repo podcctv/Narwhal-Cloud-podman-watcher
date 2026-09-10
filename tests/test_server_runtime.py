@@ -149,8 +149,8 @@ class ServerRuntimeTests(unittest.TestCase):
         )
         client = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         self.assertNotIn("overflow-x-auto", telemetry)
-        self.assertIn("lg:hidden", telemetry)
-        self.assertIn("min-w-[1530px]", telemetry)
+        self.assertNotIn("min-w-[1530px]", telemetry)
+        self.assertIn("auto-fit", telemetry)
         self.assertNotIn(">访问日志</th>", telemetry)
         self.assertNotIn("table-fixed", telemetry)
         self.assertIn("DDoS 网络信号", telemetry)
@@ -158,6 +158,33 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("SYN_RECV", telemetry)
         self.assertIn("http_4xx_rate", client)
         self.assertIn("top_ip_requests_per_second", client)
+
+    def test_telemetry_distinguishes_single_container_and_aggregate_peaks(self):
+        now = int(time.time())
+        self._insert("docker", 1, timestamp=now)
+        self._insert("incus", 1, timestamp=now)
+        conn = sqlite3.connect(server.DB_PATH)
+        conn.execute("UPDATE reports SET conn_count=400, payload_json=?", (
+            json.dumps({"security": {"inbound_unique_ips": 7, "outbound_unique_ips": 12}}),
+        ))
+        conn.execute("INSERT INTO hosts(host_id, last_seen) VALUES('host', ?)", (now,))
+        payload = {"enabled": True, "alerts": [{"type": "docker_container_notice", "severity": "info"}],
+                   "access_sources": [{"label": "incus/panel", "readable_files": 1, "requests": 120}],
+                   "thresholds": {"connections_warning": 600}}
+        conn.execute("INSERT INTO host_security(host_id,ts,payload_json) VALUES(?,?,?)", ("host", now - 1000, json.dumps(payload)))
+        conn.commit()
+        conn.close()
+        server._security_status_cache = None
+        item = json.loads(server.security_status().body)["items"][0]
+        self.assertEqual(item["today_peak_conn_count"], 800)
+        self.assertEqual(item["today_peak_container_conn_count"], 400)
+        self.assertEqual(item["today_peak_inbound_ips"], 7)
+        self.assertEqual(item["today_peak_outbound_ips"], 12)
+        self.assertEqual(item["access_sources"][0]["requests"], 120)
+        self.assertEqual(item["sample_alerts"][0]["severity"], "info")
+        self.assertEqual(item["thresholds"]["connections_warning"], 600)
+        self.assertEqual(item["timestamp"], now - 1000)
+        self.assertTrue(item["stale"])
 
     def test_dashboard_does_not_present_stale_container_samples_as_live_risk(self):
         app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")

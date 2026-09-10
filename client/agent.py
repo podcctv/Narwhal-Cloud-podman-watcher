@@ -1861,6 +1861,9 @@ def _parse_access_log_line(line: str) -> Dict[str, object] | None:
             status_int = int(status or 0)
         except (TypeError, ValueError):
             status_int = 0
+        # JSON application/error logs are not HTTP access events.
+        if not remote_ip or not 100 <= status_int <= 599:
+            return None
         return {
             "ip": remote_ip,
             "status": status_int,
@@ -2181,6 +2184,7 @@ def _http_security_alerts(
     http_rps = _env_float("ALERT_CC_TOTAL_RPS", 100)
     http_ip_rps = _env_float("ALERT_CC_IP_RPS", 30)
     http_4xx_rate = _env_float("ALERT_CC_4XX_RATE", 0.5)
+    http_5xx_rate = _env_float("ALERT_HTTP_5XX_RATE", 0.05)
     http_min_requests = _env_float("ALERT_CC_MIN_REQUESTS", 50)
     web_scan_requests = _env_float("ALERT_WEB_SCAN_REQUESTS", 10)
     auth_failures_per_ip = _env_float("ALERT_AUTH_FAILURES_PER_IP", 20)
@@ -2205,7 +2209,7 @@ def _http_security_alerts(
         alerts.append(
             _security_alert(
                 "cc_single_ip",
-                "warning",
+                "critical" if top_ip_rps >= http_ip_rps * 2 else "warning",
                 "单 IP 请求洪泛",
                 f"来源 {top_ip} 请求速率 {top_ip_rps:.1f} req/s 超过阈值 {http_ip_rps:.1f} req/s",
                 top_ip_rps,
@@ -2219,7 +2223,7 @@ def _http_security_alerts(
             alerts.append(
                 _security_alert(
                     "cc_4xx_ratio",
-                    "warning",
+                    "critical" if bad_rate >= min(1.0, http_4xx_rate * 2) else "warning",
                     "HTTP 异常请求比例过高",
                     f"4xx 比例 {bad_rate:.1%} 超过阈值 {http_4xx_rate:.1%}",
                     bad_rate,
@@ -2227,6 +2231,15 @@ def _http_security_alerts(
                     container,
                 )
             )
+        error_rate = float(int(access.get("status_5xx") or 0)) / max(1, requests_count)
+        if error_rate >= http_5xx_rate:
+            alerts.append(_security_alert(
+                "http_5xx_ratio",
+                "critical" if error_rate >= http_5xx_rate * 2 else "warning",
+                "HTTP 服务端错误比例过高",
+                f"{scope} 5xx 比例 {error_rate:.1%} 超过阈值 {http_5xx_rate:.1%}，请检查服务健康状态",
+                error_rate, http_5xx_rate, container,
+            ))
     suspicious_requests = int(access.get("suspicious_requests") or 0)
     if suspicious_requests >= web_scan_requests:
         scanner_ip = str(access.get("top_scanner_ip") or "unknown")
@@ -2271,6 +2284,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         "total_tx_pps": 0.0,
         "syn_recv_count": 0,
         "access_log": access,
+        "access_sources": [{"label": "宿主机日志", **access}],
         "alerts": [],
     }
     if not enabled:
@@ -2282,6 +2296,17 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     conn_warning = _env_float("ALERT_CONN_WARNING_THRESHOLD", 500)
     conn_critical = _env_float("ALERT_CONN_CRITICAL_THRESHOLD", 1000)
     inbound_unique_ip_threshold = _env_float("ALERT_INBOUND_UNIQUE_IPS", 10)
+    summary["thresholds"] = {
+        "connections_warning": conn_warning, "connections_critical": conn_critical,
+        "inbound_ips_warning": inbound_unique_ip_threshold,
+        "inbound_ips_critical": inbound_unique_ip_threshold * 2,
+        "rx_pps_warning": ddos_rx_pps, "syn_recv_warning": ddos_syn,
+        "http_rps_warning": _env_float("ALERT_CC_TOTAL_RPS", 100),
+        "ip_rps_warning": _env_float("ALERT_CC_IP_RPS", 30),
+        "http_4xx_warning": _env_float("ALERT_CC_4XX_RATE", 0.5),
+        "http_5xx_warning": _env_float("ALERT_HTTP_5XX_RATE", 0.05),
+        "http_min_requests": _env_float("ALERT_CC_MIN_REQUESTS", 50),
+    }
     scan_ports = _env_float("ALERT_SCAN_UNIQUE_PORTS", 20)
     abuse_unique_ips = _env_float("ALERT_ABUSE_OUTBOUND_UNIQUE_IPS", 200)
     abuse_suspicious = _env_float("ALERT_ABUSE_SUSPICIOUS_CONNECTIONS", 20)
@@ -2820,6 +2845,10 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             alerts.append(panel_alert)
         container_access = security.get("access_log")
         if isinstance(container_access, dict):
+            summary["access_sources"].append({
+                "label": f"{container.get('runtime', '')}/{container.get('project', '')}/{container.get('name', '')}",
+                **container_access,
+            })
             container_access_readable_files += int(container_access.get("readable_files") or 0)
             alerts.extend(_http_security_alerts(container_access, container))
 

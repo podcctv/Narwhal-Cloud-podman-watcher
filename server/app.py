@@ -2993,7 +2993,7 @@ def security_status() -> JSONResponse:
         try:
             rows = conn.execute(
                 """
-                SELECT hosts.host_id, hosts.last_seen AS ts, hosts.node_id, hosts.config_json, h.payload_json
+                SELECT hosts.host_id, COALESCE(h.ts, hosts.last_seen) AS ts, hosts.node_id, hosts.config_json, h.payload_json
                 FROM hosts
                 LEFT JOIN host_security h ON h.id = (
                     SELECT hs.id FROM host_security hs WHERE hs.host_id=hosts.host_id ORDER BY hs.id DESC LIMIT 1
@@ -3006,7 +3006,7 @@ def security_status() -> JSONResponse:
             # before the application startup migration has run.
             rows = conn.execute(
                 """
-                SELECT hosts.host_id, hosts.last_seen AS ts, '' AS node_id, '{}' AS config_json, h.payload_json
+                SELECT hosts.host_id, COALESCE(h.ts, hosts.last_seen) AS ts, '' AS node_id, '{}' AS config_json, h.payload_json
                 FROM hosts
                 LEFT JOIN host_security h ON h.id = (
                     SELECT hs.id FROM host_security hs WHERE hs.host_id=hosts.host_id ORDER BY hs.id DESC LIMIT 1
@@ -3019,17 +3019,21 @@ def security_status() -> JSONResponse:
             SELECT
                 host_id,
                 MAX(sum_conn) AS peak_conn_count,
+                MAX(max_conn) AS peak_container_conn_count,
                 MAX(sum_rx) AS peak_rx_bps,
                 MAX(sum_tx) AS peak_tx_bps,
-                MAX(max_inbound_ips) AS peak_inbound_ips
+                MAX(max_inbound_ips) AS peak_inbound_ips,
+                MAX(max_outbound_ips) AS peak_outbound_ips
             FROM (
                 SELECT
                     host_id,
                     ts,
                     SUM(conn_count) AS sum_conn,
+                    MAX(conn_count) AS max_conn,
                     SUM(net_rx_bps) AS sum_rx,
                     SUM(net_tx_bps) AS sum_tx,
-                    MAX(COALESCE(CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips
+                    MAX(COALESCE(CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips,
+                    MAX(COALESCE(CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS max_outbound_ips
                 FROM reports
                 WHERE ts >= ?
                 GROUP BY host_id, ts
@@ -3058,10 +3062,11 @@ def security_status() -> JSONResponse:
     for r in container_peaks_rows:
         peaks_by_host[r["host_id"]] = {
             "peak_conn_count": int(r["peak_conn_count"] or 0),
+            "peak_container_conn_count": int(r["peak_container_conn_count"] or 0),
             "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
             "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
             "peak_inbound_ips": int(r["peak_inbound_ips"] or 0),
-            "peak_outbound_ips": 0,
+            "peak_outbound_ips": int(r["peak_outbound_ips"] or 0),
         }
 
     for r in host_sec_peaks_rows:
@@ -3100,6 +3105,11 @@ def security_status() -> JSONResponse:
                 "timestamp": int(row["ts"]),
                 "timestamp_utc8": format_utc8(int(row["ts"])),
                 "enabled": bool(payload.get("enabled")),
+                "stale": time.time() - int(row["ts"]) > STALE_SECONDS,
+                "interval_seconds": payload.get("interval_seconds"),
+                "thresholds": payload.get("thresholds") or {},
+                "sample_alerts": payload.get("alerts") or [],
+                "access_sources": payload.get("access_sources") or [],
                 "total_rx_bps": cur_rx,
                 "total_tx_bps": cur_tx,
                 "total_rx_pps": float(payload.get("total_rx_pps") or 0),
@@ -3110,6 +3120,7 @@ def security_status() -> JSONResponse:
                 "today_peak_inbound_ips": int(p.get("peak_inbound_ips", 0)),
                 "today_peak_outbound_ips": int(p.get("peak_outbound_ips", 0)),
                 "today_peak_conn_count": int(p.get("peak_conn_count", 0)),
+                "today_peak_container_conn_count": int(p.get("peak_container_conn_count", 0)),
                 "today_peak_rx_bps": max(float(p.get("peak_rx_bps", 0.0)), cur_rx),
                 "today_peak_tx_bps": max(float(p.get("peak_tx_bps", 0.0)), cur_tx),
             }

@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
-import { Activity, ArrowDown, ArrowUp } from 'lucide-react';
-import { SecurityStatusItem } from '../../api/types';
-import { fmtBytes, fmtNetSpeed, fmtNumber } from '../../api/client';
-import { api } from '../../api/client';
+import { Activity } from 'lucide-react';
+import { AccessSource, SecurityStatusItem } from '../../api/types';
+import { api, fmtNetSpeed, fmtNumber } from '../../api/client';
 
 interface TelemetrySectionProps {
   telemetry: SecurityStatusItem[];
@@ -10,140 +9,142 @@ interface TelemetrySectionProps {
   onRefresh: () => void;
 }
 
+type Level = 'normal' | 'warning' | 'critical' | 'unknown';
+const tones: Record<Level, string> = {
+  normal: 'border-emerald-700 bg-emerald-950/30 text-emerald-300',
+  warning: 'border-amber-700 bg-amber-950/30 text-amber-300',
+  critical: 'border-red-700 bg-red-950/30 text-red-300',
+  unknown: 'border-slate-700 bg-slate-950/30 text-slate-300',
+};
+const labels: Record<Level, string> = { normal: '正常', warning: '警告', critical: '危险', unknown: '未评估' };
+const thresholdLevel = (value: number, warning: number, critical: number): Level =>
+  value > critical ? 'critical' : value > warning ? 'warning' : 'normal';
+const signalLevel = (t: SecurityStatusItem, pattern: RegExp): Level => {
+  if (!t.enabled || t.stale) return 'unknown';
+  const matches = (t.sample_alerts || []).filter(a => pattern.test(a.type || ''));
+  return matches.some(a => a.severity === 'critical') ? 'critical'
+    : matches.some(a => a.severity === 'warning') ? 'warning' : 'normal';
+};
+const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode }> = ({ title, level, children }) =>
+  <div className={`min-w-0 rounded-xl border p-3 ${tones[level]}`}>
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-semibold">
+      <h4>{title}</h4><span className="text-[11px]">{labels[level]}</span>
+    </div><div className="space-y-1.5 break-words text-xs leading-5 tabular-nums">{children}</div>
+  </div>;
+
+const HttpSource: React.FC<{ source: AccessSource }> = ({ source: s }) => {
+  const requests = Number(s.requests || 0);
+  const readable = Number(s.readable_files || 0) > 0;
+  const issue = Number(s.parse_errors || 0) > 0;
+  return <div className="min-w-0 rounded-lg border border-slate-700/70 p-2">
+    <p className="break-all font-semibold">{s.label || '访问日志'}</p>
+    {!readable ? <p className="text-slate-300">{s.unreadable_files ? '日志不可读：检查读取权限'
+      : s.missing_files ? '日志文件不存在：检查 access log 路径'
+      : s.container_readable_files ? '旧版仅上报容器日志状态，请更新采集客户端'
+      : '未接入访问日志：请配置宿主机或容器日志路径'}</p> : <>
+      <p>总 {fmtNumber(s.requests_per_second || 0, 1)} · 单 IP {fmtNumber(s.top_ip_requests_per_second || 0, 1)} rps</p>
+      <p>4xx {requests ? ((s.status_4xx || 0) / requests * 100).toFixed(1) + '%' : '—'} · 5xx {requests ? ((s.status_5xx || 0) / requests * 100).toFixed(1) + '%' : '—'}</p>
+      <p>本周期请求 {fmtNumber(requests, 0)} · 去重 IP {fmtNumber(s.unique_ips || 0, 0)}</p>
+      {!requests && <p className="text-slate-300">本周期无新增请求，首次采样需等待下一周期。</p>}
+    </>}
+    {issue && <p className="text-amber-300">解析失败 {s.parse_errors} 行；统计可能不完整，请检查日志格式。</p>}
+  </div>;
+};
+
 export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, onToast, onRefresh }) => {
   const [editing, setEditing] = useState<SecurityStatusItem | null>(null);
   const [deleting, setDeleting] = useState<SecurityStatusItem | null>(null);
   const [busy, setBusy] = useState(false);
-  if (!telemetry || telemetry.length === 0) return null;
-
-  return (
-    <section className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/60 overflow-hidden shadow-sm">
-      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 px-5 py-3.5">
-        <div className="flex items-center gap-2.5">
-          <div className="rounded-lg bg-sky-950/60 p-1.5 text-sky-400 border border-sky-500/30">
-            <Activity className="h-4 w-4" />
+  if (!telemetry?.length) return null;
+  return <section className="mb-6 min-w-0 rounded-2xl border border-slate-800 bg-slate-900/60 shadow-sm">
+    <header className="flex items-start gap-3 border-b border-slate-800 px-4 py-4">
+      <Activity className="mt-0.5 h-5 w-5 shrink-0 text-sky-400" />
+      <div className="min-w-0">
+        <h2 className="text-sm font-bold text-slate-100">主机网络与安全遥测</h2>
+        <p className="mt-1 text-xs leading-5 text-slate-300">按主机汇总受监控容器；HTTP 按日志来源展示。绿色正常 · 黄色警告 · 红色危险 · 灰色未采集或过期。</p>
+      </div>
+    </header>
+    <div className="space-y-4 p-3">
+      {telemetry.map(t => {
+        const thresholds = t.thresholds || {};
+        const events = t.sample_alerts || [];
+        const networkEvents = events.filter(a => /^ddos_/.test(a.type || ''));
+        const httpEvents = events.filter(a => /^(cc_|http_|web_scan)/.test(a.type || ''));
+        const sources = t.access_sources || [];
+        const readable = sources.some(s => Number(s.readable_files || 0) > 0);
+        const connWarning = thresholds.connections_warning ?? 500;
+        const connCritical = thresholds.connections_critical ?? 1000;
+        const ipWarning = thresholds.inbound_ips_warning ?? 10;
+        const ipCritical = thresholds.inbound_ips_critical ?? 20;
+        const connPeak = t.today_peak_container_conn_count ?? 0;
+        const detectedHttpLevel = signalLevel(t, /^(cc_|http_|web_scan)/);
+        const httpLevel = !readable ? 'unknown' : detectedHttpLevel === 'normal' && sources.some(s => Number(s.parse_errors || 0) > 0) ? 'warning' : detectedHttpLevel;
+        const visibleSources = readable ? sources.filter(s => Number(s.readable_files || 0) > 0) : sources.slice(0, 1);
+        const peakTone = (value: number, warning: number, critical: number) =>
+          t.stale || !t.enabled ? 'text-slate-300' : thresholdLevel(value, warning, critical) === 'critical' ? 'text-red-300'
+            : thresholdLevel(value, warning, critical) === 'warning' ? 'text-amber-300' : 'text-emerald-300';
+        return <article key={t.host_id} className="min-w-0 rounded-xl border border-slate-700 bg-slate-900/60 p-3 sm:p-4">
+          <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1 basis-56">
+              <h3 className="break-all text-sm font-semibold text-slate-100">{t.host_id}</h3>
+              <p className="mt-1 break-words text-xs text-slate-300">采样：{t.timestamp_iso_utc8 || '—'} · 窗口 {t.interval_seconds || '—'} 秒
+                {t.stale ? ' · 数据已过期' : !t.enabled ? ' · 安全采集未启用' : ''}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setEditing(t)} className="rounded-lg border border-sky-700 bg-sky-950/60 px-3 py-2 text-xs text-sky-300">配置</button>
+              <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-2 text-xs text-red-300">删除</button>
+            </div>
           </div>
-          <div>
-            <h2 className="text-sm font-bold text-slate-100">主机网络与安全遥测</h2>
-            <p className="text-[11px] text-slate-400">
-              实时监控主机下行/上行网络速率与当天峰值连接数、独立入站/出站 IP 统计
-            </p>
+          <div className="grid min-w-0 gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr))]">
+            <Signal title="实时速率 / 今日峰值" level={signalLevel(t, /^ddos_(host_)?bandwidth$/)}>
+              <p>↓ {fmtNetSpeed(t.rx_bps).mbps} · ↑ {fmtNetSpeed(t.tx_bps).mbps}</p>
+              <p>今日峰值 ↓ {fmtNetSpeed(t.today_peak_rx_bps).mbps}</p>
+              <p>今日峰值 ↑ {fmtNetSpeed(t.today_peak_tx_bps).mbps}</p>
+              <p className="text-slate-300">受监控容器合计，非物理网卡总流量。</p>
+            </Signal>
+            <Signal title="DDoS 网络信号" level={signalLevel(t, /^ddos_/)}>
+              <p>↓ {fmtNumber(t.rx_pps, 0)} pps · ↑ {fmtNumber(t.tx_pps, 0)} pps</p>
+              <p>SYN_RECV {fmtNumber(t.syn_recv, 0)}</p>
+              <p>本次 DDoS 事件 {networkEvents.length} 项</p>
+              <p className="text-slate-300">包速率 ≥ {fmtNumber(thresholds.rx_pps_warning ?? 50000, 0)} pps、SYN ≥ {thresholds.syn_recv_warning ?? 200} 警告，达到 2 倍危险。</p>
+            </Signal>
+            <Signal title="CC / HTTP 信号" level={httpLevel}>
+              <p>本次 HTTP 事件 {httpEvents.length} 项</p>
+              {visibleSources.length ? visibleSources.map((s, i) => <HttpSource key={i} source={s} />) : <p>尚未收到日志采集状态</p>}
+              {sources.length > visibleSources.length && <details><summary className="cursor-pointer text-slate-300">其余 {sources.length - visibleSources.length} 个来源未接入或不可读</summary>{sources.filter(s => !visibleSources.includes(s)).map((s, i) => <HttpSource key={i} source={s} />)}</details>}
+              <p className="text-slate-300">来源分别计数，避免反向代理与应用重复计算。没有 HTTP 访问日志时无法从 TCP 流量推算请求数。</p>
+            </Signal>
+            <Signal title="今日单容器峰值" level={t.stale || !t.enabled ? 'unknown' : [thresholdLevel(connPeak, connWarning, connCritical), thresholdLevel(t.today_peak_inbound_ips, ipWarning, ipCritical)].includes('critical') ? 'critical' : [thresholdLevel(connPeak, connWarning, connCritical), thresholdLevel(t.today_peak_inbound_ips, ipWarning, ipCritical)].includes('warning') ? 'warning' : 'normal'}>
+              <p><span className={peakTone(connPeak, connWarning, connCritical)}>最高连接 {fmtNumber(connPeak, 0)}</span> · <span className="text-slate-300">全容器合计峰值 {fmtNumber(t.today_peak_conn_count, 0)}</span></p>
+              <p><span className={peakTone(t.today_peak_inbound_ips, ipWarning, ipCritical)}>最高入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}</span> · <span className="text-slate-300">最高出站 IP {fmtNumber(t.today_peak_outbound_ips, 0)}</span></p>
+              <p className="text-slate-300">连接 &gt; {connWarning} / {connCritical}、入站 IP &gt; {ipWarning} / {ipCritical}：警告 / 危险。</p>
+              <p className="text-slate-300">UTC+8 当日采样最大值；各项可能来自不同容器。推送使用触发当时的单容器值，峰值不代表当前仍异常。</p>
+            </Signal>
           </div>
-        </div>
-      </div>
-
-      <div className="hidden lg:block">
-        <table className="min-w-[1530px] w-full table-auto text-left text-xs text-slate-300">
-          <thead className="border-b border-slate-800 bg-slate-950/70 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-            <tr>
-              <th className="min-w-[210px] px-5 py-3.5">主机</th>
-              <th className="min-w-[230px] px-4 py-3.5 text-right whitespace-nowrap">实时速率 / 今日峰值</th>
-              <th className="hidden xl:table-cell min-w-[180px] px-4 py-3.5 text-center whitespace-nowrap">DDoS 网络信号</th>
-              <th className="hidden 2xl:table-cell min-w-[210px] px-4 py-3.5 text-center whitespace-nowrap">CC / HTTP 信号</th>
-              <th className="hidden xl:table-cell min-w-[120px] px-4 py-3.5 text-center whitespace-nowrap">最高连接</th>
-              <th className="hidden 2xl:table-cell min-w-[120px] px-4 py-3.5 text-center whitespace-nowrap">最高入站 IP</th>
-              <th className="hidden lg:table-cell min-w-[180px] px-5 py-3.5 text-right whitespace-nowrap">采样时间</th>
-              <th className="min-w-[150px] px-5 py-3.5 text-right whitespace-nowrap">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/60">
-            {telemetry.map((t) => {
-              const curRx = fmtNetSpeed(t.rx_bps);
-              const curTx = fmtNetSpeed(t.tx_bps);
-              const peakRx = fmtNetSpeed(t.today_peak_rx_bps);
-              const peakTx = fmtNetSpeed(t.today_peak_tx_bps);
-              const synAlert = t.syn_recv > 50;
-
-              return (
-                <tr key={t.host_id} className="hover:bg-slate-800/40 transition-colors">
-                  <td className="px-5 py-3 font-medium text-slate-200">
-                    <div className="flex min-w-0 flex-col gap-1">
-                      <span title={t.host_id} className="block max-w-[210px] truncate font-semibold text-slate-100">{t.host_id}</span>
-                      {synAlert && (
-                        <span className="w-fit rounded bg-rose-950/80 border border-rose-500/40 px-1.5 py-0.5 text-[10px] font-bold text-rose-300 animate-pulse whitespace-nowrap">
-                          SYN {t.syn_recv}
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
-                    <div className="flex flex-col items-end gap-0.5">
-                      <div className="flex items-center gap-1.5 font-mono text-xs font-bold">
-                        <span className="text-emerald-400 flex items-center">
-                          <ArrowDown className="h-3 w-3 inline mr-0.5 text-emerald-400/80" />
-                          {curRx.mbps}
-                        </span>
-                        <span className="text-slate-600 font-normal">/</span>
-                        <span className="text-sky-400 flex items-center">
-                          <ArrowUp className="h-3 w-3 inline mr-0.5 text-sky-400/80" />
-                          {curTx.mbps}
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-slate-500 font-mono tracking-tight">
-                        ↓ {fmtBytes(t.rx_bps)}/s · ↑ {fmtBytes(t.tx_bps)}/s
-                      </span>
-                      <span className="text-[10px] text-slate-500 font-mono tracking-tight">
-                        峰 ↓ {peakRx.mbps} · ↑ {peakTx.mbps}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="hidden xl:table-cell px-4 py-3 text-center tabular-nums whitespace-nowrap">
-                    <div className="flex flex-col gap-0.5 font-mono text-[11px]">
-                      <span className={t.rx_pps >= 50000 ? 'font-bold text-rose-300' : 'text-slate-300'}>↓ {fmtNumber(t.rx_pps, 0)} pps · ↑ {fmtNumber(t.tx_pps, 0)} pps</span>
-                      <span className={synAlert ? 'font-bold text-rose-300' : 'text-slate-500'}>SYN_RECV {fmtNumber(t.syn_recv, 0)} · 告警 {fmtNumber(t.active_alerts, 0)}</span>
-                    </div>
-                  </td>
-                  <td className="hidden 2xl:table-cell px-4 py-3 text-center tabular-nums whitespace-nowrap">
-                    <div className="flex flex-col gap-0.5 font-mono text-[11px]">
-                      <span className={t.http_rps >= 100 || t.top_ip_rps >= 30 ? 'font-bold text-amber-300' : 'text-slate-300'}>总 {fmtNumber(t.http_rps, 1)} · 单 IP {fmtNumber(t.top_ip_rps, 1)} rps</span>
-                      <span className={t.http_4xx_rate >= 0.5 || t.http_5xx_rate >= 0.1 ? 'font-bold text-rose-300' : 'text-slate-500'}>4xx {(t.http_4xx_rate * 100).toFixed(1)}% · 5xx {(t.http_5xx_rate * 100).toFixed(1)}%</span>
-                      <span className="text-slate-500">请求 {fmtNumber(t.access_requests, 0)} · IP {fmtNumber(t.access_unique_ips, 0)}</span>
-                    </div>
-                  </td>
-                  <td className="hidden xl:table-cell px-4 py-3 text-center tabular-nums whitespace-nowrap">
-                    <span className="inline-flex min-w-[56px] justify-center items-center rounded-md bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 text-xs font-bold text-amber-300 font-mono shadow-sm">
-                      {fmtNumber(t.today_peak_conn_count, 0)}
-                    </span>
-                  </td>
-                  <td className="hidden xl:table-cell px-4 py-3 text-center tabular-nums whitespace-nowrap">
-                    <span className="inline-flex min-w-[48px] justify-center items-center rounded-md bg-rose-500/10 border border-rose-500/30 px-2.5 py-1 text-xs font-bold text-rose-300 font-mono shadow-sm">
-                      {fmtNumber(t.today_peak_inbound_ips, 0)}
-                    </span>
-                  </td>
-                  <td className="hidden lg:table-cell px-5 py-3 text-right tabular-nums text-slate-400 font-mono text-[11px] whitespace-nowrap">
-                    {t.timestamp_iso_utc8 || '-'}
-                  </td>
-                  <td className="px-5 py-3 text-right whitespace-nowrap">
-                    <button onClick={() => setEditing(t)} className="mr-2 rounded-md border border-sky-500/30 bg-sky-500/10 px-2.5 py-1.5 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20">配置</button>
-                    <button onClick={() => setDeleting(t)} className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] font-medium text-rose-300 hover:bg-rose-500/20">删除</button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      <div className="space-y-3 p-3 lg:hidden">
-        {telemetry.map((t) => {
-          const curRx = fmtNetSpeed(t.rx_bps);
-          const curTx = fmtNetSpeed(t.tx_bps);
-          const synAlert = t.syn_recv > 50;
-          return <article key={t.host_id} className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-            <div className="flex items-start justify-between gap-3"><div className="min-w-0"><h3 className="truncate font-mono text-sm font-semibold text-slate-100">{t.host_id}</h3><p className="mt-1 text-xs text-slate-400 tabular-nums">采样：{t.timestamp_iso_utc8 || '-'}</p></div>{synAlert && <span className="rounded-full border border-rose-500/40 bg-rose-950/70 px-2 py-1 text-[11px] font-semibold text-rose-200">SYN {fmtNumber(t.syn_recv, 0)}</span>}</div>
-            <div className="mt-3 grid grid-cols-2 gap-2 font-mono text-xs tabular-nums"><div className="rounded-lg bg-emerald-950/40 p-2 text-emerald-300">下行<br/><b>{curRx.mbps}</b><span className="text-emerald-400/70"> Mbps</span></div><div className="rounded-lg bg-sky-950/40 p-2 text-sky-300">上行<br/><b>{curTx.mbps}</b><span className="text-sky-400/70"> Mbps</span></div></div>
-            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs text-slate-400"><span>最高连接 <b className="float-right tabular-nums text-amber-300">{fmtNumber(t.today_peak_conn_count, 0)}</b></span><span>最高入站 IP <b className="float-right tabular-nums text-rose-300">{fmtNumber(t.today_peak_inbound_ips, 0)}</b></span><span>HTTP <b className="float-right tabular-nums text-slate-200">{fmtNumber(t.http_rps, 1)} rps</b></span><span>单 IP <b className="float-right tabular-nums text-slate-200">{fmtNumber(t.top_ip_rps, 1)} rps</b></span></div>
-            <div className="mt-4 flex gap-2"><button type="button" onClick={() => setEditing(t)} className="min-h-11 flex-1 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 text-xs font-medium text-sky-300">配置</button><button type="button" onClick={() => setDeleting(t)} className="min-h-11 flex-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 text-xs font-medium text-rose-300">删除</button></div>
-          </article>;
-        })}
-      </div>
-      {editing && <HostConfigDialog host={editing} busy={busy} onClose={() => setEditing(null)} onSave={async (config) => {
-        setBusy(true); try { await api.updateHostConfig(editing.host_id, config); onToast('success', '配置已下发，将在节点下次轮询时生效。'); setEditing(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '配置下发失败'); } finally { setBusy(false); }
-      }} />}
-      {deleting && <HostDeleteDialog host={deleting} busy={busy} onClose={() => setDeleting(null)} onDelete={async (mode) => {
-        setBusy(true); try { await api.deleteHost(deleting.host_id, mode); onToast('success', mode === 'uninstall' ? '已下发远程自卸载，节点确认后将从面板移除。' : '主机记录已删除。'); setDeleting(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '删除失败'); } finally { setBusy(false); }
-      }} />}
-    </section>
-  );
+          <details className="mt-3 rounded-lg border border-slate-700 p-3 text-xs text-slate-300">
+            <summary className="cursor-pointer font-semibold text-slate-100">查看本次采样事件（{events.length} 项，含普通提示）与阈值说明</summary>
+            <div className="mt-3 space-y-2">
+              {events.map((event, i) => <div key={i} className={`min-w-0 rounded-lg border p-3 break-words ${tones[event.severity === 'critical' ? 'critical' : event.severity === 'warning' ? 'warning' : 'unknown']}`}>
+                <p className="font-semibold">{event.severity === 'critical' ? '危险' : event.severity === 'warning' ? '警告' : '提示'} · {event.title || event.type}</p>
+                <p className="break-all">{[event.runtime, event.project, event.container_name].filter(Boolean).join('/') || '主机汇总'} · {event.message}</p>
+                {event.threshold != null && <p>触发值 {String(event.value ?? '—')} · 阈值 {String(event.threshold)}</p>}
+              </div>)}
+              {!events.length && <p>本次采样无事件。</p>}
+              <p>这里展示客户端本次采样检测结果；放行、已处置状态与历史推送请查看“告警历史”。</p>
+              <p>HTTP 默认警告线：总 {thresholds.http_rps_warning ?? 100} rps、单 IP {thresholds.ip_rps_warning ?? 30} rps，2 倍为危险；4xx ≥ {((thresholds.http_4xx_warning ?? .5) * 100).toFixed(0)}%、5xx ≥ {((thresholds.http_5xx_warning ?? .05) * 100).toFixed(0)}% 警告，2 倍为危险（4xx 最高 100%）。比例检测至少需要 {thresholds.http_min_requests ?? 50} 次请求。</p>
+              <p>这是可调的运维起始阈值，不是通用攻击判定标准。配置节点 ALERT_* 环境变量后重启客户端即可调整；旧版客户端需升级才能上报实际阈值及分来源数据。</p>
+            </div>
+          </details>
+        </article>;
+      })}
+    </div>
+    {editing && <HostConfigDialog host={editing} busy={busy} onClose={() => setEditing(null)} onSave={async config => {
+      setBusy(true); try { await api.updateHostConfig(editing.host_id, config); onToast('success', '配置已下发，将在节点下次轮询时生效。'); setEditing(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '配置下发失败'); } finally { setBusy(false); }
+    }} />}
+    {deleting && <HostDeleteDialog host={deleting} busy={busy} onClose={() => setDeleting(null)} onDelete={async mode => {
+      setBusy(true); try { await api.deleteHost(deleting.host_id, mode); onToast('success', mode === 'uninstall' ? '已下发远程自卸载，节点确认后将从面板移除。' : '主机记录已删除。'); setDeleting(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '删除失败'); } finally { setBusy(false); }
+    }} />}
+  </section>;
 };
 
 const HostConfigDialog: React.FC<{host: SecurityStatusItem; busy: boolean; onClose: () => void; onSave: (v: Record<string, any>) => void}> = ({ host, busy, onClose, onSave }) => {

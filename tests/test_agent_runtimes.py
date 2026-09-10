@@ -1265,7 +1265,7 @@ class SecurityTelemetryTests(unittest.TestCase):
             "name": "panel",
             "runtime": "incus",
             "security": {
-                "access_log": {"enabled": True, "readable_files": 1},
+                "access_log": {"enabled": True, "readable_files": 1, "requests": 120, "requests_per_second": 2},
                 "panel_pairing": {},
             },
         }
@@ -1273,6 +1273,21 @@ class SecurityTelemetryTests(unittest.TestCase):
             result = agent.collect_security_summary([container], 60)
         self.assertEqual(result["access_log"]["source"], "container")
         self.assertEqual(result["access_log"]["container_readable_files"], 1)
+        self.assertEqual(result["access_sources"][1]["requests"], 120)
+        self.assertEqual(result["access_sources"][1]["requests_per_second"], 2)
+        self.assertIn("panel", result["access_sources"][1]["label"])
+
+    def test_json_application_logs_are_not_counted_as_http_requests(self):
+        self.assertIsNone(agent._parse_access_log_line('{"level":"info","msg":"started"}'))
+
+    def test_http_error_alerts_require_samples_and_escalate(self):
+        with mock.patch.dict(os.environ, {"ALERT_HTTP_5XX_RATE": "0.05", "ALERT_CC_MIN_REQUESTS": "50"}):
+            few = agent._http_security_alerts({"requests": 2, "status_5xx": 2})
+            warning = agent._http_security_alerts({"requests": 100, "status_5xx": 5})
+            critical = agent._http_security_alerts({"requests": 100, "status_5xx": 10})
+        self.assertFalse(any(a["type"] == "http_5xx_ratio" for a in few))
+        self.assertEqual(next(a["severity"] for a in warning if a["type"] == "http_5xx_ratio"), "warning")
+        self.assertEqual(next(a["severity"] for a in critical if a["type"] == "http_5xx_ratio"), "critical")
 
     def test_container_access_log_reader_scans_logs_inside_runtime(self):
         state = {"size": 100}

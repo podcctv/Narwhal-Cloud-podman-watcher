@@ -143,6 +143,13 @@ export interface SecurityAlert {
 }
 
 export interface SecurityStatusItem {
+  enabled?: boolean;
+  stale?: boolean;
+  interval_seconds?: number;
+  thresholds?: Record<string, number>;
+  sample_alerts?: Partial<SecurityAlert>[];
+  access_sources?: AccessSource[];
+  today_peak_container_conn_count?: number;
   host_id: string;
   node_id?: string;
   host_config?: Record<string, any>;
@@ -191,6 +198,22 @@ export interface DeepEvidenceIp {
   inbound?: number;
   outbound?: number;
   processes?: string[];
+}
+
+export interface AccessSource {
+  label?: string;
+  enabled?: boolean;
+  readable_files?: number;
+  container_readable_files?: number;
+  missing_files?: number;
+  unreadable_files?: number;
+  parse_errors?: number;
+  requests?: number;
+  requests_per_second?: number;
+  top_ip_requests_per_second?: number;
+  unique_ips?: number;
+  status_4xx?: number;
+  status_5xx?: number;
 }
 
 export interface DiagnosticData {

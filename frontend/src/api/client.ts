@@ -69,6 +69,13 @@ export const api = {
       const accessRequests = Number(access.requests || 0);
 
       return {
+        enabled: Boolean(item.enabled),
+        stale: Boolean(item.stale),
+        interval_seconds: Number(item.interval_seconds || 0),
+        thresholds: item.thresholds || {},
+        sample_alerts: item.sample_alerts || [],
+        access_sources: item.access_sources?.length ? item.access_sources : [{ label: '宿主机日志（旧版采集）', ...access }],
+        today_peak_container_conn_count: Number(item.today_peak_container_conn_count || 0),
         host_id: String(item.host_id || ''),
         node_id: String(item.node_id || ''),
         host_config: item.host_config || {},
