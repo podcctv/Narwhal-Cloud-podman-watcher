@@ -663,10 +663,10 @@ class SecurityTelemetryTests(unittest.TestCase):
             agent, "get_runtime_bins", return_value={"incus": "incus"}
         ), mock.patch.object(
             agent, "_incus_host_namespace_kill", return_value=(0, 0, 0, "")
-        ), mock.patch.object(agent, "_run_action_command", return_value=(True, "cleaned")) as runner:
+        ), mock.patch.object(agent, "_run_action_command", return_value=(True, "remaining_processes=0")) as runner:
             ok, _ = agent.remediate_panel_pairing(action)
         self.assertTrue(ok)
-        command = runner.call_args.args[0]
+        command = runner.call_args_list[0].args[0]
         self.assertEqual(command[:5], ["incus", "--project", "default", "exec", "node1"])
         self.assertIn("/etc/V2bX/config.json", command[-1])
         self.assertIn("for proc in /proc/[0-9]*", command[-1])
@@ -716,10 +716,10 @@ class SecurityTelemetryTests(unittest.TestCase):
         ), mock.patch.object(
             agent, "_incus_host_namespace_kill", return_value=(0, 0, 0, "")
         ), mock.patch.object(
-            agent, "_run_action_command", return_value=(True, "cleaned")
+            agent, "_run_action_command", return_value=(True, "remaining_processes=0")
         ) as runner, tempfile.TemporaryDirectory() as tmp:
             ok, _ = agent.remediate_panel_pairing(action)
-            script = runner.call_args.args[0][-1]
+            script = runner.call_args_list[0].args[0][-1]
             root = Path(tmp)
             init_dir = root / "etc" / "init.d"
             init_dir.mkdir(parents=True)
@@ -763,6 +763,7 @@ class SecurityTelemetryTests(unittest.TestCase):
         results = [
             (False, "killed_processes=0 removed_services=0 removed_configs=0 cleanup_errors=0"),
             (True, "host_matched_processes=1 host_killed_processes=1 host_kill_errors=0"),
+            (True, "remaining_processes=0"),
         ]
         with mock.patch.dict(
             os.environ, {"SECURITY_PANEL_PROCESS_PATTERNS": "v2bx"}, clear=False
@@ -819,10 +820,8 @@ class SecurityTelemetryTests(unittest.TestCase):
                     agent, "remediate_panel_pairing", return_value=(True, "cleaned")
                 ) as remediate:
                     summary = agent.collect_security_summary([container], 60)
-            self.assertEqual(
-                [item for item in summary["alerts"] if item["type"] == "unauthorized_panel_pairing"],
-                [],
-            )
+            event = next(item for item in summary["alerts"] if item["type"] == "unauthorized_panel_pairing")
+            self.assertTrue(event["automatic_remediation"]["succeeded"])
             remediate.assert_called_once()
 
     def test_manual_remediation_remembers_domains_for_future_cleanup(self):
@@ -872,7 +871,8 @@ class SecurityTelemetryTests(unittest.TestCase):
             panel_alert = next(
                 item for item in summary["alerts"] if item["type"] == "unauthorized_panel_pairing"
             )
-            self.assertEqual(panel_alert["unapproved_domains"], ["new.example.net"])
+            self.assertEqual(panel_alert["unapproved_domains"], ["known.example.net", "new.example.net"])
+            self.assertTrue(panel_alert["automatic_remediation"]["succeeded"])
 
     def test_deep_sample_action_is_scheduled_without_premature_result(self):
         action = {
@@ -1144,7 +1144,7 @@ class SecurityTelemetryTests(unittest.TestCase):
                 self.assertTrue(result["succeeded"])
                 stop_mock.assert_called_once()
 
-                container["security"]["socks_proxy"]["auth_mode"] = "weak_password"
+                container["security"]["socks_proxy"]["auth_mode"] = "configured"
                 released = agent.enforce_socks_auth_policy(container)
                 self.assertTrue(released["released"])
                 self.assertEqual(agent._socks_auth_enforcement_entries(), [])
@@ -1179,10 +1179,31 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertNotIn("config_files", stored[0])
         stop_mock.assert_called_once_with(action)
 
-    def test_socks_stop_rejects_nonempty_auth_and_docker(self):
+    def test_weak_socks_auto_remediation_needs_no_manual_policy(self):
+        container = {"runtime": "incus", "name": "proxy", "security": {"socks_proxy": {
+            "detected": True, "auth_mode": "weak_password", "process_matches": [
+                {"pid": 42, "process": "microsocks", "auth_state": "weak_password"}]}}}
+        with mock.patch.object(agent, "stop_unauthenticated_socks", return_value=(True, "remaining_processes=0")) as stop:
+            result = agent.enforce_socks_auth_policy(container, [])
+        self.assertTrue(result["succeeded"])
+        self.assertEqual(stop.call_args.args[0]["params"]["auth_mode"], "weak_password")
+        self.assertEqual(stop.call_args.args[0]["params"]["process_pids"], [42])
+
+    def test_socks_respawn_is_not_reported_as_success(self):
+        action = {"runtime": "podman", "container_name": "proxy", "params": {
+            "auth_mode": "weak_password", "process_names": ["microsocks"], "process_pids": [42]}}
+        with mock.patch.object(agent, "get_runtime_bins", return_value={"podman": "podman"}), mock.patch.object(
+            agent, "_run_action_command", side_effect=[(True, "killed_processes=1"), (True, "remaining_processes=1")]
+        ) as runner:
+            ok, message = agent.stop_unauthenticated_socks(action)
+        self.assertFalse(ok)
+        self.assertIn("remaining_processes=1", message)
+        self.assertEqual(runner.call_count, 2)
+
+    def test_socks_stop_rejects_unknown_auth_and_docker(self):
         base = {
             "container_name": "proxy",
-            "params": {"auth_mode": "weak_password", "process_names": ["microsocks"]},
+            "params": {"auth_mode": "unknown", "process_names": ["microsocks"]},
         }
         self.assertFalse(agent.stop_unauthenticated_socks(dict(base, runtime="incus"))[0])
         base["params"]["auth_mode"] = "no_auth"

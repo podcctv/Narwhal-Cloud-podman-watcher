@@ -6,6 +6,7 @@ import hmac
 import html
 import http.client
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -49,6 +50,11 @@ REPORT_CLEANUP_INTERVAL_SECONDS = max(
     60, int(os.getenv("REPORT_CLEANUP_INTERVAL_SECONDS", "300"))
 )
 REPORT_CLEANUP_BATCH_SIZE = max(100, int(os.getenv("REPORT_CLEANUP_BATCH_SIZE", "5000")))
+RAW_RETENTION_SECONDS = max(3600, int(os.getenv("RAW_RETENTION_SECONDS", str(7 * 86400))))
+REPORT_MAX_ROWS = max(1000, int(os.getenv("REPORT_MAX_ROWS", "50000")))
+HOST_SECURITY_MAX_ROWS = max(1000, int(os.getenv("HOST_SECURITY_MAX_ROWS", "20000")))
+CLEANUP_TIME_BUDGET_SECONDS = max(1, float(os.getenv("CLEANUP_TIME_BUDGET_SECONDS", "5")))
+_cleanup_status: Dict[str, Any] = {}
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "").strip()
 ALERT_WEBHOOK_MIN_SEVERITY = os.getenv("ALERT_WEBHOOK_MIN_SEVERITY", "warning").strip().lower()
 TLS_CA_CERT_PATH = os.getenv("TLS_CA_CERT_PATH", "/tls-ca/root.crt")
@@ -135,6 +141,10 @@ def init_db() -> None:
     conn = db()
     # WAL lets dashboard reads coexist with frequent agent writes.  This is
     # especially important once monitor.db contains large JSON payloads.
+    # Existing NONE-mode databases require an explicit offline VACUUM migration;
+    # never rebuild a multi-GB database while starting the API.
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone():
+        conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(
         """
@@ -199,6 +209,7 @@ def init_db() -> None:
             payload_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_host_security_host_ts ON host_security(host_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_host_security_ts ON host_security(ts);
         CREATE TABLE IF NOT EXISTS security_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             alert_id INTEGER NOT NULL,
@@ -334,8 +345,8 @@ async def _cleanup_background_loop() -> None:
         try:
             await asyncio.to_thread(cleanup_old_reports, force=True)
         except Exception:
-            pass
-        await asyncio.sleep(REPORT_CLEANUP_INTERVAL_SECONDS)
+            logging.exception("Database retention worker failed")
+        await asyncio.sleep(5 if _cleanup_status.get("backlog") else REPORT_CLEANUP_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
@@ -347,86 +358,123 @@ async def startup() -> None:
         asyncio.create_task(_telegram_polling_loop())
 
 
+def database_storage_status() -> Dict[str, Any]:
+    conn = db()
+    try:
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+        return {
+            "database_bytes": pages * page_size,
+            "reusable_bytes": free * page_size,
+            "live_bytes": (pages - free) * page_size,
+            "wal_bytes": os.path.getsize(DB_PATH + "-wal") if os.path.exists(DB_PATH + "-wal") else 0,
+            "auto_vacuum": int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]),
+            "cleanup": dict(_cleanup_status),
+            "raw_retention_seconds": min(PURGE_SECONDS, RAW_RETENTION_SECONDS),
+            "report_max_rows": REPORT_MAX_ROWS,
+            "host_security_max_rows": HOST_SECURITY_MAX_ROWS,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/database/status")
+def database_status() -> JSONResponse:
+    return JSONResponse(content=database_storage_status())
+
+
 def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
-    """Run bounded retention housekeeping without delaying normal requests."""
+    """Bound each transaction, catch up backlog, and expose failures."""
     global _next_cleanup_monotonic
     scheduled = now_ts is None and not force
-    monotonic_now = time.monotonic()
-    if scheduled and monotonic_now < _next_cleanup_monotonic:
+    if scheduled and time.monotonic() < _next_cleanup_monotonic:
         return 0
     if not _cleanup_lock.acquire(blocking=not scheduled):
         return 0
-
-    conn: sqlite3.Connection | None = None
+    conn = None
+    removed_reports = 0
+    removed_total = 0
+    backlog = False
     try:
-        monotonic_now = time.monotonic()
-        if scheduled and monotonic_now < _next_cleanup_monotonic:
+        if scheduled and time.monotonic() < _next_cleanup_monotonic:
             return 0
         now = int(time.time()) if now_ts is None else now_ts
         cutoff = now - PURGE_SECONDS
+        raw_cutoff = now - min(PURGE_SECONDS, RAW_RETENTION_SECONDS)
+        deadline = time.monotonic() + CLEANUP_TIME_BUDGET_SECONDS
         conn = db()
-        # A bounded batch keeps WAL growth, lock duration and write amplification
-        # predictable.  idx_reports_ts avoids scanning large payload_json pages.
-        cur = conn.execute(
-            "DELETE FROM reports WHERE id IN ("
-            "SELECT id FROM reports INDEXED BY idx_reports_ts "
-            "WHERE ts < ? ORDER BY ts LIMIT ?)",
-            (cutoff, REPORT_CLEANUP_BATCH_SIZE),
-        )
-        conn.execute(
-            "DELETE FROM security_alerts WHERE status='resolved' AND last_seen < ?", (cutoff,)
-        )
-        conn.execute(
-            "DELETE FROM telegram_alert_messages WHERE alert_id NOT IN (SELECT id FROM security_alerts)"
-        )
-        conn.execute("DELETE FROM host_security WHERE ts < ?", (cutoff,))
-        conn.execute("DELETE FROM security_actions WHERE updated_at < ?", (cutoff,))
-        conn.execute("DELETE FROM security_alert_decisions WHERE created_at < ?", (cutoff,))
-        conn.execute("DELETE FROM security_alert_evidence WHERE captured_at < ?", (cutoff,))
-        inactive_host_cutoff = now - OFFLINE_HOST_PURGE_SECONDS
-        inactive_hosts = [
-            str(row["host_id"])
-            for row in conn.execute(
-                "SELECT host_id FROM hosts WHERE last_seen < ?", (inactive_host_cutoff,)
-            ).fetchall()
-        ]
-        for host_id in inactive_hosts:
-            conn.execute(
-                "DELETE FROM security_alert_decisions WHERE alert_id IN "
-                "(SELECT id FROM security_alerts WHERE host_id=?)",
-                (host_id,),
+        # Complete this small transaction before starting the next; never hold
+        # the API writer lock across a whole retention backlog.
+        def prune(table: str, predicate: str, params: tuple = ()) -> int:
+            nonlocal removed_reports, removed_total
+            cur = conn.execute(
+                f"DELETE FROM {table} WHERE rowid IN "
+                f"(SELECT rowid FROM {table} WHERE {predicate} LIMIT ?)",
+                (*params, REPORT_CLEANUP_BATCH_SIZE),
             )
-            conn.execute(
-                "DELETE FROM security_alert_evidence WHERE alert_id IN "
-                "(SELECT id FROM security_alerts WHERE host_id=?)",
-                (host_id,),
-            )
-            conn.execute(
-                "DELETE FROM security_alert_policies WHERE fingerprint IN "
-                "(SELECT fingerprint FROM security_alerts WHERE host_id=?)",
-                (host_id,),
-            )
-            conn.execute("DELETE FROM reports WHERE host_id=?", (host_id,))
-            conn.execute("DELETE FROM security_alerts WHERE host_id=?", (host_id,))
-            conn.execute("DELETE FROM host_security WHERE host_id=?", (host_id,))
-            conn.execute("DELETE FROM security_actions WHERE host_id=?", (host_id,))
-            conn.execute("DELETE FROM connection_overloads WHERE host_id=?", (host_id,))
-        if inactive_hosts:
-            placeholders = ",".join("?" for _ in inactive_hosts)
-            conn.execute(f"DELETE FROM hosts WHERE host_id IN ({placeholders})", inactive_hosts)
-        conn.commit()
-        if now_ts is None:
-            _next_cleanup_monotonic = time.monotonic() + REPORT_CLEANUP_INTERVAL_SECONDS
-        return int(cur.rowcount or 0)
-    except Exception:
-        _next_cleanup_monotonic = time.monotonic() + 60
-        return 0
+            count = max(0, cur.rowcount)
+            conn.commit()
+            removed_total += count
+            if table == "reports":
+                removed_reports += count
+            return count
+
+        for _ in range(20):
+            progress = 0
+            jobs = [
+                ("reports", "ts < ?", (raw_cutoff,)),
+                ("host_security", "ts < ?", (raw_cutoff,)),
+                ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ?", (cutoff,)),
+                ("security_actions", "status IN ('succeeded','failed','cancelled') AND updated_at < ?", (cutoff,)),
+                ("security_alert_decisions", "created_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
+                ("security_alert_evidence", "captured_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
+                ("telegram_alert_messages", "NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", ()),
+                ("connection_overloads", "last_seen < ?", (now - OFFLINE_HOST_PURGE_SECONDS,)),
+            ]
+            for table, predicate, params in jobs:
+                progress += prune(table, predicate, params)
+            # A row budget also bounds high-frequency raw history within the
+            # retention period. Preserve each identity's newest sample.
+            for table, cap, identity in (
+                ("reports", REPORT_MAX_ROWS, ("host_id", "runtime", "project", "container_name")),
+                ("host_security", HOST_SECURITY_MAX_ROWS, ("host_id",)),
+            ):
+                boundary = conn.execute(f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?", (cap - 1,)).fetchone()
+                if boundary:
+                    same = " AND ".join(f"newer.{column}={table}.{column}" for column in identity)
+                    progress += prune(table, f"id < ? AND EXISTS (SELECT 1 FROM {table} newer WHERE {same} AND newer.id > {table}.id)", (boundary[0],))
+            # Drain offline hosts in batches before removing their identity.
+            offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
+            for host in offline:
+                for table in ("reports", "host_security", "security_actions", "security_alerts", "connection_overloads"):
+                    progress += prune(table, "host_id=?", (host[0],))
+                remains = any(conn.execute(f"SELECT 1 FROM {table} WHERE host_id=? LIMIT 1", (host[0],)).fetchone()
+                              for table in ("reports", "host_security", "security_actions", "security_alerts"))
+                if not remains:
+                    conn.execute("DELETE FROM hosts WHERE host_id=?", (host[0],))
+                    conn.commit()
+            backlog = progress > 0
+            if not backlog or time.monotonic() >= deadline:
+                break
+        # Incremental mode is enabled for new DBs and by the explicit recovery
+        # command for old DBs. Never run a full VACUUM in this online loop.
+        if int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]) == 2:
+            conn.execute("PRAGMA incremental_vacuum(512)").fetchall()
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
+        _cleanup_status.update(last_success=now, removed_rows=removed_total, backlog=backlog, error=None)
+        _next_cleanup_monotonic = time.monotonic() + (5 if backlog else REPORT_CLEANUP_INTERVAL_SECONDS)
+        return removed_reports
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+        _cleanup_status.update(error=str(exc), last_failure=int(time.time()), backlog=True)
+        logging.exception("Database cleanup failed; will retry")
+        _next_cleanup_monotonic = time.monotonic() + 5
+        return removed_reports
     finally:
         if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            conn.close()
         _cleanup_lock.release()
 
 
@@ -898,7 +946,7 @@ def _telegram_actionable(alert: sqlite3.Row) -> bool:
     if alert["alert_type"] == "unauthorized_panel_pairing":
         return bool(details.get("process_patterns") or details.get("config_files"))
     if alert["alert_type"] == "socks_weak_auth":
-        return details.get("socks_auth_mode") == "no_auth" and bool(details.get("socks_processes"))
+        return details.get("socks_auth_mode") in ("no_auth", "weak_password") and bool(details.get("socks_processes"))
     return any(isinstance(item, dict) and item.get("process") == "xmrig" for item in details.get("malicious_processes", []))
 
 
@@ -2218,7 +2266,7 @@ def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
     ]
     if (
         not socks_processes
-        and details["socks_auth_mode"] == "no_auth"
+        and details["socks_auth_mode"] in ("no_auth", "weak_password")
         and socks_config_files
     ):
         process_match = re.search(r"(?:^|[；;])\s*进程\s*([^；;]+)", message)
@@ -2524,18 +2572,18 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
         conn.execute("UPDATE security_alerts SET status='active' WHERE id=?", (alert_id,))
         details = _alert_action_evidence(alert)
         if alert["alert_type"] == "socks_weak_auth":
-            if details.get("socks_auth_mode") != "no_auth":
+            if details.get("socks_auth_mode") not in ("no_auth", "weak_password"):
                 conn.close()
                 raise HTTPException(
                     status_code=400,
-                    detail="only confirmed no-auth SOCKS services can be stopped automatically",
+                    detail="仅可处置已确认空密码或弱密码的 SOCKS 服务",
                 )
             process_names = details.get("socks_processes") or []
             if not process_names:
                 conn.close()
                 raise HTTPException(status_code=400, detail="alert has no safe SOCKS process evidence")
             params = {
-                "auth_mode": "no_auth",
+                "auth_mode": details["socks_auth_mode"],
                 "process_names": process_names,
                 "process_pids": details.get("socks_process_pids") or [],
                 "config_files": details.get("socks_config_files") or [],
@@ -3314,7 +3362,7 @@ const labels={active:'活动',suppressed:'允许且不再提醒',dismissed:'本�
 const decisions={deny:'禁止/处理',allow_silent:'允许且不再提醒',dismiss_once:'本次取消提醒',reopen:'恢复提醒'};
 function esc(value){return String(value??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
 function showToast(message,error=false){const toast=document.getElementById('toast');toast.textContent=message;toast.className=`toast${error?' error':''}`;toast.hidden=false;setTimeout(()=>{toast.hidden=true},4500)}
-function actionable(alert){const details=alert.details||{};const supported=alert.runtime==='incus'||alert.runtime==='podman';if(!supported)return false;if(alert.type==='unauthorized_panel_pairing')return (details.process_patterns||[]).length>0||(details.config_files||[]).length>0;if(alert.type==='socks_weak_auth')return details.socks_auth_mode==='no_auth'&&(details.socks_processes||[]).length>0;if(alert.type==='malicious_process')return (details.malicious_processes||[]).some(x=>x.process==='xmrig');return false;}
+function actionable(alert){const details=alert.details||{};const supported=alert.runtime==='incus'||alert.runtime==='podman';if(!supported)return false;if(alert.type==='unauthorized_panel_pairing')return (details.process_patterns||[]).length>0||(details.config_files||[]).length>0;if(alert.type==='socks_weak_auth')return ['no_auth','weak_password'].includes(details.socks_auth_mode)&&(details.socks_processes||[]).length>0;if(alert.type==='malicious_process')return (details.malicious_processes||[]).some(x=>x.process==='xmrig');return false;}
 function evidenceText(alert){const d=alert.details||{};if(alert.type==='unauthorized_panel_pairing')return [`域名：${(d.unapproved_domains||[]).join(', ')||'-'}`,`进程：${(d.process_patterns||[]).join(', ')||'-'}`,`配置：${(d.config_files||[]).join(', ')||'-'}`];if(alert.type==='socks_weak_auth')return [`认证：${d.socks_auth_mode||'unknown'}`,`进程：${(d.socks_processes||[]).join(', ')||'-'}`,`配置：${(d.socks_config_files||[]).join(', ')||'-'}`];if(alert.type==='malicious_process')return [`进程：${(d.malicious_processes||[]).map(x=>x.process).join(', ')||'-'}`,`PID：${(d.malicious_processes||[]).map(x=>x.pid||'-').join(', ')||'-'}`,'策略：仅精确匹配 XMRig'];return [`指标：${alert.value||0}`,`阈值：${alert.threshold||0}`,`类型：${alert.type}`];}
 function resultText(alert){const automatic=alert.details?.automatic_remediation;const action=alert.latest_action;const decision=alert.latest_decision;const parts=[];if(automatic?.attempted)parts.push(`自动处置：${automatic.succeeded?'成功':'失败'} · ${automatic.message||'-'}`);if(action)parts.push(`节点操作：${action.status} · ${action.result_message||action.action_type}`);if(decision)parts.push(`人工决定：${decisions[decision.decision]||decision.decision} · ${decision.requested_by} · ${decision.created_at_utc8}`);return parts.join('<br>');}
 function card(alert){const runtime=alert.project?`${alert.runtime}/${alert.project}`:(alert.runtime||'-');const evidence=evidenceText(alert);const canAct=actionable(alert);const historical=alert.status!=='active';const controls=[];if(canAct)controls.push(`<button class='btn btn-danger' type='button' data-action-id='${alert.id}' onclick="decide(${alert.id},'deny')">${historical?'重新禁止/处理':'禁止/处理'}</button>`);if(alert.status==='suppressed'||alert.status==='dismissed')controls.push(`<button class='btn btn-secondary' type='button' data-action-id='${alert.id}' onclick="decide(${alert.id},'reopen')">恢复提醒</button>`);const result=resultText(alert);return `<article class='alert-card ${esc(alert.severity)}'><div class='alert-top'><div class='alert-title'><h3>${esc(alert.title||alert.type)}</h3><div class='meta'><span class='pill ${esc(alert.status)}'>${esc(labels[alert.status]||alert.status)}</span><span class='pill'>${esc(alert.severity)}</span><span class='pill'>${esc(alert.host_id)}</span><span class='pill'>${esc(runtime)}</span><span class='pill'>${esc(alert.container_name||'-')}</span></div></div><span class='pill'>出现 ${Number(alert.occurrence_count||0)} 次</span></div><p class='message'>${esc(alert.message)}</p><div class='evidence'>${evidence.map((x,i)=>`<div class='evidence-block'><span>${['关键证据','关联对象','处置范围'][i]||'证据'}</span><strong>${esc(x)}</strong></div>`).join('')}</div>${result?`<div class='result'>${result}</div>`:''}<footer class='card-footer'><div class='timestamps'>首次 ${esc(alert.first_seen_utc8)} · 最近 ${esc(alert.last_seen_utc8)}</div><div class='actions'>${controls.join('')}</div></footer></article>`;}
@@ -3536,7 +3584,7 @@ async function setAlertDisposition(alertId, decision){
   if(submittingAlertActions.has(Number(alertId)))return;
   const details=alert.details||{};
   const latestAction=alert.latest_action||null;
-  const socksPolicyActive=alert.type==='socks_weak_auth'&&latestAction?.action_type==='enforce_socks_auth'&&latestAction?.status==='succeeded'&&details.socks_auth_mode==='no_auth';
+  const socksPolicyActive=alert.type==='socks_weak_auth'&&latestAction?.action_type==='enforce_socks_auth'&&latestAction?.status==='succeeded'&&['no_auth','weak_password'].includes(details.socks_auth_mode);
   let promptText='';
   if(decision==='deny'){
     if(alert.type==='socks_weak_auth'){
@@ -3591,7 +3639,7 @@ async function loadAlerts(){
     const runtime=alert.project?`${alert.runtime}/${alert.project}`:(alert.runtime||'-');
     const supportedRuntime=alert.runtime==='podman'||alert.runtime==='incus';
     const canPanelRemediate=supportedRuntime&&alert.type==='unauthorized_panel_pairing'&&((alert.details?.process_patterns||[]).length>0||(alert.details?.config_files||[]).length>0);
-    const canSocksRemediate=supportedRuntime&&alert.type==='socks_weak_auth'&&alert.details?.socks_auth_mode==='no_auth'&&(alert.details?.socks_processes||[]).length>0;
+    const canSocksRemediate=supportedRuntime&&alert.type==='socks_weak_auth'&&['no_auth','weak_password'].includes(alert.details?.socks_auth_mode)&&(alert.details?.socks_processes||[]).length>0;
     const canMaliciousRemediate=supportedRuntime&&alert.type==='malicious_process'&&(alert.details?.malicious_processes||[]).some(item=>item.process==='xmrig');
     const pending=alert.latest_action&&(alert.latest_action.status==='queued'||alert.latest_action.status==='dispatched');
     const lastRemediation=['remediate_panel_pairing','remediate_malicious_process'].includes(alert.latest_action?.action_type)?alert.latest_action:null;
@@ -3599,7 +3647,7 @@ async function loadAlerts(){
     const changed=remediationChanged(lastRemediation);
     const recurred=changed&&Number(alert.last_seen||0)>Number(lastRemediation?.updated_at||0);
     const denyLabel=pending?'禁止处理中':((lastRemediation&&(lastRemediation.status==='failed'||!changed))?'重试禁止':(recurred?'再次禁止':'禁止'));
-    const socksPolicyActive=lastSocksEnforcement?.status==='succeeded'&&alert.details?.socks_auth_mode==='no_auth';
+    const socksPolicyActive=lastSocksEnforcement?.status==='succeeded'&&['no_auth','weak_password'].includes(alert.details?.socks_auth_mode);
     const socksReleased=alert.details?.socks_auth_enforcement?.released===true;
     let denyControl='';
     if(canSocksRemediate){

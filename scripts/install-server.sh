@@ -1202,9 +1202,18 @@ main() {
     echo "[INFO] Telegram 回调地址自动设置为 ${public_base_url}"
   fi
 
+  local retention_seconds raw_retention report_max_rows host_security_max_rows
+  retention_seconds="$(load_non_empty_or_default "$SERVER_ENV_FILE" PURGE_SECONDS "2592000")"
+  raw_retention="$(load_non_empty_or_default "$SERVER_ENV_FILE" RAW_RETENTION_SECONDS "604800")"
+  report_max_rows="$(load_non_empty_or_default "$SERVER_ENV_FILE" REPORT_MAX_ROWS "50000")"
+  host_security_max_rows="$(load_non_empty_or_default "$SERVER_ENV_FILE" HOST_SECURITY_MAX_ROWS "20000")"
   mkdir -p "$SERVER_DATA_DIR" "$TLS_CA_EXPORT_DIR"
   cat >"$SERVER_ENV_FILE" <<ENV
 NARWHAL_VERSION=$PROJECT_VERSION
+PURGE_SECONDS=$retention_seconds
+RAW_RETENTION_SECONDS=$raw_retention
+REPORT_MAX_ROWS=$report_max_rows
+HOST_SECURITY_MAX_ROWS=$host_security_max_rows
 SHARED_SECRET=$secret
 ALERT_DISK_THRESHOLD_PERCENT=$th
 ALERT_CONN_WARNING_THRESHOLD=$default_conn_warning_threshold

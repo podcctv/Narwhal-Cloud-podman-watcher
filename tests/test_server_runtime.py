@@ -944,7 +944,7 @@ class ServerRuntimeTests(unittest.TestCase):
         body = json.loads(response.body)
         self.assertEqual(body["action"]["params"]["process_names"], ["sockd"])
 
-    def test_deny_rejects_nonempty_weak_socks_password(self):
+    def test_deny_accepts_confirmed_weak_socks_password(self):
         alert = {
             "type": "socks_weak_auth",
             "severity": "critical",
@@ -971,9 +971,13 @@ class ServerRuntimeTests(unittest.TestCase):
             async def json(self):
                 return {"decision": "deny"}
 
-        with self.assertRaises(server.HTTPException) as raised:
-            asyncio.run(server.set_security_alert_disposition(alert_id, Request()))
-        self.assertEqual(raised.exception.status_code, 400)
+        result = asyncio.run(server.set_security_alert_disposition(alert_id, Request()))
+        body = json.loads(result.body)
+        self.assertEqual(body["action"]["action_type"], "enforce_socks_auth")
+        conn = server.db()
+        params = json.loads(conn.execute("SELECT params_json FROM security_actions").fetchone()[0])
+        conn.close()
+        self.assertEqual(params["auth_mode"], "weak_password")
 
     def test_allow_socks_alert_queues_enforcement_release(self):
         alert = {
@@ -1177,6 +1181,27 @@ class ServerRuntimeTests(unittest.TestCase):
             self.assertEqual(server._next_cleanup_monotonic, next_cleanup)
         finally:
             server.PURGE_SECONDS = original_purge
+
+    def test_raw_history_row_budget_catches_up_in_batches(self):
+        now = int(time.time())
+        for i in range(12):
+            self._insert("incus", i, timestamp=now - 12 + i)
+        with mock.patch.object(server, "REPORT_MAX_ROWS", 3), mock.patch.object(server, "REPORT_CLEANUP_BATCH_SIZE", 2):
+            server.cleanup_old_reports(now)
+        conn = server.db()
+        rows = conn.execute("SELECT cpu_percent FROM reports ORDER BY id").fetchall()
+        conn.close()
+        self.assertEqual([row[0] for row in rows], [9, 10, 11])
+        self.assertGreater(server.database_storage_status()["cleanup"]["removed_rows"], 0)
+
+    def test_cleanup_failure_is_visible(self):
+        with mock.patch.object(server, "db", side_effect=sqlite3.OperationalError("locked test")):
+            server.cleanup_old_reports(force=True)
+        self.assertIn("locked test", server._cleanup_status["error"])
+        self.assertTrue(server._cleanup_status["backlog"])
+
+    def test_new_database_supports_incremental_space_reclamation(self):
+        self.assertEqual(server.database_storage_status()["auto_vacuum"], 2)
 
     def test_legacy_schema_is_migrated_without_losing_rows(self):
         conn = sqlite3.connect(server.DB_PATH)

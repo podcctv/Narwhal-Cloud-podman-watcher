@@ -2439,8 +2439,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             action_process_matches = [
                 item
                 for item in process_matches
-                if socks_auth_mode == "no_auth"
-                and str(item.get("auth_state") or "no_auth") == "no_auth"
+                if str(item.get("auth_state") or socks_auth_mode) in ("no_auth", "weak_password")
             ]
             socks_alert = _security_alert(
                 "socks_weak_auth",
@@ -2457,6 +2456,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             socks_alert.update(
                 {
                     "socks_auth_mode": socks_auth_mode,
+                    "automatic_remediation": socks_proxy.get("auth_enforcement") or {},
                     "socks_processes": sorted(
                         {
                             str(item.get("process") or "")
@@ -2732,13 +2732,12 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             item for item in normalized_unapproved if item not in auto_domains
         ]
         xrayr_auto_result: Dict[str, object] = {}
-        xrayr_confirmed = "xrayr" in {
-            str(item).strip().lower() for item in process_patterns
-        }
+        confirmed_patterns = sorted(set(process_patterns) & set(_configured_panel_process_patterns()))
+        auto_panel = os.getenv("SECURITY_AUTO_REMEDIATE_PANEL", "true").lower() not in ("0", "false", "no", "off")
         if (
             panel_detection_enabled
-            and auto_remediate_xrayr
-            and xrayr_confirmed
+            and (auto_panel or (auto_remediate_xrayr and "xrayr" in confirmed_patterns))
+            and confirmed_patterns
             and not bool(panel_pairing.get("approved"))
             and str(container.get("runtime") or "").lower() in ("podman", "incus")
         ):
@@ -2748,12 +2747,12 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "project": container.get("project"),
                     "container_name": container.get("name"),
                     "params": {
-                        "process_patterns": ["xrayr"],
+                        "process_patterns": confirmed_patterns,
                         "process_pids": [
                             int(item.get("pid") or 0)
                             for item in process_matches[:20]
                             if isinstance(item, dict)
-                            and str(item.get("pattern") or "").lower() == "xrayr"
+                            and str(item.get("pattern") or "").lower() in confirmed_patterns
                             and int(item.get("pid") or 0) > 1
                         ],
                         "config_files": config_files,
@@ -2766,7 +2765,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 "message": xrayr_message[:500],
             }
             print(
-                f"automatic XrayR remediation {'succeeded' if xrayr_ok else 'failed'} for "
+                f"automatic panel remediation {'succeeded' if xrayr_ok else 'failed'} for "
                 f"{container.get('runtime')}/{container.get('name')}: {xrayr_message}"
             )
         suppress_panel_alert = bool(
@@ -2796,7 +2795,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 f"automatic panel remediation {'succeeded' if auto_ok else 'failed'} for "
                 f"{container.get('runtime')}/{container.get('name')}: {auto_message}"
             )
-            unapproved_domains = remaining_unapproved_domains
+            xrayr_auto_result = {"attempted": True, "succeeded": auto_ok, "message": auto_message[:500]}
+            suppress_panel_alert = False
         allowlist_configured = bool(_configured_allowed_panel_domains())
         pairing_is_allowed = allowlist_configured and bool(panel_domains) and not unapproved_domains
         if (
@@ -5129,6 +5129,7 @@ def _incus_host_namespace_kill(
     project: str,
     patterns: List[str],
     process_pids: List[int] | None = None,
+    restrict_pids: bool = False,
 ) -> Tuple[int, int, int, str]:
     """Kill exact allowlisted process identities with host user-namespace privileges.
 
@@ -5145,6 +5146,7 @@ def _incus_host_namespace_kill(
     script = (
         "set -f; matched=0; killed=0; errors=0; "
         f"req_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')}; "
+        f"restrict_pids={1 if restrict_pids else 0}; "
         f"for pattern in {safe_patterns}; do "
         "for proc in /proc/[0-9]*; do pid=${proc##*/}; "
         "[ \"$pid\" = 1 ] && continue; [ \"$pid\" = \"$$\" ] && continue; "
@@ -5158,11 +5160,9 @@ def _incus_host_namespace_kill(
         "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\" $extra_candidates; do "
         "candidate=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); "
         "[ \"$candidate\" = \"$pattern\" ] && found=1; done; "
-        "if [ \"$found\" -eq 0 ] && [ -r \"$proc/cmdline\" ]; then "
-        "if tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | grep -Fqi -- \"$pattern\"; then found=1; fi; fi; "
-        "if [ \"$found\" -eq 0 ] && [ -n \"$req_pids\" ]; then "
-        "case \"$req_pids\" in *\" $pid \"*) found=1;; esac; fi; "
         "[ \"$found\" -eq 1 ] || continue; "
+        "if [ \"$restrict_pids\" -eq 1 ] && [ -n \"$req_pids\" ]; then "
+        "case \"$req_pids\" in *\" $pid \"*) ;; *) continue;; esac; fi; "
         "matched=$((matched+1)); "
         "if kill -TERM \"$pid\" 2>/dev/null; then killed=$((killed+1)); "
         "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; "
@@ -5191,6 +5191,28 @@ def _incus_host_namespace_kill(
     )
 
 
+def _verify_remediation_stopped(runtime: str, name: str, project: str, names: List[str]) -> Tuple[bool, str]:
+    """Re-scan exact executable identities after supervisors have had time to respawn."""
+    if not names:
+        return True, "no_process_targets=1"
+    words = " ".join(shlex.quote(value.lower()) for value in names)
+    script = (
+        "sleep 1; remaining=0; for proc in /proc/[0-9]*; do "
+        "pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
+        "[ -r \"$proc/cmdline\" ] || continue; "
+        "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null); [ \"$state\" = Z ] && continue; "
+        "comm=$(cat \"$proc/comm\" 2>/dev/null); exe=$(readlink \"$proc/exe\" 2>/dev/null); "
+        "argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); matched=0; "
+        f"for pattern in {words}; do "
+        "for candidate in \"$comm\" \"${exe##*/}\" \"${argv0##*/}\"; do "
+        "[ \"$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]')\" = \"$pattern\" ] && matched=1; "
+        "done; done; remaining=$((remaining+matched)); done; "
+        "printf 'remaining_processes=%s\\n' \"$remaining\"; [ \"$remaining\" -eq 0 ]"
+    )
+    ok, message = _run_action_command(_runtime_exec_cmd(runtime, name, script, project))
+    return bool(ok and re.search(r"\bremaining_processes=0\b", message)), message
+
+
 def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
     """Stop only the allowlisted SOCKS process/service inside one container."""
     runtime_kind = str(action.get("runtime") or "").strip().lower()
@@ -5203,8 +5225,8 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
     if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
         return False, "invalid Incus project"
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
-    if str(params.get("auth_mode") or "") != "no_auth":
-        return False, "SOCKS stop requires confirmed no-auth evidence"
+    if str(params.get("auth_mode") or "") not in ("no_auth", "weak_password"):
+        return False, "SOCKS stop requires confirmed empty or weak authentication evidence"
     requested_names = params.get("process_names") if isinstance(params.get("process_names"), list) else []
     process_names = sorted(
         {
@@ -5249,6 +5271,10 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
         "if [ -x \"/etc/init.d/$pattern\" ]; then \"/etc/init.d/$pattern\" stop >/dev/null 2>&1 && "
         "stopped_services=$((stopped_services+1)) || true; fi; fi; done; "
         "for pid in $targets; do [ -r \"/proc/$pid/stat\" ] || continue; "
+        "svc=$(sed -n 's#.*[/]openrc\\.\\([^/]*\\)$#\\1#p' \"/proc/$pid/cgroup\" 2>/dev/null | head -n 1); "
+        "case \"$svc\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *) "
+        "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 || true; "
+        "command -v rc-update >/dev/null 2>&1 && rc-update del \"$svc\" >/dev/null 2>&1 || true;; esac; "
         "unit=$(sed -n 's#.*[/]\\([^/]*\\.service\\)$#\\1#p' \"/proc/$pid/cgroup\" 2>/dev/null | head -n 1); "
         "case \"$unit\" in *.service) case \"$unit\" in *[!A-Za-z0-9_.@:-]*) ;; *) "
         "command -v systemctl >/dev/null 2>&1 && systemctl stop \"$unit\" >/dev/null 2>&1 && "
@@ -5270,7 +5296,7 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
     if runtime_kind == "incus":
         container_stop_ok = ok
         _, host_killed, host_errors, host_output = _incus_host_namespace_kill(
-            runtime_bin, container_name, project, process_names, process_pids
+            runtime_bin, container_name, project, process_names, process_pids, restrict_pids=True
         )
         counts["killed_processes"] = counts.get("killed_processes", 0) + host_killed
         counts["stop_errors"] = counts.get("stop_errors", 0) + host_errors
@@ -5282,20 +5308,27 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
         ok = counts.get("stop_errors", 0) == 0 and (
             container_stop_ok or host_killed > 0
         )
+    if ok:
+        verified, verification = _verify_remediation_stopped(runtime_bin, container_name, project, process_names)
+        ok = ok and verified
+        output = (output or "") + "; " + verification
     return ok, output or ("SOCKS service stopped" if ok else "SOCKS stop command failed")
 
 
 def enforce_socks_auth_policy(
     container: Dict[str, object], entries: List[Dict[str, object]] | None = None
 ) -> Dict[str, object] | None:
-    """Apply an operator-approved no-auth policy using this cycle's existing evidence."""
+    """Automatically enforce confirmed weak/empty authentication each cycle."""
     policy = _socks_auth_enforcement_for_container(container, entries)
-    if policy is None:
-        return None
     security = container.get("security") if isinstance(container.get("security"), dict) else {}
     socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
     auth_mode = str(socks_proxy.get("auth_mode") or "unknown")
-    if auth_mode in ("configured", "weak_password"):
+    auto_enabled = os.getenv("SECURITY_AUTO_REMEDIATE_SOCKS", "true").lower() not in ("0", "false", "no", "off")
+    if policy is None and auto_enabled and str(container.get("runtime")) in ("incus", "podman"):
+        policy = {"process_names": list(_SOCKS_PROCESS_NAMES)}
+    if policy is None:
+        return None
+    if auth_mode == "configured":
         released = remove_socks_auth_enforcement(
             str(container.get("runtime") or ""),
             str(container.get("project") or ""),
@@ -5304,11 +5337,11 @@ def enforce_socks_auth_policy(
         result = {
             "active": False,
             "released": released,
-            "reason": "non_empty_auth_detected",
+            "reason": "strong_auth_detected",
         }
         socks_proxy["auth_enforcement"] = result
         return result
-    if not socks_proxy.get("detected") or auth_mode != "no_auth":
+    if not socks_proxy.get("detected") or auth_mode not in ("no_auth", "weak_password"):
         result = {"active": True, "attempted": False, "reason": "awaiting_auth_evidence"}
         socks_proxy["auth_enforcement"] = result
         return result
@@ -5317,7 +5350,7 @@ def enforce_socks_auth_policy(
         for item in socks_proxy.get("process_matches", [])
         if isinstance(item, dict)
         and str(item.get("process") or "").strip().lower() in _SOCKS_PROCESS_NAMES
-        and str(item.get("auth_state") or "no_auth") == "no_auth"
+        and str(item.get("auth_state") or auth_mode) in ("no_auth", "weak_password")
     }
     approved_names = sorted(set(policy.get("process_names", [])) & current_names)
     if not approved_names:
@@ -5329,7 +5362,7 @@ def enforce_socks_auth_policy(
         for item in socks_proxy.get("process_matches", [])
         if isinstance(item, dict)
         and str(item.get("process") or "").strip().lower() in approved_names
-        and str(item.get("auth_state") or "no_auth") == "no_auth"
+        and str(item.get("auth_state") or auth_mode) in ("no_auth", "weak_password")
         and int(item.get("pid") or 0) > 1
     ]
     ok, message = stop_unauthenticated_socks(
@@ -5338,7 +5371,7 @@ def enforce_socks_auth_policy(
             "project": container.get("project"),
             "container_name": container.get("name"),
             "params": {
-                "auth_mode": "no_auth",
+                "auth_mode": auth_mode,
                 "process_names": approved_names,
                 "process_pids": process_pids,
             },
@@ -5565,10 +5598,6 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); matched=0; "
             "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
             f"[ \"$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]')\" = {quoted_pattern} ] && matched=1; done; "
-            "if [ \"$matched\" -eq 0 ] && [ -r \"$proc/cmdline\" ]; then "
-            f"if tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | grep -Fqi -- {quoted_pattern}; then matched=1; fi; fi; "
-            "if [ \"$matched\" -eq 0 ] && [ -n \"$_req_pids\" ]; then "
-            "case \"$_req_pids\" in *\" $pid \"*) matched=1;; esac; fi; "
             "[ \"$matched\" -eq 1 ] || continue; "
             "svc=$(sed -n 's#.*[/]openrc\\.\\([^/]*\\)$#\\1#p' \"$proc/cgroup\" 2>/dev/null | head -n 1); "
             "case \"$svc\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *) "
@@ -5624,6 +5653,10 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             )
             changes = sum(counts.get(key, 0) for key in ("killed_processes", "removed_services", "removed_configs"))
             ok = counts.get("cleanup_errors", 0) == 0 and changes > 0
+    if ok:
+        verified, verification = _verify_remediation_stopped(runtime_bin, container_name, project, patterns)
+        ok = ok and verified
+        output = (output or "") + "; " + verification
     return ok, output or ("remediation completed" if ok else "remediation command failed")
 
 
@@ -5652,8 +5685,8 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         container_name = str(action.get("container_name") or "").strip()
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
         process_names = params.get("process_names") if isinstance(params.get("process_names"), list) else []
-        if str(params.get("auth_mode") or "") != "no_auth":
-            return False, "SOCKS enforcement requires confirmed no-auth evidence"
+        if str(params.get("auth_mode") or "") not in ("no_auth", "weak_password"):
+            return False, "SOCKS enforcement requires confirmed empty or weak authentication evidence"
         try:
             set_socks_auth_enforcement(runtime_kind, project, container_name, process_names)
         except (OSError, ValueError) as exc:
