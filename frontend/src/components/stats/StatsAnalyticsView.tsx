@@ -69,7 +69,7 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
               max="10080"
               value={minutes}
               onChange={(e) => setMinutes(Number(e.target.value))}
-              className="w-24 rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-slate-200 font-mono text-xs focus:outline-none focus:border-sky-500"
+              className="w-24 rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-slate-200 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
             />
           </div>
 
@@ -77,7 +77,7 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
             type="button"
             onClick={loadData}
             disabled={loading}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin text-sky-400' : ''}`} />
             <span>刷新</span>
@@ -86,7 +86,7 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
           <button
             type="button"
             onClick={onBackToDashboard}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-700 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400"
           >
             <span>返回总览</span>
             <ArrowRight className="h-3.5 w-3.5" />

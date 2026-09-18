@@ -60,7 +60,11 @@ export const App: React.FC = () => {
   const [isPaused, setIsPaused] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  const isFetchingRef = React.useRef(false);
+
   const fetchAllData = useCallback(async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
     setIsRefreshing(true);
     try {
       const [latestRes, alertsRes, secStatusRes] = await Promise.all([
@@ -98,6 +102,7 @@ export const App: React.FC = () => {
     } catch (err: any) {
       addToast('error', `数据获取失败：${err.message || err}`);
     } finally {
+      isFetchingRef.current = false;
       setIsRefreshing(false);
     }
   }, [addToast, isDocumentHidden]);
@@ -117,22 +122,28 @@ export const App: React.FC = () => {
     fetchAllData();
   }, [fetchAllData]);
 
-  // Real-time countdown interval
+  // Real-time countdown interval (pure state updater without side effects)
   useEffect(() => {
     if (isPaused) return;
 
     const timer = setInterval(() => {
       setCountdown((prev) => {
         if (prev <= 1) {
-          fetchAllData();
-          return effectivePollInterval;
+          return 0;
         }
         return prev - 1;
       });
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [isPaused, fetchAllData, effectivePollInterval]);
+  }, [isPaused]);
+
+  // When countdown expires, trigger refresh
+  useEffect(() => {
+    if (!isPaused && countdown === 0) {
+      fetchAllData();
+    }
+  }, [countdown, isPaused, fetchAllData]);
 
   // Keyboard shortcut listener (Ctrl+K, Escape)
   useEffect(() => {
@@ -168,6 +179,7 @@ export const App: React.FC = () => {
         serverVersion={serverVersion}
         activeAlertCount={activeAlertsCount}
         countdown={countdown}
+        totalSeconds={effectivePollInterval}
         isPaused={isPaused}
         onTogglePause={() => setIsPaused((prev) => !prev)}
         onRefreshNow={fetchAllData}

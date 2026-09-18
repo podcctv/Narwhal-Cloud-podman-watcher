@@ -110,10 +110,27 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
     const handleResize = () => chartInstance.current?.resize();
     window.addEventListener('resize', handleResize);
 
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && chartRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        chartInstance.current?.resize();
+      });
+      resizeObserver.observe(chartRef.current);
+    }
+
     return () => {
       window.removeEventListener('resize', handleResize);
+      resizeObserver?.disconnect();
     };
   }, [history]);
+
+  // Clean up ECharts instance on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      chartInstance.current?.dispose();
+      chartInstance.current = null;
+    };
+  }, []);
 
   return <div ref={chartRef} className="h-56 w-full" />;
 };

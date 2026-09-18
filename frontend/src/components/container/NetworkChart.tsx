@@ -78,12 +78,12 @@ export const NetworkChart: React.FC<NetworkChartProps> = ({ history }) => {
           smooth: true,
           showSymbol: false,
           data: rxSeries,
-          itemStyle: { color: '#2ecc71' },
+          itemStyle: { color: '#22c55e' },
           lineStyle: { width: 2 },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(46, 204, 113, 0.25)' },
-              { offset: 1, color: 'rgba(46, 204, 113, 0.0)' },
+              { offset: 0, color: 'rgba(34, 197, 94, 0.25)' },
+              { offset: 1, color: 'rgba(34, 197, 94, 0.0)' },
             ]),
           },
         },
@@ -93,12 +93,12 @@ export const NetworkChart: React.FC<NetworkChartProps> = ({ history }) => {
           smooth: true,
           showSymbol: false,
           data: txSeries,
-          itemStyle: { color: '#f39c12' },
+          itemStyle: { color: '#38bdf8' },
           lineStyle: { width: 2 },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(243, 156, 18, 0.25)' },
-              { offset: 1, color: 'rgba(243, 156, 18, 0.0)' },
+              { offset: 0, color: 'rgba(56, 189, 248, 0.25)' },
+              { offset: 1, color: 'rgba(56, 189, 248, 0.0)' },
             ]),
           },
         },
@@ -110,10 +110,27 @@ export const NetworkChart: React.FC<NetworkChartProps> = ({ history }) => {
     const handleResize = () => chartInstance.current?.resize();
     window.addEventListener('resize', handleResize);
 
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && chartRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        chartInstance.current?.resize();
+      });
+      resizeObserver.observe(chartRef.current);
+    }
+
     return () => {
       window.removeEventListener('resize', handleResize);
+      resizeObserver?.disconnect();
     };
   }, [history]);
+
+  // Clean up ECharts instance on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      chartInstance.current?.dispose();
+      chartInstance.current = null;
+    };
+  }, []);
 
   return <div ref={chartRef} className="h-56 w-full" />;
 };

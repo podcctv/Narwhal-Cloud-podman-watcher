@@ -25,6 +25,15 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   const isQueuedOrDispatched =
     action && (action.status === 'queued' || action.status === 'dispatched');
 
+  // Automatically poll every 2.5 seconds while waiting for the node to return diagnostic report
+  React.useEffect(() => {
+    if (!isQueuedOrDispatched) return;
+    const pollTimer = setInterval(() => {
+      onRefresh();
+    }, 2500);
+    return () => clearInterval(pollTimer);
+  }, [isQueuedOrDispatched, onRefresh]);
+
   const handleRequest = async () => {
     if (submitting) return;
     setSubmitting(true);

@@ -158,8 +158,9 @@ export const NotificationSettingsView: React.FC<{ onToast: (type: ToastMessage['
         </label>
         <div className="md:col-span-2">
           <button
+            type="submit"
             disabled={saving}
-            className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-60"
+            className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-sky-400 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60"
           >
             <Bell className="h-4 w-4" />
             {saving ? '保存中…' : '保存机器人'}
@@ -206,7 +207,7 @@ export const NotificationSettingsView: React.FC<{ onToast: (type: ToastMessage['
                     onToast('error', e.message);
                   }
                 }}
-                className="inline-flex min-h-11 items-center gap-1 rounded-lg border border-sky-700/60 px-3 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-950"
+                className="inline-flex min-h-11 items-center gap-1 rounded-lg border border-sky-700/60 px-3 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-950 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400"
               >
                 <Send className="h-3.5 w-3.5" />
                 测试
@@ -214,7 +215,7 @@ export const NotificationSettingsView: React.FC<{ onToast: (type: ToastMessage['
               <button
                 type="button"
                 onClick={() => setDeleting(bot)}
-                className="flex h-11 w-11 items-center justify-center rounded-lg border border-rose-800/60 text-rose-300 hover:bg-rose-950"
+                className="flex h-11 w-11 items-center justify-center rounded-lg border border-rose-800/60 text-rose-300 hover:bg-rose-950 transition-colors focus:outline-none focus:ring-2 focus:ring-rose-400"
                 aria-label={`删除机器人 ${bot.name}`}
               >
                 <Trash2 className="h-4 w-4" />

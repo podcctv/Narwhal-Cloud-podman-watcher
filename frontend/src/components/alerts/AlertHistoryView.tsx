@@ -162,7 +162,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             <select
               value={severity}
               onChange={(e) => setSeverity(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:border-sky-500"
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
             >
               <option value="all">全部级别</option>
               <option value="critical">Critical (高危)</option>
@@ -176,7 +176,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             <select
               value={alertType}
               onChange={(e) => setAlertType(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:border-sky-500"
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
             >
               <option value="all">全部类型</option>
               {typeOptions.map((t) => (
@@ -190,7 +190,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             <select
               value={hostId}
               onChange={(e) => setHostId(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:border-sky-500"
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
             >
               <option value="">全部主机</option>
               {hostOptions.map((h) => (
@@ -207,7 +207,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="容器、说明、进程特征..."
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-3 py-2 text-slate-200 focus:outline-none focus:border-sky-500"
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
               />
               <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
             </div>
@@ -221,7 +221,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
               key={s}
               type="button"
               onClick={() => setStatusTab(s)}
-              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all shrink-0 ${
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-none focus:ring-2 focus:ring-sky-400 ${
                 statusTab === s
                   ? 'border-sky-500 bg-sky-950/80 text-sky-300'
                   : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200 hover:border-slate-700'

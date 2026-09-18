@@ -83,6 +83,17 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const peakTone = (value: number, warning: number, critical: number) =>
           t.stale || !t.enabled ? 'text-slate-300' : thresholdLevel(value, warning, critical) === 'critical' ? 'text-red-300'
             : thresholdLevel(value, warning, critical) === 'warning' ? 'text-amber-300' : 'text-emerald-300';
+        const connLvl = thresholdLevel(connPeak, connWarning, connCritical);
+        const ipLvl = thresholdLevel(t.today_peak_inbound_ips, ipWarning, ipCritical);
+        const peakLevel: Level =
+          t.stale || !t.enabled
+            ? 'unknown'
+            : (connLvl === 'critical' || ipLvl === 'critical')
+            ? 'critical'
+            : (connLvl === 'warning' || ipLvl === 'warning')
+            ? 'warning'
+            : 'normal';
+
         return <article key={t.host_id} className="min-w-0 rounded-xl border border-slate-700 bg-slate-900/60 p-3 sm:p-4">
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1 basis-56">
@@ -91,8 +102,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                 {t.stale ? ' · 数据已过期' : !t.enabled ? ' · 安全采集未启用' : ''}</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={() => setEditing(t)} className="rounded-lg border border-sky-700 bg-sky-950/60 px-3 py-2 text-xs text-sky-300">配置</button>
-              <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-2 text-xs text-red-300">删除</button>
+              <button type="button" onClick={() => setEditing(t)} className="rounded-lg border border-sky-700 bg-sky-950/60 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-900/60 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400">配置</button>
+              <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-none focus:ring-2 focus:ring-red-400">删除</button>
             </div>
           </div>
           <div className="grid min-w-0 gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr))]">
@@ -114,7 +125,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               {sources.length > visibleSources.length && <details><summary className="cursor-pointer text-slate-300">其余 {sources.length - visibleSources.length} 个来源未接入或不可读</summary>{sources.filter(s => !visibleSources.includes(s)).map((s, i) => <HttpSource key={i} source={s} />)}</details>}
               <p className="text-slate-300">来源分别计数，避免反向代理与应用重复计算。没有 HTTP 访问日志时无法从 TCP 流量推算请求数。</p>
             </Signal>
-            <Signal title="今日单容器峰值" level={t.stale || !t.enabled ? 'unknown' : [thresholdLevel(connPeak, connWarning, connCritical), thresholdLevel(t.today_peak_inbound_ips, ipWarning, ipCritical)].includes('critical') ? 'critical' : [thresholdLevel(connPeak, connWarning, connCritical), thresholdLevel(t.today_peak_inbound_ips, ipWarning, ipCritical)].includes('warning') ? 'warning' : 'normal'}>
+            <Signal title="今日单容器峰值" level={peakLevel}>
               <p><span className={peakTone(connPeak, connWarning, connCritical)}>最高连接 {fmtNumber(connPeak, 0)}</span> · <span className="text-slate-300">全容器合计峰值 {fmtNumber(t.today_peak_conn_count, 0)}</span></p>
               <p><span className={peakTone(t.today_peak_inbound_ips, ipWarning, ipCritical)}>最高入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}</span> · <span className="text-slate-300">最高出站 IP {fmtNumber(t.today_peak_outbound_ips, 0)}</span></p>
               <p className="text-slate-300">连接 &gt; {connWarning} / {connCritical}、入站 IP &gt; {ipWarning} / {ipCritical}：警告 / 危险。</p>
@@ -147,17 +158,221 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   </section>;
 };
 
-const HostConfigDialog: React.FC<{host: SecurityStatusItem; busy: boolean; onClose: () => void; onSave: (v: Record<string, any>) => void}> = ({ host, busy, onClose, onSave }) => {
+const HostConfigDialog: React.FC<{
+  host: SecurityStatusItem;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (v: Record<string, any>) => void;
+}> = ({ host, busy, onClose, onSave }) => {
   const c = host.host_config || {};
   const [name, setName] = useState(host.host_id);
   const [interval, setIntervalValue] = useState(String(c.report_interval || 300));
   const [runtimes, setRuntimes] = useState(String(c.container_runtimes || 'auto'));
   const [docker, setDocker] = useState(String(c.docker_monitor_mode || 'notice'));
-  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4"><form onSubmit={(e) => { e.preventDefault(); onSave({host_id:name, report_interval:Number(interval), container_runtimes:runtimes, docker_monitor_mode:docker}); }} className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"><h3 className="text-base font-bold">修改主机配置</h3><p className="mt-1 text-xs text-slate-400">改名不会产生新主机：系统以稳定 NODE_ID 合并历史数据。</p><label className="mt-4 block text-xs text-slate-300">显示名称<input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" required /></label><label className="mt-3 block text-xs text-slate-300">上报间隔（秒）<input type="number" min="60" max="3600" value={interval} onChange={(e) => setIntervalValue(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" required /></label><label className="mt-3 block text-xs text-slate-300">运行时<input value={runtimes} onChange={(e) => setRuntimes(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" /></label><label className="mt-3 block text-xs text-slate-300">Docker 模式<select value={docker} onChange={(e) => setDocker(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"><option value="notice">仅提示</option><option value="full">完整采集</option><option value="off">关闭</option></select></label><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={onClose} className="rounded border border-slate-700 px-3 py-2 text-sm">取消</button><button disabled={busy} className="rounded bg-sky-600 px-3 py-2 text-sm font-semibold">{busy ? '下发中…' : '保存并下发'}</button></div></form></div>;
+
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [busy, onClose]);
+
+  return (
+    <div
+      role="presentation"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="host-config-dialog-title"
+        className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            onSave({
+              host_id: name,
+              report_interval: Number(interval),
+              container_runtimes: runtimes,
+              docker_monitor_mode: docker,
+            });
+          }}
+        >
+          <h3 id="host-config-dialog-title" className="text-base font-bold text-slate-100">
+            修改主机配置
+          </h3>
+          <p className="mt-1 text-xs text-slate-400 leading-relaxed">
+            改名不会产生新主机：系统以稳定 NODE_ID 合并历史数据。
+          </p>
+
+          <label className="mt-4 block text-xs font-medium text-slate-300">
+            显示名称
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              required
+            />
+          </label>
+
+          <label className="mt-3 block text-xs font-medium text-slate-300">
+            上报间隔（秒）
+            <input
+              type="number"
+              min="60"
+              max="3600"
+              value={interval}
+              onChange={(e) => setIntervalValue(e.target.value)}
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              required
+            />
+          </label>
+
+          <label className="mt-3 block text-xs font-medium text-slate-300">
+            运行时 (auto / incus / podman / docker)
+            <input
+              value={runtimes}
+              onChange={(e) => setRuntimes(e.target.value)}
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+            />
+          </label>
+
+          <label className="mt-3 block text-xs font-medium text-slate-300">
+            Docker 模式
+            <select
+              value={docker}
+              onChange={(e) => setDocker(e.target.value)}
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 text-xs"
+            >
+              <option value="notice">仅提示 (notice)</option>
+              <option value="full">完整采集 (full)</option>
+              <option value="off">关闭 (off)</option>
+            </select>
+          </label>
+
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              disabled={busy}
+              className="rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-500 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50 shadow-sm"
+            >
+              {busy ? '下发中…' : '保存并下发'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 };
 
-const HostDeleteDialog: React.FC<{host: SecurityStatusItem; busy: boolean; onClose: () => void; onDelete: (m: 'uninstall' | 'records_only') => void}> = ({ host, busy, onClose, onDelete }) => {
-  const [confirm, setConfirm] = useState(''); const [mode, setMode] = useState<'uninstall' | 'records_only'>('uninstall');
-  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4"><div className="w-full max-w-md rounded-2xl border border-rose-900/70 bg-slate-900 p-5 shadow-2xl"><h3 className="text-base font-bold text-rose-200">删除主机</h3><p className="mt-2 text-xs leading-5 text-slate-300">“远程卸载”会让节点停止并删除 Narwhal Client、配置和自动更新单元；不会修改容器或业务服务。仅删记录会保留节点 Agent，下一次上报会重新出现。</p><label className="mt-4 flex gap-2 text-sm"><input type="radio" checked={mode==='uninstall'} onChange={() => setMode('uninstall')} />远程卸载 Client（推荐）</label><label className="mt-2 flex gap-2 text-sm"><input type="radio" checked={mode==='records_only'} onChange={() => setMode('records_only')} />只删除面板记录</label><label className="mt-4 block text-xs">输入完整主机名确认：<b>{host.host_id}</b><input value={confirm} onChange={(e) => setConfirm(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" /></label><div className="mt-5 flex justify-end gap-2"><button onClick={onClose} className="rounded border border-slate-700 px-3 py-2 text-sm">取消</button><button disabled={busy || confirm !== host.host_id} onClick={() => onDelete(mode)} className="rounded bg-rose-700 px-3 py-2 text-sm font-semibold disabled:opacity-50">{busy ? '处理中…' : '确认删除'}</button></div></div></div>;
+const HostDeleteDialog: React.FC<{
+  host: SecurityStatusItem;
+  busy: boolean;
+  onClose: () => void;
+  onDelete: (m: 'uninstall' | 'records_only') => void;
+}> = ({ host, busy, onClose, onDelete }) => {
+  const [confirm, setConfirm] = useState('');
+  const [mode, setMode] = useState<'uninstall' | 'records_only'>('uninstall');
+
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [busy, onClose]);
+
+  return (
+    <div
+      role="presentation"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="host-delete-dialog-title"
+        className="w-full max-w-md rounded-2xl border border-rose-900/70 bg-slate-900 p-5 shadow-2xl"
+      >
+        <h3 id="host-delete-dialog-title" className="text-base font-bold text-rose-200">
+          删除主机
+        </h3>
+        <p className="mt-2 text-xs leading-5 text-slate-300">
+          “远程卸载”会让节点停止并删除 Narwhal Client、配置和自动更新单元；不会修改容器或业务服务。仅删记录会保留节点 Agent，下一次上报会重新出现。
+        </p>
+
+        <div className="mt-4 space-y-2">
+          <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+            <input
+              type="radio"
+              name="delete_mode"
+              checked={mode === 'uninstall'}
+              onChange={() => setMode('uninstall')}
+              className="accent-rose-500"
+            />
+            <span>远程卸载 Client（推荐）</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+            <input
+              type="radio"
+              name="delete_mode"
+              checked={mode === 'records_only'}
+              onChange={() => setMode('records_only')}
+              className="accent-rose-500"
+            />
+            <span>只删除面板记录</span>
+          </label>
+        </div>
+
+        <label className="mt-4 block text-xs text-slate-300">
+          输入完整主机名确认：<b className="text-rose-300 font-mono select-all">{host.host_id}</b>
+          <input
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder={`请输入 ${host.host_id}`}
+            className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-rose-500"
+          />
+        </label>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            disabled={busy || confirm !== host.host_id}
+            onClick={() => onDelete(mode)}
+            className="rounded-lg bg-rose-700 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-600 transition-colors focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-sm"
+          >
+            {busy ? '处理中…' : '确认删除'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 };
 

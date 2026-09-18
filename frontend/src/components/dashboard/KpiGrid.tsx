@@ -52,8 +52,16 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
 
       {/* KPI 3: 活动告警 */}
       <div
+        role={onFilterAlerts ? 'button' : undefined}
+        tabIndex={onFilterAlerts ? 0 : undefined}
         onClick={onFilterAlerts}
-        className={`relative overflow-hidden rounded-2xl border p-4 shadow-sm transition-all cursor-pointer ${
+        onKeyDown={(e) => {
+          if (onFilterAlerts && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            onFilterAlerts();
+          }
+        }}
+        className={`relative overflow-hidden rounded-2xl border p-4 shadow-sm transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
           activeAlerts > 0
             ? 'border-rose-500/40 bg-rose-950/20 hover:border-rose-500/70 hover:shadow-glow-rose'
             : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'

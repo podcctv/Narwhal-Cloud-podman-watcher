@@ -225,14 +225,14 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
           <button
             type="button"
             onClick={expandAll}
-            className="text-[11px] font-medium text-slate-400 hover:text-sky-300 transition-colors px-2 py-0.5 rounded border border-slate-800 hover:border-slate-700 bg-slate-900/60"
+            className="text-[11px] font-medium text-slate-400 hover:text-sky-300 transition-colors px-2.5 py-1 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/60 focus:outline-none focus:ring-2 focus:ring-sky-400"
           >
             全部展开
           </button>
           <button
             type="button"
             onClick={collapseAll}
-            className="text-[11px] font-medium text-slate-400 hover:text-sky-300 transition-colors px-2 py-0.5 rounded border border-slate-800 hover:border-slate-700 bg-slate-900/60"
+            className="text-[11px] font-medium text-slate-400 hover:text-sky-300 transition-colors px-2.5 py-1 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/60 focus:outline-none focus:ring-2 focus:ring-sky-400"
           >
             全部折叠
           </button>
@@ -552,7 +552,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                   decision: 'deny',
                                 });
                               }}
-                              className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all disabled:opacity-50 shadow-sm"
+                              className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-sm"
                               title="定向处置违规进程或停止非合规服务"
                             >
                               <Ban className="h-3 w-3" />
@@ -573,7 +573,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                   decision: 'allow_silent',
                                 });
                               }}
-                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
                               title="添加放行策略不再告警"
                             >
                               <Check className="h-3 w-3 text-emerald-400" />
@@ -590,7 +590,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                   container_name: c.container_name,
                                 })
                               }
-                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-all"
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400"
                               title="查看容器详细指标与诊断"
                             >
                               <Sparkles className="h-3 w-3" />
@@ -608,7 +608,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                 container_name: c.container_name,
                               })
                             }
-                            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 text-sky-400 px-3 py-1.5 text-xs font-semibold hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750 transition-all shadow-sm"
+                            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 text-sky-400 px-3 py-1.5 text-xs font-semibold hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 shadow-sm"
                           >
                             <Sparkles className="h-3.5 w-3.5" />
                             <span>深度排查</span>

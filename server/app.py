@@ -1702,9 +1702,18 @@ def process_connection_overloads(
 
 _latest_cache: Dict[str, Any] | None = None
 _latest_cache_time = 0.0
+_security_status_cache: Dict[str, Any] | None = None
+_security_status_cache_time = 0.0
+
+
+def invalidate_security_status_cache() -> None:
+    global _security_status_cache, _security_status_cache_time
+    _security_status_cache = None
+    _security_status_cache_time = 0.0
 
 
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
+    invalidate_security_status_cache()
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
@@ -2891,6 +2900,7 @@ async def update_host_config(host_id: str, request: Request) -> JSONResponse:
             (host_id, json.dumps({"config": config, "expected_node_id": host["node_id"]}, ensure_ascii=False), getattr(request.state, "dashboard_user", "dashboard"), now, now),
         )
         conn.commit()
+        invalidate_security_status_cache()
         return JSONResponse({"ok": True, "action_id": cur.lastrowid})
     finally:
         conn.close()
@@ -2909,6 +2919,7 @@ async def delete_host(host_id: str, request: Request) -> JSONResponse:
             raise HTTPException(status_code=404, detail="主机不存在")
         if mode == "records_only":
             _purge_host(conn, host_id); conn.commit()
+            invalidate_security_status_cache()
             return JSONResponse({"ok": True})
         if not host["node_id"]:
             raise HTTPException(status_code=409, detail="该主机需要先升级 Client，才能远程卸载")
@@ -3026,6 +3037,7 @@ async def security_action_result(
             )
             if status == "succeeded" and row["action_type"] == "self_uninstall":
                 _purge_host(conn, host_id)
+                invalidate_security_status_cache()
             if status == "succeeded" and row["action_type"] in (
                 "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth"
             ):
@@ -3155,10 +3167,6 @@ def security_alert_history(
             "hosts": hosts,
         }
     )
-
-
-_security_status_cache: Dict[str, Any] | None = None
-_security_status_cache_time = 0.0
 
 
 @app.get("/api/v1/security/status")

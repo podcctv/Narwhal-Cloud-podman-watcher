@@ -8,6 +8,7 @@ interface AppHeaderProps {
   serverVersion: string;
   activeAlertCount: number;
   countdown: number;
+  totalSeconds?: number;
   isPaused: boolean;
   onTogglePause: () => void;
   onRefreshNow: () => void;
@@ -22,6 +23,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
   serverVersion,
   activeAlertCount,
   countdown,
+  totalSeconds = 10,
   isPaused,
   onTogglePause,
   onRefreshNow,
@@ -58,7 +60,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
             type="button"
             onClick={() => onSelectTab('dashboard')}
             aria-current={activeTab === 'dashboard' ? 'page' : undefined}
-            className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+            className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
               activeTab === 'dashboard'
                 ? 'bg-sky-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
@@ -67,15 +69,25 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
             <LayoutDashboard className="h-3.5 w-3.5" />
             <span>总览看板</span>
           </button>
-          <button type="button" onClick={() => onSelectTab('notifications')} aria-current={activeTab === 'notifications' ? 'page' : undefined} className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${activeTab === 'notifications' ? 'bg-sky-500 text-slate-950 shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}>
-            <Bell className="h-3.5 w-3.5" /><span>推送设置</span>
+          <button
+            type="button"
+            onClick={() => onSelectTab('notifications')}
+            aria-current={activeTab === 'notifications' ? 'page' : undefined}
+            className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+              activeTab === 'notifications'
+                ? 'bg-sky-500 text-slate-950 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Bell className="h-3.5 w-3.5" />
+            <span>推送设置</span>
           </button>
 
           <button
             type="button"
             onClick={() => onSelectTab('alerts')}
             aria-current={activeTab === 'alerts' ? 'page' : undefined}
-            className={`relative min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+            className={`relative min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
               activeTab === 'alerts'
                 ? 'bg-sky-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
@@ -100,7 +112,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
             type="button"
             onClick={() => onSelectTab('stats')}
             aria-current={activeTab === 'stats' ? 'page' : undefined}
-            className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+            className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
               activeTab === 'stats'
                 ? 'bg-sky-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
@@ -129,7 +141,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           {/* Real-time Countdown Timer */}
           <CountdownTimer
             countdown={countdown}
-            totalSeconds={10}
+            totalSeconds={totalSeconds}
             isPaused={isPaused}
             onTogglePause={onTogglePause}
             onRefreshNow={onRefreshNow}
