@@ -21,7 +21,10 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
-import socks
+try:
+    import socks
+except ImportError:
+    socks = None
 
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -62,6 +65,45 @@ DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "").strip()
+
+
+def get_telegram_proxy_url() -> str:
+    """Return effective Telegram proxy URL, respecting module variable, env, or standard proxy envs."""
+    proxy = (
+        (TELEGRAM_PROXY_URL or "").strip()
+        or os.getenv("TELEGRAM_PROXY_URL", "").strip()
+        or os.getenv("ALL_PROXY", "").strip()
+        or os.getenv("all_proxy", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("https_proxy", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+        or os.getenv("http_proxy", "").strip()
+    )
+    if proxy and "://" not in proxy:
+        proxy = f"http://{proxy}"
+    return proxy
+
+
+def _normalize_telegram_token(raw_token: Any) -> str:
+    token = str(raw_token or "").strip().strip("'\"")
+    if token.lower().startswith("bot") and len(token) > 3 and token[3].isdigit():
+        token = token[3:]
+    return token
+
+
+def _parse_telegram_target(target: str) -> tuple[str, int | None]:
+    """Parse chat target and optional forum thread ID from target string."""
+    raw = str(target or "").strip().strip("'\"")
+    if raw.startswith("https://t.me/"):
+        raw = "@" + raw.removeprefix("https://t.me/").strip("/")
+    elif raw.startswith("t.me/"):
+        raw = "@" + raw.removeprefix("t.me/").strip("/")
+    for sep in (":", "/"):
+        if sep in raw and not raw.startswith("@"):
+            parts = raw.split(sep, 1)
+            if parts[0] and parts[1].isdigit():
+                return parts[0].strip(), int(parts[1])
+    return raw, None
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 UTC8 = timezone(timedelta(hours=8))
 _cleanup_lock = threading.Lock()
@@ -783,12 +825,13 @@ def _notification_bot_item(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _telegram_api_call(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode()
-    proxy_scheme = urllib.parse.urlsplit(TELEGRAM_PROXY_URL).scheme.lower() if TELEGRAM_PROXY_URL else ""
+    proxy_url = get_telegram_proxy_url()
+    proxy_scheme = urllib.parse.urlsplit(proxy_url).scheme.lower() if proxy_url else ""
     if proxy_scheme in ("socks5", "socks5h"):
         try:
-            result = _telegram_api_socks5(token, method, data, TELEGRAM_PROXY_URL)
+            result = _telegram_api_socks5(token, method, data, proxy_url)
         except Exception as exc:
             raise RuntimeError(f"Telegram SOCKS5 代理连接失败：{exc}") from exc
         if not result.get("ok"):
@@ -797,14 +840,15 @@ def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str,
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/{method}",
         data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"}, method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"},
+        method="POST",
     )
     try:
-        if TELEGRAM_PROXY_URL:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": TELEGRAM_PROXY_URL, "https": TELEGRAM_PROXY_URL}))
-            response_context = opener.open(request, timeout=8)
+        if proxy_url:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            response_context = opener.open(request, timeout=10)
         else:
-            response_context = urllib.request.urlopen(request, timeout=8)
+            response_context = urllib.request.urlopen(request, timeout=10)
         with response_context as response:
             result = json.loads(response.read(1024 * 1024).decode("utf-8"))
     except urllib.error.HTTPError as exc:
@@ -814,7 +858,7 @@ def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str,
             detail = ""
         raise RuntimeError(str(detail or f"Telegram HTTP {exc.code}")) from exc
     except urllib.error.URLError as exc:
-        if TELEGRAM_PROXY_URL:
+        if proxy_url:
             raise RuntimeError(f"Telegram 代理连接失败：{exc.reason}") from exc
         try:
             result = _telegram_api_ipv4(token, method, data)
@@ -828,11 +872,30 @@ def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str,
     return result
 
 
+def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _telegram_api_call(token, method, payload)
+    except RuntimeError as exc:
+        err_msg = str(exc).lower()
+        if ("can't parse entities" in err_msg or "entity" in err_msg) and payload.get("parse_mode"):
+            fallback_payload = dict(payload)
+            fallback_payload.pop("parse_mode", None)
+            raw_text = str(fallback_payload.get("text") or "")
+            fallback_payload["text"] = re.sub(r"<[^>]+>", "", raw_text)
+            try:
+                return _telegram_api_call(token, method, fallback_payload)
+            except Exception:
+                pass
+        raise
+
+
 def _telegram_api_socks5(token: str, method: str, data: bytes, proxy_url: str) -> Dict[str, Any]:
+    if socks is None:
+        raise RuntimeError("PySocks 未安装，无法使用 SOCKS5 代理。请运行 pip install PySocks 或配置 HTTP/HTTPS 代理。")
     parsed = urllib.parse.urlsplit(proxy_url)
     if not parsed.hostname:
         raise ValueError("代理地址缺少主机名")
-    proxy_rdns = parsed.scheme.lower() == "socks5h"
+    proxy_rdns = True
     proxy_sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         proxy_sock.set_proxy(
@@ -843,10 +906,10 @@ def _telegram_api_socks5(token: str, method: str, data: bytes, proxy_url: str) -
             username=urllib.parse.unquote(parsed.username) if parsed.username else None,
             password=urllib.parse.unquote(parsed.password) if parsed.password else None,
         )
-        proxy_sock.settimeout(8)
+        proxy_sock.settimeout(10)
         proxy_sock.connect(("api.telegram.org", 443))
         tls_sock = ssl.create_default_context().wrap_socket(proxy_sock, server_hostname="api.telegram.org")
-        conn = http.client.HTTPSConnection("api.telegram.org", 443, timeout=8)
+        conn = http.client.HTTPSConnection("api.telegram.org", 443, timeout=10)
         conn.sock = tls_sock
         conn.request(
             "POST", f"/bot{token}/{method}", body=data,
@@ -911,7 +974,7 @@ def _record_bot_delivery(bot_id: int, succeeded: bool, error: str = "") -> None:
 
 
 def _telegram_chat_allowed(bot: sqlite3.Row, chat: Dict[str, Any]) -> bool:
-    target = str(bot["target"] or "").strip()
+    target, _ = _parse_telegram_target(str(bot["target"] or "").strip())
     chat_id = str(chat.get("id") or "")
     username = str(chat.get("username") or "").strip().lower()
     if target.startswith("@"):
@@ -1007,6 +1070,7 @@ def _telegram_alert_detail(alert_id: int, severity: str, offset: int) -> tuple[s
     if alert is None:
         return "该告警不存在或已被清理。", {"inline_keyboard": [[{"text": "返回列表", "callback_data": f"n:l:{severity}:{offset}"}]]}
     scope = "/".join(x for x in (str(alert["runtime"] or ""), str(alert["project"] or "")) if x) or "-"
+    raw_message = str(alert['message'] or '')[:1000]
     text = (
         f"<b>{html.escape(str(alert['title'] or alert['alert_type']))}</b>\n"
         f"状态：<b>{html.escape(str(alert['status']))}</b>　级别：<b>{html.escape(str(alert['severity']))}</b>\n"
@@ -1014,8 +1078,8 @@ def _telegram_alert_detail(alert_id: int, severity: str, offset: int) -> tuple[s
         f"容器：<code>{html.escape(scope)} {html.escape(str(alert['container_name'] or '-'))}</code>\n"
         f"出现次数：{int(alert['occurrence_count'])}\n"
         f"最近出现：{format_utc8(int(alert['last_seen']))}\n\n"
-        f"{html.escape(str(alert['message'] or ''))}"
-    )[:3900]
+        f"{html.escape(raw_message)}"
+    )
     buttons: List[List[Dict[str, str]]] = []
     if alert["status"] == "active":
         buttons.append([
@@ -1127,6 +1191,9 @@ async def _handle_telegram_update(bot: sqlite3.Row, update: Dict[str, Any]) -> N
 async def _telegram_polling_loop() -> None:
     await asyncio.sleep(5)
     while True:
+        if PUBLIC_BASE_URL:
+            await asyncio.sleep(30)
+            continue
         conn = db()
         try:
             bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
@@ -1150,7 +1217,7 @@ async def _telegram_polling_loop() -> None:
                     _telegram_poll_offsets[bot_id] = max(_telegram_poll_offsets[bot_id], int(update.get("update_id") or 0) + 1)
                     await _handle_telegram_update(bot, update)
             except Exception as exc:
-                _record_bot_delivery(bot_id, False, f"Telegram polling: {exc}")
+                print(f"Telegram polling warning (bot {bot_id}): {exc}")
         await asyncio.sleep(3)
 
 
@@ -1192,7 +1259,7 @@ def _telegram_alert_status_card(
             automatic_remediation.get("message")
             or automatic_remediation.get("result_message")
             or "节点已执行定向处置"
-        )[:800]
+        )[:300]
         remediation_text = (
             "\n<b>自动处置</b>："
             f"<b>{'已完成' if automatic_remediation.get('succeeded') is True else '未完成'}</b>\n"
@@ -1227,7 +1294,7 @@ def _telegram_alert_status_card(
                 carrier = str(item.get("isp") or item.get("org") or item.get("asn") or "未知运营商")
                 count = int(item.get(direction) or item.get("connections") or 0)
                 lines.append(
-                    f"<code>{html.escape(str(item['ip']))}</code> ｜归属地：{html.escape(location)} ｜运营商：{html.escape(carrier)} ｜{label}：{count}"
+                    f"<code>{html.escape(str(item['ip'])[:45])}</code> ｜归属地：{html.escape(location[:50])} ｜运营商：{html.escape(carrier[:50])} ｜{label}：{count}"
                 )
             return "\n".join(lines) or "-"
         evidence_text = (
@@ -1237,6 +1304,8 @@ def _telegram_alert_status_card(
             f"<b>入站 IP（每行一个）</b>\n{ip_lines(inbound_items, 'inbound')}\n"
             f"<b>出站 IP（每行一个）</b>\n{ip_lines(outbound_items, 'outbound')}\n"
         )
+    raw_msg = str(alert['message'] or '')[:400]
+    msg_escaped = html.escape(raw_msg)
     text = (
         f"<b>{heading}</b>\n"
         f"<b>{html.escape(str(alert['title'] or alert['alert_type'] or '-'))}</b>\n"
@@ -1246,8 +1315,8 @@ def _telegram_alert_status_card(
         f"出现次数：{int(alert['occurrence_count'])}\n"
         f"{remediation_text}"
         f"{evidence_text}"
-        f"{html.escape(str(alert['message'] or ''))}"
-    )[:3900]
+        f"{msg_escaped}"
+    )
     keyboard = {"inline_keyboard": [[
         {"text": "查看并处理" if active else "查看历史", "callback_data": f"n:d:{alert['id']}:all:0"},
         {"text": "活动告警", "callback_data": "n:l:all:0"},
@@ -1255,18 +1324,35 @@ def _telegram_alert_status_card(
     return text, keyboard
 
 
-def sync_configured_bot_alert_messages(host_id: str, observed_at: int) -> None:
+def sync_configured_bot_alert_messages(
+    host_id: str | None = None,
+    observed_at: int | None = None,
+    alert_id: int | None = None,
+) -> None:
     """Create or refresh one Telegram status card per alert, retaining recovery history."""
     now = int(time.time())
     conn = db()
     try:
         bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
-        alerts = conn.execute(
-            "SELECT * FROM security_alerts WHERE host_id=? AND last_seen=? AND status IN ('active','resolved','dismissed','suppressed','remediated')",
-            (host_id, observed_at),
-        ).fetchall()
+        if not bots:
+            return
+        if alert_id is not None:
+            alerts = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchall()
+        elif host_id is not None and observed_at is not None:
+            alerts = conn.execute(
+                "SELECT * FROM security_alerts WHERE host_id=? AND last_seen=? AND status IN ('active','resolved','dismissed','suppressed','remediated')",
+                (host_id, observed_at),
+            ).fetchall()
+        elif host_id is not None:
+            alerts = conn.execute(
+                "SELECT * FROM security_alerts WHERE host_id=? AND status IN ('active','resolved','dismissed','suppressed','remediated') ORDER BY id DESC LIMIT 50",
+                (host_id,),
+            ).fetchall()
+        else:
+            alerts = []
         for bot in bots:
             bot_id = int(bot["id"])
+            chat_target, thread_id = _parse_telegram_target(str(bot["target"] or ""))
             for alert in alerts:
                 severity = str(alert["severity"])
                 mapping = conn.execute(
@@ -1300,23 +1386,51 @@ def sync_configured_bot_alert_messages(host_id: str, observed_at: int) -> None:
                         continue
                 try:
                     if mapping is None:
-                        result = _telegram_api(str(bot["token"]), "sendMessage", {
-                            "chat_id": str(bot["target"]), "text": text, "parse_mode": "HTML",
+                        send_payload = {
+                            "chat_id": chat_target, "text": text, "parse_mode": "HTML",
                             "reply_markup": keyboard, "disable_web_page_preview": True,
-                        })
+                        }
+                        if thread_id is not None:
+                            send_payload["message_thread_id"] = thread_id
+                        result = _telegram_api(str(bot["token"]), "sendMessage", send_payload)
                         message_id = int((result.get("result") or {}).get("message_id") or 0)
                         if message_id <= 0:
                             raise RuntimeError("Telegram did not return a message id")
                         conn.execute(
                             "INSERT INTO telegram_alert_messages(bot_id,alert_id,chat_id,message_id,last_status,last_severity,last_evidence_action_id,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                            (bot_id, int(alert["id"]), str(bot["target"]), message_id, str(alert["status"]), severity, evidence_action_id, content_hash, now),
+                            (bot_id, int(alert["id"]), chat_target, message_id, str(alert["status"]), severity, evidence_action_id, content_hash, now),
                         )
                     else:
-                        _telegram_api(str(bot["token"]), "editMessageText", {
-                            "chat_id": str(mapping["chat_id"]), "message_id": int(mapping["message_id"]),
-                            "text": text, "parse_mode": "HTML", "reply_markup": keyboard,
-                            "disable_web_page_preview": True,
-                        })
+                        edit_chat_id, _ = _parse_telegram_target(str(mapping["chat_id"]))
+                        try:
+                            _telegram_api(str(bot["token"]), "editMessageText", {
+                                "chat_id": edit_chat_id, "message_id": int(mapping["message_id"]),
+                                "text": text, "parse_mode": "HTML", "reply_markup": keyboard,
+                                "disable_web_page_preview": True,
+                            })
+                        except RuntimeError as edit_exc:
+                            err_str = str(edit_exc).lower()
+                            if "message is not modified" in err_str:
+                                pass
+                            elif "message to edit not found" in err_str or "message can't be edited" in err_str:
+                                send_payload = {
+                                    "chat_id": chat_target, "text": text, "parse_mode": "HTML",
+                                    "reply_markup": keyboard, "disable_web_page_preview": True,
+                                }
+                                if thread_id is not None:
+                                    send_payload["message_thread_id"] = thread_id
+                                resend_res = _telegram_api(str(bot["token"]), "sendMessage", send_payload)
+                                new_msg_id = int((resend_res.get("result") or {}).get("message_id") or 0)
+                                if new_msg_id > 0:
+                                    conn.execute(
+                                        "UPDATE telegram_alert_messages SET message_id=?,chat_id=?,last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
+                                        (new_msg_id, chat_target, str(alert["status"]), severity, evidence_action_id, content_hash, now, bot_id, int(alert["id"])),
+                                    )
+                                    conn.commit()
+                                    _record_bot_delivery(bot_id, True)
+                                    continue
+                            else:
+                                raise
                         conn.execute(
                             "UPDATE telegram_alert_messages SET last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
                             (str(alert["status"]), severity, evidence_action_id, content_hash, now, bot_id, int(alert["id"])),
@@ -1335,7 +1449,13 @@ def notification_bots() -> JSONResponse:
     conn = db()
     try:
         rows = conn.execute("SELECT * FROM notification_bots ORDER BY id DESC").fetchall()
-        return JSONResponse(content={"items": [_notification_bot_item(row) for row in rows], "callback_ready": bool(PUBLIC_BASE_URL)})
+        proxy_url = get_telegram_proxy_url()
+        return JSONResponse(content={
+            "items": [_notification_bot_item(row) for row in rows],
+            "callback_ready": bool(PUBLIC_BASE_URL),
+            "proxy_configured": bool(proxy_url),
+            "proxy_scheme": urllib.parse.urlsplit(proxy_url).scheme.lower() if proxy_url else "",
+        })
     finally:
         conn.close()
 
@@ -1347,19 +1467,20 @@ async def save_notification_bot(request: Request) -> JSONResponse:
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     name = str(payload.get("name") or "Telegram 通知").strip()[:80]
-    token = str(payload.get("token") or "").strip()
-    target = str(payload.get("target") or "").strip()[:200]
+    token = _normalize_telegram_token(payload.get("token"))
+    raw_target = str(payload.get("target") or "").strip()[:200]
+    chat_target, target_thread_id = _parse_telegram_target(raw_target)
     severity = str(payload.get("min_severity") or "critical").lower()
     if not token or len(token) > 256 or not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", token):
-        raise HTTPException(status_code=400, detail="请输入有效的 Telegram Bot Token")
-    if not target or severity not in _SEVERITY_RANK:
-        raise HTTPException(status_code=400, detail="目标和最低告警级别是必填项")
+        raise HTTPException(status_code=400, detail="请输入有效的 Telegram Bot Token（格式如 123456789:ABCdef...）")
+    if not raw_target or not chat_target or severity not in _SEVERITY_RANK:
+        raise HTTPException(status_code=400, detail="目标（Chat ID 或 @频道）和最低告警级别是必填项")
     now = int(time.time())
     conn = db()
     try:
         cur = conn.execute(
             "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
-            (name, "telegram", token, target, severity, secrets.token_urlsafe(32), now, now),
+            (name, "telegram", token, raw_target, severity, secrets.token_urlsafe(32), now, now),
         )
         bot_id = int(cur.lastrowid)
         row = conn.execute("SELECT * FROM notification_bots WHERE id=?", (bot_id,)).fetchone()
@@ -1367,7 +1488,13 @@ async def save_notification_bot(request: Request) -> JSONResponse:
     finally:
         conn.close()
     try:
-        _telegram_api(token, "sendMessage", {"chat_id": target, "text": "Narwhal 通知机器人已配置成功。后续将按设定的严重级别推送新告警。"})
+        send_payload = {
+            "chat_id": chat_target,
+            "text": "Narwhal 通知机器人已配置成功。后续将按设定的严重级别推送新告警。",
+        }
+        if target_thread_id is not None:
+            send_payload["message_thread_id"] = target_thread_id
+        _telegram_api(token, "sendMessage", send_payload)
         _record_bot_delivery(bot_id, True)
     except Exception as exc:
         conn = db()
@@ -1414,8 +1541,12 @@ def test_notification_bot(bot_id: int) -> JSONResponse:
         conn.close()
     if bot is None:
         raise HTTPException(status_code=404, detail="notification bot not found")
+    chat_target, target_thread_id = _parse_telegram_target(str(bot["target"] or ""))
     try:
-        _telegram_api(str(bot["token"]), "sendMessage", {"chat_id": str(bot["target"]), "text": "Narwhal 通知机器人连接测试成功。"})
+        send_payload = {"chat_id": chat_target, "text": "Narwhal 通知机器人连接测试成功。"}
+        if target_thread_id is not None:
+            send_payload["message_thread_id"] = target_thread_id
+        _telegram_api(str(bot["token"]), "sendMessage", send_payload)
         if PUBLIC_BASE_URL:
             _telegram_api(str(bot["token"]), "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{bot['callback_secret']}", "allowed_updates": ["message", "callback_query"]})
         _telegram_api(str(bot["token"]), "setMyCommands", {"commands": [{"command": "menu", "description": "打开交互式告警控制台"}, {"command": "alerts", "description": "查看活动告警"}]})
@@ -2692,6 +2823,10 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     )
     conn.commit()
     conn.close()
+    try:
+        sync_configured_bot_alert_messages(alert_id=alert_id)
+    except Exception as exc:
+        print(f"telegram sync on disposition {alert_id} failed: {exc}")
     return JSONResponse(
         status_code=202 if action is not None and queued else 200,
         content={

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -1703,6 +1704,136 @@ class ServerRuntimeTests(unittest.TestCase):
         update = {"callback_query": {"message": {"message_id": 2, "chat": {"id": 596532562}}}}
         with mock.patch.object(server, "_telegram_api", side_effect=RuntimeError("Bad Request: message is not modified")):
             server._telegram_send_view(bot, update, "unchanged", {"inline_keyboard": []})
+
+    def test_telegram_token_normalization_and_target_parsing(self):
+        # Leading bot prefix and whitespaces
+        self.assertEqual(server._normalize_telegram_token("  bot123456:abcdef  "), "123456:abcdef")
+        self.assertEqual(server._normalize_telegram_token('"123456:abcdef"'), "123456:abcdef")
+        self.assertEqual(server._normalize_telegram_token("123456:abcdef"), "123456:abcdef")
+
+        # Target parsing
+        self.assertEqual(server._parse_telegram_target("https://t.me/my_channel"), ("@my_channel", None))
+        self.assertEqual(server._parse_telegram_target("t.me/my_channel/"), ("@my_channel", None))
+        self.assertEqual(server._parse_telegram_target("-100123456789:42"), ("-100123456789", 42))
+        self.assertEqual(server._parse_telegram_target("-100123456789/42"), ("-100123456789", 42))
+        self.assertEqual(server._parse_telegram_target("123456789"), ("123456789", None))
+
+    def test_telegram_proxy_env_resolution(self):
+        original_proxy = server.TELEGRAM_PROXY_URL
+        try:
+            server.TELEGRAM_PROXY_URL = ""
+            with mock.patch.dict(os.environ, {"ALL_PROXY": "socks5://127.0.0.1:1080"}):
+                self.assertEqual(server.get_telegram_proxy_url(), "socks5://127.0.0.1:1080")
+            with mock.patch.dict(os.environ, {"HTTPS_PROXY": "127.0.0.1:7890", "ALL_PROXY": ""}):
+                self.assertEqual(server.get_telegram_proxy_url(), "http://127.0.0.1:7890")
+        finally:
+            server.TELEGRAM_PROXY_URL = original_proxy
+
+    def test_telegram_api_entity_error_falls_back_to_plain_text(self):
+        call_records = []
+        def fake_api_call(token, method, payload):
+            call_records.append(payload)
+            if payload.get("parse_mode"):
+                raise RuntimeError("Bad Request: can't parse entities: Unmatched end tag")
+            return {"ok": True, "result": {"message_id": 123}}
+
+        with mock.patch.object(server, "_telegram_api_call", side_effect=fake_api_call):
+            result = server._telegram_api("123456:token", "sendMessage", {
+                "chat_id": "123",
+                "text": "<b>Hello World</b>",
+                "parse_mode": "HTML",
+            })
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(call_records), 2)
+        self.assertNotIn("parse_mode", call_records[1])
+        self.assertEqual(call_records[1]["text"], "Hello World")
+
+    def test_telegram_dynamic_alert_recovers_when_message_deleted(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("ops", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "596532562", "critical", "secret", 1, 1),
+        )
+        bot_id = int(conn.execute("SELECT id FROM notification_bots").fetchone()[0])
+        alert = {
+            "runtime": "incus", "project": "default", "container_name": "node1",
+            "type": "container_connection_count", "severity": "critical",
+            "title": "连接数过高", "message": "持续超限", "value": 1600, "threshold": 1000,
+        }
+        notifications = server.process_security_alerts(conn, "host1", 100, [alert])
+        alert_id = notifications[0]["id"]
+        # Seed an existing telegram_alert_messages row pointing to a deleted message (id 999)
+        conn.execute(
+            "INSERT INTO telegram_alert_messages(bot_id,alert_id,chat_id,message_id,last_status,last_severity,last_evidence_action_id,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (bot_id, alert_id, "596532562", 999, "active", "critical", 0, "hash", 100),
+        )
+        conn.commit()
+        conn.close()
+
+        def fake_telegram_api(token, method, payload):
+            if method == "editMessageText":
+                raise RuntimeError("Bad Request: message to edit not found")
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 1001}}
+            return {"ok": True}
+
+        with mock.patch.object(server, "_telegram_api", side_effect=fake_telegram_api):
+            server.sync_configured_bot_alert_messages("host1", 100)
+
+        conn = server.db()
+        row = conn.execute("SELECT message_id FROM telegram_alert_messages WHERE bot_id=? AND alert_id=?", (bot_id, alert_id)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["message_id"], 1001)
+
+    def test_telegram_forum_topic_routing(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("topic_bot", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "-100123456789:888", "critical", "secret", 1, 1),
+        )
+        alert = {
+            "runtime": "incus", "project": "default", "container_name": "node1",
+            "type": "container_connection_count", "severity": "critical",
+            "title": "话题告警", "message": "测试", "value": 1600, "threshold": 1000,
+        }
+        notifications = server.process_security_alerts(conn, "host1", 100, [alert])
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "_telegram_api", return_value={"ok": True, "result": {"message_id": 55}}) as tg_mock:
+            server.sync_configured_bot_alert_messages("host1", 100)
+
+        self.assertEqual(tg_mock.call_count, 1)
+        payload = tg_mock.call_args.args[2]
+        self.assertEqual(payload["chat_id"], "-100123456789")
+        self.assertEqual(payload["message_thread_id"], 888)
+
+    def test_telegram_card_sync_on_disposition(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+            ("ops", "telegram", "123456:abcdefghijklmnopqrstuvwxyz", "596532562", "critical", "secret", 1, 1),
+        )
+        alert = {
+            "runtime": "incus", "project": "default", "container_name": "node1",
+            "type": "container_connection_count", "severity": "critical",
+            "title": "高连接", "message": "测试", "value": 1600, "threshold": 1000,
+        }
+        notifications = server.process_security_alerts(conn, "host1", 100, [alert])
+        alert_id = notifications[0]["id"]
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "sync_configured_bot_alert_messages") as sync_mock:
+            class DummyRequest:
+                state = type("State", (), {"dashboard_user": "admin"})()
+                async def json(self):
+                    return {"decision": "resolve"}
+
+            response = asyncio.run(server.set_security_alert_disposition(alert_id, DummyRequest()))
+            self.assertEqual(response.status_code, 200)
+            sync_mock.assert_called_with(alert_id=alert_id)
 
 
 if __name__ == "__main__":
