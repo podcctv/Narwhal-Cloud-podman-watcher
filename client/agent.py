@@ -3399,7 +3399,7 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
                 reasons.add("microsocks 未同时配置用户名和密码")
             elif password.lower() in _SOCKS_WEAK_PASSWORDS or len(password) < 8:
                 auth_modes.add("weak_password")
-                process_auth_state = "weak"
+                process_auth_state = "weak_password"
                 reasons.add("microsocks 使用短密码或常见弱密码")
             else:
                 auth_modes.add("configured")
@@ -3425,7 +3425,7 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
                     gost_modes.add("configured")
             process_auth_state = (
                 "no_auth" if "no_auth" in gost_modes else
-                "weak" if "weak_password" in gost_modes else
+                "weak_password" if "weak_password" in gost_modes else
                 "configured" if "configured" in gost_modes else "unknown"
             )
         matches[-1]["auth_state"] = process_auth_state
@@ -5380,7 +5380,7 @@ def enforce_socks_auth_policy(
     result = {"active": True, "attempted": True, "succeeded": ok, "message": message[:500]}
     socks_proxy["auth_enforcement"] = result
     print(
-        f"automatic no-auth SOCKS stop {'succeeded' if ok else 'failed'} for "
+        f"automatic empty/weak-auth SOCKS stop {'succeeded' if ok else 'failed'} for "
         f"{container.get('runtime')}/{container.get('name')}: {message}"
     )
     return result

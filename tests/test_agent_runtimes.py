@@ -1008,7 +1008,18 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertTrue(no_auth["detected"])
         self.assertEqual(no_auth["auth_mode"], "no_auth")
         self.assertEqual(weak["auth_mode"], "weak_password")
-        self.assertNotIn("password", json.dumps(weak["process_matches"]))
+        self.assertNotIn("admin", json.dumps(weak["process_matches"]))
+
+    def test_socks_process_detection_normalizes_weak_auth_state(self):
+        gost = agent._socks_process_evidence(
+            "42 S gost /usr/local/bin/gost -L socks5://123:123@:9221\n", "container"
+        )
+        microsocks = agent._socks_process_evidence(
+            "43 S microsocks /usr/bin/microsocks -u admin -P password\n", "container"
+        )
+        self.assertEqual(gost["auth_mode"], "weak_password")
+        self.assertEqual(gost["process_matches"][0]["auth_state"], "weak_password")
+        self.assertEqual(microsocks["process_matches"][0]["auth_state"], "weak_password")
 
     def test_socks_config_detection_returns_markers_not_credentials(self):
         markers = "@@SOCKS:/etc/danted.conf\n@@NOAUTH:/etc/danted.conf\n"
