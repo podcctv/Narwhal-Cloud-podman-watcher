@@ -1666,5 +1666,104 @@ class SecurityTelemetryTests(unittest.TestCase):
         )
         self.assertTrue(alert["automatic_remediation"]["succeeded"])
         self.assertEqual(remediate.call_count, 1)
+
+    def test_render_cyber_motd_formatting(self):
+        incidents = [
+            {
+                "type": "cc_attack",
+                "timestamp": "2026-09-21 06:00:00 UTC",
+                "detail": "HTTP access surge 180 req/s",
+                "action": "ALERTED by Host Watcher",
+                "severity": "critical",
+            },
+            {
+                "type": "socks_weak_auth",
+                "timestamp": "2026-09-21 06:10:00 UTC",
+                "detail": "Weak SOCKS5 proxy detected on :9221",
+                "action": "AUTO-STOPPED by Host Watcher",
+                "severity": "critical",
+            },
+        ]
+        rendered = agent.render_cyber_motd("test-container", incidents)
+        self.assertIn("NARWHAL CYBER-SECURITY DEFENSE PROTOCOL", rendered)
+        self.assertIn("\033[1;5;91m", rendered)  # Blinking red escape code
+        self.assertIn("\033[41;1;97m", rendered) # Red background threat badge
+        self.assertIn("THREAT DETECTED", rendered)
+        self.assertIn("已记录日志，如有持续滥用可能会删鸡。", rendered)
+        self.assertIn("test-container", rendered)
+        self.assertIn("CC_ATTACK", rendered)
+        self.assertIn("SOCKS_WEAK_AUTH", rendered)
+
+    def test_build_motd_content_and_cleanup(self):
+        original = "Welcome to Debian GNU/Linux 12\n\nSystem info here.\n"
+        banner = "CYBERPUNK_SECURITY_BANNER_LINE"
+
+        injected = agent._build_motd_content(original, banner)
+        self.assertIn(agent.MOTD_MARKER_START, injected)
+        self.assertIn(agent.MOTD_MARKER_END, injected)
+        self.assertIn(banner, injected)
+        self.assertIn("Welcome to Debian GNU/Linux 12", injected)
+
+        # Update with new banner
+        banner_v2 = "UPDATED_BANNER_LINE"
+        updated = agent._build_motd_content(injected, banner_v2)
+        self.assertIn(banner_v2, updated)
+        self.assertNotIn(banner, updated)
+        self.assertIn("Welcome to Debian GNU/Linux 12", updated)
+
+        # Self-heal / cleanup
+        cleaned = agent._build_motd_content(updated, "")
+        self.assertNotIn(agent.MOTD_MARKER_START, cleaned)
+        self.assertNotIn(agent.MOTD_MARKER_END, cleaned)
+        self.assertNotIn(banner_v2, cleaned)
+        self.assertEqual(cleaned.strip(), original.strip())
+
+    def test_update_container_motd_alerts_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_root = os.path.join(temp_dir, "proc_root")
+            etc_dir = os.path.join(proc_root, "etc")
+            os.makedirs(etc_dir, exist_ok=True)
+            motd_path = os.path.join(etc_dir, "motd")
+            with open(motd_path, "w", encoding="utf-8") as f:
+                f.write("Welcome to Ubuntu 24.04 LTS\n")
+
+            container = {
+                "name": "c-test",
+                "runtime": "incus",
+                "project": "default",
+                "pid": 99999,
+            }
+            alerts = [
+                {
+                    "type": "socks_weak_auth",
+                    "severity": "critical",
+                    "title": "SOCKS 代理认证风险",
+                    "message": "检测到 SOCKS 服务允许无认证访问",
+                    "socks_auth_enforcement": {"succeeded": True},
+                }
+            ]
+
+            with mock.patch("os.path.isdir", side_effect=lambda p: True if p == "/proc/99999/root" else os.path.isdir(p)), \
+                 mock.patch("os.path.join", side_effect=lambda *args: motd_path if args and args[0] == "/proc/99999/root" and "motd" in args else os.path.join(*args)):
+                # 1. Trigger alert: should inject banner
+                wrote = agent.update_container_motd_alerts(container, alerts)
+                self.assertTrue(wrote)
+                with open(motd_path, "r", encoding="utf-8") as f:
+                    content1 = f.read()
+                self.assertIn(agent.MOTD_MARKER_START, content1)
+                self.assertIn("已记录日志，如有持续滥用可能会删鸡。", content1)
+                self.assertIn("Welcome to Ubuntu 24.04 LTS", content1)
+
+                # 2. Container becomes clean: should remove banner and restore original
+                agent._container_motd_incidents["incus:default:c-test"] = []
+                cleaned = agent.update_container_motd_alerts(container, [])
+                self.assertTrue(cleaned)
+                with open(motd_path, "r", encoding="utf-8") as f:
+                    content2 = f.read()
+                self.assertNotIn(agent.MOTD_MARKER_START, content2)
+                self.assertIn("Welcome to Ubuntu 24.04 LTS", content2)
+
+
 if __name__ == "__main__":
     unittest.main()
+

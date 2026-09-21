@@ -2379,6 +2379,220 @@ def _http_security_alerts(
     return alerts
 
 
+MOTD_MARKER_START = "# >>> NARWHAL SECURITY ALERT BEGIN >>>"
+MOTD_MARKER_END = "# <<< NARWHAL SECURITY ALERT END <<<"
+
+_MOTD_THREAT_TYPES = {
+    "socks_weak_auth",
+    "malicious_process",
+    "unauthorized_panel_pairing",
+    "cc_attack",
+    "http_high_qps",
+    "http_suspicious_ratio",
+    "ddos_bandwidth",
+    "ddos_packets",
+    "ddos_syn",
+    "port_scan",
+    "outbound_fanout",
+    "outbound_packet_abuse",
+    "outbound_connection_churn",
+    "outbound_connection_failures",
+    "udp_outbound_flood",
+    "process_fanout_abuse",
+    "container_connection_count",
+}
+
+_container_motd_incidents: Dict[str, List[Dict[str, object]]] = {}
+
+
+def render_cyber_motd(
+    container_name: str,
+    incidents: List[Dict[str, object]],
+    target_hint: str = "",
+) -> str:
+    """Render a cyberpunk-styled terminal MOTD banner with ANSI highlights."""
+    rst = "\033[0m"
+    bold = "\033[1m"
+    blink_red = "\033[1;5;91m"
+    blink_yellow = "\033[1;5;93m"
+    bg_red = "\033[41;1;97m"
+    red = "\033[38;5;196m"
+    crimson = "\033[38;5;160m"
+    cyan = "\033[38;5;51m"
+    yellow = "\033[38;5;220m"
+    gray = "\033[38;5;243m"
+
+    sys_ref = f"NW-SEC-{time.strftime('%Y%m%d', time.gmtime())}"
+    target_display = f"{container_name} ({target_hint})" if target_hint else container_name
+
+    lines = [
+        f"{red}   ██████╗  █████╗ ███╗   ██╗ ██████╗ ███████╗██████╗ {rst}",
+        f"{red}  ██╔══██╗██╔══██╗████╗  ██║██╔════╝ ██╔════╝██╔══██╗{rst}",
+        f"{red}  ██║  ██║███████║██╔██╗ ██║██║  ███╗█████╗  ██████╔╝{rst}",
+        f"{red}  ██║  ██║██╔══██║██║╚██╗██║██║   ██║██╔══╝  ██╔══██╗{rst}",
+        f"{red}  ██████╔╝██║  ██║██║ ╚████║╚██████╔╝███████╗██║  ██║{rst}",
+        f"{red}  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝{rst}",
+        f"  {cyan}>>> NARWHAL CYBER-SECURITY DEFENSE PROTOCOL // WATCHER-v1.6 <<<{rst}",
+        "",
+        f"  {bg_red} THREAT DETECTED {rst}  {blink_red}▶▶ [CRITICAL SECURITY ALERT] ◀◀{rst}  {bg_red} THREAT DETECTED {rst}",
+        f"  {gray}SYS_REF: {sys_ref}  |  STATUS: {blink_red}COMPROMISED{gray}  |  TARGET: {cyan}{target_display}{rst}",
+        "",
+        f"{crimson}┌──[ THREAT INCIDENT LOG / 历史告警追踪 ]──────────────────────────────┐{rst}",
+    ]
+
+    for idx, inc in enumerate(incidents[:3], start=1):
+        ts = inc.get("timestamp") or time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        typ = str(inc.get("type") or "UNKNOWN").upper()
+        detail = str(inc.get("detail") or "")
+        if len(detail) > 55:
+            detail = detail[:52] + "..."
+        action = str(inc.get("action") or "ALERTED by Host Watcher")
+        lines.append(f"{crimson}│{rst} {gray}[{idx}]{rst} {yellow}{ts}{rst} {crimson}▶{rst} {red}[{typ}]{rst}")
+        lines.append(f"{crimson}│{rst}     {gray}Detail:{rst} {detail}")
+        lines.append(f"{crimson}│{rst}     {gray}Action:{rst} {action}")
+        if idx < len(incidents[:3]):
+            lines.append(f"{crimson}│{rst}")
+
+    lines.extend([
+        f"{crimson}└──[ DIRECTIVE & ADVISORY / 处置指引 ]────────────────────────────────┘{rst}",
+        f"{crimson}│{rst}  {blink_yellow}⚡{rst} {bold}警告提示{rst} : 您的容器检测到高危未授权服务或异常流量活动！",
+        f"{crimson}│{rst}  {cyan}⚡{rst} {bold}排查要求{rst} : 请检查后台进程 (`ps aux`)、SSH 密钥与定时任务 (`crontab`)。",
+        f"{crimson}│{rst}  {red}⚡{rst} {bold}风险提醒{rst} : {yellow}已记录日志，如有持续滥用可能会删鸡。{rst}",
+        f"{crimson}└────────────────────────────────────────────────────────────────────┘{rst}",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _build_motd_content(current_content: str, banner: str) -> str:
+    cleaned = current_content
+    if MOTD_MARKER_START in cleaned and MOTD_MARKER_END in cleaned:
+        before = cleaned.split(MOTD_MARKER_START, 1)[0]
+        after = cleaned.split(MOTD_MARKER_END, 1)[1]
+        cleaned = (before.rstrip() + "\n" + after.lstrip("\n")).strip()
+    else:
+        cleaned = cleaned.strip()
+
+    if not banner:
+        return cleaned + ("\n" if cleaned else "")
+    if cleaned:
+        return f"{MOTD_MARKER_START}\n{banner}\n{MOTD_MARKER_END}\n\n{cleaned}\n"
+    return f"{MOTD_MARKER_START}\n{banner}\n{MOTD_MARKER_END}\n"
+
+
+def update_container_motd_alerts(
+    container: Dict[str, object],
+    container_alerts: List[Dict[str, object]],
+) -> bool:
+    """Update or self-heal container /etc/motd with cyberpunk security banner."""
+    if os.getenv("SECURITY_INJECT_MOTD_ALERT", "true").strip().lower() in ("0", "false", "no", "off"):
+        return False
+
+    runtime = str(container.get("runtime") or "")
+    if runtime == "docker" and container.get("monitor_mode") == "notice":
+        return False
+
+    name = str(container.get("name") or "")
+    project = str(container.get("project") or "")
+    if not name:
+        return False
+
+    key = f"{runtime}:{project}:{name}"
+    incidents = _container_motd_incidents.setdefault(key, [])
+
+    now = time.time()
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now))
+
+    for alert in container_alerts:
+        alert_type = str(alert.get("type") or "")
+        severity = str(alert.get("severity") or "warning")
+        if severity != "critical" and alert_type not in _MOTD_THREAT_TYPES:
+            continue
+
+        title = str(alert.get("title") or alert_type)
+        detail = str(alert.get("message") or "")
+        action = "ALERTED by Host Watcher"
+        auto_rem = alert.get("automatic_remediation")
+        if isinstance(auto_rem, dict) and auto_rem.get("succeeded"):
+            action = "AUTO-KILLED / REMEDIATED by Host Watcher"
+        socks_enf = alert.get("socks_auth_enforcement")
+        if isinstance(socks_enf, dict) and socks_enf.get("succeeded"):
+            action = "AUTO-STOPPED by Host Watcher"
+
+        existing = next((inc for inc in incidents if inc.get("type") == alert_type), None)
+        if existing:
+            existing["time_epoch"] = now
+            existing["timestamp"] = now_str
+            existing["detail"] = detail
+            existing["action"] = action
+            existing["severity"] = severity
+        else:
+            incidents.append({
+                "type": alert_type,
+                "title": title,
+                "detail": detail,
+                "action": action,
+                "severity": severity,
+                "time_epoch": now,
+                "timestamp": now_str,
+            })
+
+    retention_seconds = max(3600.0, _env_float("SECURITY_MOTD_ALERT_RETENTION_HOURS", 24.0) * 3600.0)
+    incidents[:] = [
+        inc for inc in incidents
+        if (now - float(inc.get("time_epoch") or 0)) < retention_seconds
+    ]
+    incidents.sort(key=lambda x: float(x.get("time_epoch") or 0), reverse=True)
+    del incidents[3:]
+
+    banner = render_cyber_motd(name, incidents) if incidents else ""
+
+    pid = 0
+    try:
+        pid = int(container.get("pid", 0) or 0)
+    except (ValueError, TypeError):
+        pid = 0
+
+    proc_root = f"/proc/{pid}/root" if pid > 1 and os.path.isdir(f"/proc/{pid}/root") else ""
+    motd_host_path = os.path.join(proc_root, "etc", "motd") if proc_root else ""
+
+    current_motd = ""
+    wrote = False
+
+    if motd_host_path:
+        try:
+            if os.path.isfile(motd_host_path):
+                with open(motd_host_path, "r", encoding="utf-8", errors="ignore") as f:
+                    current_motd = f.read()
+            elif banner:
+                os.makedirs(os.path.dirname(motd_host_path), exist_ok=True)
+
+            new_motd = _build_motd_content(current_motd, banner)
+            if new_motd != current_motd:
+                with open(motd_host_path, "w", encoding="utf-8") as f:
+                    f.write(new_motd)
+                wrote = True
+        except (OSError, PermissionError):
+            pass
+
+    if not wrote and not motd_host_path and (banner or key in _container_motd_incidents):
+        runtime_bin = str(container.get("runtime_bin", "") or get_container_bin())
+        if runtime_bin:
+            try:
+                read_cmd = "cat /etc/motd 2>/dev/null || true"
+                current_motd = run(_runtime_exec_cmd(runtime_bin, name, read_cmd, project))
+                new_motd = _build_motd_content(current_motd, banner)
+                if new_motd != current_motd:
+                    escaped_motd = shlex.quote(new_motd)
+                    write_cmd = f"printf '%s\\n' {escaped_motd} > /etc/motd"
+                    run(_runtime_exec_cmd(runtime_bin, name, write_cmd, project))
+                    wrote = True
+            except Exception:
+                pass
+
+    return wrote
+
+
 def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float) -> Dict[str, object]:
     enabled = os.getenv("SECURITY_MONITOR_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
     access = _collect_access_log_stats(interval_seconds) if enabled else {"enabled": False, "readable_files": 0}
@@ -2446,6 +2660,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     socks_enforcement_entries = _socks_auth_enforcement_entries()
 
     for container in containers:
+        start_alert_idx = len(alerts)
         if container.get("runtime") == "docker" and container.get("monitor_mode") == "notice":
             alerts.append(
                 _security_alert(
@@ -2958,6 +3173,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             })
             container_access_readable_files += int(container_access.get("readable_files") or 0)
             alerts.extend(_http_security_alerts(container_access, container))
+        container_alerts = alerts[start_alert_idx:]
+        update_container_motd_alerts(container, container_alerts)
 
     total_rx_bps = float(summary["total_rx_bps"])
     total_rx_pps = float(summary["total_rx_pps"])
