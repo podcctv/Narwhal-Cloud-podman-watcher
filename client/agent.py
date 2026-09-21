@@ -1,4 +1,5 @@
 import argparse
+import glob
 import hashlib
 import hmac
 import ipaddress
@@ -1924,7 +1925,20 @@ def _collect_access_log_stats(interval_seconds: float) -> Dict[str, object]:
         if item.strip()
     ]
 
+    expanded_paths: List[str] = []
     for path in paths:
+        if any(char in path for char in "*?"):
+            matched = sorted(glob.glob(path))
+            if matched:
+                expanded_paths.extend(matched)
+            else:
+                missing_files += 1
+        else:
+            expanded_paths.append(path)
+
+    stats["configured_files"] = len(expanded_paths) or len(paths)
+
+    for path in expanded_paths:
         try:
             stat = os.stat(path)
             state = _access_log_states.get(path, {})
@@ -2021,7 +2035,13 @@ def _collect_access_log_stats(interval_seconds: float) -> Dict[str, object]:
 
 
 def _summarize_access_lines(
-    lines: List[str], interval_seconds: float, enabled: bool, readable_files: int
+    lines: List[str],
+    interval_seconds: float,
+    enabled: bool,
+    readable_files: int,
+    configured_files: int = 0,
+    missing_files: int = 0,
+    unreadable_files: int = 0,
 ) -> Dict[str, object]:
     ip_counts: Dict[str, int] = {}
     ip_4xx_counts: Dict[str, int] = {}
@@ -2070,7 +2090,10 @@ def _summarize_access_lines(
     interval = max(1.0, float(interval_seconds))
     return {
         "enabled": enabled,
+        "configured_files": configured_files,
         "readable_files": readable_files,
+        "missing_files": missing_files,
+        "unreadable_files": unreadable_files,
         "requests": requests_count,
         "requests_per_second": requests_count / interval,
         "unique_ips": len(ip_counts),
@@ -2094,10 +2117,14 @@ def _collect_container_access_log_stats(
 ) -> Dict[str, object]:
     raw_paths = os.getenv(
         "SECURITY_CONTAINER_ACCESS_LOG_PATHS",
-        "/var/log/nginx/access.log,/var/log/caddy/access.log",
+        "/var/log/nginx/access.log,/var/log/nginx/*.log,/var/log/caddy/access.log,/var/log/caddy/*.log,/var/log/apache2/*.log,/var/log/httpd/*.log,/www/wwwlogs/*.log",
     ).strip()
-    paths = [path.strip() for path in raw_paths.split(",") if re.fullmatch(r"/[A-Za-z0-9_./-]+", path.strip())]
-    if not paths:
+    raw_patterns = [
+        path.strip()
+        for path in raw_paths.split(",")
+        if re.fullmatch(r"/[A-Za-z0-9_.*?!/-]+", path.strip())
+    ]
+    if not raw_patterns:
         return _summarize_access_lines([], interval_seconds, False, 0)
 
     runtime = container.get("runtime_bin", "") or get_container_bin()
@@ -2106,10 +2133,79 @@ def _collect_container_access_log_stats(
     runtime_name = container.get("runtime", "") or _runtime_kind(runtime)
     if not runtime or not name:
         return _summarize_access_lines([], interval_seconds, True, 0)
+
+    pid = 0
+    try:
+        pid = int(container.get("pid", 0) or 0)
+    except (ValueError, TypeError):
+        pid = 0
+
+    proc_root = f"/proc/{pid}/root" if pid > 1 and os.path.isdir(f"/proc/{pid}/root") else ""
+
+    resolved_paths: List[str] = []
+    for pattern in raw_patterns:
+        if any(char in pattern for char in "*?"):
+            if proc_root:
+                host_pattern = os.path.normpath(f"{proc_root}/{pattern.lstrip('/')}")
+                for matched in sorted(glob.glob(host_pattern)):
+                    if os.path.isfile(matched):
+                        container_path = matched[len(proc_root):]
+                        if not container_path.startswith("/"):
+                            container_path = "/" + container_path
+                        if container_path not in resolved_paths:
+                            resolved_paths.append(container_path)
+            else:
+                find_cmd = f"for p in {pattern}; do if [ -f \"$p\" ]; then echo \"$p\"; fi; done"
+                out = run(_runtime_exec_cmd(runtime, name, find_cmd, project)).strip()
+                for line in out.splitlines():
+                    found_p = line.strip()
+                    if found_p.startswith("/") and found_p not in resolved_paths:
+                        resolved_paths.append(found_p)
+        else:
+            if pattern not in resolved_paths:
+                resolved_paths.append(pattern)
+
+    resolved_paths = resolved_paths[:10]
+    if not resolved_paths:
+        return _summarize_access_lines(
+            [], interval_seconds, True, 0, configured_files=len(raw_patterns), missing_files=len(raw_patterns)
+        )
+
     max_bytes = max(65536, int(os.getenv("SECURITY_ACCESS_LOG_MAX_BYTES", "1048576")))
     readable_files = 0
+    missing_files = 0
+    unreadable_files = 0
     collected_lines: List[str] = []
-    for path in paths:
+
+    for path in resolved_paths:
+        host_file = os.path.normpath(f"{proc_root}/{path.lstrip('/')}") if proc_root else ""
+        if host_file and os.path.isfile(host_file):
+            try:
+                stat = os.stat(host_file)
+                size = int(stat.st_size)
+                readable_files += 1
+                key = f"container-log:{runtime_name}:{project}:{name}:{path}"
+                state = _access_log_states.get(key)
+                if not state:
+                    _access_log_states[key] = {"inode": int(getattr(stat, "st_ino", 0) or 0), "offset": size}
+                    continue
+                previous_offset = int(state.get("offset", 0) or 0)
+                if previous_offset > size:
+                    previous_offset = 0
+                start = max(previous_offset, size - max_bytes)
+                skip_partial_line = start > previous_offset
+                with open(host_file, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(start)
+                    if skip_partial_line:
+                        f.readline()
+                    lines = f.readlines()
+                    offset = f.tell()
+                _access_log_states[key] = {"inode": int(getattr(stat, "st_ino", 0) or 0), "offset": offset}
+                collected_lines.extend(lines)
+                continue
+            except (PermissionError, OSError):
+                pass
+
         quoted_path = shlex.quote(path)
         size_out = run(
             _runtime_exec_cmd(
@@ -2119,9 +2215,11 @@ def _collect_container_access_log_stats(
                 project,
             )
         ).strip()
-        if not size_out.isdigit():
+        size_lines = [l.strip() for l in size_out.splitlines() if l.strip()]
+        if not size_lines or not size_lines[-1].isdigit():
+            missing_files += 1
             continue
-        size = int(size_out)
+        size = int(size_lines[-1])
         readable_files += 1
         key = f"container-log:{runtime_name}:{project}:{name}:{path}"
         state = _access_log_states.get(key)
@@ -2144,7 +2242,16 @@ def _collect_container_access_log_stats(
         if start > previous_offset and "\n" in output:
             output = output.split("\n", 1)[1]
         collected_lines.extend(output.splitlines())
-    return _summarize_access_lines(collected_lines, interval_seconds, True, readable_files)
+
+    return _summarize_access_lines(
+        collected_lines,
+        interval_seconds,
+        True,
+        readable_files,
+        configured_files=len(resolved_paths),
+        missing_files=missing_files,
+        unreadable_files=unreadable_files,
+    )
 
 
 def _env_float(name: str, default: float) -> float:

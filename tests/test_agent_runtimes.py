@@ -1342,6 +1342,31 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(second["requests"], 1)
         self.assertEqual(second["suspicious_requests"], 1)
 
+    def test_container_access_log_handles_motd_and_globs(self):
+        state = {"size": 150}
+
+        def fake_run(cmd, timeout=None):
+            shell = cmd[-1] if cmd else ""
+            if "for p in" in shell:
+                return "/var/log/nginx/vhost.log\n"
+            if "wc -c" in shell:
+                return "Welcome to Ubuntu 24.04 LTS\nDocumentation: https://help.ubuntu.com\n" + str(state["size"]) + "\n"
+            if "tail -c" in shell:
+                return '198.51.100.5 - - [x] "GET /test HTTP/1.1" 200 100 "-" "curl"\n'
+            return ""
+
+        container = {"name": "c1", "runtime": "incus", "runtime_bin": "incus", "project": "default"}
+        env = {"SECURITY_CONTAINER_ACCESS_LOG_PATHS": "/var/log/nginx/*.log"}
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(agent, "run", side_effect=fake_run):
+            first = agent._collect_container_access_log_stats(container, 10)
+            state["size"] = 300
+            second = agent._collect_container_access_log_stats(container, 10)
+        self.assertEqual(first["readable_files"], 1)
+        self.assertEqual(first["requests"], 0)
+        self.assertEqual(second["readable_files"], 1)
+        self.assertEqual(second["requests"], 1)
+        self.assertEqual(second["unique_ips"], 1)
+
     def test_security_summary_emits_all_detector_categories(self):
         container = {
             "name": "panel",

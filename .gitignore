@@ -9,3 +9,5 @@ id_*
 .ssh/
 *.env
 *.log
+.agents/mcp_config.json
+mcp_config.json
