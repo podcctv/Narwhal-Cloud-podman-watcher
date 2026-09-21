@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   ChevronDown,
   Server,
@@ -15,11 +15,17 @@ import {
   Sparkles,
   Ban,
   Check,
+  Radio,
+  ArrowUpDown,
+  FilterX,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, SecurityAlert } from '../../api/types';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { api, fmtBytes, fmtMbps } from '../../api/client';
+import { DashboardToolbar, ViewMode, FilterState } from './DashboardToolbar';
+import { ContainerCardCompact } from './ContainerCardCompact';
+import { ContainerTableView } from './ContainerTableView';
 
 interface HostContainerListProps {
   containers: ContainerItem[];
@@ -42,8 +48,6 @@ export function evaluateContainerRisk(
   container: ContainerItem,
   activeAlerts: SecurityAlert[] = []
 ): ContainerRiskInfo {
-  // A stale sample is historical diagnostic data, never live risk evidence.
-  // It must not keep a deleted/offline container actionable on the dashboard.
   if (container.alerts?.stale) {
     return { hasRisk: false, isCritical: false, isWarning: false, reasons: [], sortWeight: 0 };
   }
@@ -71,7 +75,7 @@ export function evaluateContainerRisk(
 
   const sec = container.security || {};
 
-  // 2. SOCKS proxy risks: only weak password or no auth counts as anomaly
+  // 2. SOCKS proxy risks
   if (sec.socks_proxy?.detected) {
     if (sec.socks_proxy.auth_mode === 'weak_password') {
       reasons.push('SOCKS 代理弱密码隐患');
@@ -82,7 +86,7 @@ export function evaluateContainerRisk(
     }
   }
 
-  // 3. Panel pairing: only unapproved pairing counts as anomaly
+  // 3. Panel pairing
   if (sec.panel_pairing?.detected && !sec.panel_pairing.approved) {
     reasons.push('未授权面板对接活动');
     sortWeight += 800;
@@ -113,6 +117,20 @@ export function evaluateContainerRisk(
     sortWeight += 450;
   }
 
+  // 7. Traffic Imbalance
+  if (container.alerts?.traffic_imbalance) {
+    const ratio = container.alerts.traffic_imbalance_ratio || 10;
+    const dir = container.alerts.traffic_imbalance_direction === 'outbound_heavy' ? '出栈严重偏高' : '入栈严重偏高';
+    reasons.push(`网络流量严重不均衡 (${dir}, ${ratio}x)`);
+    sortWeight += ratio >= 25 ? 700 : 450;
+  }
+
+  // 8. Hysteria 2 High Concurrency Observation
+  if (container.alerts?.hy2_detected && (container.alerts?.hy2_concurrency || 0) >= 50) {
+    reasons.push(`高并发 Hysteria 2 协议 (UDP并发: ${container.alerts.hy2_concurrency})`);
+    sortWeight += (container.alerts.hy2_concurrency || 0) >= 200 ? 650 : 350;
+  }
+
   const hasRisk = sortWeight > 0;
   const isCritical = sortWeight >= 600;
   const isWarning = hasRisk && !isCritical;
@@ -134,6 +152,24 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   onToast,
   onRefresh,
 }) => {
+  // View mode state with localStorage persistence
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    const saved = localStorage.getItem('narwhal_view_mode');
+    if (saved === 'table' || saved === 'detailed' || saved === 'grid') {
+      return saved;
+    }
+    return 'grid';
+  });
+
+  const handleViewModeChange = (mode: ViewMode) => {
+    setViewMode(mode);
+    localStorage.setItem('narwhal_view_mode', mode);
+  };
+
+  // State filtering & search query
+  const [filterState, setFilterState] = useState<FilterState>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+
   const [submittingKey, setSubmittingKey] = useState<string | null>(null);
   const [pendingDisposition, setPendingDisposition] = useState<{
     target: ContainerIdentity;
@@ -163,39 +199,92 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   };
 
   // Group by host_id
-  const hostMap: Record<string, ContainerItem[]> = {};
-  // The overview intentionally excludes the short stale diagnostic window.
-  // Stale data remains available only from the container-detail/history paths.
-  containers.filter((c) => !c.alerts?.stale).forEach((c) => {
-    if (!hostMap[c.host_id]) hostMap[c.host_id] = [];
-    hostMap[c.host_id].push(c);
-  });
+  const liveContainers = useMemo(
+    () => containers.filter((c) => !c.alerts?.stale),
+    [containers]
+  );
+
+  // Global counts for filter pills
+  const counts = useMemo(() => {
+    let risk = 0;
+    let hy2 = 0;
+    let imbalance = 0;
+    let healthy = 0;
+
+    liveContainers.forEach((c) => {
+      const r = evaluateContainerRisk(c, activeAlerts);
+      if (r.hasRisk) risk++;
+      if (c.alerts?.hy2_detected || c.security?.hy2_protocol?.detected) hy2++;
+      if (c.alerts?.traffic_imbalance) imbalance++;
+      if (!r.hasRisk) healthy++;
+    });
+
+    return {
+      all: liveContainers.length,
+      risk,
+      hy2,
+      imbalance,
+      healthy,
+    };
+  }, [liveContainers, activeAlerts]);
+
+  const hostMap = useMemo(() => {
+    const map: Record<string, ContainerItem[]> = {};
+    liveContainers.forEach((c) => {
+      if (!map[c.host_id]) map[c.host_id] = [];
+      map[c.host_id].push(c);
+    });
+    return map;
+  }, [liveContainers]);
 
   // Sort hosts: hosts with higher risk come first
-  const hostIds = Object.keys(hostMap).sort((a, b) => {
-    const maxA = Math.max(0, ...hostMap[a].map((c) => evaluateContainerRisk(c, activeAlerts).sortWeight));
-    const maxB = Math.max(0, ...hostMap[b].map((c) => evaluateContainerRisk(c, activeAlerts).sortWeight));
-    if (maxA !== maxB) {
-      return maxB - maxA;
-    }
-    return a.localeCompare(b);
+  const hostIds = useMemo(() => {
+    return Object.keys(hostMap).sort((a, b) => {
+      const maxA = Math.max(0, ...hostMap[a].map((c) => evaluateContainerRisk(c, activeAlerts).sortWeight));
+      const maxB = Math.max(0, ...hostMap[b].map((c) => evaluateContainerRisk(c, activeAlerts).sortWeight));
+      if (maxA !== maxB) {
+        return maxB - maxA;
+      }
+      return a.localeCompare(b);
+    });
+  }, [hostMap, activeAlerts]);
+
+  // Host accordion state: default expanded so users immediately see content
+  const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>(() => {
+    const init: Record<string, boolean> = {};
+    Object.keys(hostMap).forEach((h) => (init[h] = true));
+    return init;
   });
 
-  // All hosts collapsed by default as requested
-  const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
+  // Keep expandedHosts in sync with new hosts
+  useEffect(() => {
+    setExpandedHosts((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      hostIds.forEach((h) => {
+        if (next[h] === undefined) {
+          next[h] = true;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [hostIds]);
 
   const toggleHost = (hostId: string) => {
     setExpandedHosts((prev) => ({ ...prev, [hostId]: !prev[hostId] }));
   };
 
-  const expandAll = () => {
-    const next: Record<string, boolean> = {};
-    hostIds.forEach((h) => (next[h] = true));
-    setExpandedHosts(next);
-  };
+  const allExpanded = hostIds.length > 0 && hostIds.every((h) => expandedHosts[h]);
 
-  const collapseAll = () => {
-    setExpandedHosts({});
+  const handleToggleAll = () => {
+    if (allExpanded) {
+      setExpandedHosts({});
+    } else {
+      const next: Record<string, boolean> = {};
+      hostIds.forEach((h) => (next[h] = true));
+      setExpandedHosts(next);
+    }
   };
 
   const pendingCopy = pendingDisposition?.decision === 'deny'
@@ -204,7 +293,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
   if (hostIds.length === 0) {
     return (
-      <section className="rounded-2xl border border-dashed border-slate-800 p-12 text-center">
+      <section className="rounded-2xl border border-dashed border-slate-800 p-12 text-center bg-slate-950/40">
         <Server className="mx-auto h-10 w-10 text-slate-600 mb-3" />
         <h3 className="text-sm font-semibold text-slate-300">暂无已注册的主机与容器</h3>
         <p className="mt-1 text-xs text-slate-500">
@@ -216,417 +305,548 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
   return (
     <section className="space-y-4" aria-label="主机与容器拓扑列表">
-      <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">服务器与容器</span>
-          <span className="text-xs text-slate-500">({hostIds.length} 台主机)</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={expandAll}
-            className="text-[11px] font-medium text-slate-400 hover:text-sky-300 transition-colors px-2.5 py-1 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/60 focus:outline-none focus:ring-2 focus:ring-sky-400"
-          >
-            全部展开
-          </button>
-          <button
-            type="button"
-            onClick={collapseAll}
-            className="text-[11px] font-medium text-slate-400 hover:text-sky-300 transition-colors px-2.5 py-1 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/60 focus:outline-none focus:ring-2 focus:ring-sky-400"
-          >
-            全部折叠
-          </button>
-        </div>
-      </div>
+      {/* Master Control & Density Toolbar */}
+      <DashboardToolbar
+        viewMode={viewMode}
+        onViewModeChange={handleViewModeChange}
+        filterState={filterState}
+        onFilterStateChange={setFilterState}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        totalHosts={hostIds.length}
+        totalContainers={liveContainers.length}
+        counts={counts}
+        allExpanded={allExpanded}
+        onToggleAllHosts={handleToggleAll}
+      />
 
-      {hostIds.map((hostId) => {
-        const hostContainers = hostMap[hostId];
-        const isExpanded = Boolean(expandedHosts[hostId]);
+      {/* Host Accordion List */}
+      <div className="space-y-3">
+        {hostIds.map((hostId) => {
+          const hostContainers = hostMap[hostId] || [];
+          const isExpanded = Boolean(expandedHosts[hostId]);
 
-        // Aggregate statistics for host banner
-        const totalRunning = hostContainers.filter((c) => !c.alerts?.stale).length;
-        const hostRiskyContainers = hostContainers.filter(
-          (c) => evaluateContainerRisk(c, activeAlerts).hasRisk
-        );
-        const hostRiskyCount = hostRiskyContainers.length;
+          // Host aggregated metrics
+          const totalContainersOnHost = hostContainers.length;
+          const hostRiskyContainers = hostContainers.filter(
+            (c) => evaluateContainerRisk(c, activeAlerts).hasRisk
+          );
+          const hostRiskyCount = hostRiskyContainers.length;
 
-        // Sort containers: risky containers ranked first!
-        const sortedContainers = [...hostContainers].sort((a, b) => {
-          const riskA = evaluateContainerRisk(a, activeAlerts);
-          const riskB = evaluateContainerRisk(b, activeAlerts);
-          if (riskA.sortWeight !== riskB.sortWeight) {
-            return riskB.sortWeight - riskA.sortWeight;
+          // Aggregated host bandwidth
+          const sumRx = hostContainers.reduce((acc, c) => acc + (c.net_rx_bps || 0), 0);
+          const sumTx = hostContainers.reduce((acc, c) => acc + (c.net_tx_bps || 0), 0);
+          const sumRxMbps = fmtMbps(sumRx);
+          const sumTxMbps = fmtMbps(sumTx);
+
+          // Aggregated host CPU average
+          const avgCpu = (
+            hostContainers.reduce((acc, c) => acc + (c.cpu_percent || 0), 0) /
+            (totalContainersOnHost || 1)
+          ).toFixed(1);
+
+          // Filter containers according to filterState and searchQuery
+          const filteredContainers = hostContainers.filter((c) => {
+            // Search query filter
+            if (searchQuery.trim()) {
+              const q = searchQuery.toLowerCase();
+              const matchName = c.container_name.toLowerCase().includes(q);
+              const matchHost = c.host_id.toLowerCase().includes(q);
+              const matchRuntime = c.runtime.toLowerCase().includes(q);
+              const matchProject = (c.project || '').toLowerCase().includes(q);
+              if (!matchName && !matchHost && !matchRuntime && !matchProject) {
+                return false;
+              }
+            }
+
+            // State filter
+            const risk = evaluateContainerRisk(c, activeAlerts);
+            switch (filterState) {
+              case 'risk':
+                return risk.hasRisk;
+              case 'hy2':
+                return Boolean(c.alerts?.hy2_detected || c.security?.hy2_protocol?.detected);
+              case 'imbalance':
+                return Boolean(c.alerts?.traffic_imbalance);
+              case 'healthy':
+                return !risk.hasRisk;
+              case 'all':
+              default:
+                return true;
+            }
+          });
+
+          // Sort filtered containers: risky first
+          filteredContainers.sort((a, b) => {
+            const riskA = evaluateContainerRisk(a, activeAlerts);
+            const riskB = evaluateContainerRisk(b, activeAlerts);
+            if (riskA.sortWeight !== riskB.sortWeight) {
+              return riskB.sortWeight - riskA.sortWeight;
+            }
+            return a.container_name.localeCompare(b.container_name);
+          });
+
+          // If search query is active and this host has 0 matches, hide the entire host card
+          if (searchQuery.trim() && filteredContainers.length === 0) {
+            return null;
           }
-          return a.container_name.localeCompare(b.container_name);
-        });
 
-        const agentVersion = hostContainers[0]?.agent_version || 'unknown';
-        const isVersionMatch =
-          agentVersion !== 'unknown' &&
-          agentVersion !== 'dev' &&
-          agentVersion === serverVersion;
+          const agentVersion = hostContainers[0]?.agent_version || 'unknown';
+          const isVersionMatch =
+            agentVersion !== 'unknown' &&
+            agentVersion !== 'dev' &&
+            agentVersion === serverVersion;
 
-        return (
-          <div
-            key={hostId}
-            className={`rounded-2xl border transition-colors shadow-sm overflow-hidden ${
-              hostRiskyCount > 0
-                ? 'border-rose-900/60 bg-slate-900/80 shadow-[0_0_15px_rgba(244,63,94,0.08)]'
-                : 'border-slate-800 bg-slate-900/60'
-            }`}
-          >
-            {/* Host Accordion Bar */}
-            <button
-              type="button"
-              onClick={() => toggleHost(hostId)}
-              aria-expanded={isExpanded}
-              aria-controls={`host-containers-${hostId}`}
-              className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-800/40 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sky-400 data-[expanded=true]:border-b data-[expanded=true]:border-slate-800"
-              data-expanded={isExpanded}
+          // Status indicator color for host card left border
+          let hostStatusAccent = 'border-l-emerald-500';
+          if (hostRiskyCount > 0) {
+            hostStatusAccent = 'border-l-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.06)]';
+          }
+
+          return (
+            <div
+              key={hostId}
+              className={`relative rounded-xl border border-l-4 transition-all overflow-hidden ${hostStatusAccent} ${
+                hostRiskyCount > 0
+                  ? 'border-slate-800 bg-slate-900/95'
+                  : 'border-slate-800 bg-slate-900/80 hover:border-slate-700/90'
+              }`}
             >
-              <div className="flex items-center gap-3">
-                <div
-                  className={`rounded-xl p-2 border transition-colors ${
-                    hostRiskyCount > 0
-                      ? 'bg-rose-950/80 text-rose-400 border-rose-500/40'
-                      : 'bg-sky-950/80 text-sky-400 border-sky-500/30'
-                  }`}
-                >
-                  <Server className="h-4 w-4" />
+              {/* Host Accordion Master Bar */}
+              <button
+                type="button"
+                onClick={() => toggleHost(hostId)}
+                aria-expanded={isExpanded}
+                aria-controls={`host-containers-${hostId}`}
+                className="flex w-full flex-col gap-2 p-3 text-left transition-colors hover:bg-slate-800/40 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sky-400 sm:flex-row sm:items-center sm:justify-between data-[expanded=true]:border-b data-[expanded=true]:border-slate-800/80"
+                data-expanded={isExpanded}
+              >
+                {/* Left: Host Identification & Node Specs */}
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div
+                    className={`rounded-lg p-1.5 border transition-colors shrink-0 ${
+                      hostRiskyCount > 0
+                        ? 'bg-rose-950/80 text-rose-400 border-rose-500/40'
+                        : 'bg-sky-950/80 text-sky-400 border-sky-500/30'
+                    }`}
+                  >
+                    <Server className="h-4 w-4" />
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-sm text-slate-100 font-mono tracking-tight">
+                        {hostId}
+                      </span>
+                      {/* Version Badge */}
+                      <span
+                        className={`rounded-full border px-1.5 py-0.2 text-[9px] font-mono font-medium ${
+                          isVersionMatch
+                            ? 'border-emerald-500/30 bg-emerald-950/50 text-emerald-400'
+                            : agentVersion === 'unknown' || agentVersion === 'dev'
+                            ? 'border-amber-500/30 bg-amber-950/50 text-amber-400'
+                            : 'border-rose-500/30 bg-rose-950/50 text-rose-400'
+                        }`}
+                      >
+                        v{agentVersion}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5">
+                      <span>
+                        共 <span className="font-semibold text-slate-200 font-mono">{totalContainersOnHost}</span> 台容器
+                      </span>
+                      {filteredContainers.length !== totalContainersOnHost && (
+                        <span className="text-sky-400 font-mono text-[11px]">
+                          (筛选命中: {filteredContainers.length})
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-sm text-slate-100 font-mono">
-                      {hostId}
+
+                {/* Right: Aggregate Telemetry & Badges */}
+                <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-1 sm:pt-0 border-t border-slate-800/40 sm:border-t-0">
+                  {/* Host Aggregate Throughput */}
+                  <div className="flex items-center gap-2 text-[11px] font-mono bg-slate-950/60 rounded-lg px-2 py-1 border border-slate-800">
+                    <span className="flex items-center text-emerald-400 font-semibold" title={`母鸡总聚合入栈: ${sumRxMbps} Mbps`}>
+                      <ArrowDownLeft className="h-3 w-3 mr-0.5" />
+                      {sumRxMbps}M
                     </span>
-                    {/* Version Badge */}
-                    <span
-                      className={`rounded-full border px-2 py-0.2 text-[10px] font-mono font-medium ${
-                        isVersionMatch
-                          ? 'border-emerald-500/30 bg-emerald-950/50 text-emerald-400'
-                          : agentVersion === 'unknown' || agentVersion === 'dev'
-                          ? 'border-amber-500/30 bg-amber-950/50 text-amber-400'
-                          : 'border-rose-500/30 bg-rose-950/50 text-rose-400'
-                      }`}
-                    >
-                      Agent v{agentVersion}
+                    <span className="text-slate-600">/</span>
+                    <span className="flex items-center text-sky-400 font-semibold" title={`母鸡总聚合出栈: ${sumTxMbps} Mbps`}>
+                      <ArrowUpRight className="h-3 w-3 mr-0.5" />
+                      {sumTxMbps}M
+                    </span>
+                    <span className="text-slate-600">·</span>
+                    <span className="text-slate-400" title="容器平均 CPU 占用">
+                      均 {avgCpu}%
                     </span>
                   </div>
-                  <span className="text-xs text-slate-400">
-                    共 {hostContainers.length} 个容器 · {totalRunning} 个在线
-                  </span>
+
+                  {/* Risky container badge */}
+                  {hostRiskyCount > 0 && (
+                    <span className="rounded-full border border-rose-500/50 bg-rose-950/80 px-2 py-0.5 text-xs font-bold text-rose-300 flex items-center gap-1 shadow-sm animate-pulse">
+                      <ShieldAlert className="h-3 w-3 text-rose-400" />
+                      <span>{hostRiskyCount} 异常</span>
+                    </span>
+                  )}
+
+                  {/* Expand / Collapse Chevron */}
+                  <ChevronDown
+                    className={`h-4 w-4 text-slate-400 transition-transform duration-200 ${
+                      isExpanded ? 'rotate-180' : ''
+                    }`}
+                  />
                 </div>
-              </div>
+              </button>
 
-              {/* Badges & Chevron */}
-              <div className="flex items-center gap-3">
-                {hostRiskyCount > 0 && (
-                  <span className="rounded-full border border-rose-500/50 bg-rose-950/70 px-2.5 py-0.5 text-xs font-bold text-rose-300 flex items-center gap-1.5 shadow-[0_0_12px_rgba(244,63,94,0.25)] animate-pulse">
-                    <ShieldAlert className="h-3.5 w-3.5 text-rose-400" />
-                    <span>{hostRiskyCount} 个异常容器</span>
-                  </span>
-                )}
-                <ChevronDown
-                  className={`h-4 w-4 text-slate-400 transition-transform duration-200 ${
-                    isExpanded ? 'rotate-180' : ''
-                  }`}
-                />
-              </div>
-            </button>
+              {/* Sub-container Canvas Area */}
+              {isExpanded && (
+                <div id={`host-containers-${hostId}`} className="bg-slate-950/70 p-3">
+                  {filteredContainers.length === 0 ? (
+                    <div className="flex items-center justify-center gap-2 py-6 text-xs text-slate-500 border border-dashed border-slate-800/80 rounded-xl">
+                      <FilterX className="h-4 w-4 text-slate-600" />
+                      <span>当前筛选与搜索条件下暂无匹配容器</span>
+                    </div>
+                  ) : viewMode === 'grid' ? (
+                    /* 1. Pro Grid Mode: High-density 4~5 cols */
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5 gap-2.5">
+                      {filteredContainers.map((c) => {
+                        const risk = evaluateContainerRisk(c, activeAlerts);
+                        const key = `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`;
+                        return (
+                          <ContainerCardCompact
+                            key={key}
+                            container={c}
+                            risk={risk}
+                            onSelect={onSelectContainer}
+                            onQuickDisposition={(target, decision) =>
+                              setPendingDisposition({ target, decision })
+                            }
+                            isSubmitting={submittingKey === key}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : viewMode === 'table' ? (
+                    /* 2. Data Table Mode: Enterprise ultra-dense rows */
+                    <ContainerTableView
+                      containers={filteredContainers}
+                      onSelect={onSelectContainer}
+                      onQuickDisposition={(target, decision) =>
+                        setPendingDisposition({ target, decision })
+                      }
+                      isSubmitting={Boolean(submittingKey)}
+                    />
+                  ) : (
+                    /* 3. Detailed Cards Mode: Polished layout with fixed slots */
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                      {filteredContainers.map((c) => {
+                        const risk = evaluateContainerRisk(c, activeAlerts);
+                        const isStale = Boolean(c.alerts?.stale);
+                        const cpu = c.cpu_percent || 0;
+                        const mem = c.mem_percent || 0;
+                        const rxMbps = fmtMbps(c.net_rx_bps);
+                        const txMbps = fmtMbps(c.net_tx_bps);
+                        const memUsed = fmtBytes(c.mem_bytes);
+                        const memLimit = fmtBytes(c.mem_limit_bytes);
+                        const sec = c.security || {};
+                        const key = `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`;
 
-            {/* Container Grid */}
-            {isExpanded && (
-              <div id={`host-containers-${hostId}`} className="grid grid-cols-1 gap-4 bg-slate-950/40 p-4 md:grid-cols-2 lg:grid-cols-3">
-                {sortedContainers.map((c) => {
-                  const risk = evaluateContainerRisk(c, activeAlerts);
-                  const isStale = c.alerts?.stale;
-                  const cpu = c.cpu_percent || 0;
-                  const mem = c.mem_percent || 0;
-                  const rxMbps = fmtMbps(c.net_rx_bps);
-                  const txMbps = fmtMbps(c.net_tx_bps);
-                  const memUsed = fmtBytes(c.mem_bytes);
-                  const memLimit = fmtBytes(c.mem_limit_bytes);
-                  const sec = c.security || {};
+                        let cardStyle =
+                          'border-slate-800 bg-slate-900/90 hover:border-sky-500/50 shadow-sm';
+                        if (risk.isCritical) {
+                          cardStyle =
+                            'border-rose-500/70 bg-gradient-to-b from-rose-950/30 via-slate-900/90 to-slate-900/95 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
+                        } else if (risk.isWarning) {
+                          cardStyle =
+                            'border-amber-500/50 bg-gradient-to-b from-amber-950/20 via-slate-900/90 to-slate-900/95 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
+                        }
 
-                  // Dye container card based on risk level
-                  let cardStyle =
-                    'border-slate-800 bg-slate-900/80 hover:border-sky-500/50 shadow-sm';
-                  if (risk.isCritical) {
-                    cardStyle =
-                      'border-rose-500/70 bg-gradient-to-b from-rose-950/40 via-slate-900/90 to-slate-900/95 shadow-[0_0_20px_rgba(244,63,94,0.18)] hover:border-rose-400 hover:shadow-[0_0_25px_rgba(244,63,94,0.28)]';
-                  } else if (risk.isWarning) {
-                    cardStyle =
-                      'border-amber-500/50 bg-gradient-to-b from-amber-950/30 via-slate-900/90 to-slate-900/95 shadow-[0_0_15px_rgba(245,158,11,0.12)] hover:border-amber-400';
-                  }
+                        return (
+                          <div
+                            key={key}
+                            className={`group relative rounded-xl border p-3.5 transition-all flex flex-col justify-between ${cardStyle}`}
+                          >
+                            {/* Card Content Top */}
+                            <div>
+                              {/* Title & Badges */}
+                              <div className="flex items-start justify-between gap-2 mb-2.5">
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <Box
+                                      className={`h-4 w-4 shrink-0 ${
+                                        risk.isCritical
+                                          ? 'text-rose-400'
+                                          : risk.isWarning
+                                          ? 'text-amber-400'
+                                          : 'text-sky-400'
+                                      }`}
+                                    />
+                                    <h4
+                                      className={`font-bold font-mono text-xs truncate transition-colors ${
+                                        risk.isCritical
+                                          ? 'text-rose-200 group-hover:text-rose-100'
+                                          : 'text-slate-100 group-hover:text-sky-300'
+                                      }`}
+                                      title={c.container_name}
+                                    >
+                                      {c.container_name}
+                                    </h4>
+                                  </div>
+                                  <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">
+                                    {c.project ? `${c.runtime}/${c.project}` : c.runtime}
+                                  </span>
+                                </div>
 
-                  return (
-                    <div
-                      key={`${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
-                      className={`group relative rounded-xl border p-4 transition-all flex flex-col justify-between ${cardStyle}`}
-                    >
-                      {/* Container Top Meta */}
-                      <div>
-                        <div className="flex items-start justify-between gap-2 mb-2">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <Box
-                                className={`h-4 w-4 shrink-0 ${
-                                  risk.isCritical
-                                    ? 'text-rose-400'
-                                    : risk.isWarning
-                                    ? 'text-amber-400'
-                                    : 'text-sky-400'
-                                }`}
-                              />
-                              <h4
-                                className={`font-bold text-sm truncate transition-colors ${
-                                  risk.isCritical
-                                    ? 'text-rose-200 group-hover:text-rose-100'
-                                    : 'text-slate-100 group-hover:text-sky-300'
-                                }`}
-                                title={c.container_name}
-                              >
-                                {c.container_name}
-                              </h4>
-                            </div>
-                            <span className="text-[11px] text-slate-400 font-mono">
-                              {c.project ? `${c.runtime}/${c.project}` : c.runtime}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {risk.isCritical && (
-                              <span className="rounded-full bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 text-[10px] font-bold text-rose-300 flex items-center gap-1 shadow-sm">
-                                <AlertTriangle className="h-3 w-3 text-rose-400 animate-pulse" />
-                                <span>异常风险</span>
-                              </span>
-                            )}
-                            {risk.isWarning && (
-                              <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 text-[10px] font-bold text-amber-300 flex items-center gap-1 shadow-sm">
-                                <AlertCircle className="h-3 w-3 text-amber-400" />
-                                <span>运行预警</span>
-                              </span>
-                            )}
-                            <StatusBadge
-                              status={isStale ? 'stale' : 'healthy'}
-                              size="sm"
-                              pulse={!isStale}
-                            />
-                          </div>
-                        </div>
-
-                        {/* Resource Meters */}
-                        <div className="space-y-2 mt-3 text-xs">
-                          {/* CPU Metric */}
-                          <div>
-                            <div className="flex justify-between font-mono text-slate-300 mb-1">
-                              <span className="flex items-center gap-1 text-slate-400">
-                                <Cpu className="h-3 w-3" /> CPU
-                              </span>
-                              <span
-                                className={`tabular-nums font-bold ${
-                                  cpu > 80 ? 'text-rose-400' : 'text-slate-200'
-                                }`}
-                              >
-                                {cpu.toFixed(1)}%
-                              </span>
-                            </div>
-                            <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
-                              <div
-                                className={`h-full transition-all duration-500 ${
-                                  cpu > 80 ? 'bg-rose-500' : 'bg-sky-500'
-                                }`}
-                                style={{ width: `${Math.min(100, Math.max(0, cpu))}%` }}
-                              />
-                            </div>
-                          </div>
-
-                          {/* Memory Metric */}
-                          <div>
-                            <div className="flex justify-between font-mono text-slate-300 mb-1">
-                              <span className="flex items-center gap-1 text-slate-400">
-                                <HardDrive className="h-3 w-3" /> 内存
-                              </span>
-                              <span
-                                className={`tabular-nums font-bold ${
-                                  mem > 90 ? 'text-amber-400' : 'text-slate-200'
-                                }`}
-                              >
-                                {mem.toFixed(1)}% ({memUsed} / {memLimit})
-                              </span>
-                            </div>
-                            <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
-                              <div
-                                className={`h-full transition-all duration-500 ${
-                                  mem > 90 ? 'bg-amber-500' : 'bg-emerald-500'
-                                }`}
-                                style={{ width: `${Math.min(100, Math.max(0, mem))}%` }}
-                              />
-                            </div>
-                          </div>
-
-                          {/* Traffic & Conns Grid */}
-                          <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
-                            <div className="rounded-lg bg-slate-950/60 p-2 border border-slate-800/80">
-                              <span className="text-slate-500 flex items-center gap-1">
-                                <Activity className="h-3 w-3 text-sky-400" /> 带宽
-                              </span>
-                              <div className="mt-1 flex items-center justify-between text-slate-300 tabular-nums font-semibold">
-                                <span className="flex items-center text-emerald-400">
-                                  <ArrowDownLeft className="h-3 w-3 mr-0.5" />
-                                  {rxMbps}M
-                                </span>
-                                <span className="flex items-center text-sky-400">
-                                  <ArrowUpRight className="h-3 w-3 mr-0.5" />
-                                  {txMbps}M
-                                </span>
-                              </div>
-                            </div>
-
-                            <div className="rounded-lg bg-slate-950/60 p-2 border border-slate-800/80">
-                              <span className="text-slate-500 flex items-center gap-1">
-                                <Layers className="h-3 w-3 text-amber-400" /> 连接 / 进程
-                              </span>
-                              <div className="mt-1 flex items-center justify-between text-slate-300 tabular-nums font-semibold">
-                                <span>{c.conn_count || 0} conn</span>
-                                <span>{sec.process_count || 0} proc</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Risk Reasons Banner (Dye & Highlighted for easy inspection) */}
-                          {risk.hasRisk && risk.reasons.length > 0 && (
-                            <div
-                              className={`mt-2.5 rounded-lg border p-2 text-xs space-y-1 ${
-                                risk.isCritical
-                                  ? 'border-rose-500/50 bg-rose-950/60 text-rose-200 shadow-sm'
-                                  : 'border-amber-500/40 bg-amber-950/50 text-amber-200'
-                              }`}
-                            >
-                              <div
-                                className={`flex items-center gap-1.5 font-bold ${
-                                  risk.isCritical ? 'text-rose-300' : 'text-amber-300'
-                                }`}
-                              >
-                                {risk.isCritical ? (
-                                  <AlertTriangle className="h-3.5 w-3.5 text-rose-400 shrink-0 animate-pulse" />
-                                ) : (
-                                  <AlertCircle className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                                )}
-                                <span>异常风险待排查 ({risk.reasons.length} 项)</span>
-                              </div>
-                              <ul className="space-y-0.5 text-[11px] pl-1">
-                                {risk.reasons.map((reason, idx) => (
-                                  <li key={idx} className="flex items-start gap-1">
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {(c.alerts?.hy2_detected || sec.hy2_protocol?.detected) && (
                                     <span
-                                      className={`font-bold ${
-                                        risk.isCritical ? 'text-rose-400' : 'text-amber-400'
+                                      className="rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 text-[9px] font-bold text-violet-300 flex items-center gap-1 shadow-sm font-mono"
+                                      title="检测到 Hysteria 2 协议"
+                                    >
+                                      <Radio className="h-2.5 w-2.5 text-violet-400" />
+                                      <span>HY2</span>
+                                    </span>
+                                  )}
+                                  {risk.isCritical && (
+                                    <span className="rounded-full bg-rose-500/20 border border-rose-500/50 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 flex items-center gap-1 shadow-sm">
+                                      <AlertTriangle className="h-2.5 w-2.5 text-rose-400 animate-pulse" />
+                                      <span>异常</span>
+                                    </span>
+                                  )}
+                                  {risk.isWarning && (
+                                    <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.2 text-[9px] font-bold text-amber-300 flex items-center gap-1 shadow-sm">
+                                      <AlertCircle className="h-2.5 w-2.5 text-amber-400" />
+                                      <span>预警</span>
+                                    </span>
+                                  )}
+                                  <StatusBadge
+                                    status={isStale ? 'stale' : 'healthy'}
+                                    size="sm"
+                                    pulse={!isStale}
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Resource Meters */}
+                              <div className="space-y-2 mt-2 text-xs">
+                                {/* CPU */}
+                                <div>
+                                  <div className="flex justify-between font-mono text-slate-300 mb-0.5 text-[11px]">
+                                    <span className="flex items-center gap-1 text-slate-400">
+                                      <Cpu className="h-3 w-3" /> CPU
+                                    </span>
+                                    <span
+                                      className={`tabular-nums font-bold ${
+                                        cpu > 80 ? 'text-rose-400' : 'text-slate-200'
                                       }`}
                                     >
-                                      •
+                                      {cpu.toFixed(1)}%
                                     </span>
-                                    <span className="leading-tight">{reason}</span>
-                                  </li>
-                                ))}
-                              </ul>
+                                  </div>
+                                  <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                                    <div
+                                      className={`h-full transition-all duration-300 ${
+                                        cpu > 80 ? 'bg-rose-500' : 'bg-sky-500'
+                                      }`}
+                                      style={{ width: `${Math.min(100, Math.max(0, cpu))}%` }}
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* Memory */}
+                                <div>
+                                  <div className="flex justify-between font-mono text-slate-300 mb-0.5 text-[11px]">
+                                    <span className="flex items-center gap-1 text-slate-400">
+                                      <HardDrive className="h-3 w-3" /> 内存
+                                    </span>
+                                    <span
+                                      className={`tabular-nums font-bold ${
+                                        mem > 90 ? 'text-amber-400' : 'text-slate-200'
+                                      }`}
+                                    >
+                                      {mem.toFixed(1)}% ({memUsed} / {memLimit})
+                                    </span>
+                                  </div>
+                                  <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                                    <div
+                                      className={`h-full transition-all duration-300 ${
+                                        mem > 90 ? 'bg-amber-500' : 'bg-emerald-500'
+                                      }`}
+                                      style={{ width: `${Math.min(100, Math.max(0, mem))}%` }}
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* Bandwidth & Conns Block */}
+                                <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
+                                  <div className="rounded-lg bg-slate-950/70 p-2 border border-slate-800/80">
+                                    <div className="flex items-center justify-between text-slate-500 text-[10px]">
+                                      <span className="flex items-center gap-1">
+                                        <Activity className="h-2.5 w-2.5 text-sky-400" /> 带宽
+                                      </span>
+                                      {c.alerts?.traffic_imbalance && (
+                                        <span
+                                          className="text-[9px] font-bold text-amber-300 bg-amber-500/10 px-1 py-0.2 rounded border border-amber-500/30 flex items-center gap-0.5"
+                                          title={`出入流量失衡: ${c.alerts.traffic_imbalance_ratio}x`}
+                                        >
+                                          <ArrowUpDown className="h-2.5 w-2.5 text-amber-400" />
+                                          <span>{c.alerts.traffic_imbalance_ratio}x</span>
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="mt-1 flex items-center justify-between text-slate-300 tabular-nums font-semibold">
+                                      <span className="flex items-center text-emerald-400">
+                                        <ArrowDownLeft className="h-3 w-3 mr-0.5" />
+                                        {rxMbps}M
+                                      </span>
+                                      <span className="flex items-center text-sky-400">
+                                        <ArrowUpRight className="h-3 w-3 mr-0.5" />
+                                        {txMbps}M
+                                      </span>
+                                    </div>
+                                    <div className="mt-1 flex items-center justify-between text-[9px] text-slate-400 border-t border-slate-800/60 pt-1">
+                                      <span title={`TCP: ↓ ${fmtMbps(c.tcp_rx_bps)}M / ↑ ${fmtMbps(c.tcp_tx_bps)}M`}>
+                                        <span className="text-blue-400">T:</span> {fmtMbps(c.tcp_rx_bps)}/{fmtMbps(c.tcp_tx_bps)}M
+                                      </span>
+                                      <span title={`UDP: ↓ ${fmtMbps(c.udp_rx_bps)}M / ↑ ${fmtMbps(c.udp_tx_bps)}M`}>
+                                        <span className="text-violet-400">U:</span> {fmtMbps(c.udp_rx_bps)}/{fmtMbps(c.udp_tx_bps)}M
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <div className="rounded-lg bg-slate-950/70 p-2 border border-slate-800/80">
+                                    <span className="text-slate-500 flex items-center gap-1 text-[10px]">
+                                      <Layers className="h-2.5 w-2.5 text-amber-400" /> 连接/进程
+                                    </span>
+                                    <div className="mt-1 flex items-center justify-between text-slate-300 tabular-nums font-semibold">
+                                      <span>{c.conn_count || 0} conn</span>
+                                      <span>{sec.process_count || 0} proc</span>
+                                    </div>
+                                    <div className="mt-2 text-[9px] text-slate-400 font-mono text-right">
+                                      更新: {c.timestamp_iso_utc8?.split(' ')[1] || '实时'}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Risk Banner (Clean single line with preview) */}
+                                {risk.hasRisk && risk.reasons.length > 0 && (
+                                  <div
+                                    className={`mt-2 rounded-lg border p-1.5 text-xs flex items-center justify-between gap-1.5 ${
+                                      risk.isCritical
+                                        ? 'border-rose-500/50 bg-rose-950/60 text-rose-200'
+                                        : 'border-amber-500/40 bg-amber-950/50 text-amber-200'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-1 min-w-0 flex-1">
+                                      {risk.isCritical ? (
+                                        <AlertTriangle className="h-3 w-3 text-rose-400 shrink-0" />
+                                      ) : (
+                                        <AlertCircle className="h-3 w-3 text-amber-400 shrink-0" />
+                                      )}
+                                      <span className="text-[11px] truncate font-medium">
+                                        {risk.reasons[0]}
+                                      </span>
+                                    </div>
+                                    {risk.reasons.length > 1 && (
+                                      <span className="rounded bg-black/40 px-1 text-[9px] font-mono shrink-0">
+                                        +{risk.reasons.length - 1}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                          )}
-                        </div>
-                      </div>
 
-                      {/* Actions Footer */}
-                      <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2 flex-wrap">
-                        <span className="text-[10px] text-slate-500 font-mono">
-                          {c.timestamp_iso_utc8?.split(' ')[1] || ''}
-                        </span>
+                            {/* Actions Footer */}
+                            <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center justify-end gap-1.5">
+                              {risk.hasRisk && (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={submittingKey === key}
+                                    onClick={() =>
+                                      setPendingDisposition({
+                                        target: {
+                                          host_id: c.host_id,
+                                          runtime: c.runtime,
+                                          project: c.project,
+                                          container_name: c.container_name,
+                                        },
+                                        decision: 'deny',
+                                      })
+                                    }
+                                    className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900 transition-colors disabled:opacity-50"
+                                    title="定向处置已识别的风险"
+                                  >
+                                    <Ban className="h-3 w-3" />
+                                    <span>处置</span>
+                                  </button>
 
-                        {risk.hasRisk ? (
-                          <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                            <button
-                              type="button"
-                              disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setPendingDisposition({
-                                  target: { host_id: c.host_id, runtime: c.runtime, project: c.project, container_name: c.container_name },
-                                  decision: 'deny',
-                                });
-                              }}
-                              className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-sm"
-                              title="定向处置违规进程或停止非合规服务"
-                            >
-                              <Ban className="h-3 w-3" />
-                              <span>
-                                {submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`
-                                  ? '处理中...'
-                                  : '定向处置'}
-                              </span>
-                            </button>
+                                  <button
+                                    type="button"
+                                    disabled={submittingKey === key}
+                                    onClick={() =>
+                                      setPendingDisposition({
+                                        target: {
+                                          host_id: c.host_id,
+                                          runtime: c.runtime,
+                                          project: c.project,
+                                          container_name: c.container_name,
+                                        },
+                                        decision: 'allow_silent',
+                                      })
+                                    }
+                                    className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors disabled:opacity-50"
+                                    title="持续放行不再提醒"
+                                  >
+                                    <Check className="h-3 w-3 text-emerald-400" />
+                                    <span>放行</span>
+                                  </button>
+                                </>
+                              )}
 
-                            <button
-                              type="button"
-                              disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setPendingDisposition({
-                                  target: { host_id: c.host_id, runtime: c.runtime, project: c.project, container_name: c.container_name },
-                                  decision: 'allow_silent',
-                                });
-                              }}
-                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
-                              title="添加放行策略不再告警"
-                            >
-                              <Check className="h-3 w-3 text-emerald-400" />
-                              <span>放行</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onSelectContainer({
-                                  host_id: c.host_id,
-                                  runtime: c.runtime,
-                                  project: c.project,
-                                  container_name: c.container_name,
-                                })
-                              }
-                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400"
-                              title="查看容器详细指标与诊断"
-                            >
-                              <Sparkles className="h-3 w-3" />
-                              <span>排查</span>
-                            </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onSelectContainer({
+                                    host_id: c.host_id,
+                                    runtime: c.runtime,
+                                    project: c.project,
+                                    container_name: c.container_name,
+                                  })
+                                }
+                                className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-medium text-sky-400 hover:border-sky-500 hover:text-sky-300 transition-colors"
+                              >
+                                <Sparkles className="h-3 w-3" />
+                                <span>排查</span>
+                              </button>
+                            </div>
                           </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              onSelectContainer({
-                                host_id: c.host_id,
-                                runtime: c.runtime,
-                                project: c.project,
-                                container_name: c.container_name,
-                              })
-                            }
-                            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 text-sky-400 px-3 py-1.5 text-xs font-semibold hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 shadow-sm"
-                          >
-                            <Sparkles className="h-3.5 w-3.5" />
-                            <span>深度排查</span>
-                          </button>
-                        )}
-                      </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })}
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Global Confirmation Dialog */}
       <ConfirmDialog
         open={Boolean(pendingDisposition)}
         {...pendingCopy}
-        isSubmitting={pendingDisposition ? submittingKey === `${pendingDisposition.target.host_id}-${pendingDisposition.target.runtime}-${pendingDisposition.target.project || ''}-${pendingDisposition.target.container_name}` : false}
+        isSubmitting={
+          pendingDisposition
+            ? submittingKey ===
+              `${pendingDisposition.target.host_id}-${pendingDisposition.target.runtime}-${
+                pendingDisposition.target.project || ''
+              }-${pendingDisposition.target.container_name}`
+            : false
+        }
         onCancel={() => setPendingDisposition(null)}
         onConfirm={async () => {
           if (!pendingDisposition) return;

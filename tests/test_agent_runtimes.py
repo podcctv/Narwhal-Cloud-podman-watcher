@@ -1823,6 +1823,146 @@ class SecurityTelemetryTests(unittest.TestCase):
             agent._memory_buyer_notify_record = old_mem
 
 
+    def test_tcp_udp_traffic_separation_rates(self):
+        # 1. Test derivation with packet datagrams
+        key = "podman::c_net_test"
+        counters1 = {
+            "Tcp_InSegs": 1000,
+            "Tcp_OutSegs": 2000,
+            "Udp_InDatagrams": 3000,
+            "Udp_OutDatagrams": 6000,
+        }
+        counters2 = {
+            "Tcp_InSegs": 1100,  # +100
+            "Tcp_OutSegs": 2200,  # +200
+            "Udp_InDatagrams": 3300,  # +300
+            "Udp_OutDatagrams": 6600,  # +600
+        }
+        with mock.patch("time.time", side_effect=[100.0, 102.0]):
+            agent._derive_protocol_rates(key, counters1, 1000000.0, 2000000.0)
+            rates = agent._derive_protocol_rates(key, counters2, 1000000.0, 2000000.0)
+
+            # Inbound: 100 TCP pkts, 300 UDP pkts -> 1:3 ratio
+            self.assertAlmostEqual(rates["tcp_rx_bps"], 250000.0, places=0)
+            self.assertAlmostEqual(rates["udp_rx_bps"], 750000.0, places=0)
+            # Outbound: 200 TCP pkts, 600 UDP pkts -> 1:3 ratio
+            self.assertAlmostEqual(rates["tcp_tx_bps"], 500000.0, places=0)
+            self.assertAlmostEqual(rates["udp_tx_bps"], 1500000.0, places=0)
+
+        # 2. Test derivation with TcpExt octets
+        key_oct = "podman::c_oct_test"
+        c_oct1 = {
+            "TcpExt_TCPInDataOctets": 100000,
+            "TcpExt_TCPOutDataOctets": 200000,
+            "Tcp_InSegs": 100,
+            "Tcp_OutSegs": 200,
+            "Udp_InDatagrams": 10,
+            "Udp_OutDatagrams": 20,
+        }
+        c_oct2 = {
+            "TcpExt_TCPInDataOctets": 300000,  # +200,000 bytes in 2s -> 100,000 B/s
+            "TcpExt_TCPOutDataOctets": 500000,  # +300,000 bytes in 2s -> 150,000 B/s
+            "Tcp_InSegs": 200,
+            "Tcp_OutSegs": 400,
+            "Udp_InDatagrams": 20,
+            "Udp_OutDatagrams": 40,
+        }
+        with mock.patch("time.time", side_effect=[200.0, 202.0]):
+            agent._derive_protocol_rates(key_oct, c_oct1, 150000.0, 200000.0)
+            rates_oct = agent._derive_protocol_rates(key_oct, c_oct2, 150000.0, 200000.0)
+
+            # TCP rx = 100,000 B/s, total rx = 150,000 B/s -> UDP rx = 50,000 B/s
+            self.assertEqual(rates_oct["tcp_rx_bps"], 100000.0)
+            self.assertEqual(rates_oct["udp_rx_bps"], 50000.0)
+            # TCP tx = 150,000 B/s, total tx = 200,000 B/s -> UDP tx = 50,000 B/s
+            self.assertEqual(rates_oct["tcp_tx_bps"], 150000.0)
+            self.assertEqual(rates_oct["udp_tx_bps"], 50000.0)
+
+    def test_hy2_indicators_detection(self):
+        # 1. Process detection
+        ps_output = "101 hysteria /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml\n"
+        with mock.patch.object(agent, "run", return_value=ps_output):
+            indicators = agent.collect_hy2_indicators("c_hy2", "podman", "")
+            self.assertTrue(indicators["detected"])
+            self.assertEqual(indicators["confidence"], "confirmed")
+            self.assertEqual(indicators["process"], "hysteria")
+            self.assertEqual(indicators["pid"], 101)
+
+        # 2. Behavioral UDP QUIC high concurrency pattern
+        with mock.patch.object(agent, "run", return_value="1 init /sbin/init\n"):
+            udp_ips = {f"1.1.1.{i}": 2 for i in range(35)} # 35 unique IPs, 70 concurrency
+            rates = {"udp_rx_bps": 500000.0, "udp_tx_bps": 500000.0, "tcp_rx_bps": 10000.0, "tcp_tx_bps": 10000.0}
+            indicators = agent.collect_hy2_indicators(
+                "c_suspect", "podman", "",
+                udp_ip_counter=udp_ips,
+                protocol_rates=rates,
+            )
+            self.assertTrue(indicators["detected"])
+            self.assertEqual(indicators["confidence"], "suspected")
+            self.assertEqual(indicators["udp_concurrency"], 70)
+
+    def test_traffic_imbalance_and_hy2_alerts(self):
+        containers = [
+            {
+                "name": "imbalanced_tx",
+                "runtime": "podman",
+                "project": "",
+                "net_rx_bps": 100000.0,      # ~100 KB/s
+                "net_tx_bps": 20000000.0,    # ~20 MB/s (200x imbalance!)
+                "conn_count": 10,
+                "security": {},
+            },
+            {
+                "name": "idle_container",
+                "runtime": "podman",
+                "project": "",
+                "net_rx_bps": 100.0,
+                "net_tx_bps": 0.0,           # High ratio but only 100 B/s (under 2MB/s threshold)
+                "conn_count": 2,
+                "security": {},
+            },
+            {
+                "name": "hy2_container",
+                "runtime": "podman",
+                "project": "",
+                "net_rx_bps": 5000000.0,
+                "net_tx_bps": 5000000.0,
+                "conn_count": 100,
+                "security": {
+                    "hy2_protocol": {
+                        "detected": True,
+                        "confidence": "confirmed",
+                        "udp_concurrency": 80,
+                        "unique_remote_ips": 45,
+                    }
+                },
+            }
+        ]
+
+        sec_result = agent.collect_security_summary(containers, 15.0)
+        alerts = sec_result.get("alerts", [])
+        types = [a["type"] for a in alerts]
+        containers_alerted = {a["container_name"]: a for a in alerts}
+
+        # imbalanced_tx should trigger traffic_imbalance
+        self.assertIn("traffic_imbalance", types)
+        imb_alert = containers_alerted.get("imbalanced_tx")
+        self.assertIn("出栈严重高于入栈", imb_alert["title"])
+        self.assertIn("流量失衡比值", imb_alert["message"])
+        self.assertTrue(containers[0]["alerts"]["traffic_imbalance"])
+        self.assertEqual(containers[0]["alerts"]["traffic_imbalance_direction"], "outbound_heavy")
+
+        # idle_container should NOT trigger traffic_imbalance because volume < 2MB/s
+        self.assertNotIn("idle_container", containers_alerted)
+
+        # hy2_container should trigger hy2_high_concurrency
+        self.assertIn("hy2_high_concurrency", types)
+        hy2_alert = containers_alerted.get("hy2_container")
+        self.assertIsNotNone(hy2_alert)
+        self.assertEqual(hy2_alert["value"], 80)
+        self.assertTrue(containers[2]["alerts"]["hy2_detected"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

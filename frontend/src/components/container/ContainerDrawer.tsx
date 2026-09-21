@@ -11,9 +11,13 @@ import {
   Ban,
   Check,
   CheckCircle2,
+  ArrowUpDown,
+  Radio,
+  ArrowDownLeft,
+  ArrowUpRight,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData } from '../../api/types';
-import { api, fmtBytes, fmtNumber } from '../../api/client';
+import { api, fmtBytes, fmtNumber, fmtMbps } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 import { ResourceChart } from './ResourceChart';
 import { NetworkChart } from './NetworkChart';
@@ -259,6 +263,94 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                 <span>实时吞吐速率趋势 (RX & TX)</span>
               </h3>
               <NetworkChart history={history} />
+            </div>
+
+            {/* Protocol Breakdown & Traffic Symmetry */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-slate-200 flex items-center gap-2">
+                  <Activity className="h-4 w-4 text-sky-400" />
+                  <span>协议流量拆分与流量对称性</span>
+                </h3>
+                {container?.alerts?.traffic_imbalance ? (
+                  <span className="text-[11px] font-bold text-rose-300 bg-rose-500/10 border border-rose-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <ArrowUpDown className="h-3 w-3 text-rose-400" />
+                    <span>入出失衡 {container.alerts.traffic_imbalance_ratio}x ({container.alerts.traffic_imbalance_direction === 'outbound_heavy' ? '出栈偏高' : '入栈偏高'})</span>
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <CheckCircle2 className="h-3 w-3" />
+                    <span>入出栈流量均衡</span>
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
+                {/* TCP Traffic Card */}
+                <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                  <span className="text-slate-400 block text-[11px] mb-1 text-blue-400 font-semibold">
+                    TCP 协议流量
+                  </span>
+                  <div className="flex items-center justify-between text-slate-200">
+                    <span className="flex items-center text-emerald-400" title="TCP 入栈速率">
+                      <ArrowDownLeft className="h-3.5 w-3.5 mr-0.5" />
+                      {fmtMbps(container?.tcp_rx_bps)} Mbps
+                    </span>
+                    <span className="flex items-center text-sky-400" title="TCP 出栈速率">
+                      <ArrowUpRight className="h-3.5 w-3.5 mr-0.5" />
+                      {fmtMbps(container?.tcp_tx_bps)} Mbps
+                    </span>
+                  </div>
+                </div>
+
+                {/* UDP Traffic Card */}
+                <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                  <span className="text-slate-400 block text-[11px] mb-1 text-violet-400 font-semibold">
+                    UDP 协议流量
+                  </span>
+                  <div className="flex items-center justify-between text-slate-200">
+                    <span className="flex items-center text-emerald-400" title="UDP 入栈速率">
+                      <ArrowDownLeft className="h-3.5 w-3.5 mr-0.5" />
+                      {fmtMbps(container?.udp_rx_bps)} Mbps
+                    </span>
+                    <span className="flex items-center text-sky-400" title="UDP 出栈速率">
+                      <ArrowUpRight className="h-3.5 w-3.5 mr-0.5" />
+                      {fmtMbps(container?.udp_tx_bps)} Mbps
+                    </span>
+                  </div>
+                </div>
+
+                {/* Hysteria 2 (hy2) Status Card */}
+                <div className={`rounded-lg border p-3 ${
+                  container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected
+                    ? 'border-violet-500/40 bg-violet-950/20 text-violet-300'
+                    : 'border-slate-800 bg-slate-900/60 text-slate-300'
+                }`}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] font-semibold text-violet-400 flex items-center gap-1">
+                      <Radio className="h-3 w-3" />
+                      Hysteria 2 协议
+                    </span>
+                    {(container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
+                      <span className="text-[10px] font-bold bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 rounded text-violet-200">
+                        {container?.security?.hy2_protocol?.confidence === 'confirmed' ? '已确认' : '疑似'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] mt-1">
+                    {container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected ? (
+                      <div>
+                        <span>UDP 并发：{container?.security?.hy2_protocol?.udp_concurrency ?? container?.alerts?.hy2_concurrency ?? 0}</span>
+                        {container?.security?.hy2_protocol?.process && (
+                          <span className="text-slate-400 ml-1.5">({container.security.hy2_protocol.process})</span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-slate-500">未发现运行特征</span>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Security Checks & Surface Risk */}

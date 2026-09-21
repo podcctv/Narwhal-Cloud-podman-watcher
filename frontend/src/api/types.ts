@@ -11,6 +11,10 @@ export interface ContainerItem {
   mem_limit_bytes?: number;
   net_rx_bps?: number;
   net_tx_bps?: number;
+  tcp_rx_bps?: number;
+  tcp_tx_bps?: number;
+  udp_rx_bps?: number;
+  udp_tx_bps?: number;
   conn_count?: number;
   timestamp_iso_utc8?: string;
   agent_version?: string;
@@ -29,6 +33,12 @@ export interface ContainerItem {
     memory?: boolean;
     disk?: boolean;
     conn?: boolean;
+    traffic_imbalance?: boolean;
+    traffic_imbalance_ratio?: number;
+    traffic_imbalance_direction?: 'outbound_heavy' | 'inbound_heavy' | string;
+    hy2_detected?: boolean;
+    hy2_concurrency?: number;
+    hy2_confidence?: 'confirmed' | 'suspected' | string;
     [key: string]: any;
   };
   security?: ContainerSecurity;
@@ -41,13 +51,14 @@ export interface ContainerSecurity {
   top_cpu_process_pid?: number;
   suspicious_processes?: { pid?: number; command?: string; pattern?: string }[];
   listening_ports?: string[];
+  udp_listening_ports?: number[];
   network_exposure?: { listen: string; target: string }[];
   inbound_unique_ips?: number;
   inbound_unique_ip_threshold?: number;
   inbound_ip_observation?: string;
   inbound_top_ips?: { ip: string; connections: number }[];
   incoming_established?: number;
-  outbound_unique_ips?: number;
+  outbound_established?: number;
   net_rx_pps?: number;
   syn_recv_count?: number;
   panel_pairing?: {
@@ -60,6 +71,16 @@ export interface ContainerSecurity {
     auth_mode: 'no_auth' | 'weak_password' | 'configured' | 'unknown' | string;
     public_exposure: boolean;
     [key: string]: any;
+  };
+  hy2_protocol?: {
+    detected: boolean;
+    confidence: 'confirmed' | 'suspected' | 'none' | string;
+    process?: string;
+    pid?: number;
+    listening_udp_ports?: number[];
+    udp_concurrency?: number;
+    unique_remote_ips?: number;
+    evidence?: string[];
   };
   configuration_risks?: { message?: string; code?: string }[];
   communication_detail_available?: boolean;
@@ -183,6 +204,10 @@ export interface HistoryPoint {
   mem_percent: number;
   net_rx_bps: number;
   net_tx_bps: number;
+  tcp_rx_bps?: number;
+  tcp_tx_bps?: number;
+  udp_rx_bps?: number;
+  udp_tx_bps?: number;
   conn_count: number;
   agent_version?: string;
 }

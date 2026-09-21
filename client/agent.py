@@ -499,8 +499,14 @@ def _derive_packet_rates(container_key: str, rx_packets: int, tx_packets: int) -
 
 def _read_protocol_counters(pid: int) -> Dict[str, int]:
     wanted = {
-        "Tcp": ("ActiveOpens", "AttemptFails", "EstabResets", "OutRsts"),
-        "Udp": ("OutDatagrams", "NoPorts", "InErrors"),
+        "Tcp": (
+            "ActiveOpens", "AttemptFails", "EstabResets", "OutRsts",
+            "InSegs", "OutSegs", "RetransSegs",
+        ),
+        "Udp": (
+            "InDatagrams", "OutDatagrams", "NoPorts", "InErrors",
+            "RcvbufErrors", "SndbufErrors",
+        ),
     }
     result: Dict[str, int] = {}
     if pid <= 0:
@@ -508,40 +514,141 @@ def _read_protocol_counters(pid: int) -> Dict[str, int]:
     try:
         with open(f"/proc/{pid}/net/snmp", "r", encoding="utf-8", errors="ignore") as handle:
             lines = handle.read().splitlines()
+        for index in range(0, len(lines) - 1, 2):
+            header = lines[index].split()
+            values = lines[index + 1].split()
+            if not header or not values or header[0] != values[0]:
+                continue
+            protocol = header[0].rstrip(":")
+            if protocol not in wanted:
+                continue
+            mapping = dict(zip(header[1:], values[1:]))
+            for field in wanted[protocol]:
+                try:
+                    result[f"{protocol}_{field}"] = int(mapping.get(field, "0"))
+                except ValueError:
+                    result[f"{protocol}_{field}"] = 0
     except Exception:
-        return result
-    for index in range(0, len(lines) - 1, 2):
-        header = lines[index].split()
-        values = lines[index + 1].split()
-        if not header or not values or header[0] != values[0]:
-            continue
-        protocol = header[0].rstrip(":")
-        if protocol not in wanted:
-            continue
-        mapping = dict(zip(header[1:], values[1:]))
-        for field in wanted[protocol]:
-            try:
-                result[f"{protocol}_{field}"] = int(mapping.get(field, "0"))
-            except ValueError:
-                result[f"{protocol}_{field}"] = 0
+        pass
+
+    try:
+        with open(f"/proc/{pid}/net/netstat", "r", encoding="utf-8", errors="ignore") as handle:
+            lines = handle.read().splitlines()
+        for index in range(0, len(lines) - 1, 2):
+            header = lines[index].split()
+            values = lines[index + 1].split()
+            if not header or not values or header[0] != values[0]:
+                continue
+            protocol = header[0].rstrip(":")
+            if protocol == "TcpExt":
+                mapping = dict(zip(header[1:], values[1:]))
+                for field in ("TCPInDataOctets", "TCPOutDataOctets"):
+                    if field in mapping:
+                        try:
+                            result[f"TcpExt_{field}"] = int(mapping.get(field, "0"))
+                        except ValueError:
+                            result[f"TcpExt_{field}"] = 0
+    except Exception:
+        pass
+
     return result
 
 
-def _derive_protocol_rates(container_key: str, counters: Dict[str, int]) -> Dict[str, float]:
+def _derive_protocol_rates(
+    container_key: str,
+    counters: Dict[str, int],
+    total_rx_bps: float = 0.0,
+    total_tx_bps: float = 0.0,
+) -> Dict[str, float]:
     now = float(time.time())
     previous = _protocol_counters.get(container_key)
     current: Dict[str, float] = {"ts": now}
     current.update({key: float(value) for key, value in counters.items()})
     _protocol_counters[container_key] = current
+
+    base_rates: Dict[str, float] = {f"{key}_per_second": 0.0 for key in counters}
+    base_rates.update({
+        "tcp_rx_bps": round(total_rx_bps, 2),
+        "tcp_tx_bps": round(total_tx_bps, 2),
+        "udp_rx_bps": 0.0,
+        "udp_tx_bps": 0.0,
+        "tcp_rx_pps": 0.0,
+        "tcp_tx_pps": 0.0,
+        "udp_rx_pps": 0.0,
+        "udp_tx_pps": 0.0,
+    })
+
     if not previous:
-        return {f"{key}_per_second": 0.0 for key in counters}
+        return base_rates
+
     dt = now - float(previous.get("ts", 0.0))
     if dt <= 0:
-        return {f"{key}_per_second": 0.0 for key in counters}
-    return {
-        f"{key}_per_second": max(0.0, float(value) - float(previous.get(key, value))) / dt
-        for key, value in counters.items()
-    }
+        return base_rates
+
+    for key, value in counters.items():
+        base_rates[f"{key}_per_second"] = max(0.0, float(value) - float(previous.get(key, value))) / dt
+
+    tcp_rx_pps = max(0.0, float(counters.get("Tcp_InSegs", 0) - previous.get("Tcp_InSegs", 0))) / dt
+    tcp_tx_pps = max(0.0, float(counters.get("Tcp_OutSegs", 0) - previous.get("Tcp_OutSegs", 0))) / dt
+    udp_rx_pps = max(0.0, float(counters.get("Udp_InDatagrams", 0) - previous.get("Udp_InDatagrams", 0))) / dt
+    udp_tx_pps = max(0.0, float(counters.get("Udp_OutDatagrams", 0) - previous.get("Udp_OutDatagrams", 0))) / dt
+    base_rates["tcp_rx_pps"] = round(tcp_rx_pps, 2)
+    base_rates["tcp_tx_pps"] = round(tcp_tx_pps, 2)
+    base_rates["udp_rx_pps"] = round(udp_rx_pps, 2)
+    base_rates["udp_tx_pps"] = round(udp_tx_pps, 2)
+
+    has_octets = (
+        "TcpExt_TCPInDataOctets" in counters
+        and "TcpExt_TCPInDataOctets" in previous
+        and "TcpExt_TCPOutDataOctets" in counters
+        and "TcpExt_TCPOutDataOctets" in previous
+    )
+    if has_octets:
+        raw_tcp_rx = max(0.0, float(counters.get("TcpExt_TCPInDataOctets", 0) - previous.get("TcpExt_TCPInDataOctets", 0))) / dt
+        raw_tcp_tx = max(0.0, float(counters.get("TcpExt_TCPOutDataOctets", 0) - previous.get("TcpExt_TCPOutDataOctets", 0))) / dt
+        if total_rx_bps > 0:
+            tcp_rx_bps = min(total_rx_bps, raw_tcp_rx)
+            udp_rx_bps = max(0.0, total_rx_bps - tcp_rx_bps)
+        else:
+            tcp_rx_bps = raw_tcp_rx
+            udp_rx_bps = 0.0
+
+        if total_tx_bps > 0:
+            tcp_tx_bps = min(total_tx_bps, raw_tcp_tx)
+            udp_tx_bps = max(0.0, total_tx_bps - tcp_tx_bps)
+        else:
+            tcp_tx_bps = raw_tcp_tx
+            udp_tx_bps = 0.0
+    else:
+        tot_rx_pps = tcp_rx_pps + udp_rx_pps
+        if tot_rx_pps > 0 and total_rx_bps > 0:
+            tcp_ratio = tcp_rx_pps / tot_rx_pps
+            tcp_rx_bps = total_rx_bps * tcp_ratio
+            udp_rx_bps = max(0.0, total_rx_bps - tcp_rx_bps)
+        elif udp_rx_pps > 0 and total_rx_bps > 0:
+            tcp_rx_bps = 0.0
+            udp_rx_bps = total_rx_bps
+        else:
+            tcp_rx_bps = total_rx_bps
+            udp_rx_bps = 0.0
+
+        tot_tx_pps = tcp_tx_pps + udp_tx_pps
+        if tot_tx_pps > 0 and total_tx_bps > 0:
+            tcp_ratio = tcp_tx_pps / tot_tx_pps
+            tcp_tx_bps = total_tx_bps * tcp_ratio
+            udp_tx_bps = max(0.0, total_tx_bps - tcp_tx_bps)
+        elif udp_tx_pps > 0 and total_tx_bps > 0:
+            tcp_tx_bps = 0.0
+            udp_tx_bps = total_tx_bps
+        else:
+            tcp_tx_bps = total_tx_bps
+            udp_tx_bps = 0.0
+
+    base_rates["tcp_rx_bps"] = round(tcp_rx_bps, 2)
+    base_rates["tcp_tx_bps"] = round(tcp_tx_bps, 2)
+    base_rates["udp_rx_bps"] = round(udp_rx_bps, 2)
+    base_rates["udp_tx_bps"] = round(udp_tx_bps, 2)
+    return base_rates
 
 
 _PROM_LABEL_RE = re.compile(r'(\w+)="((?:\\.|[^"\\])*)"')
@@ -1270,6 +1377,7 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         "scan_source_ip": "",
         "listening_ports": [],
         "listening_endpoints": [],
+        "udp_listening_ports": [],
     }
     if pid <= 0:
         return result
@@ -1303,6 +1411,11 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         int(x["local_port"])
         for x in entries
         if x["proto"] == "tcp" and x["state"] == "0A" and int(x["local_port"]) > 0
+    }
+    udp_listening_ports = {
+        int(x["local_port"])
+        for x in entries
+        if x["proto"] == "udp" and int(x["local_port"]) > 0 and int(x.get("remote_port") or 0) == 0
     }
     listening_endpoints = sorted(
         {
@@ -1410,6 +1523,7 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
             "scan_source_ip": scan_source_ip,
             "listening_ports": sorted(listening_ports),
             "listening_endpoints": listening_endpoints,
+            "udp_listening_ports": sorted(udp_listening_ports),
         }
     )
     return result
@@ -2914,6 +3028,67 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     container,
                 )
             )
+
+        # Traffic Imbalance (Inbound vs Outbound Asymmetry) Check
+        imbalance_min_bps = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_MIN_BPS", "2097152"))  # 2MB/s minimum to avoid idle false alarms
+        imbalance_warn_ratio = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_RATIO_WARN", "10.0"))  # 10x ratio
+        imbalance_crit_ratio = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_RATIO_CRIT", "25.0"))  # 25x ratio
+        max_bps = max(rx_bps, tx_bps)
+        min_bps = min(rx_bps, tx_bps)
+        effective_min = max(min_bps, 1024.0)
+        imbalance_ratio = max_bps / effective_min
+
+        c_alerts = container.setdefault("alerts", {})
+        if max_bps >= imbalance_min_bps and imbalance_ratio >= imbalance_warn_ratio:
+            is_tx_heavy = tx_bps > rx_bps
+            is_crit = imbalance_ratio >= imbalance_crit_ratio or max_bps >= 15 * 1024 * 1024
+            direction = "outbound_heavy" if is_tx_heavy else "inbound_heavy"
+            direction_desc = "出栈严重高于入栈" if is_tx_heavy else "入栈严重高于出栈"
+            diag_hint = (
+                "疑似对外扫描、UDP 泛洪攻击或单向大流量滥用"
+                if is_tx_heavy
+                else "疑似遭遇入站 DDoS 攻击或高丢包反射异常"
+            )
+            fmt_tx = f"{tx_bps / (1024 * 1024):.2f} MB/s" if tx_bps >= 1024 * 1024 else f"{tx_bps / 1024:.1f} KB/s"
+            fmt_rx = f"{rx_bps / (1024 * 1024):.2f} MB/s" if rx_bps >= 1024 * 1024 else f"{rx_bps / 1024:.1f} KB/s"
+            c_alerts["traffic_imbalance"] = True
+            c_alerts["traffic_imbalance_ratio"] = round(imbalance_ratio, 1)
+            c_alerts["traffic_imbalance_direction"] = direction
+            alerts.append(
+                _security_alert(
+                    "traffic_imbalance",
+                    "critical" if is_crit else "warning",
+                    f"容器网络入出栈流量严重不均衡 ({direction_desc})",
+                    f"容器当前出栈速率 {fmt_tx}，入栈速率 {fmt_rx}，流量失衡比值达 {imbalance_ratio:.1f}x (阈值 {imbalance_warn_ratio:.0f}x)。{diag_hint}。",
+                    round(imbalance_ratio, 1),
+                    imbalance_warn_ratio,
+                    container,
+                )
+            )
+
+        # Hysteria 2 (hy2) High Concurrency Observation Alert
+        hy2_info = security.get("hy2_protocol") if isinstance(security.get("hy2_protocol"), dict) else {}
+        hy2_threshold = int(os.getenv("SECURITY_HY2_CONCURRENCY_THRESHOLD", "50"))
+        if hy2_info.get("detected"):
+            c_alerts["hy2_detected"] = True
+            c_alerts["hy2_confidence"] = hy2_info.get("confidence", "suspected")
+            c_alerts["hy2_concurrency"] = int(hy2_info.get("udp_concurrency") or 0)
+            hy2_concurrency = int(hy2_info.get("udp_concurrency") or 0)
+            if hy2_concurrency >= hy2_threshold:
+                is_crit = hy2_concurrency >= hy2_threshold * 4 or (rx_bps + tx_bps) >= 20 * 1024 * 1024
+                alerts.append(
+                    _security_alert(
+                        "hy2_high_concurrency",
+                        "critical" if is_crit else "warning",
+                        "发现高并发 Hysteria 2 (hy2) 协议代理",
+                        f"容器运行 Hysteria 2 协议，UDP 并发连接数达到 {hy2_concurrency} "
+                        f"(远端 IP 数: {int(hy2_info.get('unique_remote_ips') or 0)})，超过重点观察阈值 {hy2_threshold}。",
+                        hy2_concurrency,
+                        hy2_threshold,
+                        container,
+                    )
+                )
+
         socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
         socks_detected = bool(socks_proxy.get("detected"))
         socks_auth_mode = str(socks_proxy.get("auth_mode") or "unknown")
@@ -4329,6 +4504,94 @@ def _incus_network_exposure(item: Dict[str, object]) -> List[Dict[str, str]]:
         )
     return mappings
 
+def collect_hy2_indicators(
+    name: str,
+    runtime: str = "",
+    project: str = "",
+    pid: int = 0,
+    socket_security: Dict[str, object] | None = None,
+    udp_ip_counter: Dict[str, int] | None = None,
+    protocol_rates: Dict[str, float] | None = None,
+) -> Dict[str, object]:
+    runtime = runtime or get_container_bin()
+    socket_security = socket_security or {}
+    udp_ip_counter = udp_ip_counter or {}
+    protocol_rates = protocol_rates or {}
+
+    result: Dict[str, object] = {
+        "detected": False,
+        "confidence": "none",
+        "process": "",
+        "pid": 0,
+        "listening_udp_ports": [],
+        "udp_concurrency": 0,
+        "unique_remote_ips": 0,
+        "evidence": [],
+    }
+
+    udp_conn_count = sum(udp_ip_counter.values()) if udp_ip_counter else 0
+    unique_udp_ips = len(udp_ip_counter)
+    result["udp_concurrency"] = udp_conn_count
+    result["unique_remote_ips"] = unique_udp_ips
+
+    udp_ports = socket_security.get("udp_listening_ports", [])
+    if isinstance(udp_ports, list):
+        result["listening_udp_ports"] = [int(p) for p in udp_ports if isinstance(p, (int, str)) and str(p).isdigit()]
+
+    found_process = False
+    if runtime and name:
+        process_output = run(_runtime_exec_cmd(runtime, name, "ps -eo pid=,comm=,args= 2>/dev/null", project))
+        for line in process_output.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 2 or not parts[0].isdigit():
+                continue
+            proc_pid = int(parts[0])
+            comm = parts[1].lower()
+            args = parts[2].lower() if len(parts) > 2 else comm
+            if re.search(r"\b(hysteria|hy2|hysteria2)\b", comm) or re.search(r"\b(hysteria|hy2|hysteria2)\b", args):
+                found_process = True
+                result["detected"] = True
+                result["confidence"] = "confirmed"
+                result["process"] = comm
+                result["pid"] = proc_pid
+                result["evidence"].append(f"运行进程: {comm} (PID: {proc_pid})")
+                break
+
+    if not found_process and runtime and name:
+        cfg_check = run(_runtime_exec_cmd(
+            runtime,
+            name,
+            "test -f /etc/hysteria/config.yaml && echo /etc/hysteria/config.yaml || "
+            "test -f /etc/hysteria.yaml && echo /etc/hysteria.yaml || "
+            "test -f /etc/hy2/config.yaml && echo /etc/hy2/config.yaml || "
+            "grep -sl '\"type\"[[:space:]]*:[[:space:]]*\"hysteria2\"' /etc/sing-box/*.json /etc/sing-box/config.json 2>/dev/null || true",
+            project,
+        )).strip()
+        if cfg_check and any(line.strip().endswith((".yaml", ".yml", ".json")) for line in cfg_check.splitlines()):
+            first_cfg = [line.strip() for line in cfg_check.splitlines() if line.strip().endswith((".yaml", ".yml", ".json"))][0]
+            result["detected"] = True
+            result["confidence"] = "confirmed"
+            result["process"] = "hysteria2-config"
+            result["evidence"].append(f"配置文件: {first_cfg}")
+
+    udp_rx = float(protocol_rates.get("udp_rx_bps", 0.0))
+    udp_tx = float(protocol_rates.get("udp_tx_bps", 0.0))
+    tcp_rx = float(protocol_rates.get("tcp_rx_bps", 0.0))
+    tcp_tx = float(protocol_rates.get("tcp_tx_bps", 0.0))
+    tot_udp = udp_rx + udp_tx
+    tot_traffic = tot_udp + tcp_rx + tcp_tx
+
+    if not result["detected"]:
+        if (udp_conn_count >= 30 or unique_udp_ips >= 15) and (tot_traffic > 300_000 and (tot_udp / max(tot_traffic, 1.0)) > 0.60):
+            result["detected"] = True
+            result["confidence"] = "suspected"
+            result["process"] = "udp-quic-proxy"
+            result["evidence"].append(
+                f"高并发 UDP 代理特征 (并发: {udp_conn_count}, 远端IP: {unique_udp_ips}, UDP流量占比: {int((tot_udp/tot_traffic)*100)}%)"
+            )
+
+    return result
+
 
 def _expand_port_spec(value: str, limit: int = 4096) -> List[int]:
     ports: List[int] = []
@@ -4885,7 +5148,20 @@ def collect_container(
     container_key = f"{runtime_name}:{project}:{container_id or name}"
     net_rx, net_tx = _derive_net_bps(container_key, rx_total, tx_total)
     net_rx_pps, net_tx_pps = _derive_packet_rates(container_key, rx_packet_total, tx_packet_total)
-    protocol_rates = _derive_protocol_rates(container_key, _read_protocol_counters(pid)) if pid > 0 else {}
+    protocol_rates = (
+        _derive_protocol_rates(container_key, _read_protocol_counters(pid), net_rx, net_tx)
+        if pid > 0
+        else {
+            "tcp_rx_bps": net_rx,
+            "tcp_tx_bps": net_tx,
+            "udp_rx_bps": 0.0,
+            "udp_tx_bps": 0.0,
+            "tcp_rx_pps": net_rx_pps,
+            "tcp_tx_pps": net_tx_pps,
+            "udp_rx_pps": 0.0,
+            "udp_tx_pps": 0.0,
+        }
+    )
     process_count = _read_process_count_from_pid(pid)
 
     if runtime_name != "incus" and stats_json.strip() == "" and stats_tpl.strip() == "" and stats_compact.strip() == "":
@@ -4920,6 +5196,15 @@ def collect_container(
     panel_pairing = collect_panel_pairing_indicators(name, runtime, project, image)
     socks_proxy = panel_pairing.pop("socks_proxy", {})
     socket_security = _collect_socket_security(pid)
+    hy2_protocol = collect_hy2_indicators(
+        name,
+        runtime,
+        project,
+        pid,
+        socket_security,
+        udp_ip_counter,
+        protocol_rates,
+    )
     _apply_host_conntrack_security(
         socket_security,
         host_conntrack or {},
@@ -4981,12 +5266,19 @@ def collect_container(
             "process_count": process_count,
             "panel_pairing": panel_pairing,
             "socks_proxy": socks_proxy,
+            "hy2_protocol": hy2_protocol,
             "network_exposure": network_exposure,
             **communication,
         }
     )
     if cpu_percent <= 0 and float(top_cpu_process.get("cpu_percent") or 0) > 0:
         cpu_percent = float(top_cpu_process.get("cpu_percent") or 0)
+
+    tcp_rx_bps = float(protocol_rates.get("tcp_rx_bps", net_rx))
+    tcp_tx_bps = float(protocol_rates.get("tcp_tx_bps", net_tx))
+    udp_rx_bps = float(protocol_rates.get("udp_rx_bps", 0.0))
+    udp_tx_bps = float(protocol_rates.get("udp_tx_bps", 0.0))
+
     return {
         "id": container_id,
         "name": name,
@@ -5000,6 +5292,10 @@ def collect_container(
         "mem_percent": mem_percent,
         "net_rx_bps": net_rx,
         "net_tx_bps": net_tx,
+        "tcp_rx_bps": tcp_rx_bps,
+        "tcp_tx_bps": tcp_tx_bps,
+        "udp_rx_bps": udp_rx_bps,
+        "udp_tx_bps": udp_tx_bps,
         "conn_count": conn_count,
         "tcp_country_stats": tcp_country_stats,
         "udp_country_stats": udp_country_stats,

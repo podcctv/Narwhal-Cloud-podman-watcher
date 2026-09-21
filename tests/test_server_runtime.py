@@ -1895,7 +1895,74 @@ class ServerRuntimeTests(unittest.TestCase):
             body = json.loads(res.body)
             self.assertTrue(body["ok"])
 
+    def test_latest_and_history_tcp_udp_traffic_and_imbalance(self):
+        now = int(time.time())
+        payload = {
+            "id": "hy2-container-id",
+            "name": "hy2-test",
+            "runtime": "podman",
+            "project": "default",
+            "net_rx_bps": 1048576.0,
+            "net_tx_bps": 52428800.0,
+            "tcp_rx_bps": 48576.0,
+            "tcp_tx_bps": 2428800.0,
+            "udp_rx_bps": 1000000.0,
+            "udp_tx_bps": 50000000.0,
+            "security": {
+                "hy2_protocol": {
+                    "detected": True,
+                    "confidence": "high",
+                    "udp_concurrency": 88,
+                }
+            },
+            "_agent_version": "1.6.72",
+        }
+        conn = sqlite3.connect(server.DB_PATH)
+        conn.execute(
+            """
+            INSERT INTO reports(
+                host_id, container_name, runtime, project, cpu_percent, mem_bytes, mem_percent,
+                net_rx_bps, net_tx_bps, conn_count, disk_file, disk_size_bytes,
+                disk_used_percent, podman_network_ok_v4, podman_network_ok_v6, ts, payload_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            ("hk-host", "hy2-test", "podman", "default", 15.0, 1000000, 10.0, 1048576.0, 52428800.0, 88, "", 0, 0, 1, 1, now, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        latest_resp = server.latest()
+        latest_data = json.loads(latest_resp.body)
+        items = latest_data.get("items", [])
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["container_name"], "hy2-test")
+        self.assertEqual(item["tcp_rx_bps"], 48576.0)
+        self.assertEqual(item["tcp_tx_bps"], 2428800.0)
+        self.assertEqual(item["udp_rx_bps"], 1000000.0)
+        self.assertEqual(item["udp_tx_bps"], 50000000.0)
+
+        # Check alerts: traffic_imbalance and hy2
+        alerts = item.get("alerts", {})
+        self.assertTrue(alerts.get("traffic_imbalance"))
+        self.assertEqual(alerts.get("traffic_imbalance_direction"), "outbound_heavy")
+        self.assertGreaterEqual(alerts.get("traffic_imbalance_ratio"), 10.0)
+        self.assertTrue(alerts.get("hy2_detected"))
+        self.assertEqual(alerts.get("hy2_concurrency"), 88)
+
+        # Check history endpoint returns protocol rates
+        hist_resp = server.history("hk-host", "hy2-test", "podman", "default", 60)
+        hist_data = json.loads(hist_resp.body)
+        hist_items = hist_data.get("items", [])
+        self.assertEqual(len(hist_items), 1)
+        hist_item = hist_items[0]
+        self.assertEqual(hist_item["tcp_rx_bps"], 48576.0)
+        self.assertEqual(hist_item["tcp_tx_bps"], 2428800.0)
+        self.assertEqual(hist_item["udp_rx_bps"], 1000000.0)
+        self.assertEqual(hist_item["udp_tx_bps"], 50000000.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

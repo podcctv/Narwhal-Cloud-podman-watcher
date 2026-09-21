@@ -2027,7 +2027,7 @@ def dispatch_buyer_notifications_for_alerts(host_id: str, alerts: list) -> None:
         severity = str(alert.get("severity") or "").lower()
         alert_type = str(alert.get("type") or "").lower()
         if severity != "critical" and alert_type not in (
-            "socks_weak_auth", "malicious_process", "unauthorized_panel_pairing", "cc_attack", "ddos_bandwidth", "ddos_packets", "ddos_syn"
+            "socks_weak_auth", "malicious_process", "unauthorized_panel_pairing", "cc_attack", "ddos_bandwidth", "ddos_packets", "ddos_syn", "traffic_imbalance", "hy2_high_concurrency"
         ):
             continue
         c_name = str(alert.get("container_name") or "").strip()
@@ -2265,6 +2265,27 @@ def latest(include_stale: bool = False) -> JSONResponse:
         container_disk = payload.get("container_disk", {})
         top_cpu_process = payload.get("top_cpu_process", {})
         offline_hours = stale_seconds // 3600
+        rx_bps = float(r["net_rx_bps"] or 0)
+        tx_bps = float(r["net_tx_bps"] or 0)
+        tcp_rx_bps = float(payload.get("tcp_rx_bps", rx_bps) or 0.0)
+        tcp_tx_bps = float(payload.get("tcp_tx_bps", tx_bps) or 0.0)
+        udp_rx_bps = float(payload.get("udp_rx_bps", 0.0) or 0.0)
+        udp_tx_bps = float(payload.get("udp_tx_bps", 0.0) or 0.0)
+
+        max_bps = max(rx_bps, tx_bps)
+        min_bps = min(rx_bps, tx_bps)
+        eff_min = max(min_bps, 1024.0)
+        imb_ratio = max_bps / eff_min
+        imbalance_min_bps = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_MIN_BPS", "2097152"))
+        imbalance_warn_ratio = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_RATIO_WARN", "10.0"))
+        traffic_imbalance = max_bps >= imbalance_min_bps and imb_ratio >= imbalance_warn_ratio
+        traffic_direction = "outbound_heavy" if tx_bps > rx_bps else "inbound_heavy" if rx_bps > tx_bps else "balanced"
+
+        sec_data = payload.get("security", {})
+        hy2_data = sec_data.get("hy2_protocol", {}) if isinstance(sec_data, dict) else {}
+        hy2_detected = bool(hy2_data.get("detected"))
+        hy2_concurrency = int(hy2_data.get("udp_concurrency") or 0)
+
         out.append({
             "host_id": r["host_id"],
             "agent_version": str(payload.get("_agent_version") or "unknown"),
@@ -2278,8 +2299,12 @@ def latest(include_stale: bool = False) -> JSONResponse:
             "mem_limit_bytes": int(payload.get("mem_limit_bytes") or 0),
             "mem_percent": float(r["mem_percent"] or 0),
             "cpu_effective_cpus": float(payload.get("cpu_effective_cpus") or 0),
-            "net_rx_bps": r["net_rx_bps"],
-            "net_tx_bps": r["net_tx_bps"],
+            "net_rx_bps": rx_bps,
+            "net_tx_bps": tx_bps,
+            "tcp_rx_bps": tcp_rx_bps,
+            "tcp_tx_bps": tcp_tx_bps,
+            "udp_rx_bps": udp_rx_bps,
+            "udp_tx_bps": udp_tx_bps,
             "conn_count": conn_count,
             "tcp_country_stats": payload.get("tcp_country_stats", []),
             "udp_country_stats": payload.get("udp_country_stats", []),
@@ -2318,6 +2343,11 @@ def latest(include_stale: bool = False) -> JSONResponse:
                 "conn_severity": conn_severity,
                 "conn_warning_threshold": ALERT_CONN_WARNING_THRESHOLD,
                 "conn_critical_threshold": ALERT_CONN_CRITICAL_THRESHOLD,
+                "traffic_imbalance": traffic_imbalance,
+                "traffic_imbalance_ratio": round(imb_ratio, 1),
+                "traffic_imbalance_direction": traffic_direction,
+                "hy2_detected": hy2_detected,
+                "hy2_concurrency": hy2_concurrency,
                 "stale": stale,
                 "host_stale": host_stale,
                 "hidden_offline": hidden_offline,
@@ -2354,23 +2384,27 @@ def history(host_id: str, container_name: str, runtime: str = "", project: str =
             (host_id, container_name, start_ts),
         ).fetchall()
     conn.close()
-    return JSONResponse(
-        content={
-            "items": [
-                {
-                    "timestamp": r["ts"],
-                    "timestamp_iso_utc8": format_utc8(r["ts"]),
-                    "agent_version": report_agent_version(r["payload_json"]),
-                    "cpu_percent": r["cpu_percent"],
-                    "mem_percent": r["mem_percent"],
-                    "net_rx_bps": r["net_rx_bps"],
-                    "net_tx_bps": r["net_tx_bps"],
-                    "conn_count": r["conn_count"],
-                }
-                for r in rows
-            ]
-        }
-    )
+
+    items = []
+    for r in rows:
+        rx = float(r["net_rx_bps"] or 0)
+        tx = float(r["net_tx_bps"] or 0)
+        payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+        items.append({
+            "timestamp": r["ts"],
+            "timestamp_iso_utc8": format_utc8(r["ts"]),
+            "agent_version": report_agent_version(r["payload_json"]),
+            "cpu_percent": r["cpu_percent"],
+            "mem_percent": r["mem_percent"],
+            "net_rx_bps": rx,
+            "net_tx_bps": tx,
+            "tcp_rx_bps": float(payload.get("tcp_rx_bps", rx) or 0.0),
+            "tcp_tx_bps": float(payload.get("tcp_tx_bps", tx) or 0.0),
+            "udp_rx_bps": float(payload.get("udp_rx_bps", 0.0) or 0.0),
+            "udp_tx_bps": float(payload.get("udp_tx_bps", 0.0) or 0.0),
+            "conn_count": r["conn_count"],
+        })
+    return JSONResponse(content={"items": items})
 
 
 def _latest_deep_sample(
