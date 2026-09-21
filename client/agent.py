@@ -2609,6 +2609,7 @@ _BUYER_NOTIFY_STATE_FILE = os.getenv(
     "/opt/narwhal-monitor/last_buyer_notify.json",
 )
 _memory_buyer_notify_record: Dict[str, object] | None = None
+_synced_buyer_push_config: Dict[str, object] = {}
 
 
 def _summarize_alert_issue(alert: Dict[str, object]) -> str:
@@ -2694,10 +2695,18 @@ def notify_buyers_of_critical_alert(
     api_url: str = "",
 ) -> Tuple[bool, str]:
     """Push critical security alert to buyers via /machines/{machineId}/notify-buyers with 24h cooldown."""
-    if os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "true").strip().lower() in ("0", "false", "no", "off"):
-        return False, "buyer notifications are disabled via configuration"
+    global _synced_buyer_push_config
+    if os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "").strip():
+        if os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "").strip().lower() in ("0", "false", "no", "off"):
+            return False, "buyer notifications are disabled via configuration"
+    elif _synced_buyer_push_config and not _synced_buyer_push_config.get("enabled", True):
+        return False, "buyer notifications are disabled via server configuration"
 
-    api_key = (api_key or os.getenv("NARWHAL_API_KEY", "")).strip()
+    api_key = (
+        api_key
+        or os.getenv("NARWHAL_API_KEY", "")
+        or str(_synced_buyer_push_config.get("api_key") or "")
+    ).strip()
     if not api_key:
         return False, "NARWHAL_API_KEY is not configured; skipping buyer push notification"
 
@@ -2712,7 +2721,12 @@ def notify_buyers_of_critical_alert(
     node_name = (
         node_name or os.getenv("NARWHAL_NODE_NAME", "") or os.getenv("NODE_NAME", "") or socket.gethostname()
     ).strip()
-    api_url = (api_url or os.getenv("NARWHAL_API_URL", "https://api.fuckip.me/api/v1")).strip().rstrip("/")
+    api_url = (
+        api_url
+        or os.getenv("NARWHAL_API_URL", "")
+        or str(_synced_buyer_push_config.get("api_url") or "")
+        or "https://api.fuckip.me/api/v1"
+    ).strip().rstrip("/")
 
     record = _get_last_buyer_notify_record()
     last_ts = float(record.get("timestamp") or 0)
@@ -6419,6 +6433,15 @@ def push(server: str, secret: str, payload: Dict) -> None:
         verify=server_tls_verify(),
     )
     r.raise_for_status()
+    try:
+        data = r.json()
+        if isinstance(data, dict) and "narwhal_buyer_push" in data:
+            push_cfg = data["narwhal_buyer_push"]
+            if isinstance(push_cfg, dict):
+                global _synced_buyer_push_config
+                _synced_buyer_push_config = dict(push_cfg)
+    except Exception:
+        pass
 
 
 def main() -> None:

@@ -264,6 +264,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               </label>
             </div>
 
+            {/* Multi-node cluster note */}
+            <div className="mt-4 rounded-xl border border-sky-500/20 bg-sky-950/40 p-3.5 text-xs text-sky-200 flex items-start gap-2.5">
+              <Info className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-semibold text-slate-200">
+                  多母鸡集群说明：API 密钥全集群共享，各母鸡 UUID 无需在此逐一填写
+                </p>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Narwhal API 密钥为全局通用配置，在此处保存一次即可自动向所有母鸡同步生效。当某台母鸡发生严重告警时，系统会自动提取该母鸡自身的机器标识（HOST_ID 或机器 UUID）和主机名向买家推送，无需在面板中手动登记每一台母鸡。下方的机器 UUID 仅用于在面板点击“测试推送连接”时指定测试目标。
+                </p>
+              </div>
+            </div>
+
             <form onSubmit={handleSavePush} className="mt-5 space-y-4">
               {/* API URL */}
               <div>
@@ -332,34 +345,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 {/* Machine ID */}
                 <div>
                   <label className="block text-xs font-medium text-slate-300">
-                    母鸡机器 UUID (Machine ID)
+                    测试机器 UUID (选填 · 供测试连通性使用)
                   </label>
                   <input
                     type="text"
                     value={apiForm.narwhal_machine_id}
                     onChange={e => setApiForm({ ...apiForm, narwhal_machine_id: e.target.value })}
-                    placeholder="00000000-0000-0000-0000-000000000001"
+                    placeholder="选填，如 00000000-0000-0000-0000-000000000001"
                     className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500 font-mono"
                   />
                   <span className="mt-1 block text-[11px] text-slate-500">
-                    Narwhal 控制台母鸡机器的唯一 UUID
+                    多母鸡集群无需在此填写；各母鸡告警时会自动识别并使用各自的机器 UUID
                   </span>
                 </div>
 
                 {/* Node Name */}
                 <div>
                   <label className="block text-xs font-medium text-slate-300">
-                    母鸡节点展示名称
+                    测试节点名称 (选填 · 默认取母鸡主机名)
                   </label>
                   <input
                     type="text"
                     value={apiForm.narwhal_node_name}
                     onChange={e => setApiForm({ ...apiForm, narwhal_node_name: e.target.value })}
-                    placeholder="如 US-LAX-01 或 宿主机名"
+                    placeholder="选填，如 US-LAX-01 或 宿主机名"
                     className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500"
                   />
                   <span className="mt-1 block text-[11px] text-slate-500">
-                    展示在通知标题中的节点名称
+                    各母鸡告警时会自动使用各自的宿主机名作为标题
                   </span>
                 </div>
               </div>

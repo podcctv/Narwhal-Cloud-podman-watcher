@@ -1685,6 +1685,14 @@ async def test_push_settings(request: Request) -> JSONResponse:
         if not api_key or "*" in api_key:
             api_key = _get_system_setting(conn, "narwhal_api_key", os.getenv("NARWHAL_API_KEY", "")).strip()
         machine_id = str(payload.get("narwhal_machine_id") or _get_system_setting(conn, "narwhal_machine_id", os.getenv("NARWHAL_MACHINE_ID", ""))).strip()
+        if not machine_id:
+            # Auto-detect from active hosts in db if any host_id is a 36-char UUID
+            rows = conn.execute("SELECT host_id FROM hosts WHERE host_id <> '' ORDER BY last_seen DESC LIMIT 50").fetchall()
+            for r in rows:
+                candidate = str(r["host_id"]).strip()
+                if re.match(r"^[0-9a-fA-F-]{36}$", candidate):
+                    machine_id = candidate
+                    break
         node_name = str(payload.get("narwhal_node_name") or _get_system_setting(conn, "narwhal_node_name", os.getenv("NARWHAL_NODE_NAME", socket.gethostname()))).strip()
     finally:
         conn.close()
@@ -1692,7 +1700,7 @@ async def test_push_settings(request: Request) -> JSONResponse:
     if not api_key:
         raise HTTPException(status_code=400, detail="未配置 NARWHAL_API_KEY，无法发起测试")
     if not machine_id:
-        raise HTTPException(status_code=400, detail="未配置 NARWHAL_MACHINE_ID（母鸡机器 UUID），无法发起测试")
+        raise HTTPException(status_code=400, detail="未指定测试机器 UUID。多母鸡集群下，各母鸡告警时会自动识别各自的机器 UUID；若要手动测试连通性，请在“测试机器 UUID”框中填入任一母鸡的 UUID 发起测试。")
 
     endpoint = f"{api_url}/machines/{machine_id}/notify-buyers"
     subject, message = format_buyer_notification(node_name or "测试母鸡节点", "test-demo-container", "控制台测试：API 连通性与买家推送配置正常")
@@ -1985,6 +1993,78 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
     return host_id
 
 
+_last_server_buyer_notifications: dict[tuple[str, str], float] = {}
+
+
+def dispatch_buyer_notifications_for_alerts(host_id: str, alerts: list) -> None:
+    conn = db()
+    try:
+        api_url = _get_system_setting(conn, "narwhal_api_url", os.getenv("NARWHAL_API_URL", "https://api.fuckip.me/api/v1")).strip().rstrip("/")
+        api_key = _get_system_setting(conn, "narwhal_api_key", os.getenv("NARWHAL_API_KEY", "")).strip()
+        buyer_notify_val = _get_system_setting(conn, "buyer_notify_enabled", os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "true"))
+        buyer_notify_enabled = buyer_notify_val.strip().lower() not in ("0", "false", "no", "off")
+        default_machine_id = _get_system_setting(conn, "narwhal_machine_id", os.getenv("NARWHAL_MACHINE_ID", "")).strip()
+        default_node_name = _get_system_setting(conn, "narwhal_node_name", os.getenv("NARWHAL_NODE_NAME", "")).strip()
+    finally:
+        conn.close()
+
+    if not buyer_notify_enabled or not api_key:
+        return
+
+    # Determine machine_id for this host
+    machine_id = ""
+    if re.match(r"^[0-9a-fA-F-]{36}$", host_id.strip()):
+        machine_id = host_id.strip()
+    elif default_machine_id and re.match(r"^[0-9a-fA-F-]{36}$", default_machine_id):
+        machine_id = default_machine_id
+
+    if not machine_id:
+        return
+
+    node_name = default_node_name or host_id
+    now = time.time()
+    for alert in alerts:
+        severity = str(alert.get("severity") or "").lower()
+        alert_type = str(alert.get("type") or "").lower()
+        if severity != "critical" and alert_type not in (
+            "socks_weak_auth", "malicious_process", "unauthorized_panel_pairing", "cc_attack", "ddos_bandwidth", "ddos_packets", "ddos_syn"
+        ):
+            continue
+        c_name = str(alert.get("container_name") or "").strip()
+        if not c_name:
+            continue
+        key = (machine_id, c_name)
+        last_sent = _last_server_buyer_notifications.get(key, 0.0)
+        if (now - last_sent) < 86400.0:
+            continue
+
+        alert_issue = str(alert.get("title") or alert.get("message") or "安全威胁")
+        subject, message = format_buyer_notification(node_name, c_name, alert_issue)
+        endpoint = f"{api_url}/machines/{machine_id}/notify-buyers"
+        body = json.dumps({"subject": subject[:200], "message": message[:2000]}).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": f"Narwhal-Monitor-Server/{APP_VERSION}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    _last_server_buyer_notifications[key] = now
+                    logging.info(f"[buyer-notify] server dispatched alert to machine {machine_id} buyers for {c_name}")
+        except urllib.error.HTTPError as err:
+            if err.code == 429:
+                _last_server_buyer_notifications[key] = now
+            logging.warning(f"[buyer-notify] upstream API returned status {err.code}: {err}")
+        except Exception as exc:
+            logging.warning(f"[buyer-notify] failed to dispatch notification: {exc}")
+
+
 @app.post("/api/v1/report")
 async def report(
     request: Request,
@@ -2100,6 +2180,7 @@ async def report(
     for alert in notifications:
         send_alert_webhook(alert)
     sync_configured_bot_alert_messages(host_id, ts)
+    dispatch_buyer_notifications_for_alerts(host_id, notifications)
     return {
         "ok": True,
         "server_version": APP_VERSION,
