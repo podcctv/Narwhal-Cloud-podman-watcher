@@ -1835,6 +1835,67 @@ class ServerRuntimeTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             sync_mock.assert_called_with(alert_id=alert_id)
 
+    def test_push_settings_get_and_save(self):
+        # Initial get
+        resp = server.get_push_settings()
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.body)
+        self.assertIn("narwhal_api_url", data)
+        self.assertIn("buyer_notify_enabled", data)
+        self.assertIn("narwhal_api_key_masked", data)
+
+        # Save settings
+        class SaveRequest:
+            async def json(self):
+                return {
+                    "narwhal_api_url": "https://api.custom.example.com/v1",
+                    "narwhal_api_key": "sk_test_secret_1234567890",
+                    "narwhal_machine_id": "11111111-2222-3333-4444-555555555555",
+                    "narwhal_node_name": "HK-BGP-01",
+                    "buyer_notify_enabled": True,
+                }
+
+        save_resp = asyncio.run(server.save_push_settings(SaveRequest()))
+        self.assertEqual(save_resp.status_code, 200)
+
+        # Verify saved values reflected in GET
+        resp2 = server.get_push_settings()
+        data2 = json.loads(resp2.body)
+        self.assertEqual(data2["narwhal_api_url"], "https://api.custom.example.com/v1")
+        self.assertEqual(data2["narwhal_machine_id"], "11111111-2222-3333-4444-555555555555")
+        self.assertEqual(data2["narwhal_node_name"], "HK-BGP-01")
+        self.assertTrue(data2["buyer_notify_enabled"])
+        self.assertTrue(data2["narwhal_api_key_configured"])
+        self.assertTrue(data2["narwhal_api_key_masked"].startswith("sk_t"))
+        self.assertTrue(data2["narwhal_api_key_masked"].endswith("7890"))
+        self.assertNotIn("secret", data2["narwhal_api_key_masked"])
+
+    def test_push_settings_test_connectivity(self):
+        class TestReq:
+            async def json(self):
+                return {
+                    "narwhal_api_url": "https://api.test.example/v1",
+                    "narwhal_api_key": "sk_valid_key",
+                    "narwhal_machine_id": "00000000-0000-0000-0000-000000000001",
+                    "narwhal_node_name": "TEST-NODE",
+                }
+
+        class MockResp:
+            status = 200
+            def read(self):
+                return b'{"ok": true}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        with mock.patch("urllib.request.urlopen", return_value=MockResp()):
+            res = asyncio.run(server.test_push_settings(TestReq()))
+            self.assertEqual(res.status_code, 200)
+            body = json.loads(res.body)
+            self.assertTrue(body["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

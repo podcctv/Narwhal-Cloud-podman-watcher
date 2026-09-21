@@ -1,10 +1,10 @@
 import React from 'react';
-import { ShieldAlert, BarChart3, LayoutDashboard, Search, Bell } from 'lucide-react';
+import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings } from 'lucide-react';
 import { CountdownTimer } from '../common/CountdownTimer';
 
 interface AppHeaderProps {
-  activeTab: 'dashboard' | 'alerts' | 'stats' | 'notifications';
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'notifications') => void;
+  activeTab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications';
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications') => void;
   serverVersion: string;
   activeAlertCount: number;
   countdown: number;
@@ -71,16 +71,16 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => onSelectTab('notifications')}
-            aria-current={activeTab === 'notifications' ? 'page' : undefined}
+            onClick={() => onSelectTab('settings')}
+            aria-current={activeTab === 'settings' || activeTab === 'notifications' ? 'page' : undefined}
             className={`min-h-11 justify-center flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-              activeTab === 'notifications'
+              activeTab === 'settings' || activeTab === 'notifications'
                 ? 'bg-sky-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Bell className="h-3.5 w-3.5" />
-            <span>推送设置</span>
+            <Settings className="h-3.5 w-3.5" />
+            <span>系统设置</span>
           </button>
 
           <button

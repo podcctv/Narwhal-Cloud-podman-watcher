@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Server, Box, AlertTriangle, BarChart3, Bell, X, ArrowRight } from 'lucide-react';
+import { Search, Server, Box, AlertTriangle, BarChart3, Settings, X, ArrowRight } from 'lucide-react';
 import { ContainerItem, ContainerIdentity } from '../../api/types';
 
 interface CommandPaletteProps {
@@ -7,7 +7,7 @@ interface CommandPaletteProps {
   onClose: () => void;
   containers: ContainerItem[];
   onSelectContainer: (id: ContainerIdentity) => void;
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'notifications') => void;
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications') => void;
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -47,7 +47,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { id: 'dashboard', label: '总览看板', hint: 'Overview', icon: Server, color: 'text-sky-400', run: () => onSelectTab('dashboard') },
     { id: 'alerts', label: '安全告警历史', hint: 'Security Alerts', icon: AlertTriangle, color: 'text-amber-400', run: () => onSelectTab('alerts') },
     { id: 'stats', label: '统计分析与排行榜', hint: 'Telemetry & Stats', icon: BarChart3, color: 'text-emerald-400', run: () => onSelectTab('stats') },
-    { id: 'notifications', label: '推送设置', hint: 'Notifications', icon: Bell, color: 'text-sky-300', run: () => onSelectTab('notifications') },
+    { id: 'settings', label: '系统设置与推送配置', hint: 'Settings & Push', icon: Settings, color: 'text-sky-300', run: () => onSelectTab('settings') },
   ] : [];
   const resultCount = quickActions.length + filteredContainers.length;
 

@@ -7,6 +7,8 @@ import {
   StatsResponse,
   ContainerIdentity,
   NotificationBot,
+  PushSettingsResponse,
+  PushSettingsPayload,
 } from './types';
 
 export class ApiError extends Error {
@@ -46,6 +48,17 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  getPushSettings: () => request<PushSettingsResponse>('/api/v1/settings/push'),
+  updatePushSettings: (data: PushSettingsPayload) =>
+    request<{ ok: boolean; message: string }>('/api/v1/settings/push', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  testPushSettings: (data?: PushSettingsPayload) =>
+    request<{ ok: boolean; message: string; status_code?: number; response?: string }>('/api/v1/settings/push/test', {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    }),
   getNotificationBots: () => request<{ items: NotificationBot[]; callback_ready: boolean; proxy_configured?: boolean; proxy_scheme?: string }>('/api/v1/notifications/bots'),
   createNotificationBot: (data: { name: string; token: string; target: string; min_severity: string }) =>
     request<{ item: NotificationBot; callback_ready: boolean; callback_error?: string }>('/api/v1/notifications/bots', { method: 'POST', body: JSON.stringify(data) }),

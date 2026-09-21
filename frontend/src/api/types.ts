@@ -296,3 +296,25 @@ export interface NotificationBot {
   last_delivery_error?: string;
   last_sent_at_utc8?: string;
 }
+
+export interface PushSettingsResponse {
+  narwhal_api_url: string;
+  narwhal_api_key_configured: boolean;
+  narwhal_api_key_masked: string;
+  narwhal_machine_id: string;
+  narwhal_node_name: string;
+  buyer_notify_enabled: boolean;
+  telegram_bots_count: number;
+  callback_ready: boolean;
+  proxy_configured?: boolean;
+  proxy_scheme?: string;
+}
+
+export interface PushSettingsPayload {
+  narwhal_api_url?: string;
+  narwhal_api_key?: string;
+  narwhal_machine_id?: string;
+  narwhal_node_name?: string;
+  buyer_notify_enabled?: boolean;
+}
+

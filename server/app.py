@@ -338,6 +338,11 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_telegram_alert_messages_updated
             ON telegram_alert_messages(updated_at);
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         """
     )
     cols = conn.execute("PRAGMA table_info(reports)").fetchall()
@@ -1555,6 +1560,180 @@ def test_notification_bot(bot_id: int) -> JSONResponse:
         _record_bot_delivery(bot_id, False, str(exc))
         raise HTTPException(status_code=502, detail=f"Telegram 测试失败：{exc}")
     return JSONResponse(content={"ok": True, "callback_ready": bool(PUBLIC_BASE_URL)})
+
+
+def _get_system_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM system_settings WHERE key=?", (key,)).fetchone()
+    if row is not None and row["value"] is not None:
+        return str(row["value"])
+    return default
+
+
+def _set_system_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    now = int(time.time())
+    conn.execute(
+        "INSERT OR REPLACE INTO system_settings(key, value, updated_at) VALUES(?,?,?)",
+        (key, str(value), now),
+    )
+
+
+def _mask_secret(secret: str) -> str:
+    s = (secret or "").strip()
+    if not s:
+        return ""
+    if len(s) <= 8:
+        return "*" * len(s)
+    return s[:4] + "*" * (len(s) - 8) + s[-4:]
+
+
+def format_buyer_notification(node_name: str, container_id: str, alert_issue: str) -> tuple[str, str]:
+    subject = f"⚠️【节点安全告警】{node_name}"
+    message = (
+        f"🚨【容器安全告警】\n\n"
+        f"📦 容器 ID ：{container_id}\n"
+        f"⚠️ 异常问题：{alert_issue}\n\n"
+        f"💡 处置提示：请及时登录排查。已记录日志，如有持续滥用会导致删鸡。"
+    )
+    return subject, message
+
+
+@app.get("/api/v1/settings/push")
+def get_push_settings() -> JSONResponse:
+    conn = db()
+    try:
+        api_url = _get_system_setting(conn, "narwhal_api_url", os.getenv("NARWHAL_API_URL", "https://api.fuckip.me/api/v1"))
+        stored_key = _get_system_setting(conn, "narwhal_api_key", os.getenv("NARWHAL_API_KEY", ""))
+        machine_id = _get_system_setting(conn, "narwhal_machine_id", os.getenv("NARWHAL_MACHINE_ID", ""))
+        node_name = _get_system_setting(conn, "narwhal_node_name", os.getenv("NARWHAL_NODE_NAME", ""))
+        buyer_notify_val = _get_system_setting(conn, "buyer_notify_enabled", os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "true"))
+        buyer_notify_enabled = buyer_notify_val.strip().lower() not in ("0", "false", "no", "off")
+
+        bots = conn.execute("SELECT * FROM notification_bots ORDER BY id DESC").fetchall()
+        proxy_url = get_telegram_proxy_url()
+
+        return JSONResponse(content={
+            "narwhal_api_url": api_url,
+            "narwhal_api_key_configured": bool(stored_key.strip()),
+            "narwhal_api_key_masked": _mask_secret(stored_key),
+            "narwhal_machine_id": machine_id,
+            "narwhal_node_name": node_name,
+            "buyer_notify_enabled": buyer_notify_enabled,
+            "telegram_bots_count": len(bots),
+            "callback_ready": bool(PUBLIC_BASE_URL),
+            "proxy_configured": bool(proxy_url),
+            "proxy_scheme": urllib.parse.urlsplit(proxy_url).scheme.lower() if proxy_url else "",
+        })
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/settings/push")
+async def save_push_settings(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+
+    conn = db()
+    try:
+        if "narwhal_api_url" in payload:
+            url = str(payload["narwhal_api_url"] or "").strip().rstrip("/")
+            if url and not (url.startswith("http://") or url.startswith("https://")):
+                raise HTTPException(status_code=400, detail="Narwhal API URL 必须以 http:// 或 https:// 开头")
+            _set_system_setting(conn, "narwhal_api_url", url)
+
+        if "narwhal_api_key" in payload:
+            key = str(payload["narwhal_api_key"] or "").strip()
+            # If user provided a new key and not the masked placeholder
+            if key and not (key.startswith("sk_***") or "*" in key):
+                _set_system_setting(conn, "narwhal_api_key", key)
+
+        if "narwhal_machine_id" in payload:
+            mid = str(payload["narwhal_machine_id"] or "").strip()
+            _set_system_setting(conn, "narwhal_machine_id", mid)
+
+        if "narwhal_node_name" in payload:
+            nname = str(payload["narwhal_node_name"] or "").strip()
+            _set_system_setting(conn, "narwhal_node_name", nname)
+
+        if "buyer_notify_enabled" in payload:
+            b_val = "true" if bool(payload["buyer_notify_enabled"]) else "false"
+            _set_system_setting(conn, "buyer_notify_enabled", b_val)
+
+        conn.commit()
+        return JSONResponse({"ok": True, "message": "推送与 API 设置已保存"})
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/settings/push/test")
+async def test_push_settings(request: Request) -> JSONResponse:
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        pass
+    if not isinstance(payload, dict):
+        payload = {}
+
+    conn = db()
+    try:
+        api_url = str(payload.get("narwhal_api_url") or _get_system_setting(conn, "narwhal_api_url", os.getenv("NARWHAL_API_URL", "https://api.fuckip.me/api/v1"))).strip().rstrip("/")
+        api_key = str(payload.get("narwhal_api_key") or "").strip()
+        if not api_key or "*" in api_key:
+            api_key = _get_system_setting(conn, "narwhal_api_key", os.getenv("NARWHAL_API_KEY", "")).strip()
+        machine_id = str(payload.get("narwhal_machine_id") or _get_system_setting(conn, "narwhal_machine_id", os.getenv("NARWHAL_MACHINE_ID", ""))).strip()
+        node_name = str(payload.get("narwhal_node_name") or _get_system_setting(conn, "narwhal_node_name", os.getenv("NARWHAL_NODE_NAME", socket.gethostname()))).strip()
+    finally:
+        conn.close()
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="未配置 NARWHAL_API_KEY，无法发起测试")
+    if not machine_id:
+        raise HTTPException(status_code=400, detail="未配置 NARWHAL_MACHINE_ID（母鸡机器 UUID），无法发起测试")
+
+    endpoint = f"{api_url}/machines/{machine_id}/notify-buyers"
+    subject, message = format_buyer_notification(node_name or "测试母鸡节点", "test-demo-container", "控制台测试：API 连通性与买家推送配置正常")
+    test_body = json.dumps({"subject": subject[:200], "message": message[:2000]}).encode("utf-8")
+
+    req = urllib.request.Request(
+        endpoint,
+        data=test_body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": f"Narwhal-Monitor-Server/{APP_VERSION}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp_text = resp.read().decode("utf-8", errors="replace")
+            return JSONResponse({
+                "ok": True,
+                "message": "测试通知发送成功！Narwhal Cloud API 接口校验通过。",
+                "status_code": resp.status,
+                "response": resp_text[:500],
+            })
+    except urllib.error.HTTPError as err:
+        err_body = err.read().decode("utf-8", errors="replace")
+        if err.code == 429:
+            return JSONResponse({
+                "ok": True,
+                "message": "API 认证成功！已触发 24 小时限频保护（同一台机器 24 小时内仅允许向买家推送一次通知）。",
+                "status_code": 429,
+                "response": err_body[:500],
+            })
+        elif err.code in (401, 403):
+            raise HTTPException(status_code=401, detail=f"API 鉴权失败 ({err.code})：API Key 无效或未授权 - {err_body[:200]}")
+        elif err.code == 404:
+            raise HTTPException(status_code=404, detail=f"机器未找到 (404)：请检查 NARWHAL_MACHINE_ID 是否匹配 - {err_body[:200]}")
+        else:
+            raise HTTPException(status_code=502, detail=f"上游 API 返回错误 (HTTP {err.code}): {err_body[:200]}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"无法连接 Narwhal Cloud API ({endpoint}): {exc}")
 
 
 @app.post("/api/v1/notifications/telegram/{bot_id}/{callback_secret}")
