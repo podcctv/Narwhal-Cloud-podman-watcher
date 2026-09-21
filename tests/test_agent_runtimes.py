@@ -1689,7 +1689,7 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertIn("\033[1;5;91m", rendered)  # Blinking red escape code
         self.assertIn("\033[41;1;97m", rendered) # Red background threat badge
         self.assertIn("THREAT DETECTED", rendered)
-        self.assertIn("已记录日志，如有持续滥用可能会删鸡。", rendered)
+        self.assertIn("已记录日志，如有持续滥用会导致删鸡。", rendered)
         self.assertIn("test-container", rendered)
         self.assertIn("CC_ATTACK", rendered)
         self.assertIn("SOCKS_WEAK_AUTH", rendered)
@@ -1751,7 +1751,7 @@ class SecurityTelemetryTests(unittest.TestCase):
                 with open(motd_path, "r", encoding="utf-8") as f:
                     content1 = f.read()
                 self.assertIn(agent.MOTD_MARKER_START, content1)
-                self.assertIn("已记录日志，如有持续滥用可能会删鸡。", content1)
+                self.assertIn("已记录日志，如有持续滥用会导致删鸡。", content1)
                 self.assertIn("Welcome to Ubuntu 24.04 LTS", content1)
 
                 # 2. Container becomes clean: should remove banner and restore original
@@ -1763,7 +1763,67 @@ class SecurityTelemetryTests(unittest.TestCase):
                 self.assertNotIn(agent.MOTD_MARKER_START, content2)
                 self.assertIn("Welcome to Ubuntu 24.04 LTS", content2)
 
+    def test_format_buyer_notification(self):
+        subject, message = agent.format_buyer_notification(
+            "CloudCone 洛杉矶 DC02",
+            "61736e1d9d7b",
+            "检测到暴露公网的无认证 / 弱口令 SOCKS5 代理 (已自动拦截)",
+        )
+        self.assertEqual(subject, "⚠️【节点安全告警】CloudCone 洛杉矶 DC02")
+        self.assertIn("📦 容器 ID ：61736e1d9d7b", message)
+        self.assertIn("⚠️ 异常问题：检测到暴露公网的无认证 / 弱口令 SOCKS5 代理 (已自动拦截)", message)
+        self.assertIn("💡 处置提示：请及时登录排查。已记录日志，如有持续滥用会导致删鸡。", message)
+
+    def test_notify_buyers_of_critical_alert_cooldown_and_dispatch(self):
+        old_mem = agent._memory_buyer_notify_record
+        try:
+            agent._memory_buyer_notify_record = {}
+            with mock.patch.object(agent, "_set_last_buyer_notify_record", side_effect=lambda rec: setattr(agent, "_memory_buyer_notify_record", rec)):
+                # 1. Missing api key: should skip
+                ok, reason = agent.notify_buyers_of_critical_alert(
+                    "Node1", "00000000-0000-0000-0000-000000000001", "c1", "test issue", api_key=""
+                )
+                self.assertFalse(ok)
+                self.assertIn("NARWHAL_API_KEY is not configured", reason)
+
+                # 2. Successful dispatch
+                mock_resp = mock.Mock()
+                mock_resp.status_code = 200
+                mock_resp.text = '{"code": 0, "msg": "ok"}'
+
+                with mock.patch("requests.post", return_value=mock_resp) as mock_post:
+                    ok, msg = agent.notify_buyers_of_critical_alert(
+                        "Node1",
+                        "00000000-0000-0000-0000-000000000001",
+                        "c1",
+                        "test issue",
+                        api_key="test_key_123",
+                        api_url="https://api.example.com/api/v1",
+                    )
+                    self.assertTrue(ok)
+                    self.assertEqual(mock_post.call_count, 1)
+                    args, kwargs = mock_post.call_args
+                    self.assertEqual(args[0], "https://api.example.com/api/v1/machines/00000000-0000-0000-0000-000000000001/notify-buyers")
+                    self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test_key_123")
+                    self.assertIn("⚠️【节点安全告警】Node1", kwargs["json"]["subject"])
+                    self.assertIn("📦 容器 ID ：c1", kwargs["json"]["message"])
+
+                    # 3. Second call immediately: should be suppressed by 24h cooldown
+                    ok2, msg2 = agent.notify_buyers_of_critical_alert(
+                        "Node1",
+                        "00000000-0000-0000-0000-000000000001",
+                        "c1",
+                        "test issue 2",
+                        api_key="test_key_123",
+                    )
+                    self.assertFalse(ok2)
+                    self.assertIn("24h cooldown", msg2)
+                    self.assertEqual(mock_post.call_count, 1) # Not called again
+        finally:
+            agent._memory_buyer_notify_record = old_mem
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

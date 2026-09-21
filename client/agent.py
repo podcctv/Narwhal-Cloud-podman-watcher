@@ -2457,7 +2457,7 @@ def render_cyber_motd(
         f"{crimson}└──[ DIRECTIVE & ADVISORY / 处置指引 ]────────────────────────────────┘{rst}",
         f"{crimson}│{rst}  {blink_yellow}⚡{rst} {bold}警告提示{rst} : 您的容器检测到高危未授权服务或异常流量活动！",
         f"{crimson}│{rst}  {cyan}⚡{rst} {bold}排查要求{rst} : 请检查后台进程 (`ps aux`)、SSH 密钥与定时任务 (`crontab`)。",
-        f"{crimson}│{rst}  {red}⚡{rst} {bold}风险提醒{rst} : {yellow}已记录日志，如有持续滥用可能会删鸡。{rst}",
+        f"{crimson}│{rst}  {red}⚡{rst} {bold}风险提醒{rst} : {yellow}已记录日志，如有持续滥用会导致删鸡。{rst}",
         f"{crimson}└────────────────────────────────────────────────────────────────────┘{rst}",
         "",
     ])
@@ -2591,6 +2591,166 @@ def update_container_motd_alerts(
                 pass
 
     return wrote
+
+
+_CRITICAL_BUYER_NOTIFY_TYPES = {
+    "socks_weak_auth",
+    "malicious_process",
+    "unauthorized_panel_pairing",
+    "cc_attack",
+    "http_high_qps",
+    "ddos_bandwidth",
+    "ddos_packets",
+    "ddos_syn",
+}
+
+_BUYER_NOTIFY_STATE_FILE = os.getenv(
+    "NARWHAL_BUYER_NOTIFY_STATE_FILE",
+    "/opt/narwhal-monitor/last_buyer_notify.json",
+)
+_memory_buyer_notify_record: Dict[str, object] | None = None
+
+
+def _summarize_alert_issue(alert: Dict[str, object]) -> str:
+    alert_type = str(alert.get("type") or "").strip().lower()
+    if alert_type == "socks_weak_auth":
+        return "检测到暴露公网的无认证 / 弱口令 SOCKS5 代理 (已自动拦截)"
+    if alert_type in ("cc_attack", "http_high_qps", "http_suspicious_ratio"):
+        rps = alert.get("value")
+        rps_hint = f" ({rps:.0f} req/s 洪峰)" if isinstance(rps, (int, float)) and rps > 0 else " (高频洪峰)"
+        return f"检测到 HTTP 访问流量异常激增{rps_hint}"
+    if alert_type == "malicious_process":
+        return "检测到可疑高负载恶意挖矿算力进程 (XMRig)"
+    if alert_type == "unauthorized_panel_pairing":
+        return "检测到未授权对接第三方机场面板服务"
+    if alert_type in ("ddos_bandwidth", "ddos_packets", "ddos_syn", "ddos_host_bandwidth", "ddos_host_packets"):
+        return "检测到疑似异常 DDoS 流量或高包速率攻击"
+    if alert_type in ("outbound_fanout", "outbound_packet_abuse", "port_scan"):
+        return "检测到短时间内大量异常对外扫描与出站连接"
+    title = str(alert.get("title") or "").strip()
+    msg = str(alert.get("message") or "").strip()
+    if title:
+        return f"{title}: {msg}" if msg and msg != title else title
+    return msg or "检测到严重安全威胁"
+
+
+def format_buyer_notification(node_name: str, container_id: str, alert_issue: str) -> Tuple[str, str]:
+    subject = f"⚠️【节点安全告警】{node_name}"
+    message = (
+        f"🚨【容器安全告警】\n\n"
+        f"📦 容器 ID ：{container_id}\n"
+        f"⚠️ 异常问题：{alert_issue}\n\n"
+        f"💡 处置提示：请及时登录排查。已记录日志，如有持续滥用会导致删鸡。"
+    )
+    return subject, message
+
+
+def _get_last_buyer_notify_record() -> Dict[str, object]:
+    global _memory_buyer_notify_record
+    if _memory_buyer_notify_record is not None:
+        return dict(_memory_buyer_notify_record)
+    candidate_paths = [
+        _BUYER_NOTIFY_STATE_FILE,
+        os.path.join(tempfile.gettempdir(), "narwhal_last_buyer_notify.json"),
+    ]
+    for p in candidate_paths:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        _memory_buyer_notify_record = data
+                        return dict(data)
+            except (OSError, ValueError):
+                pass
+    return {}
+
+
+def _set_last_buyer_notify_record(record: Dict[str, object]) -> None:
+    global _memory_buyer_notify_record
+    _memory_buyer_notify_record = dict(record)
+    candidate_paths = [
+        _BUYER_NOTIFY_STATE_FILE,
+        os.path.join(tempfile.gettempdir(), "narwhal_last_buyer_notify.json"),
+    ]
+    for p in candidate_paths:
+        try:
+            parent = os.path.dirname(p)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False, indent=2)
+            break
+        except (OSError, PermissionError):
+            continue
+
+
+def notify_buyers_of_critical_alert(
+    node_name: str,
+    machine_id: str,
+    container_id: str,
+    alert_issue: str,
+    api_key: str = "",
+    api_url: str = "",
+) -> Tuple[bool, str]:
+    """Push critical security alert to buyers via /machines/{machineId}/notify-buyers with 24h cooldown."""
+    if os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "true").strip().lower() in ("0", "false", "no", "off"):
+        return False, "buyer notifications are disabled via configuration"
+
+    api_key = (api_key or os.getenv("NARWHAL_API_KEY", "")).strip()
+    if not api_key:
+        return False, "NARWHAL_API_KEY is not configured; skipping buyer push notification"
+
+    machine_id = (machine_id or os.getenv("NARWHAL_MACHINE_ID", "")).strip()
+    if not machine_id:
+        candidate_host_id = os.getenv("HOST_ID", "").strip()
+        if re.match(r"^[0-9a-fA-F-]{36}$", candidate_host_id):
+            machine_id = candidate_host_id
+    if not machine_id:
+        return False, "NARWHAL_MACHINE_ID is not configured; skipping buyer push notification"
+
+    node_name = (
+        node_name or os.getenv("NARWHAL_NODE_NAME", "") or os.getenv("NODE_NAME", "") or socket.gethostname()
+    ).strip()
+    api_url = (api_url or os.getenv("NARWHAL_API_URL", "https://api.fuckip.me/api/v1")).strip().rstrip("/")
+
+    record = _get_last_buyer_notify_record()
+    last_ts = float(record.get("timestamp") or 0)
+    now = time.time()
+    cooldown_seconds = 86400.0  # 24 hours
+    if (now - last_ts) < cooldown_seconds:
+        remaining_hours = (cooldown_seconds - (now - last_ts)) / 3600.0
+        return False, f"buyer notification on 24h cooldown ({remaining_hours:.1f}h remaining)"
+
+    subject, message = format_buyer_notification(node_name, container_id, alert_issue)
+    endpoint = f"{api_url}/machines/{machine_id}/notify-buyers"
+    payload = {"subject": subject[:200], "message": message[:2000]}
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    try:
+        resp = requests.post(endpoint, json=payload, headers=headers, timeout=12)
+        if resp.status_code == 200:
+            _set_last_buyer_notify_record({
+                "timestamp": now,
+                "machine_id": machine_id,
+                "container_id": container_id,
+                "subject": subject,
+                "status": "success",
+            })
+            print(f"[buyer-notify] successfully pushed alert to machine {machine_id} buyers for container {container_id}")
+            return True, "buyer notification sent successfully"
+        elif resp.status_code == 429:
+            _set_last_buyer_notify_record({
+                "timestamp": now,
+                "machine_id": machine_id,
+                "container_id": container_id,
+                "status": "rate_limited_429",
+            })
+            return False, "upstream rate limit reached (429: once per 24 hours per machine)"
+        else:
+            return False, f"upstream API returned status {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return False, f"failed to dispatch buyer notification: {exc}"
 
 
 def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float) -> Dict[str, object]:
@@ -3175,6 +3335,26 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             alerts.extend(_http_security_alerts(container_access, container))
         container_alerts = alerts[start_alert_idx:]
         update_container_motd_alerts(container, container_alerts)
+
+        critical_buyer_alert = next(
+            (
+                a
+                for a in container_alerts
+                if str(a.get("severity") or "") == "critical"
+                or str(a.get("type") or "") in _CRITICAL_BUYER_NOTIFY_TYPES
+            ),
+            None,
+        )
+        if critical_buyer_alert:
+            c_name = str(container.get("name") or container.get("id") or "unknown")
+            alert_issue = _summarize_alert_issue(critical_buyer_alert)
+            host_node_name = (
+                os.getenv("NARWHAL_NODE_NAME", "")
+                or os.getenv("NODE_NAME", "")
+                or socket.gethostname()
+            )
+            host_machine_id = os.getenv("NARWHAL_MACHINE_ID", "")
+            notify_buyers_of_critical_alert(host_node_name, host_machine_id, c_name, alert_issue)
 
     total_rx_bps = float(summary["total_rx_bps"])
     total_rx_pps = float(summary["total_rx_pps"])
