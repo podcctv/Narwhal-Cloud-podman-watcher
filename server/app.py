@@ -2285,6 +2285,11 @@ def latest(include_stale: bool = False) -> JSONResponse:
         hy2_data = sec_data.get("hy2_protocol", {}) if isinstance(sec_data, dict) else {}
         hy2_detected = bool(hy2_data.get("detected"))
         hy2_concurrency = int(hy2_data.get("udp_concurrency") or 0)
+        udp_throttle = sec_data.get("udp_throttle", {}) if isinstance(sec_data, dict) else {}
+        udp_throttled = bool(udp_throttle.get("throttled"))
+        udp_throttle_rate_mbps = int(udp_throttle.get("rate_mbps") or 10)
+        udp_throttle_remaining_seconds = int(udp_throttle.get("remaining_seconds") or 0)
+        udp_throttle_violation_count = int(udp_throttle.get("violation_count") or 0)
 
         out.append({
             "host_id": r["host_id"],
@@ -2348,6 +2353,10 @@ def latest(include_stale: bool = False) -> JSONResponse:
                 "traffic_imbalance_direction": traffic_direction,
                 "hy2_detected": hy2_detected,
                 "hy2_concurrency": hy2_concurrency,
+                "udp_throttled": udp_throttled,
+                "udp_throttle_rate_mbps": udp_throttle_rate_mbps,
+                "udp_throttle_remaining_seconds": udp_throttle_remaining_seconds,
+                "udp_throttle_violation_count": udp_throttle_violation_count,
                 "stale": stale,
                 "host_stale": host_stale,
                 "hidden_offline": hidden_offline,
@@ -2959,10 +2968,10 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     decision = str(payload.get("decision") or "").strip().lower()
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve"):
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle"):
         raise HTTPException(
             status_code=400,
-            detail="decision must be deny, allow_silent, dismiss_once, reopen or resolve",
+            detail="decision must be deny, allow_silent, dismiss_once, reopen, resolve, release_udp_throttle, or apply_udp_throttle",
         )
 
     conn = db()
@@ -2971,7 +2980,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     if alert is None:
         conn.close()
         raise HTTPException(status_code=404, detail="alert not found")
-    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve"):
+    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve", "release_udp_throttle", "apply_udp_throttle"):
         conn.close()
         raise HTTPException(status_code=409, detail="alert is no longer active")
 
@@ -3096,6 +3105,15 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
         conn.execute("UPDATE security_alerts SET status='dismissed' WHERE id=?", (alert_id,))
     elif decision == "resolve":
         conn.execute("UPDATE security_alerts SET status='resolved' WHERE id=?", (alert_id,))
+    elif decision == "release_udp_throttle":
+        conn.execute("UPDATE security_alerts SET status='resolved' WHERE id=?", (alert_id,))
+        action, queued = _queue_security_action_row(
+            conn, alert, "release_udp_throttle", {}, requested_by
+        )
+    elif decision == "apply_udp_throttle":
+        action, queued = _queue_security_action_row(
+            conn, alert, "apply_udp_throttle", {"rate_mbps": 10, "duration": 3600}, requested_by
+        )
     else:
         conn.execute(
             "DELETE FROM security_alert_policies WHERE fingerprint=?",
@@ -3156,7 +3174,7 @@ async def set_container_disposition(request: Request) -> JSONResponse:
         raise HTTPException(
             status_code=400, detail="host_id, runtime, and container_name are required"
         )
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve"):
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle"):
         raise HTTPException(status_code=400, detail="invalid decision")
 
     conn = db()
@@ -3169,9 +3187,40 @@ async def set_container_disposition(request: Request) -> JSONResponse:
         """,
         (host_id, runtime, project, project, container_name),
     ).fetchone()
-    conn.close()
     if alert is not None:
+        conn.close()
         return await set_security_alert_disposition(alert["id"], request)
+
+    if decision in ("release_udp_throttle", "apply_udp_throttle"):
+        now = int(time.time())
+        action_type = decision
+        params = {"rate_mbps": 10, "duration": 3600} if decision == "apply_udp_throttle" else {}
+        requested_by = str(
+            getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard")
+        )[:100]
+        cur = conn.execute(
+            """
+            INSERT INTO security_actions(
+                alert_id, host_id, runtime, project, container_name, action_type, params_json,
+                status, requested_by, created_at, updated_at
+            ) VALUES(0,?,?,?,?,?,?,'queued',?,?,?)
+            """,
+            (host_id, runtime, project, container_name, action_type, json.dumps(params), requested_by, now, now),
+        )
+        action_row = conn.execute("SELECT * FROM security_actions WHERE id=?", (cur.lastrowid,)).fetchone()
+        conn.commit()
+        conn.close()
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "decision": decision,
+                "queued": True,
+                "action": _action_item(action_row) if action_row is not None else None,
+            },
+        )
+
+    conn.close()
     raise HTTPException(status_code=404, detail="未找到该容器对应的安全告警记录")
 
 

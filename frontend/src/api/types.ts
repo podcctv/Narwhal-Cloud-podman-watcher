@@ -39,6 +39,10 @@ export interface ContainerItem {
     hy2_detected?: boolean;
     hy2_concurrency?: number;
     hy2_confidence?: 'confirmed' | 'suspected' | string;
+    udp_throttled?: boolean;
+    udp_throttle_rate_mbps?: number;
+    udp_throttle_remaining_seconds?: number;
+    udp_throttle_violation_count?: number;
     [key: string]: any;
   };
   security?: ContainerSecurity;
@@ -81,6 +85,13 @@ export interface ContainerSecurity {
     udp_concurrency?: number;
     unique_remote_ips?: number;
     evidence?: string[];
+  };
+  udp_throttle?: {
+    throttled: boolean;
+    rate_mbps: number;
+    remaining_seconds: number;
+    violation_count: number;
+    reason?: string;
   };
   configuration_risks?: { message?: string; code?: string }[];
   communication_detail_available?: boolean;

@@ -11,6 +11,7 @@ import {
   ArrowUpDown,
   Sparkles,
   Ban,
+  Gauge,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity } from '../../api/types';
 import { fmtBytes, fmtMbps } from '../../api/client';
@@ -118,6 +119,17 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
               >
                 <Radio className="h-2.5 w-2.5 text-violet-400" />
                 <span>HY2</span>
+              </span>
+            )}
+
+            {/* UDP Throttle Badge */}
+            {(c.alerts?.udp_throttled || sec.udp_throttle?.throttled) && (
+              <span
+                className="flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/60 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 font-mono shadow-sm animate-pulse"
+                title={`UDP 靶向限速生效中: ${c.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10}Mbps (剩余约 ${Math.ceil((c.alerts?.udp_throttle_remaining_seconds ?? sec.udp_throttle?.remaining_seconds ?? 0) / 60)} 分钟)`}
+              >
+                <Gauge className="h-2.5 w-2.5 text-rose-400" />
+                <span>限速 {c.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10}M</span>
               </span>
             )}
 

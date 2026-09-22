@@ -142,7 +142,7 @@ export const api = {
 
   dispositionAlert: (
     alertId: number,
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve'
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve' | 'release_udp_throttle' | 'apply_udp_throttle' | string
   ) =>
     request<{ queued?: boolean; detail?: string }>(`/api/v1/security/alerts/${alertId}/disposition`, {
       method: 'POST',
@@ -151,7 +151,7 @@ export const api = {
 
   dispositionContainer: (
     identity: ContainerIdentity,
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve'
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve' | 'release_udp_throttle' | 'apply_udp_throttle' | string
   ) =>
     request<{ queued?: boolean; detail?: string }>('/api/v1/containers/disposition', {
       method: 'POST',

@@ -15,6 +15,8 @@ import {
   Radio,
   ArrowDownLeft,
   ArrowUpRight,
+  Gauge,
+  Unlock,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData } from '../../api/types';
 import { api, fmtBytes, fmtNumber, fmtMbps } from '../../api/client';
@@ -41,10 +43,10 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [diagnostic, setDiagnostic] = useState<DiagnosticData | null>(null);
   const [isDrawerActionLoading, setIsDrawerActionLoading] = useState(false);
-  const [pendingDecision, setPendingDecision] = useState<'deny' | 'allow_silent' | 'resolve' | null>(null);
+  const [pendingDecision, setPendingDecision] = useState<'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle' | null>(null);
 
   const handleDrawerDisposition = async (
-    decision: 'deny' | 'allow_silent' | 'resolve'
+    decision: 'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle'
   ) => {
     if (!identity) return;
     setIsDrawerActionLoading(true);
@@ -56,6 +58,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           ? (res.queued ? '处置指令已下发节点执行' : '安全处置已更新')
           : decision === 'resolve'
           ? '风险已标记为已解决'
+          : decision === 'release_udp_throttle'
+          ? (res.queued ? 'UDP 限速解除指令已下发节点执行' : '已解除 UDP 限速')
           : '已成功添加放行策略'
       );
       const latestData = await api.getLatest(true);
@@ -137,7 +141,9 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
   const socks = sec.socks_proxy;
   const pairing = sec.panel_pairing;
-  const confirmationCopy = pendingDecision === 'deny'
+  const confirmationCopy = pendingDecision === 'release_udp_throttle'
+    ? { title: '确认立即解除 UDP 限速？', description: `将立即移除 ${identity.container_name} 的 Linux tc 限速规则并恢复全速。`, confirmLabel: '解除限速', tone: 'primary' as const }
+    : pendingDecision === 'deny'
     ? { title: '确认定向处置？', description: `仅处理 ${identity.container_name} 中已识别的违规进程、服务或配置，不会停止容器。`, confirmLabel: '确认处置', tone: 'danger' as const }
     : pendingDecision === 'allow_silent'
     ? { title: '确认放行策略？', description: '当前风险会被持续放行且不再提醒；可在告警历史中撤销。', confirmLabel: '确认放行', tone: 'primary' as const }
@@ -350,6 +356,59 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     )}
                   </div>
                 </div>
+
+                {/* UDP Throttle & Anti-Abuse Control Card */}
+                {(container?.alerts?.udp_throttled || sec.udp_throttle?.throttled || container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
+                  <div className={`col-span-1 sm:col-span-2 rounded-lg border p-3 ${
+                    container?.alerts?.udp_throttled || sec.udp_throttle?.throttled
+                      ? 'border-rose-500/50 bg-rose-950/30 text-rose-200'
+                      : 'border-slate-800 bg-slate-900/60 text-slate-300'
+                  }`}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] font-semibold flex items-center gap-1.5">
+                        <Gauge className={`h-3.5 w-3.5 ${
+                          container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? 'text-rose-400' : 'text-slate-400'
+                        }`} />
+                        <span>UDP 流量管控与限速</span>
+                      </span>
+                      {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
+                        <span className="text-[10px] font-bold bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 rounded text-rose-300 animate-pulse">
+                          限速生效中: {container?.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10} Mbps
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-medium bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded text-emerald-400">
+                          全速运行 (自动防滥用保护中)
+                        </span>
+                      )}
+                    </div>
+                    {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
+                      <div className="space-y-2 mt-2">
+                        <p className="text-[11px] text-rose-300/90 leading-relaxed">
+                          {sec.udp_throttle?.reason || '因持续 3 分钟上下行严重失衡且高 UDP 并发触发靶向限速。已保护 TCP 与 SSH 保持千兆线速。'}
+                        </p>
+                        <div className="flex items-center justify-between pt-1 border-t border-rose-500/20 text-[10px] text-rose-300/70 font-mono">
+                          <span>剩余冷却时间：约 {Math.ceil((container?.alerts?.udp_throttle_remaining_seconds ?? sec.udp_throttle?.remaining_seconds ?? 0) / 60)} 分钟</span>
+                          <span>24h内违规：第 {container?.alerts?.udp_throttle_violation_count ?? sec.udp_throttle?.violation_count ?? 1} 次</span>
+                        </div>
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            disabled={isDrawerActionLoading}
+                            onClick={() => setPendingDecision('release_udp_throttle')}
+                            className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/80 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-900 transition-all disabled:opacity-50 shadow-sm"
+                          >
+                            <Unlock className="h-3.5 w-3.5 text-sky-400" />
+                            <span>立即解除限速</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-slate-400 mt-1">
+                        双向流量均衡或低并发的正常 HY2 用户享有 100% 自动豁免保护，不限制 UDP 速率。
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 

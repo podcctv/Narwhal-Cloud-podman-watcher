@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 from urllib.parse import quote, urlparse
 
 import requests
@@ -3089,6 +3089,137 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     )
                 )
 
+        # HY2 Compound Anti-Abuse Rate Limiting Engine
+        container_key = f"{container.get('runtime')}:{container.get('project') or ''}:{container.get('name')}"
+        throttle_state = _hy2_throttle_states.setdefault(container_key, {
+            "is_throttled": False,
+            "throttled_until": 0.0,
+            "rate_mbps": 10,
+            "violations_history": [],
+            "consecutive_violation_count": 0,
+            "reason": "",
+        })
+
+        now_ts = time.time()
+        throttle_state["violations_history"] = [
+            t for t in throttle_state["violations_history"] if now_ts - t < 86400
+        ]
+
+        c_pid = int(container.get("pid") or security.get("pid") or 0)
+        c_runtime = str(container.get("runtime") or "")
+        c_name = str(container.get("name") or "")
+        c_project = str(container.get("project") or "")
+
+        # 1. Auto release check if currently throttled
+        just_released = False
+        if throttle_state["is_throttled"]:
+            if now_ts >= throttle_state["throttled_until"]:
+                release_udp_throttle(c_runtime, c_name, pid=c_pid, project=c_project)
+                throttle_state["is_throttled"] = False
+                throttle_state["consecutive_violation_count"] = 0
+                throttle_state["reason"] = ""
+                just_released = True
+            else:
+                rem_secs = max(1, int(throttle_state["throttled_until"] - now_ts))
+                security["udp_throttle"] = {
+                    "throttled": True,
+                    "rate_mbps": throttle_state["rate_mbps"],
+                    "remaining_seconds": rem_secs,
+                    "violation_count": len(throttle_state["violations_history"]),
+                    "reason": throttle_state["reason"],
+                }
+                c_alerts["udp_throttled"] = True
+                c_alerts["udp_throttle_rate_mbps"] = throttle_state["rate_mbps"]
+                c_alerts["udp_throttle_remaining_seconds"] = rem_secs
+                c_alerts["udp_throttle_violation_count"] = len(throttle_state["violations_history"])
+
+        # 2. Compound condition check if not throttled
+        if not throttle_state["is_throttled"] and not just_released and hy2_info.get("detected"):
+            throttle_min_bps = float(os.getenv("SECURITY_HY2_THROTTLE_MIN_BPS", "20000000"))
+            throttle_imbalance_ratio = float(os.getenv("SECURITY_HY2_THROTTLE_RATIO", "8.0"))
+            throttle_concurrency = int(os.getenv("SECURITY_HY2_THROTTLE_CONCURRENCY", "150"))
+            symmetric_concurrency = int(os.getenv("SECURITY_HY2_SYMMETRIC_CONCURRENCY", "500"))
+            throttle_direction = os.getenv("SECURITY_HY2_THROTTLE_DIRECTION", "any").strip().lower()
+            auto_throttle_enabled = os.getenv("SECURITY_HY2_AUTO_THROTTLE", "true").strip().lower() not in ("0", "false", "no", "off")
+
+            max_traffic = max(rx_bps, tx_bps)
+            is_bandwidth_enough = (max_traffic >= throttle_min_bps)
+
+            direction_matches = (
+                throttle_direction == "any"
+                or (throttle_direction == "outbound_heavy" and traffic_direction == "outbound_heavy")
+                or (throttle_direction == "inbound_heavy" and traffic_direction == "inbound_heavy")
+            )
+
+            is_asymmetric_enough = (
+                direction_matches
+                and (imbalance_ratio >= throttle_imbalance_ratio)
+                and (hy2_concurrency >= throttle_concurrency)
+            )
+            is_symmetric_enough = (hy2_concurrency >= symmetric_concurrency)
+
+            if is_bandwidth_enough and (is_asymmetric_enough or is_symmetric_enough):
+                throttle_state["consecutive_violation_count"] += 1
+                if throttle_state["consecutive_violation_count"] >= 3:
+                    throttle_state["violations_history"].append(now_ts)
+                    v_count = len(throttle_state["violations_history"])
+                    if v_count == 1:
+                        rate_mbps = 10
+                        duration = 3600
+                    elif v_count == 2:
+                        rate_mbps = 10
+                        duration = 14400
+                    else:
+                        rate_mbps = 5
+                        duration = 86400
+
+                    throttle_state["is_throttled"] = True
+                    throttle_state["rate_mbps"] = rate_mbps
+                    throttle_state["throttled_until"] = now_ts + duration
+                    if is_symmetric_enough and not is_asymmetric_enough:
+                        throttle_state["reason"] = (
+                            f"HY2并发连接数异常洪泛(持续3分钟高并发{hy2_concurrency}已超过{symmetric_concurrency})"
+                        )
+                    else:
+                        throttle_state["reason"] = (
+                            f"HY2参数异常(持续3分钟出入失衡{imbalance_ratio:.1f}x且UDP并发{hy2_concurrency})"
+                        )
+
+                    if auto_throttle_enabled:
+                        apply_udp_throttle(
+                            c_runtime,
+                            c_name,
+                            pid=c_pid,
+                            rate_mbps=rate_mbps,
+                            project=c_project,
+                        )
+
+                    alerts.append(
+                        _security_alert(
+                            "hy2_abnormal_throttle",
+                            "critical" if v_count >= 3 else "warning",
+                            f"触发 HY2 参数异常自动限速 ({rate_mbps}Mbps)",
+                            f"容器运行 HY2 协议且连续 3 分钟出现非对称打流 (失衡比 {imbalance_ratio:.1f}x，单向 {max_traffic/(1024*1024):.1f}MB/s) "
+                            f"且高并发连接数达到 {hy2_concurrency}；已实施 UDP 靶向限速至 {rate_mbps}Mbps (持续 {duration//3600} 小时，24h内第 {v_count} 次)。",
+                            hy2_concurrency,
+                            throttle_concurrency,
+                            container,
+                        )
+                    )
+                    security["udp_throttle"] = {
+                        "throttled": True,
+                        "rate_mbps": rate_mbps,
+                        "remaining_seconds": duration,
+                        "violation_count": v_count,
+                        "reason": throttle_state["reason"],
+                    }
+                    c_alerts["udp_throttled"] = True
+                    c_alerts["udp_throttle_rate_mbps"] = rate_mbps
+                    c_alerts["udp_throttle_remaining_seconds"] = duration
+                    c_alerts["udp_throttle_violation_count"] = v_count
+            else:
+                throttle_state["consecutive_violation_count"] = 0
+
         socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
         socks_detected = bool(socks_proxy.get("detected"))
         socks_auth_mode = str(socks_proxy.get("auth_mode") or "unknown")
@@ -4593,6 +4724,78 @@ def collect_hy2_indicators(
     return result
 
 
+_hy2_throttle_states: Dict[str, Dict[str, Any]] = {}
+
+
+def apply_udp_throttle(
+    runtime: str,
+    name: str,
+    pid: int = 0,
+    rate_mbps: int = 10,
+    project: str = "",
+) -> Tuple[bool, str]:
+    """Rate limit UDP traffic for the container using Linux tc HTB + u32 filter.
+
+    Keeps default class 10 for TCP/SSH at line rate (1000mbit).
+    Directs IP protocol 17 (UDP) to class 20 throttled to rate_mbps.
+    """
+    runtime_bin = get_runtime_bins().get(runtime, "") or runtime
+    commands = [
+        "IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)",
+        '[ -z "$IFACE" ] && IFACE=eth0',
+        "tc qdisc del dev $IFACE root 2>/dev/null || true",
+        "tc qdisc add dev $IFACE root handle 1: htb default 10",
+        "tc class add dev $IFACE parent 1: classid 1:10 htb rate 1000mbit",
+        f"tc class add dev $IFACE parent 1: classid 1:20 htb rate {rate_mbps}mbit ceil {rate_mbps + 2}mbit burst 32k",
+        "tc filter add dev $IFACE protocol ip parent 1: prio 1 u32 match ip protocol 17 0xff flowid 1:20",
+    ]
+    script = "; ".join(commands)
+
+    if pid > 0:
+        nsenter_cmd = ["nsenter", "-t", str(pid), "-n", "sh", "-c", script]
+        ok, out = _run_action_command(nsenter_cmd)
+        if ok:
+            return True, f"applied {rate_mbps}Mbps UDP throttle via nsenter netns (PID {pid})"
+
+    if runtime_bin and name:
+        exec_cmd = _runtime_exec_cmd(runtime_bin, name, f"sh -c {shlex.quote(script)}", project)
+        ok, out = _run_action_command(exec_cmd)
+        if ok:
+            return True, f"applied {rate_mbps}Mbps UDP throttle via {runtime_bin} exec"
+
+    return False, "failed to apply UDP throttle (no valid execution path or tc command unavailable)"
+
+
+def release_udp_throttle(
+    runtime: str,
+    name: str,
+    pid: int = 0,
+    project: str = "",
+) -> Tuple[bool, str]:
+    """Remove tc rate limiting qdisc and restore full unthrottled line rate."""
+    runtime_bin = get_runtime_bins().get(runtime, "") or runtime
+    script = (
+        "IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1); "
+        '[ -z "$IFACE" ] && IFACE=eth0; '
+        "tc qdisc del dev $IFACE root 2>/dev/null || true; "
+        "tc qdisc del dev eth0 root 2>/dev/null || true"
+    )
+
+    if pid > 0:
+        nsenter_cmd = ["nsenter", "-t", str(pid), "-n", "sh", "-c", script]
+        ok, out = _run_action_command(nsenter_cmd)
+        if ok:
+            return True, "released UDP throttle via nsenter netns"
+
+    if runtime_bin and name:
+        exec_cmd = _runtime_exec_cmd(runtime_bin, name, f"sh -c {shlex.quote(script)}", project)
+        ok, out = _run_action_command(exec_cmd)
+        if ok:
+            return True, "released UDP throttle via runtime exec"
+
+    return True, "UDP throttle release command dispatched"
+
+
 def _expand_port_spec(value: str, limit: int = 4096) -> List[int]:
     ports: List[int] = []
     for part in (value or "").split(","):
@@ -5268,6 +5471,7 @@ def collect_container(
             "socks_proxy": socks_proxy,
             "hy2_protocol": hy2_protocol,
             "network_exposure": network_exposure,
+            "pid": pid,
             **communication,
         }
     )
@@ -5281,6 +5485,7 @@ def collect_container(
 
     return {
         "id": container_id,
+        "pid": pid,
         "name": name,
         "image": image,
         "runtime": runtime_name,
@@ -6508,6 +6713,38 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         ok, message = stop_unauthenticated_socks(action)
         prefix = "policy_installed=1; "
         return ok, prefix + message
+    if action_type == "apply_udp_throttle":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        project = str(action.get("project") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        rate_mbps = int(params.get("rate_mbps") or 10)
+        pid = int(params.get("pid") or 0)
+        ok, message = apply_udp_throttle(runtime_kind, container_name, pid=pid, rate_mbps=rate_mbps, project=project)
+        key = f"{runtime_kind}:{project}:{container_name}"
+        duration = int(params.get("duration") or 3600)
+        _hy2_throttle_states[key] = {
+            "is_throttled": True,
+            "throttled_until": time.time() + duration,
+            "rate_mbps": rate_mbps,
+            "violations_history": [time.time()],
+            "consecutive_violation_count": 3,
+            "reason": "控制台指令下发 UDP 限速",
+        }
+        return ok, message
+    if action_type == "release_udp_throttle":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        project = str(action.get("project") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        pid = int(params.get("pid") or 0)
+        ok, message = release_udp_throttle(runtime_kind, container_name, pid=pid, project=project)
+        key = f"{runtime_kind}:{project}:{container_name}"
+        if key in _hy2_throttle_states:
+            _hy2_throttle_states[key]["is_throttled"] = False
+            _hy2_throttle_states[key]["consecutive_violation_count"] = 0
+            _hy2_throttle_states[key]["reason"] = ""
+        return ok, message
     if action_type == "remediate_malicious_process":
         return remediate_malicious_process(action)
     if action_type == "stop_container":

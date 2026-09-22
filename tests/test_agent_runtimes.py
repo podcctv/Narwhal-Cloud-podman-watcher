@@ -2,9 +2,11 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("narwhal_agent", ROOT / "client" / "agent.py")
@@ -1962,8 +1964,165 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(hy2_alert["value"], 80)
         self.assertTrue(containers[2]["alerts"]["hy2_detected"])
 
+    def test_hy2_compound_throttle_and_laddered_penalties(self):
+        # Clear throttle state before test
+        agent._hy2_throttle_states.clear()
+
+        # 1. Balanced traffic exemption test
+        # 50 Mbps bandwidth, but ratio is 1.1x (balanced), concurrency 300
+        balanced_container = {
+            "name": "c_balanced",
+            "runtime": "podman",
+            "project": "",
+            "net_rx_bps": 50000000.0,
+            "net_tx_bps": 45000000.0,
+            "conn_count": 300,
+            "security": {
+                "hy2_protocol": {
+                    "detected": True,
+                    "confidence": "confirmed",
+                    "udp_concurrency": 300,
+                }
+            },
+        }
+        for _ in range(5):
+            res = agent.collect_security_summary([balanced_container], 15.0)
+        self.assertFalse(balanced_container.get("alerts", {}).get("udp_throttled", False))
+        self.assertNotIn("c_balanced", [a.get("container_name") for a in res.get("alerts", []) if a.get("type") == "hy2_abnormal_throttle"])
+
+        # 2. Low concurrency exemption test (concurrency 80 < 150)
+        low_conn_container = {
+            "name": "c_low_conn",
+            "runtime": "podman",
+            "project": "",
+            "net_rx_bps": 500000.0,
+            "net_tx_bps": 30000000.0, # 60x imbalance, 30 Mbps
+            "conn_count": 80,
+            "security": {
+                "hy2_protocol": {
+                    "detected": True,
+                    "confidence": "confirmed",
+                    "udp_concurrency": 80,
+                }
+            },
+        }
+        for _ in range(5):
+            res = agent.collect_security_summary([low_conn_container], 15.0)
+        self.assertFalse(low_conn_container.get("alerts", {}).get("udp_throttled", False))
+
+        # 3. Compound violation test: high bandwidth (30Mbps) + high asymmetry (60x) + high concurrency (200 >= 150)
+        abusive_container = {
+            "name": "c_abusive",
+            "runtime": "podman",
+            "project": "",
+            "pid": 1234,
+            "net_rx_bps": 500000.0,
+            "net_tx_bps": 30000000.0,
+            "conn_count": 200,
+            "security": {
+                "hy2_protocol": {
+                    "detected": True,
+                    "confidence": "confirmed",
+                    "udp_concurrency": 200,
+                }
+            },
+        }
+
+        # Cycle 1: consecutive count = 1, not throttled yet
+        agent.collect_security_summary([abusive_container], 15.0)
+        self.assertFalse(abusive_container.get("alerts", {}).get("udp_throttled", False))
+
+        # Cycle 2: consecutive count = 2, not throttled yet
+        agent.collect_security_summary([abusive_container], 15.0)
+        self.assertFalse(abusive_container.get("alerts", {}).get("udp_throttled", False))
+
+        # Cycle 3: consecutive count = 3, FIRST penalty triggered (10Mbps for 1 hour = 3600s)
+        agent.collect_security_summary([abusive_container], 15.0)
+        self.assertTrue(abusive_container.get("alerts", {}).get("udp_throttled"))
+        self.assertEqual(abusive_container["alerts"]["udp_throttle_rate_mbps"], 10)
+        self.assertEqual(abusive_container["alerts"]["udp_throttle_violation_count"], 1)
+        self.assertGreaterEqual(abusive_container["alerts"]["udp_throttle_remaining_seconds"], 3590)
+
+        # 4. Auto-release test: simulate time elapse past throttled_until
+        state_key = "podman::c_abusive"
+        self.assertIn(state_key, agent._hy2_throttle_states)
+        # Advance time by setting throttled_until in the past
+        agent._hy2_throttle_states[state_key]["throttled_until"] = time.time() - 10
+        agent.collect_security_summary([abusive_container], 15.0)
+        # Should be auto-released
+        self.assertFalse(agent._hy2_throttle_states[state_key]["is_throttled"])
+
+        # 5. Second penalty escalation within 24h: 10Mbps for 4 hours (14400s)
+        # Need 3 more cycles
+        for _ in range(3):
+            agent.collect_security_summary([abusive_container], 15.0)
+        self.assertTrue(abusive_container.get("alerts", {}).get("udp_throttled"))
+        self.assertEqual(abusive_container["alerts"]["udp_throttle_rate_mbps"], 10)
+        self.assertEqual(abusive_container["alerts"]["udp_throttle_violation_count"], 2)
+        self.assertGreaterEqual(abusive_container["alerts"]["udp_throttle_remaining_seconds"], 14390)
+
+        # 6. Third penalty escalation within 24h: 5Mbps for 24 hours (86400s) + critical severity
+        agent._hy2_throttle_states[state_key]["throttled_until"] = time.time() - 10
+        agent.collect_security_summary([abusive_container], 15.0)
+        for _ in range(3):
+            res = agent.collect_security_summary([abusive_container], 15.0)
+        self.assertTrue(abusive_container.get("alerts", {}).get("udp_throttled"))
+        self.assertEqual(abusive_container["alerts"]["udp_throttle_rate_mbps"], 5)
+        self.assertEqual(abusive_container["alerts"]["udp_throttle_violation_count"], 3)
+        self.assertGreaterEqual(abusive_container["alerts"]["udp_throttle_remaining_seconds"], 86390)
+        throttle_alerts = [a for a in res.get("alerts", []) if a.get("type") == "hy2_abnormal_throttle"]
+        self.assertTrue(len(throttle_alerts) > 0)
+        self.assertEqual(throttle_alerts[0]["severity"], "critical")
+
+    def test_apply_and_release_udp_throttle_commands(self):
+        with patch.object(agent, "_run_action_command", return_value=(True, "ok")) as mock_cmd:
+            ok, msg = agent.apply_udp_throttle("podman", "test_box", pid=999, rate_mbps=10)
+            self.assertTrue(ok)
+            self.assertIn("applied 10Mbps UDP throttle", msg)
+            # Verify nsenter was called with tc commands matching IP proto 17
+            called_cmd = mock_cmd.call_args[0][0]
+            self.assertEqual(called_cmd[0], "nsenter")
+            self.assertEqual(called_cmd[2], "999")
+            self.assertIn("ip protocol 17", called_cmd[6])
+            self.assertIn("rate 10mbit", called_cmd[6])
+
+            # Test release
+            ok, msg = agent.release_udp_throttle("podman", "test_box", pid=999)
+            self.assertTrue(ok)
+            self.assertIn("released UDP throttle", msg)
+            rel_cmd = mock_cmd.call_args[0][0]
+            self.assertIn("tc qdisc del dev eth0 root", rel_cmd[6])
+
+    def test_execute_security_action_udp_throttle(self):
+        agent._hy2_throttle_states.clear()
+        with patch.object(agent, "apply_udp_throttle", return_value=(True, "ok")), \
+             patch.object(agent, "release_udp_throttle", return_value=(True, "ok")):
+            # Test apply action
+            ok, msg = agent.execute_security_action({
+                "action_type": "apply_udp_throttle",
+                "runtime": "podman",
+                "container_name": "target_box",
+                "project": "",
+                "params": {"rate_mbps": 10, "duration": 3600, "pid": 100},
+            })
+            self.assertTrue(ok)
+            key = "podman::target_box"
+            self.assertTrue(agent._hy2_throttle_states[key]["is_throttled"])
+
+            # Test release action
+            ok, msg = agent.execute_security_action({
+                "action_type": "release_udp_throttle",
+                "runtime": "podman",
+                "container_name": "target_box",
+                "project": "",
+                "params": {"pid": 100},
+            })
+            self.assertTrue(ok)
+            self.assertFalse(agent._hy2_throttle_states[key]["is_throttled"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

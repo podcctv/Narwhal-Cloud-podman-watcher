@@ -1961,6 +1961,47 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(hist_item["udp_rx_bps"], 1000000.0)
         self.assertEqual(hist_item["udp_tx_bps"], 50000000.0)
 
+    def test_udp_throttle_disposition_and_container_action(self):
+        class ContainerReq:
+            state = type("State", (), {"dashboard_user": "test_admin"})()
+
+            def __init__(self, data):
+                self.data = data
+
+            async def json(self):
+                return self.data
+
+        # 1. Test direct container disposition: release_udp_throttle without existing alert
+        req_rel = ContainerReq({
+            "host_id": "hk-host",
+            "runtime": "podman",
+            "project": "default",
+            "container_name": "hy2-throttle-box",
+            "decision": "release_udp_throttle",
+        })
+        resp = asyncio.run(server.set_container_disposition(req_rel))
+        self.assertEqual(resp.status_code, 202)
+        body = json.loads(resp.body)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["queued"])
+        self.assertEqual(body["decision"], "release_udp_throttle")
+        self.assertEqual(body["action"]["action_type"], "release_udp_throttle")
+
+        # 2. Test direct container disposition: apply_udp_throttle without existing alert
+        req_apply = ContainerReq({
+            "host_id": "hk-host",
+            "runtime": "podman",
+            "project": "default",
+            "container_name": "hy2-throttle-box",
+            "decision": "apply_udp_throttle",
+        })
+        resp_apply = asyncio.run(server.set_container_disposition(req_apply))
+        self.assertEqual(resp_apply.status_code, 202)
+        body_apply = json.loads(resp_apply.body)
+        self.assertTrue(body_apply["ok"])
+        self.assertEqual(body_apply["action"]["action_type"], "apply_udp_throttle")
+        self.assertEqual(body_apply["action"]["params"]["rate_mbps"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()
