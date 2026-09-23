@@ -980,6 +980,135 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.close()
         self.assertEqual(params["auth_mode"], "weak_password")
 
+    def test_legacy_weak_socks_without_config_file_is_actionable(self):
+        alert = {
+            "type": "socks_weak_auth",
+            "severity": "critical",
+            "title": "SOCKS risk",
+            "message": "检测到 SOCKS 服务弱密码；公网/NAT 暴露 是；进程 gost；不会上报用户名或密码内容",
+            "runtime": "incus",
+            "project": "default",
+            "container_name": "proxy",
+            "socks_auth_mode": "weak",
+            "socks_processes": [],
+            "socks_config_files": [],
+        }
+        conn = server.db()
+        server.process_security_alerts(conn, "host1", 100, [alert])
+        conn.commit()
+        alert_id = conn.execute("SELECT id FROM security_alerts").fetchone()["id"]
+        conn.close()
+
+        item = json.loads(server.security_alerts().body)["items"][0]
+        self.assertEqual(item["details"]["socks_auth_mode"], "weak_password")
+        self.assertEqual(item["details"]["socks_processes"], ["gost"])
+
+        class State:
+            dashboard_user = "operator"
+
+        class Request:
+            state = State()
+
+            async def json(self):
+                return {"decision": "deny"}
+
+        response = asyncio.run(server.set_security_alert_disposition(alert_id, Request()))
+        body = json.loads(response.body)
+        self.assertEqual(body["action"]["action_type"], "enforce_socks_auth")
+        self.assertEqual(body["action"]["params"]["process_names"], ["gost"])
+
+    def test_container_disposition_prefers_actionable_alert_over_newer_telemetry(self):
+        alerts = [
+            {
+                "type": "socks_weak_auth",
+                "severity": "critical",
+                "title": "SOCKS risk",
+                "message": "SOCKS no auth",
+                "runtime": "incus",
+                "project": "default",
+                "container_name": "proxy",
+                "socks_auth_mode": "no_auth",
+                "socks_processes": ["gost"],
+            },
+            {
+                "type": "ddos_packets",
+                "severity": "warning",
+                "title": "DDoS",
+                "message": "packet rate high",
+                "runtime": "incus",
+                "project": "default",
+                "container_name": "proxy",
+            },
+        ]
+        conn = server.db()
+        server.process_security_alerts(conn, "host1", 100, alerts)
+        conn.commit()
+        conn.close()
+
+        class State:
+            dashboard_user = "operator"
+
+        class Request:
+            state = State()
+
+            async def json(self):
+                return {
+                    "host_id": "host1",
+                    "runtime": "incus",
+                    "project": "default",
+                    "container_name": "proxy",
+                    "decision": "deny",
+                }
+
+        response = asyncio.run(server.set_container_disposition(Request()))
+        body = json.loads(response.body)
+        self.assertEqual(body["action"]["action_type"], "enforce_socks_auth")
+
+    def test_active_host_alert_is_hidden_after_host_heartbeat_stales(self):
+        now = int(time.time())
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO hosts(host_id,last_seen,agent_version) VALUES(?,?,?)",
+            ("stale-host", now - server.STALE_SECONDS - 1, "1.0.0"),
+        )
+        server.process_security_alerts(
+            conn,
+            "stale-host",
+            now - server.STALE_SECONDS - 1,
+            [{"type": "ddos_packets", "severity": "warning", "title": "DDoS", "message": "host"}],
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(json.loads(server.security_alerts().body)["active_count"], 0)
+        history = json.loads(server.security_alerts(active_only=False).body)["items"]
+        self.assertEqual(len(history), 1)
+
+    def test_alert_history_search_includes_structured_details(self):
+        conn = server.db()
+        server.process_security_alerts(
+            conn,
+            "host1",
+            100,
+            [{
+                "type": "socks_weak_auth",
+                "severity": "warning",
+                "title": "SOCKS risk",
+                "message": "structured evidence",
+                "runtime": "incus",
+                "project": "default",
+                "container_name": "proxy",
+                "socks_auth_mode": "weak_password",
+                "socks_processes": ["gost"],
+                "socks_config_files": ["/etc/gost/config.json"],
+            }],
+        )
+        conn.commit()
+        conn.close()
+
+        result = json.loads(server.security_alert_history(query="/etc/gost/config.json").body)
+        self.assertEqual(result["total"], 1)
+
     def test_allow_socks_alert_queues_enforcement_release(self):
         alert = {
             "type": "socks_weak_auth",

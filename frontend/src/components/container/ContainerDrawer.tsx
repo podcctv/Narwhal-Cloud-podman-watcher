@@ -18,7 +18,7 @@ import {
   Gauge,
   Unlock,
 } from 'lucide-react';
-import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData } from '../../api/types';
+import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData, SecurityAlert } from '../../api/types';
 import { api, fmtBytes, fmtNumber, fmtMbps } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 import { ResourceChart } from './ResourceChart';
@@ -28,6 +28,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog';
 
 interface ContainerDrawerProps {
   identity: ContainerIdentity | null;
+  activeAlerts?: SecurityAlert[];
   onClose: () => void;
   serverVersion: string;
   onToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -35,6 +36,7 @@ interface ContainerDrawerProps {
 
 export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   identity,
+  activeAlerts = [],
   onClose,
   serverVersion,
   onToast,
@@ -51,7 +53,11 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
     if (!identity) return;
     setIsDrawerActionLoading(true);
     try {
-      const res = await api.dispositionContainer(identity, decision);
+      const currentAlert = activeActionableAlert;
+      const res = await api.dispositionContainer(
+        { ...identity, alert_id: currentAlert?.id ?? identity.alert_id },
+        decision,
+      );
       onToast(
         'success',
         decision === 'deny'
@@ -141,6 +147,26 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
   const socks = sec.socks_proxy;
   const pairing = sec.panel_pairing;
+  const activeActionableAlert = activeAlerts.find((alert) => {
+    if (
+      alert.host_id !== identity.host_id ||
+      alert.runtime !== identity.runtime ||
+      (alert.project || '') !== (identity.project || '') ||
+      alert.container_name !== identity.container_name ||
+      alert.status !== 'active'
+    ) return false;
+    const details = alert.details || {};
+    if (alert.type === 'socks_weak_auth') {
+      return ['no_auth', 'weak_password'].includes(details.socks_auth_mode) && (details.socks_processes || []).length > 0;
+    }
+    if (alert.type === 'unauthorized_panel_pairing') {
+      return (details.process_patterns || []).length > 0 || (details.config_files || []).length > 0;
+    }
+    if (alert.type === 'malicious_process') {
+      return (details.malicious_processes || []).some((item: any) => item?.process === 'xmrig');
+    }
+    return false;
+  });
   const confirmationCopy = pendingDecision === 'release_udp_throttle'
     ? { title: '确认立即解除 UDP 限速？', description: `将立即移除 ${identity.container_name} 的 Linux tc 限速规则并恢复全速。`, confirmLabel: '解除限速', tone: 'primary' as const }
     : pendingDecision === 'deny'
@@ -426,7 +452,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <div className="mt-1 font-semibold">
                     {socks?.detected ? (
                       <span className="text-amber-400">
-                        已检测 · {socks.auth_mode === 'no_auth' ? '无认证 (高危)' : socks.auth_mode}
+                        已检测 · {socks.auth_mode === 'no_auth' ? '无认证 (高危)' : socks.auth_mode === 'weak_password' ? '弱密码 (高危)' : socks.auth_mode}
                         {socks.public_exposure && ' · 公网暴露'}
                       </span>
                     ) : (
@@ -451,8 +477,9 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               </div>
 
               {/* If Risk is detected in SOCKS or Panel, show Quick Disposition Controls */}
-              {((socks?.detected && (socks.auth_mode === 'no_auth' || socks.auth_mode === 'weak_password')) ||
-                (pairing?.detected && !pairing.approved)) && (
+              {activeActionableAlert &&
+                ((socks?.detected && (socks.auth_mode === 'no_auth' || socks.auth_mode === 'weak_password')) ||
+                  (pairing?.detected && !pairing.approved)) && (
                 <div className="rounded-xl border border-rose-500/50 bg-rose-950/40 p-3.5 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-rose-300 font-bold text-xs">
@@ -463,6 +490,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <p className="text-[11px] text-slate-300">
                     {socks?.detected && socks.auth_mode === 'no_auth'
                       ? '当前容器正在运行开放且无认证的 SOCKS 代理服务，极易被利用为跳板。'
+                      : socks?.detected && socks.auth_mode === 'weak_password'
+                      ? '当前容器正在运行弱密码 SOCKS 代理服务，容易被撞库后滥用为跳板。'
                       : pairing?.detected && !pairing.approved
                       ? '当前容器检测到未经放行的第三方机场节点对接活动与内部特征。'
                       : '检测到运行风险，建议定向处置或加入安全白名单。'}

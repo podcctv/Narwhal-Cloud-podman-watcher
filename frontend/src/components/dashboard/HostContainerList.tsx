@@ -38,6 +38,8 @@ interface HostContainerListProps {
 
 export interface ContainerRiskInfo {
   hasRisk: boolean;
+  canRemediate: boolean;
+  actionableAlert: SecurityAlert | null;
   isCritical: boolean;
   isWarning: boolean;
   reasons: string[];
@@ -49,7 +51,15 @@ export function evaluateContainerRisk(
   activeAlerts: SecurityAlert[] = []
 ): ContainerRiskInfo {
   if (container.alerts?.stale) {
-    return { hasRisk: false, isCritical: false, isWarning: false, reasons: [], sortWeight: 0 };
+    return {
+      hasRisk: false,
+      canRemediate: false,
+      actionableAlert: null,
+      isCritical: false,
+      isWarning: false,
+      reasons: [],
+      sortWeight: 0,
+    };
   }
   const reasons: string[] = [];
   let sortWeight = 0;
@@ -58,10 +68,27 @@ export function evaluateContainerRisk(
   const matchingAlerts = activeAlerts.filter(
     (a) =>
       a.host_id === container.host_id &&
+      a.runtime === container.runtime &&
       a.container_name === container.container_name &&
-      (!a.project || !container.project || a.project === container.project) &&
+      (a.project || '') === (container.project || '') &&
       a.status === 'active'
   );
+
+  const isActionable = (alert: SecurityAlert) => {
+    if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
+    const details = alert.details || {};
+    if (alert.type === 'unauthorized_panel_pairing') {
+      return (details.process_patterns || []).length > 0 || (details.config_files || []).length > 0;
+    }
+    if (alert.type === 'socks_weak_auth') {
+      return ['no_auth', 'weak_password'].includes(details.socks_auth_mode) && (details.socks_processes || []).length > 0;
+    }
+    if (alert.type === 'malicious_process') {
+      return (details.malicious_processes || []).some((item: any) => item?.process === 'xmrig');
+    }
+    return false;
+  };
+  const actionableAlert = matchingAlerts.find(isActionable) || null;
 
   for (const alert of matchingAlerts) {
     if (alert.severity === 'critical') {
@@ -137,6 +164,8 @@ export function evaluateContainerRisk(
 
   return {
     hasRisk,
+    canRemediate: Boolean(actionableAlert),
+    actionableAlert,
     isCritical,
     isWarning,
     reasons: Array.from(new Set(reasons)),
@@ -532,6 +561,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                     /* 2. Data Table Mode: Enterprise ultra-dense rows */
                     <ContainerTableView
                       containers={filteredContainers}
+                      activeAlerts={activeAlerts}
                       onSelect={onSelectContainer}
                       onQuickDisposition={(target, decision) =>
                         setPendingDisposition({ target, decision })
@@ -761,67 +791,82 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
                             {/* Actions Footer */}
                             <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center justify-end gap-1.5">
-                              {risk.hasRisk && (
-                                <>
-                                  <button
-                                    type="button"
-                                    disabled={submittingKey === key}
-                                    onClick={() =>
-                                      setPendingDisposition({
-                                        target: {
-                                          host_id: c.host_id,
-                                          runtime: c.runtime,
-                                          project: c.project,
-                                          container_name: c.container_name,
-                                        },
-                                        decision: 'deny',
-                                      })
-                                    }
-                                    className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900 transition-colors disabled:opacity-50"
-                                    title="定向处置已识别的风险"
-                                  >
-                                    <Ban className="h-3 w-3" />
-                                    <span>处置</span>
-                                  </button>
+                        {risk.canRemediate ? (
+                          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                            <button
+                              type="button"
+                              disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPendingDisposition({
+                                  target: { host_id: c.host_id, runtime: c.runtime, project: c.project, container_name: c.container_name, alert_id: risk.actionableAlert?.id },
+                                  decision: 'deny',
+                                });
+                              }}
+                              className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-sm"
+                              title="定向处置违规进程或停止非合规服务"
+                            >
+                              <Ban className="h-3 w-3" />
+                              <span>
+                                {submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`
+                                  ? '处理中...'
+                                  : '定向处置'}
+                              </span>
+                            </button>
 
-                                  <button
-                                    type="button"
-                                    disabled={submittingKey === key}
-                                    onClick={() =>
-                                      setPendingDisposition({
-                                        target: {
-                                          host_id: c.host_id,
-                                          runtime: c.runtime,
-                                          project: c.project,
-                                          container_name: c.container_name,
-                                        },
-                                        decision: 'allow_silent',
-                                      })
-                                    }
-                                    className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors disabled:opacity-50"
-                                    title="持续放行不再提醒"
-                                  >
-                                    <Check className="h-3 w-3 text-emerald-400" />
-                                    <span>放行</span>
-                                  </button>
-                                </>
-                              )}
+                            <button
+                              type="button"
+                              disabled={submittingKey === `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPendingDisposition({
+                                  target: { host_id: c.host_id, runtime: c.runtime, project: c.project, container_name: c.container_name, alert_id: risk.actionableAlert?.id },
+                                  decision: 'allow_silent',
+                                });
+                              }}
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+                              title="添加放行策略不再告警"
+                            >
+                              <Check className="h-3 w-3 text-emerald-400" />
+                              <span>放行</span>
+                            </button>
 
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  onSelectContainer({
-                                    host_id: c.host_id,
-                                    runtime: c.runtime,
-                                    project: c.project,
-                                    container_name: c.container_name,
-                                  })
-                                }
-                                className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-medium text-sky-400 hover:border-sky-500 hover:text-sky-300 transition-colors"
-                              >
-                                <Sparkles className="h-3 w-3" />
-                                <span>排查</span>
-                              </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onSelectContainer({
+                                  host_id: c.host_id,
+                                  runtime: c.runtime,
+                                  project: c.project,
+                                  container_name: c.container_name,
+                                  alert_id: risk.actionableAlert?.id,
+                                })
+                              }
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400"
+                              title="查看容器详细指标与诊断"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              <span>排查</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onSelectContainer({
+                                host_id: c.host_id,
+                                runtime: c.runtime,
+                                project: c.project,
+                                container_name: c.container_name,
+                                alert_id: risk.actionableAlert?.id,
+                              })
+                            }
+                            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 text-sky-400 px-3 py-1.5 text-xs font-semibold hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 shadow-sm"
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            <span>深度排查</span>
+                          </button>
+                        )}
                             </div>
                           </div>
                         );

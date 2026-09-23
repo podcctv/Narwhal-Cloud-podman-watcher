@@ -14,6 +14,21 @@ import { api } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 
+const hasActionEvidence = (alert: SecurityAlert): boolean => {
+  if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
+  const details = alert.details || {};
+  if (alert.type === 'unauthorized_panel_pairing') {
+    return (details.process_patterns || []).length > 0 || (details.config_files || []).length > 0;
+  }
+  if (alert.type === 'socks_weak_auth') {
+    return ['no_auth', 'weak_password'].includes(details.socks_auth_mode) && (details.socks_processes || []).length > 0;
+  }
+  if (alert.type === 'malicious_process') {
+    return (details.malicious_processes || []).some((item: any) => item?.process === 'xmrig');
+  }
+  return false;
+};
+
 interface SecurityAlertSectionProps {
   alerts: SecurityAlert[];
   onRefresh: () => void;
@@ -128,11 +143,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
             ? `${alert.runtime}/${alert.project}`
             : alert.runtime;
           const isActionFailed = alert.latest_action?.status === 'failed';
-          const canRemediate =
-            (alert.runtime === 'incus' || alert.runtime === 'podman') &&
-            (alert.type === 'unauthorized_panel_pairing' ||
-              alert.type === 'socks_weak_auth' ||
-              alert.type === 'malicious_process');
+          const canRemediate = hasActionEvidence(alert);
 
           return (
             <div

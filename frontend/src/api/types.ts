@@ -316,6 +316,8 @@ export interface ContainerIdentity {
   runtime: string;
   project?: string;
   container_name: string;
+  /** Explicit security alert selected for a targeted disposition. */
+  alert_id?: number;
 }
 
 export interface NotificationBot {

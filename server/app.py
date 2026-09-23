@@ -582,6 +582,11 @@ def tls_ca(
 
 
 _SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
+_ACTIONABLE_ALERT_TYPES = {
+    "unauthorized_panel_pairing",
+    "socks_weak_auth",
+    "malicious_process",
+}
 
 
 def _alert_fingerprint(host_id: str, alert: Dict[str, Any]) -> str:
@@ -2691,28 +2696,59 @@ def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
     details["process_patterns"] = process_patterns
     details["process_pids"] = process_pids
     details["config_files"] = config_files
-    details["socks_auth_mode"] = (
-        str(details.get("socks_auth_mode") or "unknown")
-        if str(details.get("socks_auth_mode") or "unknown")
-        in ("no_auth", "weak_password", "configured", "unknown")
-        else "unknown"
-    )
+    # Older clients used ``weak``/``weak-auth`` and some reports called this
+    # field ``socks_auth_state``.  Keep the enforcement contract canonical so
+    # those alerts can still be handled safely without accepting arbitrary
+    # user supplied process names.
+    raw_auth_mode = str(
+        details.get("socks_auth_mode") or details.get("socks_auth_state") or "unknown"
+    ).strip().lower().replace("-", "_").replace(" ", "_")
+    auth_mode_aliases = {
+        "weak": "weak_password",
+        "weak_auth": "weak_password",
+        "weak_password": "weak_password",
+        "noauth": "no_auth",
+        "no_auth": "no_auth",
+        "none": "no_auth",
+        "configured": "configured",
+        "unknown": "unknown",
+    }
+    details["socks_auth_mode"] = auth_mode_aliases.get(raw_auth_mode, "unknown")
     allowed_socks_processes = {
         "microsocks", "sockd", "danted", "srelay", "hev-socks5-server",
         "3proxy", "gost", "xray", "v2ray", "sing-box",
     }
     socks_config_files = clean(details.get("socks_config_files"))
     socks_processes = [
-        item
+        item.lower()
         for item in clean(details.get("socks_processes"))
         if item.lower() in allowed_socks_processes
     ]
+    # A short-lived compatibility window for pre-1.6 clients which retained
+    # process_matches but did not copy the safe process list into the alert.
+    # Only allowlisted executable names and confirmed weak states are retained.
+    legacy_matches = details.get("socks_process_matches")
+    if isinstance(legacy_matches, list):
+        for item in legacy_matches:
+            if not isinstance(item, dict):
+                continue
+            process = str(item.get("process") or "").strip().lower()
+            state = str(item.get("auth_state") or item.get("auth_mode") or details["socks_auth_mode"])
+            state = auth_mode_aliases.get(
+                state.strip().lower().replace("-", "_").replace(" ", "_"), "unknown"
+            )
+            if process in allowed_socks_processes and state in ("no_auth", "weak_password"):
+                socks_processes.append(process)
+    socks_processes = sorted(set(socks_processes))
     if (
         not socks_processes
         and details["socks_auth_mode"] in ("no_auth", "weak_password")
-        and socks_config_files
     ):
-        process_match = re.search(r"(?:^|[；;])\s*进程\s*([^；;]+)", message)
+        process_match = re.search(
+            r"(?:^|[；;，,\n])\s*(?:进程|process)\s*(?:[:=：])?\s*([^；;，,\n]+)",
+            message,
+            flags=re.IGNORECASE,
+        )
         message_processes = (
             re.split(r"[,，\s]+", process_match.group(1).strip())
             if process_match
@@ -2991,9 +3027,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     action = None
     queued = False
     if decision == "deny":
-        if alert["alert_type"] not in (
-            "unauthorized_panel_pairing", "socks_weak_auth", "malicious_process"
-        ):
+        if alert["alert_type"] not in _ACTIONABLE_ALERT_TYPES:
             conn.close()
             raise HTTPException(
                 status_code=400,
@@ -3170,6 +3204,15 @@ async def set_container_disposition(request: Request) -> JSONResponse:
     project = str(payload.get("project") or "").strip()[:100]
     container_name = str(payload.get("container_name") or "").strip()[:200]
     decision = str(payload.get("decision") or "").strip().lower()
+    raw_alert_id = payload.get("alert_id")
+    alert_id = None
+    if raw_alert_id not in (None, ""):
+        try:
+            alert_id = int(raw_alert_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="alert_id must be an integer")
+        if alert_id <= 0:
+            raise HTTPException(status_code=400, detail="alert_id must be positive")
     if not host_id or not runtime or not container_name:
         raise HTTPException(
             status_code=400, detail="host_id, runtime, and container_name are required"
@@ -3178,50 +3221,112 @@ async def set_container_disposition(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="invalid decision")
 
     conn = db()
-    alert = conn.execute(
-        """
-        SELECT * FROM security_alerts
-        WHERE host_id=? AND runtime=? AND (project=? OR project='' OR ?='') AND container_name=?
-        ORDER BY (CASE WHEN status='active' THEN 0 ELSE 1 END), id DESC
-        LIMIT 1
-        """,
-        (host_id, runtime, project, project, container_name),
-    ).fetchone()
-    if alert is not None:
-        conn.close()
-        return await set_security_alert_disposition(alert["id"], request)
+    try:
+        identity = (host_id, runtime, project, container_name)
+        selected_alert_id = None
+        if alert_id is not None:
+            alert = conn.execute(
+                "SELECT * FROM security_alerts WHERE id=?", (alert_id,)
+            ).fetchone()
+            if alert is None:
+                raise HTTPException(status_code=404, detail="alert not found")
+            alert_identity = (
+                str(alert["host_id"] or ""),
+                str(alert["runtime"] or ""),
+                str(alert["project"] or ""),
+                str(alert["container_name"] or ""),
+            )
+            if (
+                alert_identity[0] != identity[0]
+                or alert_identity[1] != identity[1]
+                or alert_identity[3] != identity[3]
+                or (
+                    alert_identity[2]
+                    and identity[2]
+                    and alert_identity[2] != identity[2]
+                )
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="alert_id 与目标主机、运行时、项目或容器不匹配",
+                )
+            selected_alert_id = int(alert["id"])
+        else:
+            # Never let a generic DDoS/connection alert win just because it is
+            # newer than the actionable SOCKS/panel alert the user clicked.
+            # The frontend normally sends alert_id; this fallback keeps the
+            # drawer compatible with older clients.
+            actionable_types = tuple(sorted(_ACTIONABLE_ALERT_TYPES))
+            placeholders = ",".join("?" for _ in actionable_types)
+            alert = conn.execute(
+                f"""
+                SELECT * FROM security_alerts
+                WHERE host_id=? AND runtime=?
+                  AND (project=? OR project='' OR ?='')
+                  AND container_name=?
+                  AND status='active' AND alert_type IN ({placeholders})
+                ORDER BY id DESC LIMIT 1
+                """,
+                (host_id, runtime, project, project, container_name, *actionable_types),
+            ).fetchone()
+            if alert is None and decision == "resolve":
+                # Resolve is a generic acknowledgement action; it may be used
+                # for a non-remediable telemetry alert from the drawer.
+                alert = conn.execute(
+                    """
+                    SELECT * FROM security_alerts
+                    WHERE host_id=? AND runtime=?
+                      AND (project=? OR project='' OR ?='')
+                      AND container_name=?
+                      AND status='active'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (host_id, runtime, project, project, container_name),
+                ).fetchone()
+            if alert is not None:
+                selected_alert_id = int(alert["id"])
 
-    if decision in ("release_udp_throttle", "apply_udp_throttle"):
-        now = int(time.time())
-        action_type = decision
-        params = {"rate_mbps": 10, "duration": 3600} if decision == "apply_udp_throttle" else {}
-        requested_by = str(
-            getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard")
-        )[:100]
-        cur = conn.execute(
-            """
-            INSERT INTO security_actions(
-                alert_id, host_id, runtime, project, container_name, action_type, params_json,
-                status, requested_by, created_at, updated_at
-            ) VALUES(0,?,?,?,?,?,?,'queued',?,?,?)
-            """,
-            (host_id, runtime, project, container_name, action_type, json.dumps(params), requested_by, now, now),
-        )
-        action_row = conn.execute("SELECT * FROM security_actions WHERE id=?", (cur.lastrowid,)).fetchone()
-        conn.commit()
-        conn.close()
-        return JSONResponse(
-            status_code=202,
-            content={
-                "ok": True,
-                "decision": decision,
-                "queued": True,
-                "action": _action_item(action_row) if action_row is not None else None,
-            },
-        )
+        if selected_alert_id is not None:
+            conn.close()
+            return await set_security_alert_disposition(selected_alert_id, request)
 
-    conn.close()
-    raise HTTPException(status_code=404, detail="未找到该容器对应的安全告警记录")
+        if decision in ("release_udp_throttle", "apply_udp_throttle"):
+            now = int(time.time())
+            action_type = decision
+            params = {"rate_mbps": 10, "duration": 3600} if decision == "apply_udp_throttle" else {}
+            requested_by = str(
+                getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard")
+            )[:100]
+            cur = conn.execute(
+                """
+                INSERT INTO security_actions(
+                    alert_id, host_id, runtime, project, container_name, action_type, params_json,
+                    status, requested_by, created_at, updated_at
+                ) VALUES(0,?,?,?,?,?,?,'queued',?,?,?)
+                """,
+                (host_id, runtime, project, container_name, action_type, json.dumps(params, ensure_ascii=False), requested_by, now, now),
+            )
+            action_row = conn.execute("SELECT * FROM security_actions WHERE id=?", (cur.lastrowid,)).fetchone()
+            conn.commit()
+            conn.close()
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "ok": True,
+                    "decision": decision,
+                    "queued": True,
+                    "action": _action_item(action_row) if action_row is not None else None,
+                },
+            )
+        if alert is None:
+            raise HTTPException(
+                status_code=404,
+                detail="未找到该容器对应的可处置活动安全告警记录",
+            )
+        selected_alert_id = int(alert["id"])
+    finally:
+        conn.close()
+    return await set_security_alert_disposition(selected_alert_id, request)
 
 
 @app.post("/api/v1/hosts/{host_id}/config")
@@ -3409,8 +3514,14 @@ def security_alerts(active_only: bool = True, limit: int = 200) -> JSONResponse:
     conn = db()
     if active_only:
         rows = conn.execute(
-            "SELECT * FROM security_alerts WHERE status='active' ORDER BY last_seen DESC LIMIT ?",
-            (limit,),
+            """
+            SELECT a.* FROM security_alerts a
+            LEFT JOIN hosts h ON h.host_id=a.host_id
+            WHERE a.status='active'
+              AND (a.container_name<>'' OR h.host_id IS NULL OR h.last_seen>=?)
+            ORDER BY a.last_seen DESC, a.id DESC LIMIT ?
+            """,
+            (int(time.time()) - STALE_SECONDS, limit),
         ).fetchall()
     else:
         rows = conn.execute(
@@ -3463,9 +3574,9 @@ def security_alert_history(
     if query:
         like_query = f"%{query}%"
         clauses.append(
-            "(host_id LIKE ? OR container_name LIKE ? OR title LIKE ? OR message LIKE ?)"
+            "(host_id LIKE ? OR container_name LIKE ? OR title LIKE ? OR message LIKE ? OR details_json LIKE ?)"
         )
-        params.extend([like_query, like_query, like_query, like_query])
+        params.extend([like_query, like_query, like_query, like_query, like_query])
     where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     conn = db()
     total = int(

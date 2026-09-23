@@ -79,17 +79,26 @@ export const App: React.FC = () => {
       setContainers(liveContainers);
       setServerVersion(latestRes.server_version || 'dev');
       const alertItems = alertsRes.items || alertsRes.alerts || [];
-      // Host-level alerts have no container identity and remain visible. A
-      // container-specific alert is actionable only while that container has
-      // a current live sample in this dashboard response.
-      setActiveAlerts(alertItems.filter((alert) => !alert.container_name || liveContainers.some((container) =>
-        container.host_id === alert.host_id &&
-        container.runtime === alert.runtime &&
-        (container.project || '') === (alert.project || '') &&
-        container.container_name === alert.container_name &&
-        !container.alerts?.stale
-      )));
-      setSecurityStatus(secStatusRes.items || []);
+      const liveSecurityStatus = secStatusRes.items || [];
+      const securityByHost = new Map(liveSecurityStatus.map((item) => [item.host_id, item]));
+      // A host-level alert is live only while the host heartbeat is fresh. A
+      // container alert also needs an exact runtime/project/container match;
+      // this prevents a stale alert or same-name container in another runtime
+      // from becoming an actionable risk card.
+      setActiveAlerts(alertItems.filter((alert) => {
+        if (!alert.container_name) {
+          const host = securityByHost.get(alert.host_id);
+          return Boolean(host && !host.stale);
+        }
+        return liveContainers.some((container) =>
+          container.host_id === alert.host_id &&
+          container.runtime === alert.runtime &&
+          (container.project || '') === (alert.project || '') &&
+          container.container_name === alert.container_name &&
+          !container.alerts?.stale
+        );
+      }));
+      setSecurityStatus(liveSecurityStatus);
 
       const now = new Date();
       setLastRefreshTime(
@@ -246,6 +255,7 @@ export const App: React.FC = () => {
       {/* Slide-over Container Drawer */}
       <ContainerDrawer
         identity={selectedContainer}
+        activeAlerts={activeAlerts}
         onClose={() => setSelectedContainer(null)}
         serverVersion={serverVersion}
         onToast={addToast}

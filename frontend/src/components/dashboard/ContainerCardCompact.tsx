@@ -46,6 +46,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
     runtime: c.runtime,
     project: c.project,
     container_name: c.container_name,
+    alert_id: risk.actionableAlert?.id,
   };
 
   // Card theme based on risk severity
@@ -284,7 +285,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
 
         {/* Right: Action Buttons */}
         <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-          {risk.hasRisk && onQuickDisposition && (
+          {risk.canRemediate && onQuickDisposition && (
             <button
               type="button"
               disabled={isSubmitting}

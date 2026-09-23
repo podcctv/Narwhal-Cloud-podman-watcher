@@ -18,7 +18,7 @@ const tones: Record<Level, string> = {
 };
 const labels: Record<Level, string> = { normal: '正常', warning: '警告', critical: '危险', unknown: '未评估' };
 const thresholdLevel = (value: number, warning: number, critical: number): Level =>
-  value > critical ? 'critical' : value > warning ? 'warning' : 'normal';
+  value >= critical ? 'critical' : value >= warning ? 'warning' : 'normal';
 const signalLevel = (t: SecurityStatusItem, pattern: RegExp): Level => {
   if (!t.enabled || t.stale) return 'unknown';
   const matches = (t.sample_alerts || []).filter(a => pattern.test(a.type || ''));
@@ -128,7 +128,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             <Signal title="今日单容器峰值" level={peakLevel}>
               <p><span className={peakTone(connPeak, connWarning, connCritical)}>最高连接 {fmtNumber(connPeak, 0)}</span> · <span className="text-slate-300">全容器合计峰值 {fmtNumber(t.today_peak_conn_count, 0)}</span></p>
               <p><span className={peakTone(t.today_peak_inbound_ips, ipWarning, ipCritical)}>最高入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}</span> · <span className="text-slate-300">最高出站 IP {fmtNumber(t.today_peak_outbound_ips, 0)}</span></p>
-              <p className="text-slate-300">连接 &gt; {connWarning} / {connCritical}、入站 IP &gt; {ipWarning} / {ipCritical}：警告 / 危险。</p>
+              <p className="text-slate-300">连接 ≥ {connWarning} / {connCritical}、入站 IP ≥ {ipWarning} / {ipCritical}：警告 / 危险。</p>
               <p className="text-slate-300">UTC+8 当日采样最大值；各项可能来自不同容器。推送使用触发当时的单容器值，峰值不代表当前仍异常。</p>
             </Signal>
           </div>

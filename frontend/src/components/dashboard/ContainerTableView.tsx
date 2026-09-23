@@ -12,12 +12,13 @@ import {
   ArrowDown,
   Gauge,
 } from 'lucide-react';
-import { ContainerItem, ContainerIdentity } from '../../api/types';
+import { ContainerItem, ContainerIdentity, SecurityAlert } from '../../api/types';
 import { fmtBytes, fmtMbps } from '../../api/client';
 import { evaluateContainerRisk } from './HostContainerList';
 
 interface ContainerTableViewProps {
   containers: ContainerItem[];
+  activeAlerts?: SecurityAlert[];
   onSelect: (id: ContainerIdentity) => void;
   onQuickDisposition?: (target: ContainerIdentity, decision: 'deny' | 'allow_silent') => void;
   isSubmitting?: boolean;
@@ -28,6 +29,7 @@ type SortOrder = 'asc' | 'desc';
 
 export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
   containers,
+  activeAlerts = [],
   onSelect,
   onQuickDisposition,
   isSubmitting = false,
@@ -47,8 +49,8 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
   const sortedContainers = useMemo(() => {
     const list = [...containers];
     list.sort((a, b) => {
-      const riskA = evaluateContainerRisk(a);
-      const riskB = evaluateContainerRisk(b);
+      const riskA = evaluateContainerRisk(a, activeAlerts);
+      const riskB = evaluateContainerRisk(b, activeAlerts);
 
       let valA: number | string = 0;
       let valB: number | string = 0;
@@ -91,7 +93,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
       return sortOrder === 'asc' ? Number(valA) - Number(valB) : Number(valB) - Number(valA);
     });
     return list;
-  }, [containers, sortField, sortOrder]);
+  }, [containers, activeAlerts, sortField, sortOrder]);
 
   const renderSortIndicator = (field: SortField) => {
     if (sortField !== field) {
@@ -179,7 +181,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
         </thead>
         <tbody className="divide-y divide-slate-800/60 font-mono">
           {sortedContainers.map((c) => {
-            const risk = evaluateContainerRisk(c);
+            const risk = evaluateContainerRisk(c, activeAlerts);
             const isStale = Boolean(c.alerts?.stale);
             const cpu = c.cpu_percent || 0;
             const mem = c.mem_percent || 0;
@@ -194,6 +196,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
               runtime: c.runtime,
               project: c.project,
               container_name: c.container_name,
+              alert_id: risk.actionableAlert?.id,
             };
 
             let rowBg = 'hover:bg-slate-900/70 transition-colors';
@@ -384,7 +387,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-end gap-1.5">
-                    {risk.hasRisk && onQuickDisposition && (
+                    {risk.canRemediate && onQuickDisposition && (
                       <button
                         type="button"
                         disabled={isSubmitting}

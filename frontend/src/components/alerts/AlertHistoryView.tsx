@@ -13,6 +13,21 @@ import { SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 
+const hasActionEvidence = (alert: SecurityAlert): boolean => {
+  if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
+  const details = alert.details || {};
+  if (alert.type === 'unauthorized_panel_pairing') {
+    return (details.process_patterns || []).length > 0 || (details.config_files || []).length > 0;
+  }
+  if (alert.type === 'socks_weak_auth') {
+    return ['no_auth', 'weak_password'].includes(details.socks_auth_mode) && (details.socks_processes || []).length > 0;
+  }
+  if (alert.type === 'malicious_process') {
+    return (details.malicious_processes || []).some((item: any) => item?.process === 'xmrig');
+  }
+  return false;
+};
+
 interface AlertHistoryViewProps {
   onToast: (type: 'success' | 'error' | 'info', message: string) => void;
   onBackToDashboard: () => void;
@@ -245,11 +260,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
         ) : (
           items.map((alert) => {
             const isHistorical = alert.status !== 'active';
-            const canRemediate =
-              (alert.runtime === 'incus' || alert.runtime === 'podman') &&
-              (alert.type === 'unauthorized_panel_pairing' ||
-                alert.type === 'socks_weak_auth' ||
-                alert.type === 'malicious_process');
+            const canRemediate = hasActionEvidence(alert);
 
             return (
               <div
