@@ -1952,6 +1952,16 @@ class SecurityTelemetryTests(unittest.TestCase):
     def test_hy2_compound_throttle_and_laddered_penalties(self):
         # Clear throttle state before test
         agent._hy2_throttle_states.clear()
+        clock = mock.patch.object(agent.time, 'time', return_value=time.time())
+        mocked_time = clock.start()
+        self.addCleanup(clock.stop)
+        for method in ('apply_udp_throttle', 'release_udp_throttle'):
+            patcher = mock.patch.object(agent, method, return_value=(True, 'ok'))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        def sample(containers, interval):
+            mocked_time.return_value += 100
+            return agent.collect_security_summary(containers, interval)
 
         # 1. Balanced traffic exemption test
         # 50 Mbps bandwidth, but ratio is 1.1x (balanced), concurrency 300
@@ -1971,7 +1981,7 @@ class SecurityTelemetryTests(unittest.TestCase):
             },
         }
         for _ in range(5):
-            res = agent.collect_security_summary([balanced_container], 15.0)
+            res = sample([balanced_container], 15.0)
         self.assertFalse(balanced_container.get("alerts", {}).get("udp_throttled", False))
         self.assertNotIn("c_balanced", [a.get("container_name") for a in res.get("alerts", []) if a.get("type") == "hy2_abnormal_throttle"])
 
@@ -1992,7 +2002,7 @@ class SecurityTelemetryTests(unittest.TestCase):
             },
         }
         for _ in range(5):
-            res = agent.collect_security_summary([low_conn_container], 15.0)
+            res = sample([low_conn_container], 15.0)
         self.assertFalse(low_conn_container.get("alerts", {}).get("udp_throttled", False))
 
         # 3. Compound violation test: high bandwidth (30Mbps) + high asymmetry (60x) + high concurrency (200 >= 150)
@@ -2014,15 +2024,15 @@ class SecurityTelemetryTests(unittest.TestCase):
         }
 
         # Cycle 1: consecutive count = 1, not throttled yet
-        agent.collect_security_summary([abusive_container], 15.0)
+        sample([abusive_container], 15.0)
         self.assertFalse(abusive_container.get("alerts", {}).get("udp_throttled", False))
 
         # Cycle 2: consecutive count = 2, not throttled yet
-        agent.collect_security_summary([abusive_container], 15.0)
+        sample([abusive_container], 15.0)
         self.assertFalse(abusive_container.get("alerts", {}).get("udp_throttled", False))
 
         # Cycle 3: consecutive count = 3, FIRST penalty triggered (10Mbps for 1 hour = 3600s)
-        agent.collect_security_summary([abusive_container], 15.0)
+        sample([abusive_container], 15.0)
         self.assertTrue(abusive_container.get("alerts", {}).get("udp_throttled"))
         self.assertEqual(abusive_container["alerts"]["udp_throttle_rate_mbps"], 10)
         self.assertEqual(abusive_container["alerts"]["udp_throttle_violation_count"], 1)
@@ -2033,14 +2043,14 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertIn(state_key, agent._hy2_throttle_states)
         # Advance time by setting throttled_until in the past
         agent._hy2_throttle_states[state_key]["throttled_until"] = time.time() - 10
-        agent.collect_security_summary([abusive_container], 15.0)
+        sample([abusive_container], 15.0)
         # Should be auto-released
         self.assertFalse(agent._hy2_throttle_states[state_key]["is_throttled"])
 
         # 5. Second penalty escalation within 24h: 10Mbps for 4 hours (14400s)
         # Need 3 more cycles
         for _ in range(3):
-            agent.collect_security_summary([abusive_container], 15.0)
+            sample([abusive_container], 15.0)
         self.assertTrue(abusive_container.get("alerts", {}).get("udp_throttled"))
         self.assertEqual(abusive_container["alerts"]["udp_throttle_rate_mbps"], 10)
         self.assertEqual(abusive_container["alerts"]["udp_throttle_violation_count"], 2)
@@ -2048,9 +2058,9 @@ class SecurityTelemetryTests(unittest.TestCase):
 
         # 6. Third penalty escalation within 24h: 5Mbps for 24 hours (86400s) + critical severity
         agent._hy2_throttle_states[state_key]["throttled_until"] = time.time() - 10
-        agent.collect_security_summary([abusive_container], 15.0)
+        sample([abusive_container], 15.0)
         for _ in range(3):
-            res = agent.collect_security_summary([abusive_container], 15.0)
+            res = sample([abusive_container], 15.0)
         self.assertTrue(abusive_container.get("alerts", {}).get("udp_throttled"))
         self.assertEqual(abusive_container["alerts"]["udp_throttle_rate_mbps"], 5)
         self.assertEqual(abusive_container["alerts"]["udp_throttle_violation_count"], 3)

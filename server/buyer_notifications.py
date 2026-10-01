@@ -12,6 +12,11 @@ import urllib.parse
 import urllib.request
 import uuid
 from email.utils import parsedate_to_datetime
+try:
+    from . import buyer_mapping, buyer_content
+except ImportError:
+    import buyer_mapping
+    import buyer_content
 
 STATES = {"active": "风险存在", "awaiting_report": "已执行，待复查", "verified": "复查通过",
           "resolved": "告警已关闭（未验证）", "recurring": "风险复发 / 处置失败", "unverified": "证据不足，未确认恢复"}
@@ -44,6 +49,7 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS buyer_cooldowns(machine_id TEXT PRIMARY KEY,next_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS buyer_checks(alert_id INTEGER PRIMARY KEY,episode INTEGER,clean_samples INTEGER DEFAULT 0,last_sample INTEGER,state TEXT);
     """)
+    buyer_mapping.initialize(conn)
 
 
 def setting(conn, key, default=""):
@@ -81,12 +87,13 @@ def save_target(conn, data):
         raise ValueError("enabled 必须是布尔值")
     if conn.execute("SELECT 1 FROM buyer_outbox WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND status='sending' LIMIT 1",fields).fetchone():
         raise ValueError("该容器正在投递，请等待结果后修改收件范围")
-    conn.execute("INSERT INTO buyer_targets VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,scope=excluded.scope,enabled=excluded.enabled",
+    conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,scope,enabled) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,scope=excluded.scope,enabled=excluded.enabled,source='manual',vm_id='',verified_at=0",
                  (*fields, machine, user if scope == "user" else "", clean(data.get("node_name"), 100), scope, int(data.get("enabled", True))))
 
 
-def target(conn, row):
-    return conn.execute("SELECT * FROM buyer_targets WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND enabled=1", tuple(row[k] for k in ("host_id", "runtime", "project", "container_name"))).fetchone()
+def target(conn, row, now=None):
+    now = int(time.time()) if now is None else now
+    return conn.execute("SELECT * FROM buyer_targets WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND enabled=1 AND (source='manual' OR verified_at>=?)", (*tuple(row[k] for k in ("host_id", "runtime", "project", "container_name")), now-buyer_mapping.TTL)).fetchone()
 
 
 def current_state(conn, alert):
@@ -116,26 +123,33 @@ def observe(conn, host, ts, containers, alerts):
         present=(a["alert_type"],a["runtime"],a["project"],a["container_name"]) in observed
         socks=c.get("security",{}).get("socks_proxy",{})
         unknown=a["alert_type"]=="socks_weak_auth" and ("detected" not in socks or (socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}))
+        if a["alert_type"] == "ops_bandwidth_saturation":
+            unknown = not c.get("bandwidth_monitor", {}).get("available", False)
         # Only verify events with an existing observation/remediation history.
         clean_samples=0 if present or unknown else (old["clean_samples"] if old and old["episode"]==a["first_seen"] else 0)+1
         state="awaiting_report" if present and a["status"]=="remediated" else "active" if present else "unverified" if unknown else "verified" if clean_samples>=2 else "awaiting_report"
         conn.execute("INSERT INTO buyer_checks VALUES(?,?,?,?,?) ON CONFLICT(alert_id) DO UPDATE SET episode=excluded.episode,clean_samples=excluded.clean_samples,last_sample=excluded.last_sample,state=excluded.state",(a["id"],a["first_seen"],clean_samples,ts,state))
 
 
-def render(alert, state, node=""):
-    ref = f"NW-{alert['id']}-{alert['first_seen']}"
-    subject = clean(f"[{STATES.get(state, state)}] {node or alert['host_id']}", 200)
-    message = (f"事件 {ref}\n容器 {alert['runtime']}/{alert['project']}/{alert['container_name']}\n"
-               f"状态 {STATES.get(state, state)} | 等级 {alert['severity']}\n"
-               f"问题 {clean(alert['title'], 200)}\n{clean(alert['message'], 700)}\n"
-               f"采样时间 {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(alert['last_seen']))}\n"
-               "请登录排查；执行成功不等于复查通过。持续违规按服务政策处理。")
-    return subject, message
+def render(alert, state, node="", conn=None):
+    action = None
+    if conn is not None:
+        action = conn.execute("SELECT * FROM security_actions WHERE alert_id=? AND created_at>=? "
+                              "AND action_type IN ('remediate_panel_pairing','remediate_malicious_process','enforce_socks_auth','apply_udp_throttle','stop_container') "
+                              "ORDER BY id DESC LIMIT 1", (alert['id'], alert['first_seen'])).fetchone()
+    if action:
+        action = dict(action)
+        receipt = conn.execute('SELECT payload FROM security_action_receipts WHERE action_id=?',(action['id'],)).fetchone()
+        action['items'] = json.loads(receipt[0]) if receipt else []
+    return buyer_content.render(alert, state, node, action)
 
 
 def reconcile(conn, host, now):
     cfg = config(conn)
     for alert in conn.execute("SELECT * FROM security_alerts WHERE host_id=? AND last_seen>=? ORDER BY id DESC LIMIT 1000", (host, now-7*86400)).fetchall():
+        if alert["alert_type"] == "ops_traffic_quota":
+            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
+            continue
         state = current_state(conn, alert)
         # Reconcile pending snapshots: never send stale active warnings after recovery.
         conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='事件状态或等级已变化' WHERE alert_id=? AND (state<>? OR severity<>? OR event_key NOT LIKE ?) AND status IN ('queued','retrying','blocked')", (now, alert["id"], state, alert["severity"], f"{alert['id']}:{alert['first_seen']}:%"))
@@ -147,7 +161,7 @@ def reconcile(conn, host, now):
         if not cfg["enabled"]:
             continue
         t = target(conn, alert)
-        subject, message = render(alert, state, t["node_name"] if t else "")
+        subject, message = render(alert, state, t["node_name"] if t else "", conn)
         event_key = f"{alert['id']}:{alert['first_seen']}:{state}:{alert['severity']}"
         # Bounded outbox protects the monitoring database from notification growth.
         count = conn.execute("SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')").fetchone()[0]
@@ -161,6 +175,8 @@ def reconcile(conn, host, now):
 def banner_states(conn, host):
     states = []
     for a in conn.execute("SELECT * FROM security_alerts WHERE host_id=? AND last_seen>=? ORDER BY id DESC LIMIT 1000", (host, int(time.time())-86400)):
+        if a['alert_type'] == 'ops_traffic_quota':
+            continue
         states.append({"runtime": a["runtime"], "project": a["project"], "name": a["container_name"], "type": a["alert_type"],
                        "event_id": f"NW-{a['id']}-{a['first_seen']}", "state": current_state(conn,a), "updated_at": a["last_seen"]})
     return states
@@ -189,6 +205,17 @@ def validate_url(url, resolve=False):
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None  # Never forward Authorization to a redirected endpoint.
+
+
+def sync_mappings(db, force=False):
+    conn = db()
+    try:
+        cfg = config(conn)
+    finally:
+        conn.close()
+    if not force and not cfg["enabled"]:
+        return {"status": "disabled", "message": "买家推送已停用"}
+    return buyer_mapping.sync(db, cfg, validate_url, lambda: urllib.request.build_opener(NoRedirect), force=force)
 
 
 def deliver(cfg, machine, user, scope, subject, message, batch):
@@ -234,6 +261,7 @@ def work_once(db, now=None, sender=deliver):
     try:
         conn.execute("BEGIN IMMEDIATE")
         # Exactly-once cannot be guaranteed without upstream support. Expired leases
+        conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE status IN ('queued','retrying','blocked') AND alert_id IN (SELECT id FROM security_alerts WHERE alert_type='ops_traffic_quota')", (now,))
         # are surfaced for inspection, never automatically retransmitted.
         conn.execute("UPDATE buyer_outbox SET status='uncertain',last_error='发送进程中断，需核对上游投递结果',updated_at=? WHERE status='sending' AND updated_at<?", (now,now-120))
         conn.execute("DELETE FROM buyer_outbox WHERE id IN (SELECT id FROM buyer_outbox WHERE updated_at<? AND status IN ('succeeded','failed','uncertain','cancelled','expired') LIMIT 500)", (now-90*86400,))
@@ -250,15 +278,20 @@ def work_once(db, now=None, sender=deliver):
             if not a or current_state(conn,a)!=row["state"] or a["severity"]!=row["severity"] or a["first_seen"]!=int(row["event_key"].split(":")[1]) or a["status"] in {"suppressed","dismissed"} or (cfg["min_severity"]=="critical" and a["severity"]!="critical") or (row["state"] in {"resolved","verified"} and not cfg["recovery"]):
                 conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=? WHERE id=?",(now,row["id"]))
                 continue
-            t=target(conn,row)
+            if buyer_content.loads(a["details_json"]).get("data_stale") and row['state'] not in {'verified','resolved'}:
+                conn.execute("UPDATE buyer_outbox SET status='blocked',last_error='异常采样已过期，等待新鲜证据',due_at=?,updated_at=? WHERE id=?", (now+300,now,row['id']))
+                continue
+            t=target(conn,row,now)
             if not t:
-                conn.execute("UPDATE buyer_outbox SET status='blocked',last_error='收件映射缺失或已停用',due_at=?,updated_at=? WHERE id=?",(now+300,now,row["id"]))
+                issue=conn.execute("SELECT reason FROM buyer_mapping_issues WHERE host_id=? AND runtime=? AND project=? AND container_name=?",tuple(row[k] for k in buyer_mapping.IDENTITY)).fetchone()
+                reason=issue[0] if issue else '收件映射缺失、已停用或上游关联已过期'
+                conn.execute("UPDATE buyer_outbox SET status='blocked',last_error=?,due_at=?,updated_at=? WHERE id=?",(reason,now+300,now,row["id"]))
                 continue
             host=conn.execute("SELECT last_seen FROM hosts WHERE host_id=?",(row["host_id"],)).fetchone()
             if host and now-host[0]>900:
                 conn.execute("UPDATE buyer_outbox SET status='blocked',last_error='主机离线，等待新鲜证据',due_at=?,updated_at=? WHERE id=?",(now+300,now,row["id"]))
                 continue
-            subject,message=render(a,row["state"],t["node_name"])
+            subject,message=render(a,row["state"],t["node_name"],conn)
             conn.execute("UPDATE buyer_outbox SET machine_id=?,user_id=?,scope=?,subject=?,message=?,status=CASE WHEN status='blocked' THEN 'queued' ELSE status END WHERE id=?",(t["machine_id"],t["user_id"],t["scope"],subject,message,row["id"]))
             eligible.append(row["id"])
         if not eligible:
@@ -275,13 +308,13 @@ def work_once(db, now=None, sender=deliver):
         # Only acknowledge events actually included in the bounded digest.
         chunks=[]
         for item in candidates:
-            part=item["message"][:700]
+            part=item["message"]
             if sum(len(c) for c in chunks)+len(part)+2*len(chunks)>1900:
                 break
             chunks.append(part)
             ids.append(item["id"])
         message="\n\n".join(chunks)
-        subject=row["subject"] if len(ids)==1 else clean(f"安全事件摘要 ({len(ids)} 项) / {row['host_id']}",200)
+        subject=row["subject"] if len(ids)==1 else clean(f"服务器提醒汇总（{len(ids)} 项）",200)
         batch=hashlib.sha256((row["machine_id"]+":"+",".join(map(str,ids))).encode()).hexdigest()
         conn.executemany("UPDATE buyer_outbox SET status='sending',batch_id=?,attempts=attempts+1,updated_at=? WHERE id=?",[(batch,now,i) for i in ids])
         conn.commit()
@@ -379,9 +412,16 @@ def attach(app, db):
             return {"items":[dict(r) for r in conn.execute("SELECT o.*,COALESCE(c.next_at,0) AS machine_next_at FROM buyer_outbox o LEFT JOIN buyer_cooldowns c ON o.machine_id=c.machine_id ORDER BY o.id DESC LIMIT 100")],
                     "counts":dict(conn.execute("SELECT status,COUNT(*) FROM buyer_outbox GROUP BY status")),
                     "targets":[dict(r) for r in conn.execute("SELECT * FROM buyer_targets LIMIT 1000")],
-                    "hosts":[dict(r) for r in conn.execute("SELECT host_id,runtime,project,container_name FROM reports GROUP BY host_id,runtime,project,container_name LIMIT 1000")]}
+                    "hosts":[dict(r) for r in conn.execute("SELECT host_id,runtime,project,container_name FROM reports GROUP BY host_id,runtime,project,container_name HAVING MAX(ts)>=? LIMIT 1000",(int(time.time())-900,))],
+                    "mapping_sync":buyer_mapping.status(conn),
+                    "mapping_issues":[dict(r) for r in conn.execute("SELECT * FROM buyer_mapping_issues LIMIT 2000")]}
         finally:
             conn.close()
+
+    @app.post("/api/v1/buyer/sync")
+    async def sync():
+        import asyncio
+        return await asyncio.to_thread(sync_mappings, db, True)
 
     @app.post("/api/v1/buyer/targets")
     async def targets(request: Request):

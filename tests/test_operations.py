@@ -84,7 +84,8 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(ops.policy(self.conn,self.entity)["connections"],2000)
         self.ingest(self.now)
         alerts=self.ingest(self.now+300,self.data(1100,2100))
-        self.assertIn("ops_traffic_quota",[a["type"] for a in alerts])
+        self.assertNotIn("ops_traffic_quota",[a["type"] for a in alerts])
+        self.assertEqual(self.usage()[0], 1000)
         self.conn.execute("INSERT INTO ops_policies VALUES(?,?,?,?)",(self.entity,"hy2","{}",self.now))
         self.assertEqual(ops.policy(self.conn,self.entity)["connections"],1500)
 
@@ -292,7 +293,7 @@ class OperationsTests(unittest.TestCase):
         self.ingest(self.now+300,data)
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"verified")
 
-    def test_signed_report_integrates_quota_into_existing_alert_pipeline(self):
+    def test_signed_report_keeps_usage_but_does_not_notify_quota(self):
         self.conn.execute("INSERT INTO ops_policies VALUES(?,?,?,?)",(self.entity,"general",json.dumps({"monthly_quota_bytes":1000}),self.now))
         self.conn.commit()
         with mock.patch.object(server,"send_alert_webhook"),mock.patch.object(server,"sync_configured_bot_alert_messages"),mock.patch.object(server,"dispatch_buyer_notifications_for_alerts"):
@@ -302,7 +303,8 @@ class OperationsTests(unittest.TestCase):
             second=self.data(2100,2100)
             second.update(host_id="h",node_id="node",timestamp=self.now+300)
             self.assertEqual(self.request("/api/v1/report","POST",second,signed=True)[0],200)
-        self.assertEqual(self.conn.execute("SELECT alert_type FROM security_alerts WHERE alert_type='ops_traffic_quota'").fetchone()[0],"ops_traffic_quota")
+        self.assertIsNone(self.conn.execute("SELECT alert_type FROM security_alerts WHERE alert_type='ops_traffic_quota'").fetchone())
+        self.assertGreater(self.usage()[0], 0)
 
     def test_service_failure_creates_alert_and_recovers(self):
         self.conn.execute("INSERT INTO ops_services VALUES(1,'h','service','{}',1)")

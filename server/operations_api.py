@@ -131,9 +131,10 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         if profile not in ops.PROFILES:
             raise HTTPException(400, "unknown profile")
         rules = payload.get("rules", {})
-        if not isinstance(rules,dict) or set(rules)-{"connections","rx_bps","http_rps","baseline_factor","monthly_quota_bytes","quota_warning","silent_until"}:
+        if not isinstance(rules,dict) or set(rules)-{"connections","rx_bps","http_rps","baseline_factor","monthly_quota_bytes","quota_warning","silent_until","bandwidth_mbps","bandwidth_ratio","bandwidth_duration_seconds"}:
             raise HTTPException(400, "unknown policy field")
         bounds = {"connections": (1,1000000), "rx_bps": (1,1e12), "http_rps": (1,1e6), "baseline_factor": (2,20), "monthly_quota_bytes": (0,1e18), "quota_warning": (.1,1), "silent_until": (0,time.time()+86400)}
+        bounds.update(bandwidth_mbps=(0,1_000_000),bandwidth_ratio=(.5,1),bandwidth_duration_seconds=(600,86400))
         for key,value in rules.items():
             try:
                 n = float(value)
@@ -149,7 +150,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         entity,profile,rules = await policy_input(request)
         conn = db()
         try:
-            return {"entity": entity, "before": ops.policy(conn, entity), "after": {**ops.PROFILES[profile], **rules}, "scope": "网络观测/基线/配额，不解除弱认证与恶意进程处置"}
+            return {"entity": entity, "before": ops.policy(conn, entity), "after": {**ops.PROFILES[profile], 'bandwidth_mbps':0, 'bandwidth_ratio':.9, 'bandwidth_duration_seconds':600, **rules}, "scope": "网络观测/基线/持续带宽提醒；实例带宽不继承主机值；不提醒流量额度，不自动停机，不解除弱认证与恶意进程处置"}
         finally:
             conn.close()
 

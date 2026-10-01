@@ -961,6 +961,7 @@ def _collect_socket_process_details(
     listening = {int(port) for port in listening_ports if int(port) > 0}
     sockets: List[Dict[str, object]] = []
     process_totals: Dict[Tuple[int, str], Dict[str, object]] = {}
+    service_listeners: List[Dict[str, object]] = []
 
     for line in lines:
         parts = line.split(None, 6)
@@ -975,6 +976,12 @@ def _collect_socket_process_details(
         process_text = parts[6] if len(parts) > 6 else ""
         remote_ip, remote_port = _parse_socket_endpoint(remote_endpoint)
         _, local_port = _parse_socket_endpoint(local_endpoint)
+        if (state == 'LISTEN' or (proto.startswith('udp') and remote_port == 0)) and 0 < local_port <= 65535:
+            for process_name, process_pid in re.findall(r'\("([^"\\]{1,120})",pid=(\d+)', process_text):
+                if len(service_listeners) < 100:
+                    service_listeners.append({'process':process_name.lower(), 'pid':int(process_pid),
+                                              'proto':'tcp' if proto.startswith('tcp') else 'udp',
+                                              'local':local_endpoint, 'port':local_port, 'source':'ss_process_owner'})
         if not _is_trackable_ip(remote_ip):
             continue
         if proto.startswith("tcp") and state not in ("ESTAB", "ESTABLISHED", "SYN-SENT", "SYN-RECV"):
@@ -1028,6 +1035,7 @@ def _collect_socket_process_details(
         "communication_snapshot_truncated": len(lines) >= snapshot_limit,
         "communication_processes": processes[:50],
         "communication_sockets": sockets,
+        "service_listeners": service_listeners,
     }
 
 
@@ -2391,6 +2399,15 @@ def _security_alert(
     container: Dict[str, object] | None = None,
 ) -> Dict[str, object]:
     container = container or {}
+    security = container.get('security') if isinstance(container.get('security'), dict) else {}
+    access = security.get('access_log') if isinstance(security.get('access_log'), dict) else {}
+    observation = {
+        'rx_bps':container.get('net_rx_bps',0), 'tx_bps':container.get('net_tx_bps',0),
+        'connections':container.get('conn_count',0), 'http_requests':access.get('requests',0),
+        'configuration_risks':security.get('configuration_risks',[])[:10],
+    }
+    if alert_type in {'cc_single_ip','http_abuse','web_scan'}:
+        observation['source_ip'] = access.get({'cc_single_ip':'top_ip','http_abuse':'top_ip_4xx','web_scan':'top_scanner_ip'}[alert_type], '')
     return {
         "type": alert_type,
         "severity": severity,
@@ -2401,6 +2418,7 @@ def _security_alert(
         "runtime": str(container.get("runtime") or ""),
         "project": str(container.get("project") or ""),
         "container_name": str(container.get("name") or ""),
+        "observation": observation,
     }
 
 
@@ -2496,6 +2514,12 @@ def _http_security_alerts(
                 container,
             )
         )
+    for alert in alerts:
+        observation = alert.setdefault('observation', {})
+        observation['http_requests'] = requests_count
+        source_key = {'cc_single_ip':'top_ip', 'web_scan':'top_scanner_ip', 'http_abuse':'top_ip_4xx'}.get(alert['type'])
+        if source_key:
+            observation['source_ip'] = str(access.get(source_key) or '')[:80]
     return alerts
 
 
@@ -2963,11 +2987,15 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         just_released = False
         if throttle_state["is_throttled"]:
             if now_ts >= throttle_state["throttled_until"]:
-                release_udp_throttle(c_runtime, c_name, pid=c_pid, project=c_project)
-                throttle_state["is_throttled"] = False
-                throttle_state["consecutive_violation_count"] = 0
-                throttle_state["reason"] = ""
-                just_released = True
+                released, release_message = release_udp_throttle(c_runtime, c_name, pid=c_pid, project=c_project)
+                if released:
+                    throttle_state["is_throttled"] = False
+                    throttle_state["consecutive_violation_count"] = 0
+                    throttle_state["reason"] = ""
+                    just_released = True
+                else:
+                    security["udp_throttle"] = {"throttled": True, "release_failed": True,
+                        "rate_mbps": throttle_state["rate_mbps"], "message": str(release_message)[:300]}
             else:
                 rem_secs = max(1, int(throttle_state["throttled_until"] - now_ts))
                 security["udp_throttle"] = {
@@ -3008,8 +3036,14 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             is_symmetric_enough = (hy2_concurrency >= symmetric_concurrency)
 
             if is_bandwidth_enough and (is_asymmetric_enough or is_symmetric_enough):
+                previous_at = throttle_state.get('violation_last_at', 0)
+                if not previous_at or now_ts <= previous_at or now_ts - previous_at > max(180, interval_seconds*2.5):
+                    throttle_state['consecutive_violation_count'] = 0
+                    throttle_state['violation_started_at'] = now_ts
+                throttle_state['violation_last_at'] = now_ts
                 throttle_state["consecutive_violation_count"] += 1
-                if throttle_state["consecutive_violation_count"] >= 3:
+                observed_duration = max(0, now_ts - throttle_state.get('violation_started_at', now_ts))
+                if throttle_state["consecutive_violation_count"] >= 3 and observed_duration >= 180:
                     throttle_state["violations_history"].append(now_ts)
                     v_count = len(throttle_state["violations_history"])
                     if v_count == 1:
@@ -3022,52 +3056,64 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                         rate_mbps = 5
                         duration = 86400
 
-                    throttle_state["is_throttled"] = True
+                    throttle_state["is_throttled"] = False
                     throttle_state["rate_mbps"] = rate_mbps
                     throttle_state["throttled_until"] = now_ts + duration
                     if is_symmetric_enough and not is_asymmetric_enough:
                         throttle_state["reason"] = (
-                            f"HY2并发连接数异常洪泛(持续3分钟高并发{hy2_concurrency}已超过{symmetric_concurrency})"
+                            f"HY2有效采样跨度{int(observed_duration)}秒，高并发{hy2_concurrency}超过{symmetric_concurrency}"
                         )
                     else:
                         throttle_state["reason"] = (
-                            f"HY2参数异常(持续3分钟出入失衡{imbalance_ratio:.1f}x且UDP并发{hy2_concurrency})"
+                            f"HY2有效采样跨度{int(observed_duration)}秒，收发比例{imbalance_ratio:.1f}x且UDP并发{hy2_concurrency}"
                         )
 
+                    throttle_ok, throttle_message = False, '自动限速已关闭，未执行限速'
                     if auto_throttle_enabled:
-                        apply_udp_throttle(
+                        throttle_ok, throttle_message = apply_udp_throttle(
                             c_runtime,
                             c_name,
                             pid=c_pid,
                             rate_mbps=rate_mbps,
                             project=c_project,
                         )
+                    throttle_state['is_throttled'] = throttle_ok
 
                     alerts.append(
                         _security_alert(
                             "hy2_abnormal_throttle",
                             "critical" if v_count >= 3 else "warning",
                             f"触发 HY2 参数异常自动限速 ({rate_mbps}Mbps)",
-                            f"容器运行 HY2 协议且连续 3 分钟出现非对称打流 (失衡比 {imbalance_ratio:.1f}x，单向 {max_traffic/(1024*1024):.1f}MB/s) "
-                            f"且高并发连接数达到 {hy2_concurrency}；已实施 UDP 靶向限速至 {rate_mbps}Mbps (持续 {duration//3600} 小时，24h内第 {v_count} 次)。",
+                            f"有效采样跨度 {int(observed_duration)} 秒，收发比例 {imbalance_ratio:.1f}x，单向 {max_traffic/(1024*1024):.1f}MB/s，UDP 并发 {hy2_concurrency}；"
+                            + (f"已限速至 {rate_mbps}Mbps，计划 {duration//3600} 小时。" if throttle_ok else '未确认限速成功。'),
                             hy2_concurrency,
-                            throttle_concurrency,
+                            symmetric_concurrency if is_symmetric_enough and not is_asymmetric_enough else throttle_concurrency,
                             container,
                         )
                     )
+                    alerts[-1]['automatic_remediation'] = {
+                        'attempted':auto_throttle_enabled, 'succeeded':throttle_ok,
+                        'action_type':'apply_udp_throttle', 'message':throttle_message[:500],
+                        'params':{'rate_mbps':rate_mbps,'duration':duration},
+                    }
+                    alerts[-1]['observation'].update(covered_seconds=observed_duration, sample_count=throttle_state['consecutive_violation_count'],
+                        bandwidth_threshold_bps=throttle_min_bps, imbalance_threshold=throttle_imbalance_ratio,
+                        imbalance_ratio=imbalance_ratio, required_duration_seconds=180)
                     security["udp_throttle"] = {
-                        "throttled": True,
+                        "throttled": throttle_ok,
                         "rate_mbps": rate_mbps,
                         "remaining_seconds": duration,
                         "violation_count": v_count,
                         "reason": throttle_state["reason"],
                     }
-                    c_alerts["udp_throttled"] = True
+                    c_alerts["udp_throttled"] = throttle_ok
                     c_alerts["udp_throttle_rate_mbps"] = rate_mbps
                     c_alerts["udp_throttle_remaining_seconds"] = duration
                     c_alerts["udp_throttle_violation_count"] = v_count
             else:
                 throttle_state["consecutive_violation_count"] = 0
+                throttle_state['violation_started_at'] = 0
+                throttle_state['violation_last_at'] = 0
 
         socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
         socks_detected = bool(socks_proxy.get("detected"))
@@ -3108,6 +3154,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 {
                     "socks_auth_mode": socks_auth_mode,
                     "automatic_remediation": socks_proxy.get("auth_enforcement") or {},
+                    "service_listeners": socks_proxy.get('service_listeners', []),
                     "socks_processes": sorted(
                         {
                             str(item.get("process") or "")
@@ -3131,6 +3178,12 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 }
             )
             alerts.append(socks_alert)
+        elif socks_detected and socks_auth_mode == 'unknown' and socks_proxy.get('service_listeners'):
+            attention = _security_alert('socks_auth_unknown','warning','SOCKS 认证待核实',
+                'SOCKS 服务正在监听，但当前采样无法确认认证设置；不据此自动停止服务',1,0,container)
+            attention.update(socks_auth_mode='unknown',service_listeners=socks_proxy['service_listeners'],
+                socks_processes=sorted({str(i.get('process')) for i in socks_proxy.get('process_matches',[]) if isinstance(i,dict) and i.get('process')}))
+            alerts.append(attention)
         inbound_unique_ips = int(security.get("inbound_unique_ips") or 0)
         if inbound_unique_ips > inbound_unique_ip_threshold:
             communication_processes = (
@@ -3316,6 +3369,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 automatic_result = {
                     "attempted": True,
                     "succeeded": auto_ok,
+                    "items": _cleanup_items(auto_message),
                     "message": auto_message[:500],
                 }
                 print(
@@ -3413,6 +3467,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             xrayr_auto_result = {
                 "attempted": True,
                 "succeeded": xrayr_ok,
+                "items": _cleanup_items(xrayr_message),
                 "message": xrayr_message[:500],
             }
             print(
@@ -3446,7 +3501,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 f"automatic panel remediation {'succeeded' if auto_ok else 'failed'} for "
                 f"{container.get('runtime')}/{container.get('name')}: {auto_message}"
             )
-            xrayr_auto_result = {"attempted": True, "succeeded": auto_ok, "message": auto_message[:500]}
+            xrayr_auto_result = {"attempted": True, "succeeded": auto_ok, "message": auto_message[:500], "items":_cleanup_items(auto_message)}
             suppress_panel_alert = False
         allowlist_configured = bool(_configured_allowed_panel_domains())
         pairing_is_allowed = allowlist_configured and bool(panel_domains) and not unapproved_domains
@@ -3488,6 +3543,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                         for item in process_matches[:20]
                         if isinstance(item, dict) and int(item.get("pid") or 0) > 1
                     ],
+                    "service_listeners": panel_pairing.get('service_listeners', []),
                     "identity_patterns": [str(item) for item in identity_patterns[:20]],
                     "config_files": [str(item) for item in config_files[:20]],
                     "automatic_remediation": xrayr_auto_result,
@@ -5255,10 +5311,7 @@ def collect_container(
             if isinstance(socket_security.get("listening_endpoints"), list)
             else []
         )
-        socks_proxy["listening_ports"] = socket_security.get("listening_ports", [])
-        socks_proxy["public_exposure"] = bool(network_exposure) or any(
-            str(endpoint).startswith(("0.0.0.0:", "[::]:")) for endpoint in listening_endpoints
-        )
+        socks_proxy["public_exposure"] = False
     has_remote_connections = any(
         int(socket_security.get(key) or 0) > 0
         for key in (
@@ -5277,7 +5330,7 @@ def collect_container(
             if isinstance(socket_security.get("listening_ports"), list)
             else [],
         )
-        if has_remote_connections
+        if has_remote_connections or socks_proxy.get('detected') or panel_pairing.get('detected')
         else {
             "communication_detail_available": True,
             "communication_snapshot_count": 0,
@@ -5292,9 +5345,21 @@ def collect_container(
         if isinstance(socket_security.get("inbound_public_flows"), list)
         else [],
     )
+    owned_listeners = communication.get('service_listeners', [])
+    for indicators in (socks_proxy, panel_pairing):
+        matches = indicators.get('process_matches', [])
+        pids = {int(item.get('pid') or 0) for item in matches if isinstance(item,dict)}
+        indicators['service_listeners'] = [item for item in owned_listeners if item.get('pid') in pids]
+    socks_proxy['listening_ports'] = sorted({item['port'] for item in socks_proxy.get('service_listeners',[])})
+    socks_proxy['public_exposure'] = any(
+        str(item.get('local','')).startswith(('0.0.0.0:','[::]:','*:'))
+        or any(_parse_exposure_endpoint(str(exposure.get('target') or ''))[2] == item['port']
+               for exposure in network_exposure if isinstance(exposure,dict))
+        for item in socks_proxy.get('service_listeners',[]))
     socket_security.update(
         {
             "net_rx_pps": net_rx_pps,
+            "service_listeners": owned_listeners,
             "net_tx_pps": net_tx_pps,
             "net_rx_total_packets": rx_packet_total,
             "net_tx_total_packets": tx_packet_total,
@@ -5950,8 +6015,37 @@ def _run_action_command(cmd: List[str]) -> Tuple[bool, str]:
         result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=90)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)[:500]
-    message = (result.stdout or result.stderr or "").strip()[:1000]
+    message = (result.stdout or result.stderr or "").strip()
+    summaries = [line for line in message.splitlines() if line.startswith(('killed_processes=', 'stopped_services='))]
+    if summaries:
+        message = '\n'.join(summaries + [line for line in message.splitlines() if line not in summaries])
+    message = message[:8000]
     return result.returncode == 0, message
+
+
+def _cleanup_receipt_shell() -> str:
+    # Only operation metadata, never configuration contents or command arguments.
+    return ("nw_items=0; nw_receipt() { "
+            "[ \"$nw_items\" -ge 20 ] && return 0; "
+            "nw_items=$((nw_items+1)); "
+            "printf '@@NW_ACTION\\t%s\\t%s\\t%s\\n' \"$1\" \"$2\" \"$3\"; }; ")
+
+
+def _cleanup_items(output: str) -> List[Dict[str, str]]:
+    items = []
+    allowed = {'process','stop_service','service','config','binary','startup'}
+    for kind,target,status in re.findall(r'@@NW_ACTION\t([a-z_]+)\t([^\t\n]+)\t(ok|failed)', output or ''):
+        if kind in allowed and re.fullmatch(r'[A-Za-z0-9_./@:+-]{1,240}', target):
+            item = {'kind':kind,'target':target,'status':status}
+            if item not in items:
+                items.append(item)
+        if len(items) >= 20:
+            break
+    return items
+
+
+def _cleanup_marker_text(output: str) -> str:
+    return '\n'.join('@@NW_ACTION\t'+item['kind']+'\t'+item['target']+'\t'+item['status'] for item in _cleanup_items(output))
 
 
 def _configured_panel_process_patterns() -> List[str]:
@@ -5999,7 +6093,7 @@ def _incus_host_namespace_kill(
     safe_patterns = " ".join(shlex.quote(item) for item in patterns)
     safe_pids = " ".join(str(p) for p in (process_pids or []) if isinstance(p, int) and p > 1)
     script = (
-        "set -f; matched=0; killed=0; errors=0; "
+        "set -f; " + _cleanup_receipt_shell() + "matched=0; killed=0; errors=0; "
         f"req_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')}; "
         f"restrict_pids={1 if restrict_pids else 0}; "
         f"for pattern in {safe_patterns}; do "
@@ -6019,9 +6113,9 @@ def _incus_host_namespace_kill(
         "if [ \"$restrict_pids\" -eq 1 ] && [ -n \"$req_pids\" ]; then "
         "case \"$req_pids\" in *\" $pid \"*) ;; *) continue;; esac; fi; "
         "matched=$((matched+1)); "
-        "if kill -TERM \"$pid\" 2>/dev/null; then killed=$((killed+1)); "
+        "if kill -TERM \"$pid\" 2>/dev/null; then killed=$((killed+1)); nw_receipt process \"$comm:$pid\" ok; "
         "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; "
-        "else errors=$((errors+1)); fi; done; done; "
+        "else errors=$((errors+1)); nw_receipt process \"$comm:$pid\" failed; fi; done; done; "
         "printf 'host_matched_processes=%s host_killed_processes=%s host_kill_errors=%s\\n' "
         '"$matched" "$killed" "$errors"; [ "$errors" -eq 0 ]'
     )
@@ -6107,7 +6201,7 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
     names = " ".join(shlex.quote(item) for item in process_names)
     pids = " ".join(str(item) for item in process_pids)
     script = (
-        "set -u; stopped_services=0; killed_processes=0; stop_errors=0; targets=''; "
+        "set -u; " + _cleanup_receipt_shell() + "stopped_services=0; killed_processes=0; stop_errors=0; targets=''; "
         f"requested_pids={shlex.quote((' ' + pids + ' ') if pids else '')}; "
         f"for pattern in {names}; do "
         "for proc in /proc/[0-9]*; do pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
@@ -6122,20 +6216,21 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
         "case \"$requested_pids\" in *\" $pid \"*) targets=\"$targets $pid\";; esac; "
         "else targets=\"$targets $pid\"; fi; fi; done; "
         "if [ -z \"$requested_pids\" ]; then command -v systemctl >/dev/null 2>&1 && "
-        "systemctl stop \"${pattern}.service\" >/dev/null 2>&1 && stopped_services=$((stopped_services+1)) || true; "
+        "systemctl stop \"${pattern}.service\" >/dev/null 2>&1 && { stopped_services=$((stopped_services+1)); nw_receipt stop_service \"${pattern}.service\" ok; } || true; "
         "if [ -x \"/etc/init.d/$pattern\" ]; then \"/etc/init.d/$pattern\" stop >/dev/null 2>&1 && "
-        "stopped_services=$((stopped_services+1)) || true; fi; fi; done; "
+        "{ stopped_services=$((stopped_services+1)); nw_receipt stop_service \"/etc/init.d/$pattern\" ok; } || nw_receipt stop_service \"/etc/init.d/$pattern\" failed; fi; fi; done; "
         "for pid in $targets; do [ -r \"/proc/$pid/stat\" ] || continue; "
+        "comm=$(cat \"/proc/$pid/comm\" 2>/dev/null || true); "
         "svc=$(sed -n 's#.*[/]openrc\\.\\([^/]*\\)$#\\1#p' \"/proc/$pid/cgroup\" 2>/dev/null | head -n 1); "
         "case \"$svc\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *) "
-        "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 || true; "
+        "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 && { stopped_services=$((stopped_services+1)); nw_receipt stop_service \"$svc\" ok; } || true; "
         "command -v rc-update >/dev/null 2>&1 && rc-update del \"$svc\" >/dev/null 2>&1 || true;; esac; "
         "unit=$(sed -n 's#.*[/]\\([^/]*\\.service\\)$#\\1#p' \"/proc/$pid/cgroup\" 2>/dev/null | head -n 1); "
         "case \"$unit\" in *.service) case \"$unit\" in *[!A-Za-z0-9_.@:-]*) ;; *) "
         "command -v systemctl >/dev/null 2>&1 && systemctl stop \"$unit\" >/dev/null 2>&1 && "
-        "stopped_services=$((stopped_services+1)) || true;; esac;; esac; "
-        "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); "
-        "sleep 1; [ -d \"/proc/$pid\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done; "
+        "{ stopped_services=$((stopped_services+1)); nw_receipt stop_service \"$unit\" ok; } || true;; esac;; esac; "
+        "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); nw_receipt process \"$comm:$pid\" ok; "
+        "sleep 1; [ -d \"/proc/$pid\" ] && kill -KILL \"$pid\" 2>/dev/null || true; else nw_receipt process \"$comm:$pid\" failed; fi; done; "
         "printf 'stopped_services=%s killed_processes=%s stop_errors=%s\\n' "
         "\"$stopped_services\" \"$killed_processes\" \"$stop_errors\"; [ \"$stop_errors\" -eq 0 ]"
     )
@@ -6150,6 +6245,7 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
     }
     if runtime_kind == "incus":
         container_stop_ok = ok
+        receipts = _cleanup_marker_text(output)
         _, host_killed, host_errors, host_output = _incus_host_namespace_kill(
             runtime_bin, container_name, project, process_names, process_pids, restrict_pids=True
         )
@@ -6158,7 +6254,7 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
         output = (
             f"stopped_services={counts.get('stopped_services', 0)} "
             f"killed_processes={counts.get('killed_processes', 0)} "
-            f"stop_errors={counts.get('stop_errors', 0)}; {host_output}"
+            f"stop_errors={counts.get('stop_errors', 0)}; {host_output}\n{receipts}"
         )
         ok = counts.get("stop_errors", 0) == 0 and (
             container_stop_ok or host_killed > 0
@@ -6232,7 +6328,7 @@ def enforce_socks_auth_policy(
             },
         }
     )
-    result = {"active": True, "attempted": True, "succeeded": ok, "message": message[:500]}
+    result = {"active": True, "attempted": True, "succeeded": ok, "message": message[:500], "items":_cleanup_items(message)}
     socks_proxy["auth_enforcement"] = result
     print(
         f"automatic empty/weak-auth SOCKS stop {'succeeded' if ok else 'failed'} for "
@@ -6290,27 +6386,27 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
         )
     )
     script = (
-        "set -u; killed_processes=0; removed_services=0; removed_configs=0; "
+        "set -u; " + _cleanup_receipt_shell() + "killed_processes=0; removed_services=0; removed_configs=0; "
         "removed_binaries=0; cleanup_errors=0; "
         f"for pattern in {names}; do "
         "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"${pattern}.service\" >/dev/null 2>&1 || true; "
         "for unit_dir in /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system; do "
         "unit=\"$unit_dir/${pattern}.service\"; [ -e \"$unit\" ] || [ -L \"$unit\" ] || continue; "
-        "if rm -f -- \"$unit\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; done; "
+        "if rm -f -- \"$unit\"; then removed_services=$((removed_services+1)); nw_receipt service \"$unit\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service \"$unit\" failed; fi; done; "
         "if [ -e \"/etc/init.d/$pattern\" ]; then \"/etc/init.d/$pattern\" stop >/dev/null 2>&1 || true; "
-        "if rm -f -- \"/etc/init.d/$pattern\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; fi; "
+        "if rm -f -- \"/etc/init.d/$pattern\"; then removed_services=$((removed_services+1)); nw_receipt service \"/etc/init.d/$pattern\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service \"/etc/init.d/$pattern\" failed; fi; fi; "
         "for proc in /proc/[0-9]*; do pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
         "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null || true); [ \"$state\" = Z ] && continue; "
         "comm=$(cat \"$proc/comm\" 2>/dev/null || true); argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
         "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); matched=0; "
         "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
         "candidate=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); [ \"$candidate\" = \"$pattern\" ] && matched=1; done; "
-        "if [ \"$matched\" -eq 1 ]; then if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); "
+        "if [ \"$matched\" -eq 1 ]; then if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); nw_receipt process \"$comm:$pid\" ok; "
         "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; fi; done; done; "
         f"for path in {config_paths}; do [ -e \"$path\" ] || [ -L \"$path\" ] || continue; "
-        "if rm -f -- \"$path\"; then removed_configs=$((removed_configs+1)); else cleanup_errors=$((cleanup_errors+1)); fi; done; "
+        "if rm -f -- \"$path\"; then removed_configs=$((removed_configs+1)); nw_receipt config \"$path\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt config \"$path\" failed; fi; done; "
         f"for path in {binary_paths}; do [ -e \"$path\" ] || [ -L \"$path\" ] || continue; "
-        "if rm -f -- \"$path\"; then removed_binaries=$((removed_binaries+1)); else cleanup_errors=$((cleanup_errors+1)); fi; done; "
+        "if rm -f -- \"$path\"; then removed_binaries=$((removed_binaries+1)); nw_receipt binary \"$path\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt binary \"$path\" failed; fi; done; "
         "command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true; "
         "printf 'killed_processes=%s removed_services=%s removed_configs=%s removed_binaries=%s cleanup_errors=%s\\n' "
         "\"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$removed_binaries\" \"$cleanup_errors\"; "
@@ -6347,7 +6443,7 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
             f"removed_services={counts.get('removed_services', 0)} "
             f"removed_configs={counts.get('removed_configs', 0)} "
             f"removed_binaries={counts.get('removed_binaries', 0)} "
-            f"cleanup_errors={counts.get('cleanup_errors', 0)}; {host_output}"
+            f"cleanup_errors={counts.get('cleanup_errors', 0)}; {_cleanup_marker_text(output)}; {host_output}"
         )
         ok = counts.get("cleanup_errors", 0) == 0 and changes > 0
     return ok, output or ("malware remediation completed" if ok else "malware remediation failed")
@@ -6396,6 +6492,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     safe_pids = " ".join(str(p) for p in process_pids if p > 1)
     script_parts = [
         "set -u",
+        _cleanup_receipt_shell().rstrip(' ;'),
         "removed_services=0",
         "removed_configs=0",
         "killed_processes=0",
@@ -6414,8 +6511,9 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"$un\" >/dev/null 2>&1 || true; "
             "real=$(readlink -f \"$u\" 2>/dev/null || echo \"$u\"); "
             "for t in \"$u\" \"$real\"; do "
+            "case \"$t\" in /etc/systemd/system/*.service|/etc/systemd/system/*.timer|/etc/systemd/system/*.socket|/etc/systemd/system/*.path|/lib/systemd/system/*.service|/lib/systemd/system/*.timer|/lib/systemd/system/*.socket|/lib/systemd/system/*.path|/usr/lib/systemd/system/*.service|/usr/lib/systemd/system/*.timer|/usr/lib/systemd/system/*.socket|/usr/lib/systemd/system/*.path|/run/systemd/system/*.service|/run/systemd/system/*.timer|/run/systemd/system/*.socket|/run/systemd/system/*.path) ;; *) continue;; esac; "
             "[ -e \"$t\" ] || [ -L \"$t\" ] || continue; "
-            "if rm -f -- \"$t\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; "
+            "if rm -f -- \"$t\"; then removed_services=$((removed_services+1)); nw_receipt service \"$t\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service \"$t\" failed; fi; "
             "done; "
             "};\n"
             "for ud in /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system /run/systemd/system; do "
@@ -6430,14 +6528,16 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "svc=${f##*/}; "
             "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 || \"$f\" stop >/dev/null 2>&1 || true; "
             "command -v rc-update >/dev/null 2>&1 && rc-update del \"$svc\" >/dev/null 2>&1 || true; "
-            "if rm -f -- \"$f\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; "
+            "if rm -f -- \"$f\"; then removed_services=$((removed_services+1)); nw_receipt service \"$f\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service \"$f\" failed; fi; "
             "fi; done; "
             "command -v rc-update >/dev/null 2>&1 && rc-update del \"${_pat}\" >/dev/null 2>&1 || true; "
             "for sc in $(grep -rIl --include='*.conf' \"${_pat}\" /etc/supervisor 2>/dev/null); do "
-            "if rm -f -- \"$sc\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; done; "
+            "if rm -f -- \"$sc\"; then removed_services=$((removed_services+1)); nw_receipt service \"$sc\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service \"$sc\" failed; fi; done; "
             "command -v supervisorctl >/dev/null 2>&1 && supervisorctl reread >/dev/null 2>&1 && supervisorctl update >/dev/null 2>&1 || true; "
             "for cf in $(grep -rIl \"${_pat}\" /etc/cron.d /etc/cron.daily /etc/cron.hourly /var/spool/cron 2>/dev/null); do "
-            "grep -vF \"${_pat}\" \"$cf\" > \"$cf.tmp\" 2>/dev/null && mv -f \"$cf.tmp\" \"$cf\" || true; done"
+            "grep -vF \"${_pat}\" \"$cf\" > \"$cf.tmp\" 2>/dev/null; gr=$?; "
+            "if [ \"$gr\" -le 1 ] && mv -f \"$cf.tmp\" \"$cf\"; then nw_receipt startup \"$cf\" ok; "
+            "else cleanup_errors=$((cleanup_errors+1)); nw_receipt startup \"$cf\" failed; fi; done"
         )
         # PID evidence can become stale while a supervisor respawns the child.
         # Re-resolve the exact allowlisted identity and derive OpenRC/systemd
@@ -6459,19 +6559,19 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 || true; "
             "command -v rc-update >/dev/null 2>&1 && rc-update del \"$svc\" >/dev/null 2>&1 || true; "
             "sf=\"/etc/init.d/$svc\"; if [ -e \"$sf\" ] || [ -L \"$sf\" ]; then "
-            "if rm -f -- \"$sf\"; then removed_services=$((removed_services+1)); else cleanup_errors=$((cleanup_errors+1)); fi; fi;; esac; "
+            "if rm -f -- \"$sf\"; then removed_services=$((removed_services+1)); nw_receipt service \"$sf\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service \"$sf\" failed; fi; fi;; esac; "
             "unit=$(sed -n 's#.*[/]\\([^/]*\\.service\\)$#\\1#p' \"$proc/cgroup\" 2>/dev/null | head -n 1); "
             "case \"$unit\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *.service) "
             "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"$unit\" >/dev/null 2>&1 || true;; esac; "
-            "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); "
+            "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); nw_receipt process \"$comm:$pid\" ok; "
             "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done"
         )
     for config_file in config_files:
         quoted_file = shlex.quote(config_file)
         script_parts.append(
             f"if [ -f {quoted_file} ] || [ -L {quoted_file} ]; then "
-            f"if rm -f -- {quoted_file}; then removed_configs=$((removed_configs+1)); "
-            "else cleanup_errors=$((cleanup_errors+1)); fi; fi"
+            f"if rm -f -- {quoted_file}; then removed_configs=$((removed_configs+1)); nw_receipt config {quoted_file} ok; "
+            f"else cleanup_errors=$((cleanup_errors+1)); nw_receipt config {quoted_file} failed; fi; fi"
         )
     script_parts.extend(
         [
@@ -6504,7 +6604,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
                 f"killed_processes={counts.get('killed_processes', 0)} "
                 f"removed_services={counts.get('removed_services', 0)} "
                 f"removed_configs={counts.get('removed_configs', 0)} "
-                f"cleanup_errors={counts.get('cleanup_errors', 0)}; {host_output}"
+                f"cleanup_errors={counts.get('cleanup_errors', 0)}; {_cleanup_marker_text(output)}; {host_output}"
             )
             changes = sum(counts.get(key, 0) for key in ("killed_processes", "removed_services", "removed_configs"))
             ok = counts.get("cleanup_errors", 0) == 0 and changes > 0
@@ -6559,6 +6659,8 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         ok, message = apply_udp_throttle(runtime_kind, container_name, pid=pid, rate_mbps=rate_mbps, project=project)
         key = f"{runtime_kind}:{project}:{container_name}"
         duration = int(params.get("duration") or 3600)
+        if not ok:
+            return ok, message
         _hy2_throttle_states[key] = {
             "is_throttled": True,
             "throttled_until": time.time() + duration,
@@ -6576,7 +6678,7 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         pid = int(params.get("pid") or 0)
         ok, message = release_udp_throttle(runtime_kind, container_name, pid=pid, project=project)
         key = f"{runtime_kind}:{project}:{container_name}"
-        if key in _hy2_throttle_states:
+        if ok and key in _hy2_throttle_states:
             _hy2_throttle_states[key]["is_throttled"] = False
             _hy2_throttle_states[key]["consecutive_violation_count"] = 0
             _hy2_throttle_states[key]["reason"] = ""
@@ -6792,6 +6894,7 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
                 "node_id": node_id,
                 "status": "running" if ok and action_type in {"self_uninstall", "managed_upgrade", "managed_rollback"} else ("succeeded" if ok else "failed"),
                 "message": message,
+                "items": _cleanup_items(message),
             },
         )
         print(f"security action {action_id} {'succeeded' if ok else 'failed'}: {message}")

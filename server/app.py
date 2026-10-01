@@ -443,6 +443,7 @@ async def _buyer_background_loop():
     await asyncio.sleep(20)
     while True:
         try:
+            await asyncio.to_thread(buyer_notifications.sync_mappings, db)
             await asyncio.to_thread(buyer_notifications.work_once, db)
         except Exception:
             logging.exception("Buyer outbox worker failed")
@@ -698,6 +699,8 @@ def process_security_alerts(
         if not isinstance(raw_alert, dict):
             continue
         alert_type = str(raw_alert.get("type") or "unknown")[:80]
+        if alert_type == "ops_traffic_quota":
+            continue  # Usage accounting remains available; never notify quota usage.
         severity = str(raw_alert.get("severity") or "warning").lower()
         if severity not in _SEVERITY_RANK:
             severity = "warning"
@@ -3447,6 +3450,7 @@ async def security_action_result(
     if status not in ("succeeded", "failed", "running"):
         raise HTTPException(status_code=400, detail="status must be succeeded, failed, or running")
     message = str(payload.get("message") or "")[:2000]
+    receipt_items = buyer_notifications.buyer_content.receipt_items(payload.get('items'))
     now = int(time.time())
     conn = db()
     try:
@@ -3471,6 +3475,11 @@ async def security_action_result(
                 "UPDATE security_actions SET status=?, result_message=?, updated_at=? WHERE id=?",
                 (status, message, now, action_id),
             )
+            if receipt_items and status in {'succeeded','failed'}:
+                conn.execute("INSERT INTO security_action_receipts VALUES(?,?,?) ON CONFLICT(action_id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at", (action_id,json.dumps(receipt_items,ensure_ascii=False),now))
+            if status in {'succeeded','failed'} and row['action_type'] == 'stop_container':
+                operations.record_connection_guard(conn,action_id,now)
+                buyer_notifications.reconcile(conn,host_id,now)
             if status == "succeeded" and row["action_type"] == "self_uninstall":
                 _purge_host(conn, host_id)
                 invalidate_security_status_cache()

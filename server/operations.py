@@ -45,6 +45,7 @@ def initialize(conn):
       PRIMARY KEY(campaign,host_id));
     CREATE TABLE IF NOT EXISTS ops_users(username TEXT PRIMARY KEY,password_hash TEXT,role TEXT,enabled INTEGER DEFAULT 1,updated_at INTEGER);
     CREATE TABLE IF NOT EXISTS ops_audit(id INTEGER PRIMARY KEY,ts INTEGER,username TEXT,method TEXT,path TEXT,status INTEGER);
+    CREATE TABLE IF NOT EXISTS security_action_receipts(action_id INTEGER PRIMARY KEY,payload TEXT,updated_at INTEGER);
     CREATE TABLE IF NOT EXISTS ops_settings(key TEXT PRIMARY KEY,payload TEXT);
     """)
 
@@ -74,7 +75,57 @@ def policy(conn, entity):
     row = conn.execute("SELECT * FROM ops_policies WHERE entity IN (?,?) ORDER BY entity=? DESC LIMIT 1", (entity, host, entity)).fetchone()
     profile = row["profile"] if row else "general"
     saved = loads(row["payload"]) if row else {}
-    return {"profile": profile, "monthly_quota_bytes":0, "quota_warning":.8, "silent_until":0, **PROFILES.get(profile, PROFILES["general"]), **saved}
+    return {"profile": profile, "monthly_quota_bytes":0, "quota_warning":.8, "silent_until":0,
+            "bandwidth_mbps":0, "bandwidth_ratio":.9, "bandwidth_duration_seconds":600,
+            **PROFILES.get(profile, PROFILES["general"]), **saved}
+
+
+def bandwidth_capacity(conn, host, c, entity, ts):
+    # Capacity is per instance. Never inherit the entire host NIC capacity.
+    row = conn.execute("SELECT payload FROM ops_policies WHERE entity=?", (entity,)).fetchone()
+    explicit = number(loads(row[0] if row else None).get('bandwidth_mbps'))
+    if explicit:
+        return explicit, 'instance_policy'
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='buyer_targets'").fetchone():
+        return 0, ''
+    mapped = conn.execute("SELECT bandwidth_mbps FROM buyer_targets WHERE host_id=? AND runtime=? AND project=? AND container_name=? "
+                          "AND source='upstream' AND enabled=1 AND verified_at>=?", (host,c.get('runtime','podman'),c.get('project',''),c.get('name',''),ts-900)).fetchone()
+    return (number(mapped[0]), 'upstream_instance') if mapped else (0, '')
+
+
+def bandwidth_sample(conn, entity, ts, c, old, covered, rx, tx, valid, capacity, source, rules):
+    c['bandwidth_monitor'] = {'available': bool(valid and covered and capacity), 'capacity_mbps': capacity}
+    prior = old.get('bandwidth', {})
+    current = {'capacity_mbps':capacity, 'source':source, 'covered_seconds':0, 'samples':0, 'direction':''}
+    if not c['bandwidth_monitor']['available']:
+        row = conn.execute("SELECT payload FROM ops_incidents WHERE entity=? AND kind='bandwidth_saturation' AND status='open'", (entity,)).fetchone()
+        if row:
+            event(conn,entity,'bandwidth_saturation',ts,{**loads(row[0]), 'data_stale':True})
+        return current
+    rx_mbps, tx_mbps = rx * 8 / covered / 1e6, tx * 8 / covered / 1e6
+    direction = 'rx' if rx_mbps >= tx_mbps else 'tx'
+    rate = max(rx_mbps, tx_mbps)  # Full-duplex directions must not be added.
+    ratio = number(rules.get('bandwidth_ratio', .9))
+    duration = number(rules.get('bandwidth_duration_seconds', 600))
+    high = rate >= capacity * ratio
+    same = (prior.get('direction') == direction and prior.get('capacity_mbps') == capacity
+            and prior.get('source') == source and prior.get('ratio') == ratio and prior.get('duration') == duration)
+    current.update(direction=direction if high else '', ratio=ratio, duration=duration)
+    if high:
+        current['covered_seconds'] = min(7*86400, (number(prior.get('covered_seconds')) if same else 0) + covered)
+        current['samples'] = min(100000, (int(number(prior.get('samples'))) if same else 0) + 1)
+    ready = high and current['covered_seconds'] >= duration and current['samples'] >= 2
+    payload = {**current, 'rate_mbps':rate, 'rx_mbps':rx_mbps,'tx_mbps':tx_mbps,
+               'direction_label':'下载' if direction=='rx' else '上传', 'utilization':rate/capacity,
+               'observed_at':ts, 'data_stale':not ready or rules.get('silent_until',0) >= ts,
+               'severity':'critical' if current['covered_seconds'] >= max(1800,duration*3) else 'warning'}
+    if ready and rules.get('silent_until',0) < ts:
+        event(conn,entity,'bandwidth_saturation',ts,payload)
+    elif not high:
+        event(conn,entity,'bandwidth_saturation',ts,{**payload,'data_stale':False},False)
+    elif conn.execute("SELECT id FROM ops_incidents WHERE entity=? AND kind='bandwidth_saturation' AND status='open'", (entity,)).fetchone():
+        event(conn,entity,'bandwidth_saturation',ts,payload)
+    return current
 
 
 def event(conn, entity, kind, ts, payload, active=True):
@@ -139,6 +190,10 @@ def ingest(conn, host_id, node_id, ts, data):
                   (entity, period, bucket, 1, rx*fraction, tx*fraction, duration, gap + int(reset), estimated,
                    number(c.get("cpu_percent")), number(c.get("mem_percent")), int(number(c.get("conn_count")))))
         rules = policy(conn, entity)
+        capacity, capacity_source = bandwidth_capacity(conn, host_id, c, entity, ts)
+        bandwidth = bandwidth_sample(conn,entity,ts,c,old,covered,rx,tx,
+                                     counter_valid and old.get('counter_valid') and not reset and not gap,
+                                     capacity,capacity_source,rules)
         values = [number(c.get("net_rx_bps")), number(c.get("conn_count"))]
         history = [x for x in old.get("baseline", []) if ts-x[0] < 86400][-288:]
         medians = [statistics.median(x[i+1] for x in history) if history else 0 for i in range(2)]
@@ -155,6 +210,7 @@ def ingest(conn, host_id, node_id, ts, data):
         if sample_valid and (anomaly or old.get("anomaly")):
             event(conn, entity, "baseline_anomaly", ts, {"values": values, "baseline": medians, "streak": streak,"severity":"critical"}, anomaly)
         state = {"counter_valid": counter_valid, "rx": number(counters.get("rx")), "tx": number(counters.get("tx")), "epoch": counters.get("epoch"), "baseline": history[-288:], "streak": streak, "anomaly": anomaly, "baseline_ready": enough, "gap": gap, "reset": bool(reset), "estimated": bool(estimated), "medians": medians}
+        state['bandwidth'] = bandwidth
         conn.execute("INSERT INTO ops_meter VALUES(?,?,?,?,?,?,?) ON CONFLICT(entity) DO UPDATE SET host_id=excluded.host_id,ts=excluded.ts,payload=excluded.payload", (entity, host_id, c.get("runtime", "podman"), c.get("project", ""), c.get("name", "unknown"), ts, json.dumps(state)))
         for alert in alerts:
             if (alert.get("runtime"), alert.get("project", ""), alert.get("container_name")) == (c.get("runtime"), c.get("project", ""), c.get("name")):
@@ -165,24 +221,24 @@ def ingest(conn, host_id, node_id, ts, data):
         signals = {"connections": values[1] >= rules["connections"], "rx_bps": values[0] >= rules["rx_bps"], "http_rps": number(access.get("requests_per_second")) >= rules["http_rps"]}
         if sample_valid:
             severe = values[1]>=rules["connections"]*2 or values[0]>=rules["rx_bps"]*2 or number(access.get("requests_per_second"))>=rules["http_rps"]*2
-            event(conn, entity, "policy_signal", ts, {"signals": signals,"profile":rules["profile"],"severity":"critical" if severe else "warning"}, any(signals.values()) and rules.get("silent_until",0)<ts)
+            event(conn, entity, "policy_signal", ts, {"signals": signals,"profile":rules["profile"],
+                  "values":{"connections":values[1],"rx_bps":values[0],"http_rps":number(access.get('requests_per_second'))},
+                  "thresholds":{k:rules[k] for k in ('connections','rx_bps','http_rps')},
+                  "severity":"critical" if severe else "warning"}, any(signals.values()) and rules.get("silent_until",0)<ts)
         # Close only security episodes proven absent in a complete fresh scan.
         if number(c.get("security", {}).get("process_count")) > 0 and data.get("security", {}).get("enabled") is True:
             current={str(a.get("type")) for a in alerts if (a.get("runtime"),a.get("project",""),a.get("container_name")) == (c.get("runtime"),c.get("project",""),c.get("name"))}
             for episode in conn.execute("SELECT kind FROM ops_incidents WHERE entity=? AND status='open'",(entity,)).fetchall():
-                if episode[0] not in {"remediation","baseline_anomaly","traffic_quota","policy_signal"} and episode[0] not in current:
+                if episode[0] not in {"remediation","baseline_anomaly","bandwidth_saturation","traffic_quota","policy_signal"} and episode[0] not in current:
                     event(conn,entity,episode[0],ts,{"reason":"新安全样本中已消失"},False)
-        quota = number(rules.get("monthly_quota_bytes"))
-        if quota:
-            month = int(datetime.fromtimestamp(ts, TZ).replace(day=1,hour=0,minute=0,second=0,microsecond=0).timestamp())
-            usage = conn.execute("SELECT COALESCE(SUM(rx+tx),0) FROM ops_rollups WHERE entity=? AND period='day' AND bucket>=?", (entity, month)).fetchone()[0]
-            event(conn, entity, "traffic_quota", ts, {"used": usage, "quota": quota, "severity": "critical" if usage >= quota else "warning"}, usage >= quota*number(rules.get("quota_warning", .8)))
+        # Keep accounting/policy compatibility, but never emit quota notifications.
+        event(conn, entity, 'traffic_quota', ts, {'reason':'流量额度提醒已停用'}, False)
     host_entity=identity(node)
     host_rules=policy(conn,host_entity)
     host_access=data.get("security",{}).get("access_log",{})
     host_http=number(host_access.get("requests_per_second"))
     if number(host_access.get("readable_files"))>0:
-        event(conn,host_entity,"policy_signal",ts,{"signals":{"http_rps":host_http},"profile":host_rules["profile"],"severity":"critical" if host_http>=host_rules["http_rps"]*2 else "warning"},host_http>=host_rules["http_rps"] and host_rules.get("silent_until",0)<ts)
+        event(conn,host_entity,"policy_signal",ts,{"signals":{"http_rps":host_http},"values":{"http_rps":host_http},"thresholds":{"http_rps":host_rules['http_rps']},"profile":host_rules["profile"],"severity":"critical" if host_http>=host_rules["http_rps"]*2 else "warning"},host_http>=host_rules["http_rps"] and host_rules.get("silent_until",0)<ts)
     for result in operations.get("services", [])[:50]:
         service = conn.execute("SELECT id FROM ops_services WHERE id=? AND host_id=? AND enabled=1", (result.get("id"), host_id)).fetchone()
         if service:
@@ -215,14 +271,33 @@ def ingest(conn, host_id, node_id, ts, data):
             conn.execute("UPDATE ops_upgrades SET status='verified' WHERE id=?",(campaign[0],))
     generated=[]
     prefix=json.dumps([node],ensure_ascii=False,separators=(",",":"))[:-1]+","
-    for row in conn.execute("SELECT * FROM ops_incidents WHERE status='open' AND substr(entity,1,?)=? AND (kind IN ('baseline_anomaly','traffic_quota','policy_signal') OR kind LIKE 'service:%') ORDER BY last_seen DESC LIMIT 500",(len(prefix),prefix)).fetchall():
+    for row in conn.execute("SELECT * FROM ops_incidents WHERE status='open' AND substr(entity,1,?)=? AND (kind IN ('baseline_anomaly','bandwidth_saturation','policy_signal') OR kind LIKE 'service:%') ORDER BY last_seen DESC LIMIT 500",(len(prefix),prefix)).fetchall():
         parts=loads(row["entity"],[])
         if len(parts)!=4 or parts[0]!=node:
             continue
         payload=loads(row["payload"])
-        payload.update(observed_at=row["last_seen"],data_stale=ts-row["last_seen"]>interval*2.5)
-        generated.append({"runtime":parts[1],"project":parts[2],"container_name":parts[3],"type":"ops_"+row["kind"],"severity":payload.get("severity","warning"),"title":"运维信号："+row["kind"],"message":json.dumps(payload,ensure_ascii=False)[:1000],"value":0,"threshold":0})
+        payload.update(observed_at=row["last_seen"],data_stale=payload.get('data_stale',False) or ts-row["last_seen"]>interval*2.5)
+        generated.append({"runtime":parts[1],"project":parts[2],"container_name":parts[3],"type":"ops_"+row["kind"],"severity":payload.get("severity","warning"),"title":"运维信号："+row["kind"],"message":json.dumps(payload,ensure_ascii=False)[:1000],"observation":payload,"data_stale":payload['data_stale'],"value":payload.get('rate_mbps',0),"threshold":payload.get('capacity_mbps',0)*payload.get('ratio',0)})
     return generated
+
+
+def record_connection_guard(conn, action_id, ts):
+    """Record the actual stop receipt, not a speculative queued stop."""
+    row = conn.execute('SELECT * FROM security_actions WHERE id=?',(action_id,)).fetchone()
+    if not row or row['action_type'] != 'stop_container' or row['status'] not in {'succeeded','failed'}:
+        return
+    params = loads(row['params_json'])
+    if params.get('reason') != 'sustained_connection_overload':
+        return
+    fingerprint = 'connection-guard-action-' + str(action_id)
+    details = {'observation':params, 'automatic_remediation': {'attempted':True,
+        'succeeded':row['status']=='succeeded','action_type':'stop_container','message':row['result_message']}}
+    conn.execute("INSERT OR IGNORE INTO security_alerts(fingerprint,host_id,runtime,project,container_name,alert_type,severity,title,message,value,threshold,first_seen,last_seen,status,details_json) VALUES(?,?,?,?,?,'ops_connection_guard','critical','连接保护处理回执',?,?,?,?,?,?,?)",
+        (fingerprint,row['host_id'],row['runtime'],row['project'],row['container_name'],
+         row['result_message'],number(params.get('connection_count')),number(params.get('threshold')),
+         row['created_at'],ts,'remediated' if row['status']=='succeeded' else 'active',json.dumps(details)))
+    alert = conn.execute('SELECT id FROM security_alerts WHERE fingerprint=?',(fingerprint,)).fetchone()
+    conn.execute('UPDATE security_actions SET alert_id=? WHERE id=?',(alert[0],action_id))
 
 
 def track_recheck(conn, action_id, ts):
@@ -316,6 +391,7 @@ def maintain(conn, now):
     for table in ("ops_meter","ops_hosts"):
         conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE ts<? LIMIT 5000)",(now-90*86400,))
     conn.execute("DELETE FROM ops_service_results WHERE service_id NOT IN (SELECT id FROM ops_services)")
+    conn.execute("DELETE FROM security_action_receipts WHERE action_id NOT IN (SELECT id FROM security_actions)")
     conn.commit()
 
 

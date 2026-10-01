@@ -55,7 +55,7 @@ class BuyerTests(unittest.TestCase):
 
     def mapping(self,name="c1",user="user-1",scope="user",**kw):
         with server.db() as conn:
-            buyer.save_target(conn,{"host_id":"host","runtime":"incus","project":"default","container_name":name,"machine_id":MACHINE,"user_id":user,"node_name":"Node","scope":scope,**kw})
+            buyer.save_target(conn,{"host_id":"host","runtime":"incus","project":"default","container_name":name,"machine_id":MACHINE,"user_id":user,"node_name":kw.pop('node_name','Node'),"scope":scope,**kw})
 
     def rows(self):
         with server.db() as conn:
@@ -94,7 +94,8 @@ class BuyerTests(unittest.TestCase):
         sender=mock.Mock(return_value=("succeeded",200))
         buyer.work_once(server.db,self.now+10,sender)
         self.assertEqual(sender.call_count,1)
-        self.assertIn("critical",sender.call_args.args[5])
+        self.assertIn("服务器",sender.call_args.args[5])
+        self.assertEqual(self.rows()[-1]['severity'], 'critical')
 
     def test_closed_alert_is_not_claimed_verified(self):
         self.assertNotIn("消失",buyer.STATES["resolved"])
@@ -187,8 +188,9 @@ class BuyerTests(unittest.TestCase):
         self.assertEqual(self.rows()[0]["status"],"blocked")
 
     def test_digest_acknowledges_only_included_events(self):
+        self.alert['type'] = 'unclassified_service_attention'
         for n in range(5):
-            self.mapping(f"c{n}")
+            self.mapping(f"c{n}", node_name='香港服务器'*16)
             self.alert["container_name"]=f"c{n}"
             self.alert["message"]="x"*1000
             self.ingest(container={**self.c,"name":f"c{n}"})
