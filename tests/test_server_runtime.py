@@ -129,6 +129,8 @@ class ServerRuntimeTests(unittest.TestCase):
                 "new_alerts": 0,
                 "automatic_deep_samples_queued": 0,
                 "automatic_stops_queued": 0,
+                "narwhal_buyer_push": {"owner": "server", "enabled": False},
+                "motd_states": [],
             },
         )
 

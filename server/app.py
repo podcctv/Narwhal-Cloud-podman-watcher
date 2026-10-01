@@ -126,10 +126,11 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api
+    from server import operations, operations_api, buyer_notifications
 except ImportError:
     import operations
     import operations_api
+    import buyer_notifications
 
 _AGENT_ONLY_PATHS = {
     "/api/v1/report",
@@ -410,6 +411,7 @@ def init_db() -> None:
         """
     )
     operations.initialize(conn)
+    buyer_notifications.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -430,9 +432,24 @@ async def _cleanup_background_loop() -> None:
 async def startup() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     init_db()
+    asyncio.create_task(_buyer_background_loop())
     asyncio.create_task(_cleanup_background_loop())
     if not PUBLIC_BASE_URL:
         asyncio.create_task(_telegram_polling_loop())
+
+
+async def _buyer_background_loop():
+    # Startup never replays historical reports or sends migration test messages.
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await asyncio.to_thread(buyer_notifications.work_once, db)
+        except Exception:
+            logging.exception("Buyer outbox worker failed")
+        await asyncio.sleep(10)
+
+
+buyer_notifications.attach(app, db)
 
 
 def database_storage_status() -> Dict[str, Any]:
@@ -722,6 +739,8 @@ def process_security_alerts(
         should_notify = existing is None and not allow_policy and not automatically_remediated
         if existing is not None:
             previous_status = str(existing["status"])
+            verification = conn.execute("SELECT state FROM buyer_checks WHERE alert_id=?", (existing["id"],)).fetchone()
+            restart_episode = previous_status == "resolved" or (previous_status == "remediated" and (next_status == "active" or (verification and verification[0] == "verified")))
             if allow_policy:
                 should_notify = False
             elif automatically_remediated:
@@ -744,8 +763,8 @@ def process_security_alerts(
                 """
                 UPDATE security_alerts
                 SET severity=?, title=?, message=?, value=?, threshold=?, last_seen=?,
-                    first_seen=CASE WHEN status IN ('resolved','remediated') THEN ? ELSE first_seen END,
-                    occurrence_count=CASE WHEN status IN ('resolved','remediated') THEN 1 ELSE occurrence_count+1 END,
+                    first_seen=CASE WHEN ? THEN ? ELSE first_seen END,
+                    occurrence_count=CASE WHEN ? THEN 1 ELSE occurrence_count+1 END,
                     status=?, details_json=?
                 WHERE fingerprint=?
                 """,
@@ -756,7 +775,9 @@ def process_security_alerts(
                     normalized["value"],
                     normalized["threshold"],
                     ts,
+                    bool(restart_episode),
                     ts,
+                    bool(restart_episode),
                     next_status,
                     json.dumps(raw_alert, ensure_ascii=False),
                     fingerprint,
@@ -791,8 +812,9 @@ def process_security_alerts(
             )
         if should_notify:
             notification = dict(normalized)
-            row = conn.execute("SELECT id FROM security_alerts WHERE fingerprint=?", (fingerprint,)).fetchone()
+            row = conn.execute("SELECT id,first_seen FROM security_alerts WHERE fingerprint=?", (fingerprint,)).fetchone()
             notification["id"] = int(row["id"]) if row is not None else 0
+            notification["event_id"] = f"NW-{row['id']}-{row['first_seen']}" if row is not None else ""
             notifications.append(notification)
 
     if active_fingerprints:
@@ -1138,6 +1160,7 @@ def _telegram_alert_detail(alert_id: int, severity: str, offset: int) -> tuple[s
     raw_message = str(alert['message'] or '')[:1000]
     text = (
         f"<b>{html.escape(str(alert['title'] or alert['alert_type']))}</b>\n"
+        f"事件：<code>NW-{alert['id']}-{alert['first_seen']}</code>\n"
         f"状态：<b>{html.escape(str(alert['status']))}</b>　级别：<b>{html.escape(str(alert['severity']))}</b>\n"
         f"主机：<code>{html.escape(str(alert['host_id']))}</code>\n"
         f"容器：<code>{html.escape(scope)} {html.escape(str(alert['container_name'] or '-'))}</code>\n"
@@ -1678,6 +1701,9 @@ def get_push_settings() -> JSONResponse:
             "narwhal_machine_id": machine_id,
             "narwhal_node_name": node_name,
             "buyer_notify_enabled": buyer_notify_enabled,
+            "buyer_min_severity": buyer_notifications.setting(conn, "buyer_min_severity", "warning"),
+            "buyer_recovery_enabled": buyer_notifications.setting(conn, "buyer_recovery_enabled", "true") == "true",
+            "buyer_sender": "server",
             "telegram_bots_count": len(bots),
             "callback_ready": bool(PUBLIC_BASE_URL),
             "proxy_configured": bool(proxy_url),
@@ -1700,8 +1726,10 @@ async def save_push_settings(request: Request) -> JSONResponse:
     try:
         if "narwhal_api_url" in payload:
             url = str(payload["narwhal_api_url"] or "").strip().rstrip("/")
-            if url and not (url.startswith("http://") or url.startswith("https://")):
-                raise HTTPException(status_code=400, detail="Narwhal API URL 必须以 http:// 或 https:// 开头")
+            try:
+                buyer_notifications.validate_url(url)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
             _set_system_setting(conn, "narwhal_api_url", url)
 
         if "narwhal_api_key" in payload:
@@ -1719,8 +1747,19 @@ async def save_push_settings(request: Request) -> JSONResponse:
             _set_system_setting(conn, "narwhal_node_name", nname)
 
         if "buyer_notify_enabled" in payload:
+            if type(payload["buyer_notify_enabled"]) is not bool:
+                raise HTTPException(400, "buyer_notify_enabled 必须是布尔值")
             b_val = "true" if bool(payload["buyer_notify_enabled"]) else "false"
             _set_system_setting(conn, "buyer_notify_enabled", b_val)
+
+        if "buyer_min_severity" in payload:
+            if payload["buyer_min_severity"] not in ("warning", "critical"):
+                raise HTTPException(400, "不支持的严重等级")
+            _set_system_setting(conn, "buyer_min_severity", payload["buyer_min_severity"])
+        if "buyer_recovery_enabled" in payload:
+            if type(payload["buyer_recovery_enabled"]) is not bool:
+                raise HTTPException(400, "buyer_recovery_enabled 必须是布尔值")
+            _set_system_setting(conn, "buyer_recovery_enabled", str(payload["buyer_recovery_enabled"]).lower())
 
         conn.commit()
         return JSONResponse({"ok": True, "message": "推送与 API 设置已保存"})
@@ -1730,78 +1769,12 @@ async def save_push_settings(request: Request) -> JSONResponse:
 
 @app.post("/api/v1/settings/push/test")
 async def test_push_settings(request: Request) -> JSONResponse:
-    payload = {}
     try:
         payload = await request.json()
-    except Exception:
-        pass
-    if not isinstance(payload, dict):
-        payload = {}
-
-    conn = db()
-    try:
-        api_url = str(payload.get("narwhal_api_url") or _get_system_setting(conn, "narwhal_api_url", os.getenv("NARWHAL_API_URL", "https://api.fuckip.me/api/v1"))).strip().rstrip("/")
-        api_key = str(payload.get("narwhal_api_key") or "").strip()
-        if not api_key or "*" in api_key:
-            api_key = _get_system_setting(conn, "narwhal_api_key", os.getenv("NARWHAL_API_KEY", "")).strip()
-        machine_id = str(payload.get("narwhal_machine_id") or _get_system_setting(conn, "narwhal_machine_id", os.getenv("NARWHAL_MACHINE_ID", ""))).strip()
-        if not machine_id:
-            # Auto-detect from active hosts in db if any host_id is a 36-char UUID
-            rows = conn.execute("SELECT host_id FROM hosts WHERE host_id <> '' ORDER BY last_seen DESC LIMIT 50").fetchall()
-            for r in rows:
-                candidate = str(r["host_id"]).strip()
-                if re.match(r"^[0-9a-fA-F-]{36}$", candidate):
-                    machine_id = candidate
-                    break
-        node_name = str(payload.get("narwhal_node_name") or _get_system_setting(conn, "narwhal_node_name", os.getenv("NARWHAL_NODE_NAME", socket.gethostname()))).strip()
-    finally:
-        conn.close()
-
-    if not api_key:
-        raise HTTPException(status_code=400, detail="未配置 NARWHAL_API_KEY，无法发起测试")
-    if not machine_id:
-        raise HTTPException(status_code=400, detail="未指定测试机器 UUID。多母鸡集群下，各母鸡告警时会自动识别各自的机器 UUID；若要手动测试连通性，请在“测试机器 UUID”框中填入任一母鸡的 UUID 发起测试。")
-
-    endpoint = f"{api_url}/machines/{machine_id}/notify-buyers"
-    subject, message = format_buyer_notification(node_name or "测试母鸡节点", "test-demo-container", "控制台测试：API 连通性与买家推送配置正常")
-    test_body = json.dumps({"subject": subject[:200], "message": message[:2000]}).encode("utf-8")
-
-    req = urllib.request.Request(
-        endpoint,
-        data=test_body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": f"Narwhal-Monitor-Server/{APP_VERSION}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp_text = resp.read().decode("utf-8", errors="replace")
-            return JSONResponse({
-                "ok": True,
-                "message": "测试通知发送成功！Narwhal Cloud API 接口校验通过。",
-                "status_code": resp.status,
-                "response": resp_text[:500],
-            })
-    except urllib.error.HTTPError as err:
-        err_body = err.read().decode("utf-8", errors="replace")
-        if err.code == 429:
-            return JSONResponse({
-                "ok": True,
-                "message": "API 认证成功！已触发 24 小时限频保护（同一台机器 24 小时内仅允许向买家推送一次通知）。",
-                "status_code": 429,
-                "response": err_body[:500],
-            })
-        elif err.code in (401, 403):
-            raise HTTPException(status_code=401, detail=f"API 鉴权失败 ({err.code})：API Key 无效或未授权 - {err_body[:200]}")
-        elif err.code == 404:
-            raise HTTPException(status_code=404, detail=f"机器未找到 (404)：请检查 NARWHAL_MACHINE_ID 是否匹配 - {err_body[:200]}")
-        else:
-            raise HTTPException(status_code=502, detail=f"上游 API 返回错误 (HTTP {err.code}): {err_body[:200]}")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"无法连接 Narwhal Cloud API ({endpoint}): {exc}")
+        result = await asyncio.to_thread(buyer_notifications.test_notification, db, payload)
+        return JSONResponse(result)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.post("/api/v1/notifications/telegram/{bot_id}/{callback_secret}")
@@ -2059,76 +2032,14 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
     return host_id
 
 
-_last_server_buyer_notifications: dict[tuple[str, str], float] = {}
-
-
 def dispatch_buyer_notifications_for_alerts(host_id: str, alerts: list) -> None:
+    """Compatibility entry point: enqueue only, never send in the report request."""
     conn = db()
     try:
-        api_url = _get_system_setting(conn, "narwhal_api_url", os.getenv("NARWHAL_API_URL", "https://api.fuckip.me/api/v1")).strip().rstrip("/")
-        api_key = _get_system_setting(conn, "narwhal_api_key", os.getenv("NARWHAL_API_KEY", "")).strip()
-        buyer_notify_val = _get_system_setting(conn, "buyer_notify_enabled", os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "true"))
-        buyer_notify_enabled = buyer_notify_val.strip().lower() not in ("0", "false", "no", "off")
-        default_machine_id = _get_system_setting(conn, "narwhal_machine_id", os.getenv("NARWHAL_MACHINE_ID", "")).strip()
-        default_node_name = _get_system_setting(conn, "narwhal_node_name", os.getenv("NARWHAL_NODE_NAME", "")).strip()
+        buyer_notifications.reconcile(conn, host_id, int(time.time()))
+        conn.commit()
     finally:
         conn.close()
-
-    if not buyer_notify_enabled or not api_key:
-        return
-
-    # Determine machine_id for this host
-    machine_id = ""
-    if re.match(r"^[0-9a-fA-F-]{36}$", host_id.strip()):
-        machine_id = host_id.strip()
-    elif default_machine_id and re.match(r"^[0-9a-fA-F-]{36}$", default_machine_id):
-        machine_id = default_machine_id
-
-    if not machine_id:
-        return
-
-    node_name = default_node_name or host_id
-    now = time.time()
-    for alert in alerts:
-        severity = str(alert.get("severity") or "").lower()
-        alert_type = str(alert.get("type") or "").lower()
-        if severity != "critical" and alert_type not in (
-            "socks_weak_auth", "malicious_process", "unauthorized_panel_pairing", "cc_attack", "ddos_bandwidth", "ddos_packets", "ddos_syn", "traffic_imbalance", "hy2_high_concurrency"
-        ):
-            continue
-        c_name = str(alert.get("container_name") or "").strip()
-        if not c_name:
-            continue
-        key = (machine_id, c_name)
-        last_sent = _last_server_buyer_notifications.get(key, 0.0)
-        if (now - last_sent) < 86400.0:
-            continue
-
-        alert_issue = str(alert.get("title") or alert.get("message") or "安全威胁")
-        subject, message = format_buyer_notification(node_name, c_name, alert_issue)
-        endpoint = f"{api_url}/machines/{machine_id}/notify-buyers"
-        body = json.dumps({"subject": subject[:200], "message": message[:2000]}).encode("utf-8")
-        req = urllib.request.Request(
-            endpoint,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": f"Narwhal-Monitor-Server/{APP_VERSION}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status == 200:
-                    _last_server_buyer_notifications[key] = now
-                    logging.info(f"[buyer-notify] server dispatched alert to machine {machine_id} buyers for {c_name}")
-        except urllib.error.HTTPError as err:
-            if err.code == 429:
-                _last_server_buyer_notifications[key] = now
-            logging.warning(f"[buyer-notify] upstream API returned status {err.code}: {err}")
-        except Exception as exc:
-            logging.warning(f"[buyer-notify] failed to dispatch notification: {exc}")
 
 
 @app.post("/api/v1/report")
@@ -2234,7 +2145,10 @@ async def report(
         security = data.get("security")
         if isinstance(security, dict):
             security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
-            notifications = process_security_alerts(conn, host_id, ts, security_alerts + operations_alerts)
+            previous_sample = conn.execute("SELECT MAX(ts) FROM host_security WHERE host_id=?", (host_id,)).fetchone()[0] or 0
+            if security.get("enabled", True) and ts > previous_sample:
+                notifications = process_security_alerts(conn, host_id, ts, security_alerts + operations_alerts)
+                buyer_notifications.observe(conn, host_id, ts, containers, security_alerts + operations_alerts)
             automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, host_id, ts)
             conn.execute(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
@@ -2248,6 +2162,11 @@ async def report(
         send_alert_webhook(alert)
     sync_configured_bot_alert_messages(host_id, ts)
     dispatch_buyer_notifications_for_alerts(host_id, notifications)
+    conn = db()
+    try:
+        motd_states = buyer_notifications.banner_states(conn, host_id)
+    finally:
+        conn.close()
     return {
         "ok": True,
         "server_version": APP_VERSION,
@@ -2255,6 +2174,8 @@ async def report(
         "new_alerts": len(notifications),
         "automatic_deep_samples_queued": automatic_deep_samples_queued,
         "automatic_stops_queued": automatic_stops_queued,
+        "narwhal_buyer_push": {"owner": "server", "enabled": False},
+        "motd_states": motd_states,
     }
 
 

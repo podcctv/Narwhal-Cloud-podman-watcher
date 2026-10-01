@@ -342,6 +342,9 @@ export interface PushSettingsResponse {
   narwhal_machine_id: string;
   narwhal_node_name: string;
   buyer_notify_enabled: boolean;
+  buyer_min_severity?: 'warning' | 'critical';
+  buyer_recovery_enabled?: boolean;
+  buyer_sender?: string;
   telegram_bots_count: number;
   callback_ready: boolean;
   proxy_configured?: boolean;
@@ -354,5 +357,12 @@ export interface PushSettingsPayload {
   narwhal_machine_id?: string;
   narwhal_node_name?: string;
   buyer_notify_enabled?: boolean;
+  buyer_min_severity?: 'warning' | 'critical';
+  buyer_recovery_enabled?: boolean;
+  user_id?: string;
+  scope?: 'user' | 'machine';
+  send?: boolean;
+  confirm_audience?: string;
+  confirm_broadcast?: boolean;
 }
 

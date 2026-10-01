@@ -6,7 +6,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
-COPY operations.py operations_api.py ./
+COPY operations.py operations_api.py buyer_notifications.py ./
 COPY maintain_db.py .
 COPY static/ static/
 EXPOSE 8080

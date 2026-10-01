@@ -33,6 +33,7 @@ class ManagedUpgradeTests(unittest.TestCase):
             (base/"client-auto-update.env").write_text("AUTO_UPDATE_REPO_DIR="+shlex.quote(str(repo))+"\n")
             (fixture/"client"/"agent.py").write_text("new_agent=True\n")
             (fixture/"client"/"operations.py").write_text("new_operations=True\n")
+            (fixture/"client"/"security_banner.py").write_text("new_banner=True\n")
             (fixture/"client"/"requirements.txt").write_text("")
             executable(fixture/"scripts"/"install-client.sh",f"#!/bin/bash\ncp {shlex.quote(str(fixture/'client'/'agent.py'))} {shlex.quote(str(app/'agent.py'))}\nprintf 'NARWHAL_VERSION=1.7.0\\n' >{shlex.quote(str(base/'client.env'))}\nexit {1 if fail else 0}\n")
             executable(app/".venv"/"bin"/"python","#!/bin/bash\nexit 0\n")

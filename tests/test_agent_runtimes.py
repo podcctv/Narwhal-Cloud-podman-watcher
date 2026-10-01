@@ -26,11 +26,15 @@ class RuntimeDiscoveryTests(unittest.TestCase):
 
     def test_auto_discovers_all_available_runtimes(self):
         with mock.patch.dict(os.environ, {"CONTAINER_RUNTIMES": "auto"}, clear=False):
-            with mock.patch.object(agent.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+            with mock.patch.object(agent.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"), mock.patch.object(agent,"_is_containerized_runtime",return_value=False):
                 self.assertEqual(
                     agent.get_runtime_bins(),
                     {"podman": "podman", "docker": "docker", "incus": "incus"},
                 )
+
+    def test_containerized_discovery_prefers_remote_podman(self):
+        with mock.patch.dict(os.environ,{"CONTAINER_RUNTIMES":"auto"}), mock.patch.object(agent.shutil,"which",side_effect=lambda name:f"/usr/bin/{name}"), mock.patch.object(agent,"_is_containerized_runtime",return_value=True):
+            self.assertEqual(agent.get_runtime_bins()["podman"],"podman-remote")
 
     def test_runtime_command_timeout_is_bounded_and_non_blocking(self):
         agent._warned_timeout_commands.clear()
@@ -1687,14 +1691,13 @@ class SecurityTelemetryTests(unittest.TestCase):
             },
         ]
         rendered = agent.render_cyber_motd("test-container", incidents)
-        self.assertIn("NARWHAL CYBER-SECURITY DEFENSE PROTOCOL", rendered)
-        self.assertIn("\033[1;5;91m", rendered)  # Blinking red escape code
-        self.assertIn("\033[41;1;97m", rendered) # Red background threat badge
-        self.assertIn("THREAT DETECTED", rendered)
-        self.assertIn("已记录日志，如有持续滥用会导致删鸡。", rendered)
+        self.assertIn("NARWHAL SECURITY", rendered)
+        self.assertNotIn("COMPROMISED", rendered)
+        self.assertNotIn("\033", rendered)  # Plain text by default.
+        self.assertIn("风险存在", rendered)
         self.assertIn("test-container", rendered)
-        self.assertIn("CC_ATTACK", rendered)
-        self.assertIn("SOCKS_WEAK_AUTH", rendered)
+        self.assertIn("cc_attack", rendered)
+        self.assertIn("socks_weak_auth", rendered)
 
     def test_build_motd_content_and_cleanup(self):
         original = "Welcome to Debian GNU/Linux 12\n\nSystem info here.\n"
@@ -1721,49 +1724,28 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(cleaned.strip(), original.strip())
 
     def test_update_container_motd_alerts_lifecycle(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            proc_root = os.path.join(temp_dir, "proc_root")
-            etc_dir = os.path.join(proc_root, "etc")
-            os.makedirs(etc_dir, exist_ok=True)
-            motd_path = os.path.join(etc_dir, "motd")
-            with open(motd_path, "w", encoding="utf-8") as f:
-                f.write("Welcome to Ubuntu 24.04 LTS\n")
-
-            container = {
-                "name": "c-test",
-                "runtime": "incus",
-                "project": "default",
-                "pid": 99999,
-            }
-            alerts = [
-                {
-                    "type": "socks_weak_auth",
-                    "severity": "critical",
-                    "title": "SOCKS 代理认证风险",
-                    "message": "检测到 SOCKS 服务允许无认证访问",
-                    "socks_auth_enforcement": {"succeeded": True},
-                }
-            ]
-
-            with mock.patch("os.path.isdir", side_effect=lambda p: True if p == "/proc/99999/root" else os.path.isdir(p)), \
-                 mock.patch("os.path.join", side_effect=lambda *args: motd_path if args and args[0] == "/proc/99999/root" and "motd" in args else os.path.join(*args)):
-                # 1. Trigger alert: should inject banner
-                wrote = agent.update_container_motd_alerts(container, alerts)
-                self.assertTrue(wrote)
-                with open(motd_path, "r", encoding="utf-8") as f:
-                    content1 = f.read()
-                self.assertIn(agent.MOTD_MARKER_START, content1)
-                self.assertIn("已记录日志，如有持续滥用会导致删鸡。", content1)
-                self.assertIn("Welcome to Ubuntu 24.04 LTS", content1)
-
-                # 2. Container becomes clean: should remove banner and restore original
-                agent._container_motd_incidents["incus:default:c-test"] = []
-                cleaned = agent.update_container_motd_alerts(container, [])
-                self.assertTrue(cleaned)
-                with open(motd_path, "r", encoding="utf-8") as f:
-                    content2 = f.read()
-                self.assertNotIn(agent.MOTD_MARKER_START, content2)
-                self.assertIn("Welcome to Ubuntu 24.04 LTS", content2)
+        banner = agent.security_banner
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"SECURITY_MOTD_STATE_FILE": os.path.join(directory, "state.json")}):
+            banner.incidents.clear()
+            banner._checks.clear()
+            content = ["Welcome to Ubuntu 24.04 LTS\\n"]
+            def write(pid, text):
+                merged = banner.merge(content[0], text)
+                changed = merged != content[0]
+                content[0] = merged
+                return changed
+            c = {"name": "test", "runtime": "incus", "project": "default", "pid": 99999}
+            alerts = [{"type": "socks_weak_auth", "severity": "critical", "message": "No auth", "socks_auth_enforcement": {"succeeded": True}}]
+            with mock.patch.object(banner, "write_proc", side_effect=write), mock.patch.object(agent, "_checked_banner_exec", return_value=(True, "printmotd yes")):
+                self.assertTrue(agent.update_container_motd_alerts(c, alerts))
+                self.assertIn("已执行，待复查", content[0])
+                self.assertNotIn("COMPROMISED", content[0])
+                self.assertIn("Welcome to Ubuntu 24.04 LTS", content[0])
+                now = time.time()
+                with mock.patch.object(banner.time, "time", return_value=now+90000):
+                    self.assertTrue(agent.update_container_motd_alerts(c, []))
+                self.assertEqual(content[0], "Welcome to Ubuntu 24.04 LTS\\n")
+            banner.incidents.clear()
 
     def test_format_buyer_notification(self):
         subject, message = agent.format_buyer_notification(
@@ -1778,6 +1760,8 @@ class SecurityTelemetryTests(unittest.TestCase):
 
     def test_notify_buyers_of_critical_alert_cooldown_and_dispatch(self):
         old_mem = agent._memory_buyer_notify_record
+        env_patch = mock.patch.dict(os.environ, {"NARWHAL_BUYER_NOTIFY_OWNER": "standalone"})
+        env_patch.start()
         try:
             agent._memory_buyer_notify_record = {}
             with mock.patch.object(agent, "_set_last_buyer_notify_record", side_effect=lambda rec: setattr(agent, "_memory_buyer_notify_record", rec)):
@@ -1823,6 +1807,7 @@ class SecurityTelemetryTests(unittest.TestCase):
                     self.assertEqual(mock_post.call_count, 1) # Not called again
         finally:
             agent._memory_buyer_notify_record = old_mem
+            env_patch.stop()
 
 
     def test_tcp_udp_traffic_separation_rates(self):

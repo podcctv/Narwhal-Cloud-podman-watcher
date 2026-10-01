@@ -20,9 +20,10 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations
+    from client import operations as node_operations, security_banner
 except ImportError:
     import operations as node_operations
+    import security_banner
 
 try:
     import maxminddb
@@ -2521,195 +2522,32 @@ _MOTD_THREAT_TYPES = {
     "container_connection_count",
 }
 
-_container_motd_incidents: Dict[str, List[Dict[str, object]]] = {}
+_container_motd_incidents = security_banner.incidents
+_server_motd_states = []
 
 
-def render_cyber_motd(
-    container_name: str,
-    incidents: List[Dict[str, object]],
-    target_hint: str = "",
-) -> str:
-    """Render a cyberpunk-styled terminal MOTD banner with ANSI highlights."""
-    rst = "\033[0m"
-    bold = "\033[1m"
-    blink_red = "\033[1;5;91m"
-    blink_yellow = "\033[1;5;93m"
-    bg_red = "\033[41;1;97m"
-    red = "\033[38;5;196m"
-    crimson = "\033[38;5;160m"
-    cyan = "\033[38;5;51m"
-    yellow = "\033[38;5;220m"
-    gray = "\033[38;5;243m"
-
-    sys_ref = f"NW-SEC-{time.strftime('%Y%m%d', time.gmtime())}"
-    target_display = f"{container_name} ({target_hint})" if target_hint else container_name
-
-    lines = [
-        f"{red}   ██████╗  █████╗ ███╗   ██╗ ██████╗ ███████╗██████╗ {rst}",
-        f"{red}  ██╔══██╗██╔══██╗████╗  ██║██╔════╝ ██╔════╝██╔══██╗{rst}",
-        f"{red}  ██║  ██║███████║██╔██╗ ██║██║  ███╗█████╗  ██████╔╝{rst}",
-        f"{red}  ██║  ██║██╔══██║██║╚██╗██║██║   ██║██╔══╝  ██╔══██╗{rst}",
-        f"{red}  ██████╔╝██║  ██║██║ ╚████║╚██████╔╝███████╗██║  ██║{rst}",
-        f"{red}  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝{rst}",
-        f"  {cyan}>>> NARWHAL CYBER-SECURITY DEFENSE PROTOCOL // WATCHER-v1.6 <<<{rst}",
-        "",
-        f"  {bg_red} THREAT DETECTED {rst}  {blink_red}▶▶ [CRITICAL SECURITY ALERT] ◀◀{rst}  {bg_red} THREAT DETECTED {rst}",
-        f"  {gray}SYS_REF: {sys_ref}  |  STATUS: {blink_red}COMPROMISED{gray}  |  TARGET: {cyan}{target_display}{rst}",
-        "",
-        f"{crimson}┌──[ THREAT INCIDENT LOG / 历史告警追踪 ]──────────────────────────────┐{rst}",
-    ]
-
-    for idx, inc in enumerate(incidents[:3], start=1):
-        ts = inc.get("timestamp") or time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        typ = str(inc.get("type") or "UNKNOWN").upper()
-        detail = str(inc.get("detail") or "")
-        if len(detail) > 55:
-            detail = detail[:52] + "..."
-        action = str(inc.get("action") or "ALERTED by Host Watcher")
-        lines.append(f"{crimson}│{rst} {gray}[{idx}]{rst} {yellow}{ts}{rst} {crimson}▶{rst} {red}[{typ}]{rst}")
-        lines.append(f"{crimson}│{rst}     {gray}Detail:{rst} {detail}")
-        lines.append(f"{crimson}│{rst}     {gray}Action:{rst} {action}")
-        if idx < len(incidents[:3]):
-            lines.append(f"{crimson}│{rst}")
-
-    lines.extend([
-        f"{crimson}└──[ DIRECTIVE & ADVISORY / 处置指引 ]────────────────────────────────┘{rst}",
-        f"{crimson}│{rst}  {blink_yellow}⚡{rst} {bold}警告提示{rst} : 您的容器检测到高危未授权服务或异常流量活动！",
-        f"{crimson}│{rst}  {cyan}⚡{rst} {bold}排查要求{rst} : 请检查后台进程 (`ps aux`)、SSH 密钥与定时任务 (`crontab`)。",
-        f"{crimson}│{rst}  {red}⚡{rst} {bold}风险提醒{rst} : {yellow}已记录日志，如有持续滥用会导致删鸡。{rst}",
-        f"{crimson}└────────────────────────────────────────────────────────────────────┘{rst}",
-        "",
-    ])
-    return "\n".join(lines)
+def render_cyber_motd(container_name, incidents, target_hint=""):
+    """Compatibility name; render a concise, truthful post-login banner."""
+    return security_banner.render(container_name, incidents, target_hint, APP_VERSION)
 
 
-def _build_motd_content(current_content: str, banner: str) -> str:
-    cleaned = current_content
-    if MOTD_MARKER_START in cleaned and MOTD_MARKER_END in cleaned:
-        before = cleaned.split(MOTD_MARKER_START, 1)[0]
-        after = cleaned.split(MOTD_MARKER_END, 1)[1]
-        cleaned = (before.rstrip() + "\n" + after.lstrip("\n")).strip()
-    else:
-        cleaned = cleaned.strip()
-
-    if not banner:
-        return cleaned + ("\n" if cleaned else "")
-    if cleaned:
-        return f"{MOTD_MARKER_START}\n{banner}\n{MOTD_MARKER_END}\n\n{cleaned}\n"
-    return f"{MOTD_MARKER_START}\n{banner}\n{MOTD_MARKER_END}\n"
+def _build_motd_content(current_content, banner):
+    return security_banner.merge(current_content, banner)
 
 
-def update_container_motd_alerts(
-    container: Dict[str, object],
-    container_alerts: List[Dict[str, object]],
-) -> bool:
-    """Update or self-heal container /etc/motd with cyberpunk security banner."""
-    if os.getenv("SECURITY_INJECT_MOTD_ALERT", "true").strip().lower() in ("0", "false", "no", "off"):
-        return False
-
-    runtime = str(container.get("runtime") or "")
-    if runtime == "docker" and container.get("monitor_mode") == "notice":
-        return False
-
-    name = str(container.get("name") or "")
-    project = str(container.get("project") or "")
-    if not name:
-        return False
-
-    key = f"{runtime}:{project}:{name}"
-    incidents = _container_motd_incidents.setdefault(key, [])
-
-    now = time.time()
-    now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now))
-
-    for alert in container_alerts:
-        alert_type = str(alert.get("type") or "")
-        severity = str(alert.get("severity") or "warning")
-        if severity != "critical" and alert_type not in _MOTD_THREAT_TYPES:
-            continue
-
-        title = str(alert.get("title") or alert_type)
-        detail = str(alert.get("message") or "")
-        action = "ALERTED by Host Watcher"
-        auto_rem = alert.get("automatic_remediation")
-        if isinstance(auto_rem, dict) and auto_rem.get("succeeded"):
-            action = "AUTO-KILLED / REMEDIATED by Host Watcher"
-        socks_enf = alert.get("socks_auth_enforcement")
-        if isinstance(socks_enf, dict) and socks_enf.get("succeeded"):
-            action = "AUTO-STOPPED by Host Watcher"
-
-        existing = next((inc for inc in incidents if inc.get("type") == alert_type), None)
-        if existing:
-            existing["time_epoch"] = now
-            existing["timestamp"] = now_str
-            existing["detail"] = detail
-            existing["action"] = action
-            existing["severity"] = severity
-        else:
-            incidents.append({
-                "type": alert_type,
-                "title": title,
-                "detail": detail,
-                "action": action,
-                "severity": severity,
-                "time_epoch": now,
-                "timestamp": now_str,
-            })
-
-    retention_seconds = max(3600.0, _env_float("SECURITY_MOTD_ALERT_RETENTION_HOURS", 24.0) * 3600.0)
-    incidents[:] = [
-        inc for inc in incidents
-        if (now - float(inc.get("time_epoch") or 0)) < retention_seconds
-    ]
-    incidents.sort(key=lambda x: float(x.get("time_epoch") or 0), reverse=True)
-    del incidents[3:]
-
-    banner = render_cyber_motd(name, incidents) if incidents else ""
-
-    pid = 0
+def _checked_banner_exec(container, command):
+    runtime_bin = str(container.get("runtime_bin") or get_container_bin())
+    if not runtime_bin:
+        return False, ""
     try:
-        pid = int(container.get("pid", 0) or 0)
-    except (ValueError, TypeError):
-        pid = 0
+        result = subprocess.run(_runtime_exec_cmd(runtime_bin, str(container.get("name") or ""), command, str(container.get("project") or "")), capture_output=True, text=True, timeout=_runtime_command_timeout())
+        return result.returncode == 0, result.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
 
-    proc_root = f"/proc/{pid}/root" if pid > 1 and os.path.isdir(f"/proc/{pid}/root") else ""
-    motd_host_path = os.path.join(proc_root, "etc", "motd") if proc_root else ""
 
-    current_motd = ""
-    wrote = False
-
-    if motd_host_path:
-        try:
-            if os.path.isfile(motd_host_path):
-                with open(motd_host_path, "r", encoding="utf-8", errors="ignore") as f:
-                    current_motd = f.read()
-            elif banner:
-                os.makedirs(os.path.dirname(motd_host_path), exist_ok=True)
-
-            new_motd = _build_motd_content(current_motd, banner)
-            if new_motd != current_motd:
-                with open(motd_host_path, "w", encoding="utf-8") as f:
-                    f.write(new_motd)
-                wrote = True
-        except (OSError, PermissionError):
-            pass
-
-    if not wrote and not motd_host_path and (banner or key in _container_motd_incidents):
-        runtime_bin = str(container.get("runtime_bin", "") or get_container_bin())
-        if runtime_bin:
-            try:
-                read_cmd = "cat /etc/motd 2>/dev/null || true"
-                current_motd = run(_runtime_exec_cmd(runtime_bin, name, read_cmd, project))
-                new_motd = _build_motd_content(current_motd, banner)
-                if new_motd != current_motd:
-                    escaped_motd = shlex.quote(new_motd)
-                    write_cmd = f"printf '%s\\n' {escaped_motd} > /etc/motd"
-                    run(_runtime_exec_cmd(runtime_bin, name, write_cmd, project))
-                    wrote = True
-            except Exception:
-                pass
-
-    return wrote
+def update_container_motd_alerts(container, container_alerts):
+    return security_banner.update(container, container_alerts, _MOTD_THREAT_TYPES, _checked_banner_exec, _server_motd_states, APP_VERSION)
 
 
 _CRITICAL_BUYER_NOTIFY_TYPES = {
@@ -2734,7 +2572,9 @@ _synced_buyer_push_config: Dict[str, object] = {}
 def _summarize_alert_issue(alert: Dict[str, object]) -> str:
     alert_type = str(alert.get("type") or "").strip().lower()
     if alert_type == "socks_weak_auth":
-        return "检测到暴露公网的无认证 / 弱口令 SOCKS5 代理 (已自动拦截)"
+        rem = alert.get("automatic_remediation") or alert.get("socks_auth_enforcement") or {}
+        result = "执行成功，待复查" if rem.get("succeeded") is True else "处置失败" if rem.get("attempted") is True else "尚未确认处置"
+        return f"检测到暴露公网的无认证 / 弱口令 SOCKS5 代理 ({result})"
     if alert_type in ("cc_attack", "http_high_qps", "http_suspicious_ratio"):
         rps = alert.get("value")
         rps_hint = f" ({rps:.0f} req/s 洪峰)" if isinstance(rps, (int, float)) and rps > 0 else " (高频洪峰)"
@@ -2815,6 +2655,10 @@ def notify_buyers_of_critical_alert(
 ) -> Tuple[bool, str]:
     """Push critical security alert to buyers via /machines/{machineId}/notify-buyers with 24h cooldown."""
     global _synced_buyer_push_config
+    # Only an explicitly standalone installation may use the legacy sender.
+    # Normal monitored nodes never send buyers directly or receive the API key.
+    if _synced_buyer_push_config.get("owner") == "server" or os.getenv("NARWHAL_BUYER_NOTIFY_OWNER", "server") != "standalone":
+        return False, "buyer notifications are owned by the server"
     if os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "").strip():
         if os.getenv("NARWHAL_BUYER_NOTIFY_ENABLED", "").strip().lower() in ("0", "false", "no", "off"):
             return False, "buyer notifications are disabled via configuration"
@@ -3661,25 +3505,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         container_alerts = alerts[start_alert_idx:]
         update_container_motd_alerts(container, container_alerts)
 
-        critical_buyer_alert = next(
-            (
-                a
-                for a in container_alerts
-                if str(a.get("severity") or "") == "critical"
-                or str(a.get("type") or "") in _CRITICAL_BUYER_NOTIFY_TYPES
-            ),
-            None,
-        )
-        if critical_buyer_alert:
-            c_name = str(container.get("name") or container.get("id") or "unknown")
-            alert_issue = _summarize_alert_issue(critical_buyer_alert)
-            host_node_name = (
-                os.getenv("NARWHAL_NODE_NAME", "")
-                or os.getenv("NODE_NAME", "")
-                or socket.gethostname()
-            )
-            host_machine_id = os.getenv("NARWHAL_MACHINE_ID", "")
-            notify_buyers_of_critical_alert(host_node_name, host_machine_id, c_name, alert_issue)
+        # Buyer delivery is server-owned; security reports carry evidence only.
 
     total_rx_bps = float(summary["total_rx_bps"])
     total_rx_pps = float(summary["total_rx_pps"])
@@ -6994,7 +6820,10 @@ def push(server: str, secret: str, payload: Dict) -> None:
             push_cfg = data["narwhal_buyer_push"]
             if isinstance(push_cfg, dict):
                 global _synced_buyer_push_config
-                _synced_buyer_push_config = dict(push_cfg)
+                _synced_buyer_push_config = {"owner": push_cfg.get("owner", "server"), "enabled": False}
+        if isinstance(data, dict) and isinstance(data.get("motd_states"), list):
+            global _server_motd_states
+            _server_motd_states = data["motd_states"][:1000]
     except Exception:
         pass
 

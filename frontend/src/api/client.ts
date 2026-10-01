@@ -55,7 +55,7 @@ export const api = {
       body: JSON.stringify(data),
     }),
   testPushSettings: (data?: PushSettingsPayload) =>
-    request<{ ok: boolean; message: string; status_code?: number; response?: string }>('/api/v1/settings/push/test', {
+    request<{ ok: boolean; message: string; status_code?: number; preview?: boolean; subject?: string; body?: string; audience?: string }>('/api/v1/settings/push/test', {
       method: 'POST',
       body: JSON.stringify(data || {}),
     }),

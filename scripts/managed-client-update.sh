@@ -28,6 +28,9 @@ restore() {
   if [[ -f "$snapshot/operations.py" ]]; then
     install -m 0644 "$snapshot/operations.py" "$app_dir/operations.py" || return 1
   fi
+  if [[ -f "$snapshot/security_banner.py" ]]; then
+    install -m 0644 "$snapshot/security_banner.py" "$app_dir/security_banner.py" || return 1
+  fi
   install -m 0600 "$snapshot/client.env" "$base/client.env" || return 1
   install -m 0644 "$snapshot/requirements.txt" "$app_dir/requirements.txt" || return 1
   "$app_dir/.venv/bin/pip" install -r "$app_dir/requirements.txt" || return 1
@@ -76,11 +79,12 @@ cleanup_stage() {
 }
 trap cleanup_stage EXIT
 git -C "$repo" archive "$revision" | tar -x -C "$stage"
-"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py"
+"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py"
 mkdir -p "$snapshot"
 chmod 0700 "$snapshot"
 install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
 [[ ! -f "$app_dir/operations.py" ]] || install -m 0644 "$app_dir/operations.py" "$snapshot/operations.py"
+[[ ! -f "$app_dir/security_banner.py" ]] || install -m 0644 "$app_dir/security_banner.py" "$snapshot/security_banner.py"
 install -m 0644 "$app_dir/requirements.txt" "$snapshot/requirements.txt"
 install -m 0600 "$base/client.env" "$snapshot/client.env"
 git -C "$repo" rev-parse HEAD >"$snapshot/revision"

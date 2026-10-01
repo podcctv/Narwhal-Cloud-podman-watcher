@@ -283,7 +283,7 @@ def permitted(role, method, path):
     if role == "admin":
         return True
     # These reads expose credentials/configuration even when the response is masked today.
-    if any(path.startswith(p) for p in ("/api/v1/notifications", "/api/v1/settings", "/api/v1/ops/users", "/api/v1/ops/backups", "/api/v1/ops/audit")):
+    if any(path.startswith(p) for p in ("/api/v1/notifications", "/api/v1/settings", "/api/v1/buyer", "/api/v1/ops/users", "/api/v1/ops/backups", "/api/v1/ops/audit")):
         return False
     if method in ("GET", "HEAD"):
         return True

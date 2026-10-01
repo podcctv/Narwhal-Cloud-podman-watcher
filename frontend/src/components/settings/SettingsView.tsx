@@ -21,6 +21,7 @@ import { api } from '../../api/client';
 import { NotificationBot, PushSettingsResponse, PushSettingsPayload } from '../../api/types';
 import { ToastMessage } from '../common/Toast';
 import { ConfirmDialog } from '../common/ConfirmDialog';
+import { BuyerNotificationsView } from './BuyerNotificationsView';
 
 interface SettingsViewProps {
   onToast: (type: ToastMessage['type'], message: string) => void;
@@ -40,6 +41,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
     narwhal_machine_id: '',
     narwhal_node_name: '',
     buyer_notify_enabled: true,
+    buyer_min_severity: 'warning',
+    buyer_recovery_enabled: true,
   });
 
   // Telegram bot state
@@ -74,6 +77,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
         narwhal_machine_id: pushData.narwhal_machine_id || '',
         narwhal_node_name: pushData.narwhal_node_name || '',
         buyer_notify_enabled: Boolean(pushData.buyer_notify_enabled),
+        buyer_min_severity: pushData.buyer_min_severity || 'warning',
+        buyer_recovery_enabled: pushData.buyer_recovery_enabled !== false,
       });
 
       setBots(botData.items);
@@ -101,6 +106,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
         narwhal_machine_id: apiForm.narwhal_machine_id?.trim(),
         narwhal_node_name: apiForm.narwhal_node_name?.trim(),
         buyer_notify_enabled: apiForm.buyer_notify_enabled,
+        buyer_min_severity: apiForm.buyer_min_severity,
+        buyer_recovery_enabled: apiForm.buyer_recovery_enabled,
       };
       if (apiForm.narwhal_api_key && apiForm.narwhal_api_key.trim()) {
         payload.narwhal_api_key = apiForm.narwhal_api_key.trim();
@@ -230,6 +237,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       </section>
 
       {/* Grid: Card 1 (Narwhal Cloud Buyer API) & Card 2 (Telegram Bots) */}
+      <BuyerNotificationsView onToast={onToast} />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 items-start">
         {/* =========================================================================
             CARD A: Narwhal Cloud 买家告警推送配置
@@ -269,15 +277,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               <Info className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
               <div className="space-y-1">
                 <p className="font-semibold text-slate-200">
-                  多母鸡集群说明：API 密钥全集群共享，各母鸡 UUID 无需在此逐一填写
+                  服务端统一发送，API 密钥不下发节点
                 </p>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Narwhal API 密钥为全局通用配置，在此处保存一次即可自动向所有母鸡同步生效。当某台母鸡发生严重告警时，系统会自动提取该母鸡自身的机器标识（HOST_ID 或机器 UUID）和主机名向买家推送，无需在面板中手动登记每一台母鸡。下方的机器 UUID 仅用于在面板点击“测试推送连接”时指定测试目标。
+                  在下方记录中心登记精确的主机、运行时、项目、容器与买家 user_id。缺少映射时阻止发送，绝不猜测机器 UUID 或默认广播。预览不会请求上游；真实测试需要单独确认收件范围。
                 </p>
               </div>
             </div>
 
             <form onSubmit={handleSavePush} className="mt-5 space-y-4">
+              <div className="flex flex-wrap gap-4 text-xs text-slate-300">
+                <label>最低告警等级 <select value={apiForm.buyer_min_severity || 'warning'} onChange={e => setApiForm({ ...apiForm, buyer_min_severity: e.target.value as 'warning' | 'critical' })} className="min-h-11 rounded-lg bg-slate-950 px-2"><option value="warning">警告及危险</option><option value="critical">仅危险</option></select></label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={apiForm.buyer_recovery_enabled !== false} onChange={e => setApiForm({ ...apiForm, buyer_recovery_enabled: e.target.checked })} />发送复查恢复通知</label>
+              </div>
               {/* API URL */}
               <div>
                 <label className="block text-xs font-medium text-slate-300">
@@ -355,7 +367,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                     className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500 font-mono"
                   />
                   <span className="mt-1 block text-[11px] text-slate-500">
-                    多母鸡集群无需在此填写；各母鸡告警时会自动识别并使用各自的机器 UUID
+                    此处仅供格式预览；实际告警使用下方登记的精确收件映射
                   </span>
                 </div>
 
@@ -372,7 +384,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                     className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500"
                   />
                   <span className="mt-1 block text-[11px] text-slate-500">
-                    各母鸡告警时会自动使用各自的宿主机名作为标题
+                    实际告警标题使用精确映射中的节点名称
                   </span>
                 </div>
               </div>
@@ -388,10 +400,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 </div>
                 <div className="font-mono text-xs space-y-2 text-slate-300 leading-relaxed">
                   <div className="font-bold text-amber-300">
-                    ⚠️【节点安全告警】{apiForm.narwhal_node_name || 'US-LAX-01'}
+                    [已执行，待复查] {apiForm.narwhal_node_name || 'US-LAX-01'}
                   </div>
                   <div className="bg-slate-900/80 p-2.5 rounded border border-slate-800/60 whitespace-pre-line text-slate-300 text-[11px]">
-                    {`🚨【容器安全告警】\n\n📦 容器 ID ：c-demo-8f3a\n⚠️ 异常问题：检测到暴露公网的无认证 / 弱口令 SOCKS5 代理 (已自动拦截)\n\n💡 处置提示：请及时登录排查。已记录日志，如有持续滥用会导致删鸡。`}
+                    {`事件 NW-demo\n容器 incus/default/c-demo-8f3a\n状态 已执行，待复查\n问题 无认证 / 弱口令 SOCKS5 代理\n执行成功不等于复查通过，请等待新报告验证。`}
                   </div>
                 </div>
               </div>
@@ -414,7 +426,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-sky-600/50 bg-sky-950/40 px-4 py-2 text-xs sm:text-sm font-semibold text-sky-300 hover:bg-sky-900/60 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60"
                 >
                   <Send className="h-3.5 w-3.5" />
-                  {testingPush ? '测试中…' : '测试推送连接'}
+                  {testingPush ? '预览中…' : '检查通知预览（不发送）'}
                 </button>
               </div>
 
