@@ -24,7 +24,8 @@
 ## 升级与排障
 
 - Server 与 Client 均需升级。旧 Client 保持报告兼容，但新 MOTD 模块只在新 Client 生效；安装及受管升级脚本已复制并校验该模块。
-- 先备份 SQLite（使用在线 backup，包含 WAL 数据）、当前镜像与配置；确认新镜像内 `NARWHAL_VERSION=1.7.1` 后再替换主控。
+- 先备份 SQLite（使用在线 backup，包含 WAL 数据）、当前镜像与配置；确认新镜像内 `NARWHAL_VERSION` 与仓库 `VERSION` 一致后再替换主控。
 - 不重写其他服务的 Caddy 路由。升级后检查认证 API、队列表、报告持续入库及前端资源。
 - Cloudflare 403、401、缺映射和未知结果应先在上游排查，不能靠盲目重试证明发送成功。密钥和实际收件人不要写入日志、提交或评审提示。
 - v1.7.1 本地 Windows 测试 242 项（七项 POSIX 测试跳过）；Linux 隔离环境 242 项全部通过。生产推送链路还须依据现场 API 权限和真实映射单独验证。
+- v1.7.2 补齐容器化 Client 的 `security_banner.py` 镜像复制，并增加打包回归检查，避免主机安装正常但 Client 镜像缺模块。

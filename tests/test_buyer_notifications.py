@@ -100,6 +100,11 @@ class BuyerTests(unittest.TestCase):
         self.assertNotIn("消失",buyer.STATES["resolved"])
         self.assertIn("未验证",buyer.STATES["resolved"])
 
+    def test_client_image_copies_imported_modules(self):
+        dockerfile=(ROOT/"client/Dockerfile").read_text()
+        for module in ("agent.py","operations.py","security_banner.py"):
+            self.assertIn(f"COPY {module} .",dockerfile)
+
     def test_transient_5xx_retries_unchanged_alert_with_bound(self):
         self.mapping()
         self.ingest()
