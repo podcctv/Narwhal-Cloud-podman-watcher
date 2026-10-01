@@ -203,6 +203,19 @@ class BuyerTests(unittest.TestCase):
         self.assertTrue(p["preview"]); sender.assert_not_called()
         self.assertEqual(self.rows(),[])
 
+    def test_delivery_identifies_application_and_preserves_scoped_payload(self):
+        response=mock.MagicMock()
+        response.__enter__.return_value.status=200
+        response.__enter__.return_value.read.return_value=b'{"data":{"notified":1}}'
+        opener=mock.Mock()
+        opener.open.return_value=response
+        with mock.patch.object(buyer,"validate_url",return_value="https://api.example.com/v1"), mock.patch.object(buyer.urllib.request,"build_opener",return_value=opener), mock.patch.dict(os.environ,{"NARWHAL_VERSION":"test-version"}):
+            self.assertEqual(buyer.deliver({"api_url":"https://api.example.com/v1","api_key":"fake-key"},MACHINE,"user-1","user","subject","message","batch"),("succeeded",200))
+        request=opener.open.call_args.args[0]
+        self.assertEqual(request.get_header("User-agent"),"Narwhal-Monitor/test-version")
+        self.assertEqual(request.get_header("Accept"),"application/json")
+        self.assertEqual(json.loads(request.data)["user_id"],"user-1")
+
     def test_real_test_requires_audience_and_is_persisted(self):
         payload={"narwhal_machine_id":MACHINE,"user_id":"user-1","send":True}
         with self.assertRaises(ValueError): buyer.test_notification(server.db,payload,mock.Mock())

@@ -196,7 +196,7 @@ def deliver(cfg, machine, user, scope, subject, message, batch):
     endpoint = base + f"/machines/{valid_uuid(machine)}/notify-buyers"
     body = {"subject": clean(subject,200), "message": clean(message,2000), "user_id": user if scope == "user" else ""}
     req = urllib.request.Request(endpoint, data=json.dumps(body).encode(), method="POST",
-                                 headers={"Authorization": "Bearer "+cfg["api_key"], "Content-Type":"application/json", "Idempotency-Key":batch})
+                                 headers={"Authorization": "Bearer "+cfg["api_key"], "Content-Type":"application/json", "Accept":"application/json", "User-Agent":"Narwhal-Monitor/"+os.getenv("NARWHAL_VERSION","dev"), "Idempotency-Key":batch})
     # A response timeout/crash is uncertain: caller must not blindly resend.
     with urllib.request.build_opener(NoRedirect).open(req, timeout=12) as resp:
         raw = resp.read(8192)
