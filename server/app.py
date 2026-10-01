@@ -125,6 +125,12 @@ def report_agent_version(payload_json: str | None) -> str:
 
 app = FastAPI(title="Narwhal Container Monitor")
 
+try:
+    from server import operations, operations_api
+except ImportError:
+    import operations
+    import operations_api
+
 _AGENT_ONLY_PATHS = {
     "/api/v1/report",
     "/api/v1/tls/ca",
@@ -156,6 +162,17 @@ async def dashboard_basic_auth(request: Request, call_next):
     if request.url.path in _AGENT_ONLY_PATHS or request.url.path.startswith(_BOT_CALLBACK_PREFIX):
         return await call_next(request)
     username = dashboard_user_from_authorization(request.headers.get("authorization", ""))
+    role = "admin"
+    if username is None:
+        conn = db()
+        try:
+            account = operations.authenticate(conn, request.headers.get("authorization", ""))
+            if account:
+                username, role = account
+        except sqlite3.OperationalError:
+            pass  # Startup migration has not yet completed.
+        finally:
+            conn.close()
     if username is None:
         return JSONResponse(
             status_code=401,
@@ -163,7 +180,18 @@ async def dashboard_basic_auth(request: Request, call_next):
             headers={"WWW-Authenticate": 'Basic realm="Narwhal Monitor", charset="UTF-8"'},
         )
     request.state.dashboard_user = username
-    return await call_next(request)
+    request.state.dashboard_role = role
+    allowed = operations.permitted(role, request.method, request.url.path)
+    response = await call_next(request) if allowed else JSONResponse(status_code=403, content={"detail": "当前角色无此操作权限"})
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        conn = db()
+        try:
+            # Never audit bodies, query strings, authorization headers or passwords.
+            conn.execute("INSERT INTO ops_audit(ts,username,method,path,status) VALUES(?,?,?,?,?)", (int(time.time()), username, request.method, request.url.path[:500], response.status_code))
+            conn.commit()
+        finally:
+            conn.close()
+    return response
 
 
 def db() -> sqlite3.Connection:
@@ -381,6 +409,7 @@ def init_db() -> None:
         SELECT host_id, MAX(ts), 'unknown' FROM reports GROUP BY host_id
         """
     )
+    operations.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -391,6 +420,7 @@ async def _cleanup_background_loop() -> None:
     while True:
         try:
             await asyncio.to_thread(cleanup_old_reports, force=True)
+            await asyncio.to_thread(operations_maintenance)
         except Exception:
             logging.exception("Database retention worker failed")
         await asyncio.sleep(5 if _cleanup_status.get("backlog") else REPORT_CLEANUP_INTERVAL_SECONDS)
@@ -429,6 +459,31 @@ def database_storage_status() -> Dict[str, Any]:
 @app.get("/api/v1/database/status")
 def database_status() -> JSONResponse:
     return JSONResponse(content=database_storage_status())
+
+
+def operations_maintenance():
+    conn = db()
+    try:
+        now = int(time.time())
+        operations.maintain(conn, now)
+        row = conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
+        settings = operations.loads(row[0]) if row else {}
+        due = settings.get("enabled") and now-settings.get("last_attempt", 0) >= settings.get("interval_hours", 24)*3600
+        if due:
+            settings["last_attempt"] = now
+            conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)", (json.dumps(settings),))
+            conn.commit()
+            try:
+                settings["last_result"] = operations.backup(DB_PATH, settings.get("retention", 7))
+                settings["last_success"] = now
+                settings.pop("error", None)
+            except Exception as e:
+                settings["error"] = str(e)[:500]
+                logging.exception("Scheduled backup failed")
+            conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)", (json.dumps(settings),))
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
@@ -1906,6 +1961,7 @@ def invalidate_security_status_cache() -> None:
 
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     invalidate_security_status_cache()
+    operations.purge_host(conn,host_id)
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
@@ -1915,7 +1971,7 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
 
 
 def _validate_host_config(payload: Dict[str, Any]) -> Dict[str, Any]:
-    allowed = {"host_id", "report_interval", "action_poll_interval", "container_runtimes", "docker_monitor_mode", "incus_project", "security_monitor_enabled"}
+    allowed = {"host_id", "report_interval", "action_poll_interval", "container_runtimes", "docker_monitor_mode", "incus_project", "security_monitor_enabled", "security_access_log_paths"}
     config = {key: value for key, value in payload.items() if key in allowed}
     if not config:
         raise HTTPException(status_code=400, detail="没有可更新的配置")
@@ -1949,6 +2005,11 @@ def _validate_host_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         config["incus_project"] = value or "all"
     if "security_monitor_enabled" in config:
         config["security_monitor_enabled"] = bool(config["security_monitor_enabled"])
+    if "security_access_log_paths" in config:
+        paths = config["security_access_log_paths"]
+        if not isinstance(paths, list) or not 1 <= len(paths) <= 20 or any(not isinstance(p, str) or not re.fullmatch(r"/var/log/[A-Za-z0-9_./-]{1,200}", p) or ".." in p for p in paths):
+            raise HTTPException(status_code=400, detail="日志路径必须是 /var/log 内的明确文件")
+        config["security_access_log_paths"] = paths
     return config
 
 
@@ -2169,10 +2230,11 @@ async def report(
                             ),
                         )
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
+        operations_alerts = operations.ingest(conn, host_id, node_id, ts, data)
         security = data.get("security")
         if isinstance(security, dict):
             security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
-            notifications = process_security_alerts(conn, host_id, ts, security_alerts)
+            notifications = process_security_alerts(conn, host_id, ts, security_alerts + operations_alerts)
             automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, host_id, ts)
             conn.execute(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
@@ -2929,6 +2991,8 @@ async def queue_security_action(alert_id: int, request: Request) -> JSONResponse
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     requested_action = str(payload.get("action") or "").strip().lower()
+    if requested_action == "allow" and getattr(request.state,"dashboard_role","admin") != "admin":
+        raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略")
     action_type = {"remediate": "remediate_panel_pairing", "allow": "allow_panel_domains"}.get(
         requested_action
     )
@@ -3004,6 +3068,8 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     decision = str(payload.get("decision") or "").strip().lower()
+    if decision == "allow_silent" and getattr(request.state,"dashboard_role","admin") != "admin":
+        raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略")
     if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle"):
         raise HTTPException(
             status_code=400,
@@ -3422,7 +3488,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if row["action_type"] in {"update_host_config", "self_uninstall"} and stored.get("expected_node_id") != node_id:
+            if row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback"} and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -3435,9 +3501,10 @@ async def poll_security_actions(
             action["attempts"] += 1
             actions.append(action)
         conn.commit()
+        ops_services = [{"id": r["id"], **operations.loads(r["payload"])} for r in conn.execute("SELECT id,payload FROM ops_services WHERE host_id=? AND enabled=1 LIMIT 20", (host_id,)).fetchall()]
     finally:
         conn.close()
-    return signed_json_response({"ok": True, "actions": actions}, x_timestamp)
+    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services}}, x_timestamp)
 
 
 @app.post("/api/v1/actions/result")
@@ -3469,7 +3536,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall"} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback"} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"
@@ -3493,10 +3560,14 @@ async def security_action_result(
                     "UPDATE security_alerts SET status='remediated' WHERE id=? AND status='active'",
                     (row["alert_id"],),
                 )
+                operations.track_recheck(conn, action_id, now)
             conn.commit()
     finally:
         conn.close()
     return signed_json_response({"ok": True, "action_id": action_id}, x_timestamp)
+
+
+operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup_old_reports, lambda: APP_VERSION, lambda: DASHBOARD_USERNAME)
 
 
 @app.get("/api/v1/security/actions")

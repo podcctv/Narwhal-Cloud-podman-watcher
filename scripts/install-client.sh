@@ -461,6 +461,8 @@ docker rm -f narwhal-monitor-client >/dev/null 2>&1 || true
 
 mkdir -p "$CLIENT_APP_DIR"
 cp "$ROOT_DIR/client/agent.py" "$CLIENT_APP_DIR/agent.py"
+cp "$ROOT_DIR/client/operations.py" "$CLIENT_APP_DIR/operations.py"
+install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
 cp "$ROOT_DIR/client/requirements.txt" "$CLIENT_APP_DIR/requirements.txt"
 cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"
 chmod 0700 "$SELF_UNINSTALL_SCRIPT"
@@ -493,7 +495,9 @@ EOF_SERVICE
 systemctl daemon-reload
 systemctl enable narwhal-monitor-client.service >/dev/null
 systemctl restart narwhal-monitor-client.service
-bash "$ROOT_DIR/scripts/setup-auto-update.sh" client "$ROOT_DIR"
+if [[ "${NARWHAL_MANAGED_UPDATE:-0}" != "1" ]]; then
+  bash "$ROOT_DIR/scripts/setup-auto-update.sh" client "$ROOT_DIR"
+fi
 check_incus_visibility "$runtimes" "$incus_project"
 
 cat <<EOF_SUM

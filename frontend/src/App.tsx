@@ -18,10 +18,11 @@ import { CommandPalette } from './components/common/CommandPalette';
 import { ToastContainer, ToastMessage } from './components/common/Toast';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { SettingsView } from './components/settings/SettingsView';
+import { OperationsView } from './components/operations/OperationsView';
 
 export const App: React.FC = () => {
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations'>('dashboard');
 
   // Selected container for slide-over drawer
   const [selectedContainer, setSelectedContainer] = useState<ContainerIdentity | null>(null);
@@ -249,6 +250,7 @@ export const App: React.FC = () => {
             />
           )}
           {(activeTab === 'settings' || activeTab === 'notifications') && <SettingsView onToast={addToast} />}
+          {activeTab === 'operations' && <OperationsView onToast={addToast} isPaused={isPaused} />}
         </ErrorBoundary>
       </main>
 

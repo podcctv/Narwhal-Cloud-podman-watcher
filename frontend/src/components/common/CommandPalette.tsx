@@ -7,7 +7,7 @@ interface CommandPaletteProps {
   onClose: () => void;
   containers: ContainerItem[];
   onSelectContainer: (id: ContainerIdentity) => void;
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications') => void;
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations') => void;
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -48,6 +48,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { id: 'alerts', label: '安全告警历史', hint: 'Security Alerts', icon: AlertTriangle, color: 'text-amber-400', run: () => onSelectTab('alerts') },
     { id: 'stats', label: '统计分析与排行榜', hint: 'Telemetry & Stats', icon: BarChart3, color: 'text-emerald-400', run: () => onSelectTab('stats') },
     { id: 'settings', label: '系统设置与推送配置', hint: 'Settings & Push', icon: Settings, color: 'text-sky-300', run: () => onSelectTab('settings') },
+    { id: 'operations', label: '运维中心', hint: 'Operations', icon: Server, color: 'text-sky-300', run: () => onSelectTab('operations') },
   ] : [];
   const resultCount = quickActions.length + filteredContainers.length;
 

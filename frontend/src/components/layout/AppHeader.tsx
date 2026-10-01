@@ -3,8 +3,8 @@ import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings } from 'lucid
 import { CountdownTimer } from '../common/CountdownTimer';
 
 interface AppHeaderProps {
-  activeTab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications';
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications') => void;
+  activeTab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations';
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations') => void;
   serverVersion: string;
   activeAlertCount: number;
   countdown: number;
@@ -122,6 +122,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
             <span>数据统计</span>
           </button>
         </nav>
+        <button type="button" onClick={() => onSelectTab('operations')} aria-current={activeTab === 'operations' ? 'page' : undefined} className={`min-h-11 rounded-lg border px-3 py-2 text-xs font-semibold ${activeTab === 'operations' ? 'border-sky-400 bg-sky-500 text-slate-950' : 'border-slate-700 text-slate-300 hover:border-sky-500'}`}>运维中心</button>
 
         {/* Search & Timer Tools */}
         <div className="flex items-center justify-between gap-2.5 xl:justify-end">

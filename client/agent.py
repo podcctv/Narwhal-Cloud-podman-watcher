@@ -20,6 +20,11 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
+    from client import operations as node_operations
+except ImportError:
+    import operations as node_operations
+
+try:
     import maxminddb
 except ImportError:  # Optional at import time for source-only/test environments.
     maxminddb = None
@@ -5301,6 +5306,7 @@ def collect_container(
             rx_total = int(rx_c)
             tx_total = int(tx_c)
             break
+    counter_source = "runtime" if rx_total or tx_total else "unavailable"
     rx_packet_total = int(parsed_stats.get("net_rx_total_packets", 0) or 0)
     tx_packet_total = int(parsed_stats.get("net_tx_total_packets", 0) or 0)
 
@@ -5344,6 +5350,9 @@ def collect_container(
             if rx_total <= 0 and tx_total <= 0:
                 rx_total = proc_rx
                 tx_total = proc_tx
+                counter_source = "proc"
+        elif counter_source == "unavailable" and os.access(f"/proc/{pid}/net/dev", os.R_OK):
+            counter_source = "proc"
         if rx_packet_total <= 0 and tx_packet_total <= 0:
             rx_packet_total = proc_rx_packets
             tx_packet_total = proc_tx_packets
@@ -5497,6 +5506,7 @@ def collect_container(
         "mem_percent": mem_percent,
         "net_rx_bps": net_rx,
         "net_tx_bps": net_tx,
+        "traffic_counters": {"available": counter_source != "unavailable", "rx": rx_total, "tx": tx_total, "source": counter_source, "epoch": f"{container_id or name}:{pid}:{counter_source}"},
         "tcp_rx_bps": tcp_rx_bps,
         "tcp_tx_bps": tcp_tx_bps,
         "udp_rx_bps": udp_rx_bps,
@@ -6858,6 +6868,7 @@ def _apply_host_config(action: Dict, node_id: str) -> Tuple[bool, str]:
         "host_id": "HOST_ID", "report_interval": "REPORT_INTERVAL", "action_poll_interval": "ACTION_POLL_INTERVAL",
         "container_runtimes": "CONTAINER_RUNTIMES", "docker_monitor_mode": "DOCKER_MONITOR_MODE",
         "incus_project": "INCUS_PROJECT", "security_monitor_enabled": "SECURITY_MONITOR_ENABLED",
+        "security_access_log_paths": "SECURITY_ACCESS_LOG_PATHS",
     }
     env_file = os.getenv("NARWHAL_CLIENT_ENV_FILE", "/opt/narwhal-monitor/client.env")
     if not os.path.isfile(env_file):
@@ -6868,7 +6879,11 @@ def _apply_host_config(action: Dict, node_id: str) -> Tuple[bool, str]:
             target = allowed.get(key)
             if target is None:
                 continue
-            if key == "security_monitor_enabled":
+            if key == "security_access_log_paths":
+                if not isinstance(value, list) or not 1 <= len(value) <= 20 or any(not isinstance(p,str) or not re.fullmatch(r"/var/log/[A-Za-z0-9_./-]{1,200}",p) or ".." in p for p in value):
+                    return False, "unsafe access log paths"
+                values[target] = ",".join(value)
+            elif key == "security_monitor_enabled":
                 values[target] = "true" if bool(value) else "false"
             else:
                 text = str(value).strip()
@@ -6915,6 +6930,7 @@ def _schedule_self_uninstall(action: Dict, node_id: str) -> Tuple[bool, str]:
 
 def process_security_actions(server: str, secret: str, host_id: str, node_id: str = "") -> bool:
     response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
+    node_operations.configure(response.get("operations"))
     actions = response.get("actions") if isinstance(response.get("actions"), list) else []
     changed = False
     for action in actions:
@@ -6928,6 +6944,12 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
                 print(f"diagnostic action {action_id} accepted: {message}")
                 changed = True
                 continue
+        elif action_type == "discover_access_logs":
+            params = action.get("params", {})
+            ok = bool(node_id) and params.get("expected_node_id") == node_id
+            message = json.dumps(node_operations.discover_logs(_parse_access_log_line), ensure_ascii=False) if ok else "host action node identity mismatch"
+        elif action_type in {"managed_upgrade", "managed_rollback"}:
+            ok, message = node_operations.schedule_upgrade(action, node_id)
         elif action_type == "update_host_config":
             ok, message = _apply_host_config(action, node_id)
         elif action_type == "self_uninstall":
@@ -6942,7 +6964,7 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
                 "action_id": action_id,
                 "host_id": host_id,
                 "node_id": node_id,
-                "status": "running" if ok and action_type == "self_uninstall" else ("succeeded" if ok else "failed"),
+                "status": "running" if ok and action_type in {"self_uninstall", "managed_upgrade", "managed_rollback"} else ("succeeded" if ok else "failed"),
                 "message": message,
             },
         )
@@ -6986,6 +7008,7 @@ def main() -> None:
     parser.add_argument("--host-id", default=os.getenv("HOST_ID", socket.gethostname()))
     parser.add_argument("--node-id", default=os.getenv("NODE_ID", ""))
     args = parser.parse_args()
+    node_operations.load_config()
 
     while True:
         containers = list_containers()
@@ -7077,6 +7100,7 @@ def main() -> None:
             "podman_network": {"ipv4_ok": v4, "ipv6_ok": v6},
             "containers": collected,
             "security": security,
+            "operations": node_operations.collect(security, collected, security_interval),
         }
         try:
             push(args.server, args.secret, payload)
