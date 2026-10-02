@@ -87,6 +87,12 @@ def _evidence(alert):
     observation = raw.get('observation') if isinstance(raw.get('observation'), dict) else {}
     for k in ("auth_mode", "duration_seconds", "duration_verified", "sample_count", "max_gap_seconds"):
         v = raw.get(k, observation.get(k))
+        if k == 'auth_mode':
+            # Production detector alerts use socks_auth_mode; older generic
+            # evidence uses auth_mode. Keep only known categorical facts.
+            v = raw.get('socks_auth_mode') or v
+            if v not in {'no_auth', 'weak_password', 'unknown'}:
+                continue
         if isinstance(v, (str, bool, int, float)):
             if isinstance(v, float) and not math.isfinite(v):
                 continue

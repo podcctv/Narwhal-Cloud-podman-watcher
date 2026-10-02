@@ -68,6 +68,13 @@ class InvestigationTests(unittest.TestCase):
         self.assertNotIn("must-not-copy", json.dumps(result))
         self.assertEqual(result["items"][0]["evidence"]["service_listeners"][0]["process"], "danted")
 
+    def test_production_socks_auth_field_is_preserved_without_credentials(self):
+        for mode in ('no_auth', 'weak_password', 'unknown'):
+            self.assertEqual(json.loads(investigation._evidence({'details_json': json.dumps({'socks_auth_mode': mode, 'password': 'never-copy'})}))['auth_mode'], mode)
+        evidence = investigation._evidence({'details_json': json.dumps({'socks_auth_mode': 'invalid-secret-value'})})
+        self.assertNotIn('auth_mode', json.loads(evidence))
+        self.assertNotIn('invalid-secret-value', evidence)
+
     def test_recurrence_keeps_old_episode_and_threshold(self):
         self.mapping()
         self.ingest()
