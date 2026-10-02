@@ -366,3 +366,28 @@ export interface PushSettingsPayload {
   confirm_broadcast?: boolean;
 }
 
+export interface InvestigationReceipt { kind: string; target: string; status: 'ok' | 'failed'; }
+export interface InvestigationEvidence {
+  auth_mode?: string;
+  service_listeners?: { process: string; local: string; pid: string }[];
+  automatic_remediation?: { attempted: boolean; succeeded: boolean; items: InvestigationReceipt[] };
+}
+export interface InvestigationAction { id?: number; action_type?: string; status?: string; updated_at?: number; items?: InvestigationReceipt[]; }
+export interface InvestigationIncident {
+  id: number; identity_key: string; host_id: string; runtime: string; project: string; container_name: string;
+  user_id: string; title: string; alert_type: string; category: string; severity: string; status: string; state: string;
+  first_seen: number; last_anomaly: number; recorded_from: number; legacy: number;
+  value: number | null; threshold: number | null; initial_value: number | null; initial_threshold: number | null;
+  evidence: InvestigationEvidence; action: InvestigationAction;
+  transitions: { ts: number; state: string; status: string; severity: string; value: number | null; threshold: number | null; evidence: InvestigationEvidence; action: InvestigationAction }[];
+}
+export interface InvestigationResponse {
+  concentration: { user_id: string; observed: number; affected: number; share: number | null } | null;
+  hosts: { host_id: string; first_sample: number; last_sample: number }[];
+  users: { user_id: string; observed: number; affected: number; unassessed: number; episodes: number; pending: number; rate: number | null; share: number | null; legacy: number; security: number; signals: number }[];
+  items: InvestigationIncident[]; total: number; offset: number;
+  public_items: InvestigationIncident[]; public_total: number;
+  summary: { observed: number; affected: number; users: number; unknown: number; attributed: number; legacy: number };
+  coverage: { from: number | null; retention_days: number; complete_window: boolean; note: string };
+  window: { start: number; end: number }; host_id: string; days: number;
+}

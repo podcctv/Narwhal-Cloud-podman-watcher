@@ -126,10 +126,11 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications
+    from server import operations, operations_api, buyer_notifications, investigation
 except ImportError:
     import operations
     import operations_api
+    import investigation
     import buyer_notifications
 
 _AGENT_ONLY_PATHS = {
@@ -412,6 +413,7 @@ def init_db() -> None:
     )
     operations.initialize(conn)
     buyer_notifications.initialize(conn)
+    investigation.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -524,6 +526,8 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
         raw_cutoff = now - min(PURGE_SECONDS, RAW_RETENTION_SECONDS)
         deadline = time.monotonic() + CLEANUP_TIME_BUDGET_SECONDS
         conn = db()
+        investigation.maintain(conn, now)
+        conn.commit()
         # Complete this small transaction before starting the next; never hold
         # the API writer lock across a whole retention backlog.
         def prune(table: str, predicate: str, params: tuple = ()) -> int:
@@ -1938,6 +1942,7 @@ def invalidate_security_status_cache() -> None:
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     invalidate_security_status_cache()
     operations.purge_host(conn,host_id)
+    investigation.purge_host(conn,host_id)
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
@@ -2025,6 +2030,7 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
                 conn.execute("UPDATE security_alert_decisions SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
             for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads"):
                 conn.execute(f"UPDATE {table} SET host_id=? WHERE host_id=?", (host_id, old))
+            investigation.rename_host(conn, old, host_id)
             conn.execute("DELETE FROM hosts WHERE host_id=?", (old,))
     conn.execute(
         "INSERT INTO hosts(host_id,last_seen,agent_version,node_id,config_json) VALUES(?,?,?,?,?) "
@@ -2157,6 +2163,10 @@ async def report(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
                 (host_id, ts, json.dumps(security, ensure_ascii=False)),
             )
+        fingerprints = None
+        if isinstance(security, dict) and security.get("enabled", True) and ts > previous_sample:
+            fingerprints = {r[0] for r in conn.execute("SELECT fingerprint FROM security_alerts WHERE host_id=? AND last_seen=? AND status<>'resolved'", (host_id, ts))}
+        investigation.observe(conn, host_id, node_id, ts, containers, fingerprints)
         conn.commit()
     finally:
         conn.close()
@@ -2977,6 +2987,7 @@ async def queue_security_action(alert_id: int, request: Request) -> JSONResponse
 
     requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
     row, queued = _queue_security_action_row(conn, alert, action_type, params, requested_by)
+    investigation.sync_states(conn, alert['host_id'], int(time.time()), alert_id=alert['id'])
     conn.commit()
     conn.close()
     return JSONResponse(
@@ -3166,6 +3177,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
         """,
         (alert_id, alert["fingerprint"], decision, requested_by, now),
     )
+    investigation.sync_states(conn, alert['host_id'], now, alert_id=alert['id'])
     conn.commit()
     conn.close()
     try:
@@ -3491,6 +3503,8 @@ async def security_action_result(
                     (row["alert_id"],),
                 )
                 operations.track_recheck(conn, action_id, now)
+            if row['alert_id'] is not None:
+                investigation.sync_states(conn, host_id, now, alert_id=row['alert_id'])
             conn.commit()
     finally:
         conn.close()
@@ -3533,6 +3547,24 @@ def security_alerts(active_only: bool = True, limit: int = 200) -> JSONResponse:
     conn.close()
     active_count = sum(1 for item in items if item["status"] == "active") if not active_only else len(items)
     return JSONResponse(content={"items": items, "active_count": active_count})
+
+
+@app.get("/api/v1/security/investigation")
+def user_investigation(host_id: str = "", days: int = 30, query: str = "",
+                       user_id: str | None = None, identity_key: str = "", offset: int = 0,
+                       limit: int = 30) -> JSONResponse:
+    if days not in {7, 30, 90}:
+        raise HTTPException(status_code=400, detail="历史范围必须是 7、30 或 90 天")
+    now = int(time.time())
+    conn = db()
+    try:
+        result = investigation.overview(conn, host_id.strip()[:200], now - days * 86400, now,
+                                        query[:200], user_id[:128] if user_id is not None else None,
+                                        identity_key[:64], max(0, offset), max(1, min(limit, 100)))
+        result.update(window={"start": now - days * 86400, "end": now}, host_id=host_id, days=days)
+        return JSONResponse(content=result)
+    finally:
+        conn.close()
 
 
 @app.get("/api/v1/security/history")

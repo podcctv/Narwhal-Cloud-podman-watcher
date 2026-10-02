@@ -6,6 +6,17 @@
   color-scheme: dark;
 }
 
+/* Native quantitative control, styled to the investigation view's cyan tokens. */
+progress {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: #334155;
+}
+progress::-webkit-progress-bar { background: #334155; border-radius: 999px; }
+progress::-webkit-progress-value { background: #38bdf8; border-radius: 999px; }
+progress::-moz-progress-bar { background: #38bdf8; border-radius: 999px; }
+
 body {
   margin: 0;
   background-color: #020617;

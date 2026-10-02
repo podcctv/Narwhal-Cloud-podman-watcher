@@ -9,6 +9,7 @@ import {
   NotificationBot,
   PushSettingsResponse,
   PushSettingsPayload,
+  InvestigationResponse,
 } from './types';
 
 export class ApiError extends Error {
@@ -48,6 +49,11 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
 }
 
 export const api = {
+  getInvestigation: (params: { host_id: string; days: number; query?: string; user_id?: string; identity_key?: string; offset?: number; limit?: number }, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => { if (value !== undefined) query.set(key, String(value)); });
+    return request<InvestigationResponse>(`/api/v1/security/investigation?${query}`, { signal });
+  },
   getPushSettings: () => request<PushSettingsResponse>('/api/v1/settings/push'),
   updatePushSettings: (data: PushSettingsPayload) =>
     request<{ ok: boolean; message: string }>('/api/v1/settings/push', {

@@ -13,6 +13,7 @@ import { TelemetrySection } from './components/dashboard/TelemetrySection';
 import { HostContainerList } from './components/dashboard/HostContainerList';
 import { ContainerDrawer } from './components/container/ContainerDrawer';
 import { AlertHistoryView } from './components/alerts/AlertHistoryView';
+import { UserInvestigationView } from './components/alerts/UserInvestigationView';
 import { StatsAnalyticsView } from './components/stats/StatsAnalyticsView';
 import { CommandPalette } from './components/common/CommandPalette';
 import { ToastContainer, ToastMessage } from './components/common/Toast';
@@ -22,7 +23,7 @@ import { OperationsView } from './components/operations/OperationsView';
 
 export const App: React.FC = () => {
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations'>('dashboard');
 
   // Selected container for slide-over drawer
   const [selectedContainer, setSelectedContainer] = useState<ContainerIdentity | null>(null);
@@ -199,7 +200,7 @@ export const App: React.FC = () => {
       />
 
       {/* Main Body */}
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 sm:px-6 pb-16">
+      <main className={`mx-auto w-full ${activeTab === 'investigation' ? 'max-w-[1536px]' : 'max-w-7xl'} flex-1 px-4 sm:px-6 pb-16`}>
         <ErrorBoundary fallbackTitle="主界面视图加载异常">
           {activeTab === 'dashboard' && (
             <>
@@ -241,6 +242,8 @@ export const App: React.FC = () => {
               onBackToDashboard={() => setActiveTab('dashboard')}
             />
           )}
+
+          {activeTab === 'investigation' && <UserInvestigationView />}
 
           {activeTab === 'stats' && (
             <StatsAnalyticsView

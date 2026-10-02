@@ -1,10 +1,10 @@
 import React from 'react';
-import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings } from 'lucide-react';
+import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings, Users } from 'lucide-react';
 import { CountdownTimer } from '../common/CountdownTimer';
 
 interface AppHeaderProps {
-  activeTab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations';
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations') => void;
+  activeTab: 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations';
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations') => void;
   serverVersion: string;
   activeAlertCount: number;
   countdown: number;
@@ -32,16 +32,16 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
   onOpenSearch,
 }) => {
   return (
-    <header className="sticky top-0 z-30 mb-6 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
-      <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:px-6 xl:flex-row xl:items-center xl:justify-between">
+    <header className="top-0 z-30 mb-6 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl lg:sticky">
+      <div className="mx-auto flex max-w-[1536px] flex-col gap-3 px-4 py-3 sm:px-6 xl:flex-row xl:flex-wrap xl:items-center xl:justify-between 2xl:flex-nowrap">
         {/* Brand & Title */}
-        <div className="flex items-center gap-3">
+        <div className="flex shrink-0 items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-sky-500/40 bg-sky-950/60 shadow-inner">
             <span className="font-mono text-base font-extrabold text-sky-400">NW</span>
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-lg font-bold tracking-tight text-slate-100">
+              <h1 className="whitespace-nowrap text-lg font-bold tracking-tight text-slate-100">
                 Narwhal Monitor
               </h1>
               <span className="rounded-full border border-slate-700 bg-slate-800/80 px-2 py-0.5 font-mono text-[11px] text-slate-300">
@@ -55,7 +55,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
         </div>
 
         {/* Navigation Tabs */}
-        <nav aria-label="主导航" className="grid w-full grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1 sm:flex sm:w-auto sm:items-center">
+        <nav aria-label="主导航" className="grid w-full grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1 sm:flex sm:w-auto sm:flex-wrap sm:items-center [&>button]:whitespace-nowrap">
           <button
             type="button"
             onClick={() => onSelectTab('dashboard')}
@@ -121,6 +121,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
             <BarChart3 className="h-3.5 w-3.5" />
             <span>数据统计</span>
           </button>
+          <button type="button" onClick={() => onSelectTab('investigation')} aria-current={activeTab === 'investigation' ? 'page' : undefined} className={`min-h-11 flex items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold ${activeTab === 'investigation' ? 'bg-sky-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'}`}><Users className="h-3.5 w-3.5" /><span>用户排查</span></button>
         </nav>
         <button type="button" onClick={() => onSelectTab('operations')} aria-current={activeTab === 'operations' ? 'page' : undefined} className={`min-h-11 rounded-lg border px-3 py-2 text-xs font-semibold ${activeTab === 'operations' ? 'border-sky-400 bg-sky-500 text-slate-950' : 'border-slate-700 text-slate-300 hover:border-sky-500'}`}>运维中心</button>
 
@@ -130,6 +131,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           <button
             type="button"
             onClick={onOpenSearch}
+            aria-label="打开全局检索"
             className="min-h-11 flex flex-1 items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-400 xl:flex-none"
           >
             <Search className="h-3.5 w-3.5" />
