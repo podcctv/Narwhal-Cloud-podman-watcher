@@ -126,12 +126,13 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth
 except ImportError:
     import operations
     import operations_api
     import investigation
     import buyer_notifications
+    import dashboard_auth
 
 _AGENT_ONLY_PATHS = {
     "/api/v1/report",
@@ -154,46 +155,13 @@ def dashboard_user_from_authorization(authorization: str) -> str | None:
         username, password = decoded.split(":", 1)
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
-    user_ok = hmac.compare_digest(username, DASHBOARD_USERNAME)
-    password_ok = hmac.compare_digest(password, DASHBOARD_PASSWORD)
+    user_ok = hmac.compare_digest(username.encode(), DASHBOARD_USERNAME.encode())
+    password_ok = hmac.compare_digest(password.encode(), DASHBOARD_PASSWORD.encode())
     return username if user_ok and password_ok else None
 
 
-@app.middleware("http")
-async def dashboard_basic_auth(request: Request, call_next):
-    if request.url.path in _AGENT_ONLY_PATHS or request.url.path.startswith(_BOT_CALLBACK_PREFIX):
-        return await call_next(request)
-    username = dashboard_user_from_authorization(request.headers.get("authorization", ""))
-    role = "admin"
-    if username is None:
-        conn = db()
-        try:
-            account = operations.authenticate(conn, request.headers.get("authorization", ""))
-            if account:
-                username, role = account
-        except sqlite3.OperationalError:
-            pass  # Startup migration has not yet completed.
-        finally:
-            conn.close()
-    if username is None:
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "dashboard authentication required"},
-            headers={"WWW-Authenticate": 'Basic realm="Narwhal Monitor", charset="UTF-8"'},
-        )
-    request.state.dashboard_user = username
-    request.state.dashboard_role = role
-    allowed = operations.permitted(role, request.method, request.url.path)
-    response = await call_next(request) if allowed else JSONResponse(status_code=403, content={"detail": "当前角色无此操作权限"})
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        conn = db()
-        try:
-            # Never audit bodies, query strings, authorization headers or passwords.
-            conn.execute("INSERT INTO ops_audit(ts,username,method,path,status) VALUES(?,?,?,?,?)", (int(time.time()), username, request.method, request.url.path[:500], response.status_code))
-            conn.commit()
-        finally:
-            conn.close()
-    return response
+dashboard_auth.attach(app, lambda: db(), lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD),
+                      _AGENT_ONLY_PATHS, _BOT_CALLBACK_PREFIX, STATIC_DIR)
 
 
 def db() -> sqlite3.Connection:

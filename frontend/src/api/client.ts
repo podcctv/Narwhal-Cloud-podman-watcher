@@ -31,6 +31,9 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
   });
 
   if (res.status === 401) {
+    if (window.location.pathname !== '/login') {
+      window.location.replace('/login?next=' + encodeURIComponent(window.location.pathname + window.location.search));
+    }
     throw new ApiError('Dashboard 认证失败或已过期 (HTTP 401)', 401);
   }
 

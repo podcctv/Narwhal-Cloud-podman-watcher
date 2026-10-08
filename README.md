@@ -5,7 +5,7 @@
 - **Server 主控端**：汇总多机容器状态、网络状态与预警，提供 Web 页面。
 - **Client 宿主机 Agent**：以 systemd 服务方式运行在宿主机，按固定间隔采集数据并上报。
 - **通信安全**：`HMAC-SHA256` 共享密钥签名鉴权。
-- **面板登录保护**：Server 安装时随机生成 Web 用户名和密码，使用 HTTP Basic Authentication 保护页面及管理 API。
+- **面板登录保护**：Server 安装时随机生成 Web 用户名和密码，使用独立登录页与最长 12 小时的 HttpOnly 会话保护页面及管理 API；现有多用户与角色权限保持不变。
 - **部署方式**：Server 容器化 + Client 宿主机 Agent，支持一键安装与一键更新。
 - **多运行时发现**：默认 `auto` 自动发现全部已安装运行时，也可显式指定组合。
 
@@ -112,11 +112,13 @@ sudo journalctl -u narwhal-monitor-client -n 100 --no-pager
 
 未启用 TLS 时，Server 监听安装时指定的 HTTP Backend Port。启用 Caddy 后，对外只使用配置的 HTTPS 地址，Backend Port 绑定到 `127.0.0.1` 供 Caddy 本机反代。Client 日志持续出现 `reported ... containers` 表示上报成功。
 
-浏览器首次打开 Server 会弹出登录框。随机凭据只在首次安装摘要中显示，并保存在权限为 `0600` 的 Server 环境文件中；忘记时可在 Server 主机查看：
+浏览器打开 Server 会进入 `/login` 独立登录页，不再显示浏览器原生认证弹窗。随机凭据只在首次安装摘要中显示，并保存在权限为 `0600` 的 Server 环境文件中；忘记时可在 Server 主机查看：
 
 ```bash
 sudo awk -F= '$1=="DASHBOARD_USERNAME" || $1=="DASHBOARD_PASSWORD" {print $1"="substr($0,index($0,"=")+1)}' /opt/narwhal-monitor/server.env
 ```
+
+登录后可从顶部「退出登录」注销。会话在 12 小时后、退出登录、账号禁用/密码更改或服务重启后失效；角色更改即时生效。浏览器不会在本地存储密码。请通过 HTTPS 访问，并保持后端仅监听回环地址，让 Caddy 终止 TLS 和设置转发头。旧脚本仍可主动发送 Basic 认证头访问管理 API，但服务不再返回 Basic challenge。Agent 签名认证与 Telegram 回调不受面板登录改动影响。
 
 ### 配置 Telegram 推送与推送内操作
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings, Users } from 'lucide-react';
+import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings, Users, LogOut } from 'lucide-react';
 import { CountdownTimer } from '../common/CountdownTimer';
 
 interface AppHeaderProps {
@@ -15,6 +15,8 @@ interface AppHeaderProps {
   isRefreshing: boolean;
   lastRefreshTime?: string;
   onOpenSearch: () => void;
+  onLogout: () => void;
+  isLoggingOut: boolean;
 }
 
 export const AppHeader: React.FC<AppHeaderProps> = ({
@@ -30,6 +32,8 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
   isRefreshing,
   lastRefreshTime,
   onOpenSearch,
+  onLogout,
+  isLoggingOut,
 }) => {
   return (
     <header className="top-0 z-30 mb-6 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl lg:sticky">
@@ -151,6 +155,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
             isRefreshing={isRefreshing}
             lastRefreshTime={lastRefreshTime}
           />
+          <button type="button" onClick={onLogout} disabled={isLoggingOut} className="flex min-h-11 shrink-0 items-center gap-2 rounded-lg border border-slate-700 px-3 text-xs font-medium text-slate-300 transition-colors hover:border-sky-400 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-60"><LogOut aria-hidden="true" className="h-4 w-4" /><span>{isLoggingOut ? '正在退出' : '退出登录'}</span></button>
         </div>
       </div>
     </header>

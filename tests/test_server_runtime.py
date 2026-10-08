@@ -190,7 +190,7 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertTrue(item["stale"])
 
     def test_dashboard_does_not_present_stale_container_samples_as_live_risk(self):
-        app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        app = (ROOT / "frontend" / "src" / "Dashboard.tsx").read_text(encoding="utf-8")
         cards = (ROOT / "frontend" / "src" / "components" / "dashboard" / "HostContainerList.tsx").read_text(
             encoding="utf-8"
         )
