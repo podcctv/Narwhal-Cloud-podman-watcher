@@ -259,7 +259,7 @@ class BannerTests(unittest.TestCase):
         entry={"state":"awaiting_report","severity":"warning","detail":"x","type":"SOCKS"}
         text=banner.render("name",[entry],version="1.7.1")
         self.assertNotIn("COMPROMISED",text); self.assertNotIn("CRITICAL",text)
-        self.assertIn("已执行，待复查",text); self.assertIn("1.7.1",text)
+        self.assertIn("已执行，待复查",text); self.assertNotIn("1.7.1",text)
         with mock.patch.dict(os.environ,{"TERM":"xterm","NO_COLOR":""}):
             entry["state"]="verified"
             self.assertIn("\033[32m",banner.render("name",[entry],color=True))
@@ -273,7 +273,8 @@ class BannerTests(unittest.TestCase):
 
     def test_narrow_terminal_chinese_width_and_english(self):
         text=banner.render("长名称"*30,[{"detail":"中文"*40}],width=40,language="en")
-        self.assertIn("Target",text)
+        self.assertIn("Status",text)
+        self.assertNotIn("Target",text)
         for line in text.splitlines():
             import unicodedata
             self.assertLessEqual(sum(2 if unicodedata.east_asian_width(c) in {'W','F'} else 1 for c in line),40)

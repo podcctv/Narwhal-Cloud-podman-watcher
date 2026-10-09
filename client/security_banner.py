@@ -10,6 +10,7 @@ import tempfile
 import time
 import unicodedata
 import re
+from datetime import datetime, timedelta, timezone
 
 START = "# >>> NARWHAL SECURITY ALERT BEGIN >>>"
 END = "# <<< NARWHAL SECURITY ALERT END <<<"
@@ -35,7 +36,7 @@ FONT = {
     'G': ['  ____ ', ' / ___|', '| |  _ ', '| |_| |', ' \\____|'],
 }
 LABELS = {"active": ("风险存在", "ACTIVE"), "awaiting_report": ("已执行，待复查", "AWAITING VERIFICATION"),
-          "verified": ("复查通过", "VERIFIED"), "resolved": ("本轮未检出 / 历史事件", "NO LONGER OBSERVED"),
+          "verified": ("已恢复", "RECOVERED"), "resolved": ("本轮未检出，待复查", "NOT OBSERVED; AWAITING VERIFICATION"),
           "recurring": ("风险复发 / 处置失败", "RECURRING / FAILED"), "unverified": ("证据不足，未确认恢复", "UNVERIFIED")}
 
 
@@ -62,6 +63,35 @@ def wrap_cells(text, width):
     return lines + [current]
 
 
+def beijing_time(epoch=None, legacy=""):
+    """Fixed UTC+8, independent of the host/container timezone or tzdata."""
+    try:
+        if epoch is None:
+            epoch = datetime.strptime(legacy, '%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc).timestamp()
+        return datetime.fromtimestamp(float(epoch), timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError, OverflowError, OSError):
+        return ''
+
+
+def customer_metrics(entry, english=False):
+    """Keep numeric evidence without raw internal field names or duplicate values."""
+    numbers = set(re.findall(r'-?\d+(?:\.\d+)?', safe(entry.get('detail'))))
+    labels = {'value': ('观测值', 'Observed'), 'threshold': ('参考阈值', 'Threshold'),
+              'duration_seconds': ('持续秒数', 'Duration (seconds)')}
+    return '；'.join(labels[field][int(english)] + '：' + value
+                    for field, value in re.findall(r'(value|threshold|duration_seconds)=(-?\d+(?:\.\d+)?)', safe(entry.get('metrics')))
+                    if value not in numbers)
+
+
+def select_entries(entries):
+    # Reserve a separate slot for the latest recovery, even when new risks appear.
+    current = sorted((e for e in entries if not e.get('historical')), key=lambda e: (
+        e.get('state', 'active') not in {'active', 'recurring'}, e.get('severity') != 'critical', -e.get('time_epoch', 0)))[:3]
+    history = sorted((e for e in entries if e.get('historical')),
+                     key=lambda e: e.get('recovered_at_epoch', e.get('time_epoch', 0)), reverse=True)[:1]
+    return current + history
+
+
 def render(name, entries, target_hint="", version="dev", language=None, width=None, color=None, stale=False, sampled_at=None):
     language=language or os.getenv("SECURITY_MOTD_LANGUAGE","zh")
     try:
@@ -71,7 +101,7 @@ def render(name, entries, target_hint="", version="dev", language=None, width=No
     if color is None:
         color=os.getenv("SECURITY_MOTD_COLOR","false").lower() in {"true","1","yes"} and not os.getenv("NO_COLOR") and os.getenv("TERM")!="dumb"
     english=language=="en"
-    ordered=sorted(entries,key=lambda e: (e.get("state","active") not in {"active","recurring"}, e.get("severity")!="critical"))[:3]
+    ordered=select_entries(entries)
     inner = width - 2
     lines = []
     def tint(text, code):
@@ -98,7 +128,7 @@ def render(name, entries, target_hint="", version="dev", language=None, width=No
         row('FLANKER HOSTING', '32', True)
     row('弗兰克托管', '37', True)
     border('├', '┤')
-    outstanding = [e for e in ordered if e.get('state', 'active') not in {'verified', 'resolved'}]
+    outstanding = [e for e in ordered if e.get('state', 'active') != 'verified']
     if stale:
         status = 'Monitoring sample expired; current status unknown' if english else '监测数据已过期，当前状态未知'
         status_color = '33'
@@ -109,22 +139,24 @@ def render(name, entries, target_hint="", version="dev", language=None, width=No
         status = 'No anomalies currently detected' if english else '目前容器无异常'
         status_color = '32'
     row(('Status: ' if english else '状态：') + status, status_color)
-    row(('Target: ' if english else '容器：') + safe(name) + (' ' + safe(target_hint) if target_hint else ''))
-    row('Watcher ' + safe(version, 30))
     if sampled_at is not None:
-        row(('Sample: ' if english else '采样：') + time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(sampled_at)))
+        row(('Updated (UTC+8): ' if english else '更新（北京时间）：') + beijing_time(sampled_at))
     for e in ordered:
         row()
         state = e.get('state', 'active')
-        code = '32' if state in {'verified', 'resolved'} else '31' if state in {'active', 'recurring'} and e.get('severity') == 'critical' else '33'
-        row(safe(e.get('title') or e.get('type')) + ' / ' + LABELS.get(state, LABELS['unverified'])[int(english)], code)
+        code = '32' if state == 'verified' else '31' if state in {'active', 'recurring'} and e.get('severity') == 'critical' else '33'
+        prefix = ('History: ' if english else '最近历史告警：') if e.get('historical') or state == 'verified' else ''
+        row(prefix + safe(e.get('title') or e.get('type')) + ' / ' + LABELS.get(state, LABELS['unverified'])[int(english)], code)
         row(safe(e.get('detail')), code)
-        if e.get('metrics'):
-            row(safe(e['metrics']), code)
-        row(safe(e.get('action')), code)
-        row(safe(e.get('event_id') or 'LOCAL') + ' | ' + safe(e.get('timestamp')))
-    if ordered:
-        row('Execution is not verification.' if english else '执行成功不等于复查通过。', '33')
+        metrics = customer_metrics(e, english)
+        if metrics:
+            row(metrics, code)
+        detected = beijing_time(e.get('time_epoch'), e.get('timestamp', ''))
+        if detected and (stale or state == 'verified' or detected != beijing_time(sampled_at)):
+            row(('Last observed (UTC+8): ' if english else '最近发生（北京时间）：') + detected)
+        recovered = beijing_time(e.get('recovered_at_epoch')) if e.get('recovered_at_epoch') is not None else ''
+        if recovered:
+            row(('Recovered (UTC+8): ' if english else '恢复（北京时间）：') + recovered)
     border('├', '┤')
     row(('Channel: ' if english else '频道：') + CHANNEL)
     border('╰', '╯')
@@ -231,7 +263,7 @@ def load_state():
         if isinstance(data,dict) and len(data)<=1000:
             for key,value in data.items():
                 if isinstance(value,list):
-                    incidents.setdefault(key,[e for e in value[:3] if isinstance(e,dict)])
+                    incidents.setdefault(key,[e for e in value[:4] if isinstance(e,dict)])
     except (OSError,ValueError):
         pass
 
@@ -313,7 +345,7 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     now=time.time()
     relevant=[a for a in alerts if a.get("severity") in {"warning", "critical"} or a.get("type") in threat_types]
     for a in relevant:
-        e=next((e for e in entries if e.get("type")==a.get("type")),None)
+        e=next((e for e in entries if e.get("type")==a.get("type") and not e.get('historical') and e.get('state') != 'verified'),None)
         if e is None:
             e={"type":a.get("type"),"event_id":"LOCAL-"+hashlib.sha256((key+str(a.get("type"))+str(int(now))).encode()).hexdigest()[:12]}
             entries.append(e)
@@ -333,6 +365,10 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
                  action="Execution succeeded; awaiting verification" if success else "Execution failed" if failed else "Detected; not remediated")
     present={a.get("type") for a in relevant}
     for e in entries:
+        if e.get('historical') or e.get('state') == 'verified':
+            e['historical'] = True
+            e.setdefault('recovered_at_epoch', now)
+            continue
         matching=next((s for s in server_states if (s.get("runtime"),s.get("project"),s.get("name"),s.get("type"))==(container.get("runtime",""),container.get("project",""),name,e.get("type")) and now-float(s.get("updated_at",0))<900),None)
         if matching:
             e["event_id"]=safe(matching.get("event_id"),80)
@@ -344,11 +380,15 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
             e["action"]="Two fresh samples verified clean" if e["state"]=="verified" else "Awaiting fresh evidence"
             if matching and matching.get("state") in {"recurring","unverified","awaiting_report","suppressed"}:
                 e["state"]=matching["state"]
-    try: retention=max(3600,min(7*86400,float(os.getenv("SECURITY_MOTD_ALERT_RETENTION_HOURS","24"))*3600))
-    except ValueError: retention=86400
-    entries[:]=sorted([e for e in entries if now-float(e.get("time_epoch",0))<retention and e.get("state")!="suppressed"],key=lambda e:e.get("time_epoch",0),reverse=True)[:3]
+            if e['state'] == 'verified':
+                e['historical'] = True
+                e.setdefault('recovered_at_epoch', now)
+    try: retention=max(7*86400,min(30*86400,float(os.getenv("SECURITY_MOTD_ALERT_RETENTION_HOURS","168"))*3600))
+    except ValueError: retention=7*86400
     for k in list(incidents):
-        if not incidents[k] or all(now-float(e.get("time_epoch",0))>=retention for e in incidents[k]):
+        incidents[k][:] = select_entries([e for e in incidents[k] if e.get('state') != 'suppressed'
+            and now-float(e.get('recovered_at_epoch', e.get('time_epoch', 0))) <= retention])
+        if not incidents[k]:
             incidents.pop(k,None)
     for k in list(_checks):
         if k not in incidents or now-_checks[k][0]>86400:

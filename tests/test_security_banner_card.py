@@ -13,6 +13,96 @@ from client import agent
 
 
 class CardTests(unittest.TestCase):
+    def test_customer_card_uses_beijing_time_and_hides_internal_fields(self):
+        entry = {'title': 'Hysteria 2 高并发', 'detail': 'UDP 连接 64，远端 IP 2，阈值 50。',
+                 'state': 'active', 'severity': 'warning', 'time_epoch': 1791509400,
+                 'metrics': 'value=64 / threshold=50', 'event_id': 'NW-87',
+                 'action': 'Detected; not remediated'}
+        text = banner.render('internal-uuid', [entry], version='1.7.11', sampled_at=1791509400, width=100)
+        self.assertIn('2026-10-09 09:30:00', text)
+        self.assertEqual(text.count('2026-10-09 09:30:00'), 1)
+        self.assertIn('北京时间', text)
+        self.assertIn('UDP 连接 64', text)
+        for internal in ('internal-uuid', 'Watcher', 'NW-87', 'value=', 'threshold=',
+                         'Detected;', '执行成功不等于复查通过', 'UTC'):
+            self.assertNotIn(internal, text)
+        self.assertEqual(banner.beijing_time(legacy='2026-10-08 23:00:00 UTC'), '2026-10-09 07:00:00')
+        with mock.patch.dict(os.environ, {'TZ': 'America/New_York'}):
+            self.assertEqual(banner.beijing_time(0), '1970-01-01 08:00:00')
+
+    def test_numeric_evidence_not_in_description_is_customer_friendly(self):
+        text = banner.render('c', [{'detail': '连接数量偏高', 'metrics': 'value=738 / threshold=500 / duration_seconds=720'}], width=100)
+        self.assertIn('观测值：738；参考阈值：500；持续秒数：720', text)
+        self.assertNotIn('value=', text)
+
+    def test_first_clean_sample_is_not_claimed_as_recovered(self):
+        text = banner.render('c', [{'state': 'resolved', 'title': '高连接数'}])
+        self.assertIn('待复查', text)
+        self.assertNotIn('目前容器无异常', text)
+        self.assertNotIn('已恢复', text)
+
+    def test_recovery_retained_for_seven_days_after_recovery_across_restart(self):
+        for configured in ('24', '168', 'invalid'):
+            with self.subTest(configured=configured), tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                    'SECURITY_MOTD_STATE_FILE': str(Path(directory)/'state.json'),
+                    'SECURITY_MOTD_ALERT_RETENTION_HOURS': configured}), \
+                    mock.patch.object(banner, 'install_shell', return_value=(True, True)), \
+                    mock.patch.object(banner, 'write_proc', return_value=False):
+                banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
+                c = {'name': 'c', 'runtime': 'incus', 'pid': 99}
+                alert = {'type': 'connections', 'title': '高连接数', 'severity': 'warning', 'message': '738 条'}
+                def update(at, alerts):
+                    with mock.patch.object(banner.time, 'time', return_value=at):
+                        banner.update(c, alerts, set(), mock.Mock(return_value=(True, '')), [], 'test')
+                start = 1791509400
+                update(start, [alert])
+                update(start+3600, [])
+                self.assertEqual(next(iter(banner.incidents.values()))[0]['state'], 'resolved')
+                recovery = start+3660
+                update(recovery, [])
+                self.assertTrue(next(iter(banner.incidents.values()))[0]['historical'])
+                banner.incidents.clear(); banner._loaded_path = ''
+                update(recovery+7*86400, [])
+                entry = next(iter(banner.incidents.values()))[0]
+                self.assertEqual(entry['recovered_at_epoch'], recovery)
+                text = banner.render('c', [entry], width=100)
+                self.assertIn('最近历史告警', text)
+                self.assertIn('已恢复', text)
+                self.assertIn('738 条', text)
+                update(recovery+7*86400+1, [])
+                self.assertFalse(banner.incidents)
+        banner.incidents.clear(); banner._loaded_path = ''
+
+    def test_same_type_recurrence_preserves_latest_history_with_three_current_risks(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                'SECURITY_MOTD_STATE_FILE': str(Path(directory)/'state.json')}), \
+                mock.patch.object(banner, 'install_shell', return_value=(True, True)), \
+                mock.patch.object(banner, 'write_proc', return_value=False):
+            banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
+            c = {'name': 'c', 'runtime': 'incus', 'pid': 99}
+            alerts = [{'type': typ, 'severity': 'warning', 'message': typ} for typ in ('connections', 'cpu', 'memory')]
+            def update(at, events):
+                with mock.patch.object(banner.time, 'time', return_value=at):
+                    banner.update(c, events, set(), mock.Mock(return_value=(True, '')), [], 'test')
+            update(1000, alerts[:1]); update(1010, []); update(1020, [])
+            history_id = next(iter(banner.incidents.values()))[0]['event_id']
+            update(1030, alerts)
+            entries = next(iter(banner.incidents.values()))
+            self.assertEqual(len(entries), 4)
+            history = [e for e in entries if e.get('historical')]
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]['event_id'], history_id)
+            self.assertEqual(len([e for e in entries if e['state'] == 'active']), 3)
+            text = banner.render('c', entries, width=100)
+            self.assertIn('最近历史告警', text)
+            self.assertIn('风险存在', text)
+            script = banner.shell_renderer('c', entries, 'test', 1030)
+            self.assertLess(len(script.encode()), 65536)
+            banner.incidents.clear(); banner._loaded_path = ''
+            banner.load_state()
+            self.assertEqual(len(next(iter(banner.incidents.values()))), 4)
+        banner.incidents.clear(); banner._loaded_path = ''
+
     def test_banner_exec_routes_to_container_runtime_not_host_default(self):
         with mock.patch.object(agent, 'get_runtime_bins', return_value={'podman': 'podman', 'incus': 'incus'}), \
                 mock.patch.object(agent.subprocess, 'run', return_value=mock.Mock(returncode=0, stdout='ok')) as execute:

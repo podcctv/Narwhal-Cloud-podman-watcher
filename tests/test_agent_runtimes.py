@@ -1711,7 +1711,7 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertNotIn("COMPROMISED", rendered)
         self.assertNotIn("\033", rendered)  # Plain text by default.
         self.assertIn("风险存在", rendered)
-        self.assertIn("test-container", rendered)
+        self.assertNotIn("test-container", rendered)
         self.assertIn("cc_attack", rendered)
         self.assertIn("socks_weak_auth", rendered)
 
@@ -1758,9 +1758,16 @@ class SecurityTelemetryTests(unittest.TestCase):
                 self.assertNotIn("COMPROMISED", content[0])
                 self.assertIn("Welcome to Ubuntu 24.04 LTS", content[0])
                 now = time.time()
+                c['security']['socks_proxy'] = {'detected': False}
+                with mock.patch.object(banner.time, "time", return_value=now+60):
+                    agent.update_container_motd_alerts(c, [])
+                with mock.patch.object(banner.time, "time", return_value=now+120):
+                    agent.update_container_motd_alerts(c, [])
                 with mock.patch.object(banner.time, "time", return_value=now+90000):
                     self.assertTrue(agent.update_container_motd_alerts(c, []))
                 self.assertIn("目前容器无异常", content[0])
+                self.assertIn("最近历史告警", content[0])
+                self.assertIn("已恢复", content[0])
                 self.assertIn("Welcome to Ubuntu 24.04 LTS", content[0])
             banner.incidents.clear()
 
