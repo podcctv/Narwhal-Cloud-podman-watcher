@@ -9,9 +9,25 @@ from pathlib import Path
 from unittest import mock
 
 from client import security_banner as banner
+from client import agent
 
 
 class CardTests(unittest.TestCase):
+    def test_banner_exec_routes_to_container_runtime_not_host_default(self):
+        with mock.patch.object(agent, 'get_runtime_bins', return_value={'podman': 'podman', 'incus': 'incus'}), \
+                mock.patch.object(agent.subprocess, 'run', return_value=mock.Mock(returncode=0, stdout='ok')) as execute:
+            c = {'name': 'incus-vm', 'runtime': 'incus', 'project': 'buyers'}
+            self.assertEqual(agent._checked_banner_exec(c, 'true'), (True, 'ok'))
+            self.assertEqual(execute.call_args.args[0], ['incus', '--project', 'buyers', 'exec', 'incus-vm', '--', 'sh', '-lc', 'true'])
+            execute.reset_mock()
+            c['runtime_bin'] = 'podman'
+            self.assertEqual(agent._checked_banner_exec(c, 'true'), (False, ''))
+            execute.assert_not_called()
+            c.pop('runtime_bin')
+            with mock.patch.object(agent, 'get_runtime_bins', return_value={'podman': 'podman'}):
+                self.assertEqual(agent._checked_banner_exec(c, 'true'), (False, ''))
+                execute.assert_not_called()
+
     def test_all_rows_have_identical_terminal_width_with_color(self):
         entries = [{'title': '连接数偏高', 'detail': '738 条 / 阈值 500 条 · 持续 12 分钟',
                     'state': 'active', 'severity': 'warning', 'metrics': 'value=738 / threshold=500',

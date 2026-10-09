@@ -2560,7 +2560,11 @@ def _build_motd_content(current_content, banner):
 
 
 def _checked_banner_exec(container, command):
-    runtime_bin = str(container.get("runtime_bin") or get_container_bin())
+    runtime_kind = str(container.get("runtime") or "")
+    runtime_bin = str(container.get("runtime_bin") or
+                      (get_runtime_bins().get(runtime_kind, "") if runtime_kind else get_container_bin()))
+    if runtime_kind and _runtime_kind(runtime_bin) != runtime_kind:
+        return False, ""
     if not runtime_bin:
         return False, ""
     try:
