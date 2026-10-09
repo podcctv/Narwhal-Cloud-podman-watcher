@@ -1766,7 +1766,7 @@ class SecurityTelemetryTests(unittest.TestCase):
                 with mock.patch.object(banner.time, "time", return_value=now+90000):
                     self.assertTrue(agent.update_container_motd_alerts(c, []))
                 self.assertIn("目前容器无异常", content[0])
-                self.assertIn("最近历史告警", content[0])
+                self.assertIn("历史告警 · 已恢复", content[0])
                 self.assertIn("已恢复", content[0])
                 self.assertIn("Welcome to Ubuntu 24.04 LTS", content[0])
             banner.incidents.clear()

@@ -83,6 +83,36 @@ def customer_metrics(entry, english=False):
                     if value not in numbers)
 
 
+def observed_epoch(entry):
+    try:
+        value = entry.get('time_epoch')
+        if value is None:
+            value = datetime.strptime(entry.get('timestamp', ''), '%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc).timestamp()
+        return int(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def relative_age(epoch, now, english=False):
+    if epoch is None or epoch < 0 or now < epoch:
+        return 'time unknown' if english else '时间待核实'
+    minutes = int((now - epoch) // 60)
+    if minutes < 1:
+        return 'just now' if english else '刚刚'
+    if minutes < 60:
+        return f'{minutes} minutes ago' if english else f'{minutes}分钟前'
+    hours = minutes // 60
+    if hours < 24:
+        return f'{hours}h {minutes % 60}m ago' if english else f'{hours}小时{minutes % 60}分钟前'
+    return f'{hours // 24}d {hours % 24}h ago' if english else f'{hours // 24}天{hours % 24}小时前'
+
+
+def historical_detail(entry):
+    # The saved evidence is unchanged; only customer-facing tense is adjusted.
+    text = safe(entry.get('detail')).replace('当前', '当时').replace('目前', '当时')
+    return re.sub(r'\bcurrently\b', 'at the time', text, flags=re.I)
+
+
 def select_entries(entries):
     # Reserve a separate slot for the latest recovery, even when new risks appear.
     current = sorted((e for e in entries if not e.get('historical')), key=lambda e: (
@@ -92,7 +122,7 @@ def select_entries(entries):
     return current + history
 
 
-def render(name, entries, target_hint="", version="dev", language=None, width=None, color=None, stale=False, sampled_at=None):
+def render(name, entries, target_hint="", version="dev", language=None, width=None, color=None, stale=False, sampled_at=None, _dynamic_history_age=False):
     language=language or os.getenv("SECURITY_MOTD_LANGUAGE","zh")
     try:
         width=max(12,min(100,int(width or os.getenv("SECURITY_MOTD_WIDTH","72"))))
@@ -145,15 +175,27 @@ def render(name, entries, target_hint="", version="dev", language=None, width=No
         row()
         state = e.get('state', 'active')
         code = '32' if state == 'verified' else '31' if state in {'active', 'recurring'} and e.get('severity') == 'critical' else '33'
-        prefix = ('History: ' if english else '最近历史告警：') if e.get('historical') or state == 'verified' else ''
-        row(prefix + safe(e.get('title') or e.get('type')) + ' / ' + LABELS.get(state, LABELS['unverified'])[int(english)], code)
-        row(safe(e.get('detail')), code)
+        historical = state == 'verified'
+        if historical:
+            row('Historical alert · Recovered' if english else '历史告警 · 已恢复', code)
+            row(safe(e.get('title') or e.get('type')), code)
+            row(('At the time: ' if english else '当时情况：') + historical_detail(e), code)
+            epoch = observed_epoch(e)
+            if _dynamic_history_age and epoch is not None and epoch >= 0:
+                # A bounded metadata row, replaced by the login-time shell renderer.
+                lines.append(f'@@AGE:{epoch}:{int(english)}')
+            else:
+                reference = (' (as of update)' if english else '（截至更新时间）') if sampled_at is not None and epoch is not None else ''
+                row(('Last occurred: ' if english else '最近发生：') + relative_age(epoch, sampled_at if sampled_at is not None else time.time(), english) + reference)
+        else:
+            row(safe(e.get('title') or e.get('type')) + ' / ' + LABELS.get(state, LABELS['unverified'])[int(english)], code)
+            row(safe(e.get('detail')), code)
         metrics = customer_metrics(e, english)
         if metrics:
-            row(metrics, code)
+            row((('Historical data: ' if english else '当时数据：') if historical else '') + metrics, code)
         detected = beijing_time(e.get('time_epoch'), e.get('timestamp', ''))
         if detected and (stale or state == 'verified' or detected != beijing_time(sampled_at)):
-            row(('Last observed (UTC+8): ' if english else '最近发生（北京时间）：') + detected)
+            row(('Last observed (UTC+8): ' if english else '发生时间（北京时间）：' if historical else '最近发生（北京时间）：') + detected)
         recovered = beijing_time(e.get('recovered_at_epoch')) if e.get('recovered_at_epoch') is not None else ''
         if recovered:
             row(('Recovered (UTC+8): ' if english else '恢复（北京时间）：') + recovered)
@@ -169,7 +211,7 @@ def shell_renderer(name, entries, version, sampled_at=None):
     cards = []
     for stale in (False, True):
         for width in (12, 16, 24, 32, 40, 52, 68, 80, 100):
-            cards.append(f'@@{int(stale)}:{width}\n' + render(name, entries, version=version, width=width, color=True, stale=stale, sampled_at=sampled_at))
+            cards.append(f'@@{int(stale)}:{width}\n' + render(name, entries, version=version, width=width, color=True, stale=stale, sampled_at=sampled_at, _dynamic_history_age=True))
     return '''#!/bin/sh
 # NARWHAL MANAGED INTERACTIVE BANNER v1
 [ -t 1 ] || exit 0
@@ -188,8 +230,40 @@ if [ "${NO_COLOR+x}" = x ] || [ "${TERM:-dumb}" = dumb ] || [ "${SECURITY_MOTD_C
 now=$(date +%s 2>/dev/null)
 stale=1
 case "$now" in ''|*[!0-9]*) :;; *) [ "$now" -ge SAMPLE_EPOCH ] && [ "$((now - SAMPLE_EPOCH))" -le 900 ] && stale=0;; esac
-base64 -d <<'NARWHAL_CARD_DATA' | gzip -dc | LC_ALL=C awk -v key="@@$stale:$width" -v color="$color" '
-    /^@@/ { selected=($0 == key); next }
+base64 -d <<'NARWHAL_CARD_DATA' | gzip -dc | LC_ALL=C awk -v key="@@$stale:$width" -v color="$color" -v width="$width" -v now="$now" '
+    function age(epoch, english, minutes, hours) {
+        if (now !~ /^[0-9]+$/ || now < epoch) return english ? "time unknown" : "时间待核实"
+        minutes=int((now-epoch)/60)
+        if (minutes<1) return english ? "just now" : "刚刚"
+        if (minutes<60) return english ? minutes " minutes ago" : minutes "分钟前"
+        hours=int(minutes/60)
+        if (hours<24) return english ? hours "h " minutes%60 "m ago" : hours "小时" minutes%60 "分钟前"
+        return english ? int(hours/24) "d " hours%24 "h ago" : int(hours/24) "天" hours%24 "小时前"
+    }
+    function age_line(part, cells, body, esc) {
+        body="  " part sprintf("%*s",width-4-cells,"")
+        esc=sprintf("%c",27)
+        if (color) printf "%s[32m│%s[0m%s[37m%s%s[0m%s[32m│%s[0m\\n",esc,esc,esc,body,esc,esc,esc
+        else print "│" body "│"
+    }
+    function age_rows(text, i, ch, bytes, size, part, cells) {
+        # Text is generated only from numeric ages and fixed ASCII/CJK literals.
+        # In LC_ALL=C, these CJK literals use three UTF-8 bytes / two cells.
+        part="";cells=0
+        for (i=1;i<=length(text);i+=bytes) {
+            ch=substr(text,i,1);bytes=(ch ~ /^[ -~]$/ ? 1 : 3);size=(bytes==1 ? 1 : 2)
+            ch=substr(text,i,bytes)
+            if (cells+size>width-6) { age_line(part,cells);part="";cells=0 }
+            part=part ch;cells+=size
+        }
+        age_line(part,cells)
+    }
+    /^@@[01]:[0-9]+$/ { selected=($0 == key); next }
+    selected && /^@@AGE:[0-9]+:[01]$/ {
+        split($0,fields,":")
+        age_rows((fields[3]==1 ? "Last occurred: " : "最近发生：") age(fields[2],fields[3]))
+        next
+    }
     selected { if (!color) gsub(sprintf("%c",27) "\\\\[[0-9;]*m", ""); print }
 '
 '''.replace('SAMPLE_EPOCH', str(sampled_at)) + base64.b64encode(gzip.compress(''.join(cards).encode(), mtime=0)).decode() + '\nNARWHAL_CARD_DATA\n'
