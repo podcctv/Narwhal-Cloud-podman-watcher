@@ -1,5 +1,7 @@
 """Post-login MOTD only: truthful, bounded, persistent, safe terminal text."""
 import hashlib
+import base64
+import gzip
 import json
 import os
 import shlex
@@ -14,6 +16,24 @@ END = "# <<< NARWHAL SECURITY ALERT END <<<"
 incidents = {}
 _loaded_path = ""
 _checks = {}
+SHELL_START = "# >>> NARWHAL SHELL BANNER BEGIN >>>"
+SHELL_END = "# <<< NARWHAL SHELL BANNER END <<<"
+CHANNEL = "https://t.me/flanker_channel"
+FONT = {
+    'F': [' _____ ', '|  ___|', '| |_   ', '|  _|  ', '|_|    '],
+    'L': [' _     ', '| |    ', '| |    ', '| |___ ', '|_____|'],
+    'A': ['    _    ', '   / \\   ', '  / _ \\  ', ' / ___ \\ ', '/_/   \\_\\'],
+    'N': [' _   _ ', '| \\ | |', '|  \\| |', '| |\\  |', '|_| \\_|'],
+    'K': [' _  __ ', '| |/ / ', "| ' /  ", '| . \\  ', '|_|\\_\\ '],
+    'E': [' _____ ', '| ____|', '|  _|  ', '| |___ ', '|_____|'],
+    'R': [' ____  ', '|  _ \\ ', '| |_) |', '|  _ < ', '|_| \\_\\'],
+    'H': [' _   _ ', '| | | |', '| |_| |', '|  _  |', '|_| |_|'],
+    'O': ['  ___  ', ' / _ \\ ', '| | | |', '| |_| |', ' \\___/ '],
+    'S': [' ____  ', '/ ___| ', '\\___ \\ ', ' ___) |', '|____/ '],
+    'T': [' _____ ', '|_   _|', '  | |  ', '  | |  ', '  |_|  '],
+    'I': [' ___ ', '|_ _|', ' | | ', ' | | ', '|___|'],
+    'G': ['  ____ ', ' / ___|', '| |  _ ', '| |_| |', ' \\____|'],
+}
 LABELS = {"active": ("风险存在", "ACTIVE"), "awaiting_report": ("已执行，待复查", "AWAITING VERIFICATION"),
           "verified": ("复查通过", "VERIFIED"), "resolved": ("本轮未检出 / 历史事件", "NO LONGER OBSERVED"),
           "recurring": ("风险复发 / 处置失败", "RECURRING / FAILED"), "unverified": ("证据不足，未确认恢复", "UNVERIFIED")}
@@ -26,47 +46,164 @@ def safe(value, limit=300):
     return re.sub(r"(?i)(password|passwd|token|secret|api[_-]?key)(\s*[:=]\s*)\S+", r"\1\2[REDACTED]",text)[:limit]
 
 
-def render(name, entries, target_hint="", version="dev", language=None, width=None, color=None):
+def cell_width(text):
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in {'W', 'F'} else 1 for c in text)
+
+
+def wrap_cells(text, width):
+    lines, current, cells = [], '', 0
+    for c in text:
+        size = cell_width(c)
+        if cells + size > width:
+            lines.append(current)
+            current, cells = '', 0
+        current += c
+        cells += size
+    return lines + [current]
+
+
+def render(name, entries, target_hint="", version="dev", language=None, width=None, color=None, stale=False, sampled_at=None):
     language=language or os.getenv("SECURITY_MOTD_LANGUAGE","zh")
     try:
-        width=max(40,min(100,int(width or os.getenv("SECURITY_MOTD_WIDTH","72"))))
+        width=max(12,min(100,int(width or os.getenv("SECURITY_MOTD_WIDTH","72"))))
     except ValueError:
         width=72
     if color is None:
         color=os.getenv("SECURITY_MOTD_COLOR","false").lower() in {"true","1","yes"} and not os.getenv("NO_COLOR") and os.getenv("TERM")!="dumb"
     english=language=="en"
     ordered=sorted(entries,key=lambda e: (e.get("state","active") not in {"active","recurring"}, e.get("severity")!="critical"))[:3]
-    state=ordered[0].get("state","active") if ordered else "verified"
-    severity=ordered[0].get("severity","warning") if ordered else "info"
-    label=LABELS.get(state,LABELS["unverified"])[int(english)]
-    ansi="\033[31m" if state in {"active","recurring"} and severity=="critical" else "\033[32m" if state=="verified" else "\033[33m"
-    lines=[f"NARWHAL SECURITY / Watcher {safe(version,30)}", f"{'Target' if english else '容器'}: {safe(name)} {safe(target_hint)}",
-           f"{'Status' if english else '状态'}: {label} [{severity.upper()}]"]
-    if color:
-        lines[2]=ansi+lines[2]+"\033[0m"
+    inner = width - 2
+    lines = []
+    def tint(text, code):
+        return f'\033[{code}m{text}\033[0m' if color else text
+    def border(left, right):
+        lines.append(tint(left + '─' * inner + right, '32'))
+    def row(text='', code='37', center=False):
+        available = inner if center else max(1, inner - 4)
+        for part in wrap_cells(text, available):
+            extra = inner - cell_width(part)
+            left = extra // 2 if center else min(2, extra)
+            body = ' ' * left + part + ' ' * (extra - left)
+            lines.append(tint('│', '32') + tint(body, code) + tint('│', '32'))
+    border('╭', '╮')
+    if inner >= 61:
+        row()
+        for word in ('FLANKER', 'HOSTING'):
+            glyphs = [FONT[c] for c in word]
+            sizes = [max(map(len, g)) for g in glyphs]
+            for i in range(5):
+                row(' '.join(g[i].ljust(size) for g, size in zip(glyphs, sizes)), '32', True)
+            row()
+    else:
+        row('FLANKER HOSTING', '32', True)
+    row('弗兰克托管', '37', True)
+    border('├', '┤')
+    outstanding = [e for e in ordered if e.get('state', 'active') not in {'verified', 'resolved'}]
+    if stale:
+        status = 'Monitoring sample expired; current status unknown' if english else '监测数据已过期，当前状态未知'
+        status_color = '33'
+    elif outstanding:
+        status = 'Warnings / notices require attention' if english else '存在警告或通知，请检查以下内容'
+        status_color = '31' if any(e.get('severity') == 'critical' and e.get('state', 'active') in {'active', 'recurring'} for e in outstanding) else '33'
+    else:
+        status = 'No anomalies currently detected' if english else '目前容器无异常'
+        status_color = '32'
+    row(('Status: ' if english else '状态：') + status, status_color)
+    row(('Target: ' if english else '容器：') + safe(name) + (' ' + safe(target_hint) if target_hint else ''))
+    row('Watcher ' + safe(version, 30))
+    if sampled_at is not None:
+        row(('Sample: ' if english else '采样：') + time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(sampled_at)))
     for e in ordered:
-        lines.extend([f"{safe(e.get('event_id') or 'LOCAL')} | {safe(e.get('type'))} | {safe(e.get('timestamp'))}",
-                      LABELS.get(e.get("state","active"),LABELS["unverified"])[int(english)],
-                      safe(e.get("detail")), safe(e.get("action"))])
-    lines.append("Inspect processes, SSH keys and scheduled tasks. Execution is not verification." if english else "请检查进程、SSH 密钥与定时任务。执行成功不等于复查通过。")
-    # East Asian display width: use cells, not len(), and don't truncate event IDs.
-    wrapped=[]
-    for line in lines:
-        if "\033" in line:
-            wrapped.append(line)
-            continue
-        current=""
-        cells=0
-        for c in line:
-            n=0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in {"W","F"} else 1
-            if cells+n>width:
-                wrapped.append(current)
-                current=""
-                cells=0
-            current+=c
-            cells+=n
-        wrapped.append(current)
-    return "\n".join(wrapped)+"\n"
+        row()
+        state = e.get('state', 'active')
+        code = '32' if state in {'verified', 'resolved'} else '31' if state in {'active', 'recurring'} and e.get('severity') == 'critical' else '33'
+        row(safe(e.get('title') or e.get('type')) + ' / ' + LABELS.get(state, LABELS['unverified'])[int(english)], code)
+        row(safe(e.get('detail')), code)
+        if e.get('metrics'):
+            row(safe(e['metrics']), code)
+        row(safe(e.get('action')), code)
+        row(safe(e.get('event_id') or 'LOCAL') + ' | ' + safe(e.get('timestamp')))
+    if ordered:
+        row('Execution is not verification.' if english else '执行成功不等于复查通过。', '33')
+    border('├', '┤')
+    row(('Channel: ' if english else '频道：') + CHANNEL)
+    border('╰', '╯')
+    return '\n'.join(lines) + '\n'
+
+
+def shell_renderer(name, entries, version, sampled_at=None):
+    """Bounded pre-rendered widths, decoded by standard BusyBox/coreutils tools."""
+    sampled_at = int(time.time()) if sampled_at is None else int(sampled_at)
+    cards = []
+    for stale in (False, True):
+        for width in (12, 16, 24, 32, 40, 52, 68, 80, 100):
+            cards.append(f'@@{int(stale)}:{width}\n' + render(name, entries, version=version, width=width, color=True, stale=stale, sampled_at=sampled_at))
+    return '''#!/bin/sh
+# NARWHAL MANAGED INTERACTIVE BANNER v1
+[ -t 1 ] || exit 0
+exec 3<&1
+cols=$(stty size <&3 2>/dev/null | awk '{print $2}')
+exec 3<&-
+case "$cols" in ''|*[!0-9]*|0) cols=${COLUMNS:-80};; esac
+case "$cols" in ''|*[!0-9]*|0) cols=80;; esac
+[ "$cols" -ge 12 ] || exit 0
+width=12
+for size in 16 24 32 40 52 68 80 100; do
+    [ "$size" -le "$cols" ] && width=$size
+done
+color=1
+if [ "${NO_COLOR+x}" = x ] || [ "${TERM:-dumb}" = dumb ] || [ "${SECURITY_MOTD_COLOR:-true}" = false ]; then color=0; fi
+now=$(date +%s 2>/dev/null)
+stale=1
+case "$now" in ''|*[!0-9]*) :;; *) [ "$now" -ge SAMPLE_EPOCH ] && [ "$((now - SAMPLE_EPOCH))" -le 900 ] && stale=0;; esac
+base64 -d <<'NARWHAL_CARD_DATA' | gzip -dc | LC_ALL=C awk -v key="@@$stale:$width" -v color="$color" '
+    /^@@/ { selected=($0 == key); next }
+    selected { if (!color) gsub(sprintf("%c",27) "\\\\[[0-9;]*m", ""); print }
+'
+'''.replace('SAMPLE_EPOCH', str(sampled_at)) + base64.b64encode(gzip.compress(''.join(cards).encode(), mtime=0)).decode() + '\nNARWHAL_CARD_DATA\n'
+
+
+def shell_hook():
+    return '''# NARWHAL MANAGED INTERACTIVE BANNER v1
+case $- in
+  *i*) if [ -z "${NARWHAL_BANNER_SHOWN:-}" ] && [ -t 1 ] && [ -r /etc/narwhal-banner.sh ]; then
+         NARWHAL_BANNER_SHOWN=1
+         COLUMNS=${COLUMNS:-80} /bin/sh /etc/narwhal-banner.sh
+       fi;;
+esac
+'''
+
+
+def merge_shell(original, hook):
+    pattern = re.compile(re.escape(SHELL_START) + r'\n.*?' + re.escape(SHELL_END) + r'\n?', re.S)
+    cleaned = pattern.sub('', original)
+    if SHELL_START in cleaned or SHELL_END in cleaned:
+        raise ValueError('shell hook markers incomplete')
+    return SHELL_START + '\n' + hook + SHELL_END + '\n' + cleaned
+
+
+def install_shell(container, entries, checked_exec, version, now):
+    read = "[ ! -L /root ] && [ -d /root ] && [ ! -L /root/.bashrc ] && { [ ! -e /root/.bashrc ] || [ -f /root/.bashrc ]; } && { [ ! -e /root/.bashrc ] || [ $(wc -c < /root/.bashrc) -le 65536 ]; } && { cat /root/.bashrc 2>/dev/null || [ ! -e /root/.bashrc ]; }"
+    ok, original = checked_exec(container, read)
+    if not ok:
+        return False, False
+    try:
+        rc = merge_shell(original, shell_hook())
+    except ValueError:
+        return False, False
+    files = [('/etc/narwhal-banner.sh', shell_renderer(str(container['name']), entries, version, now), '644'),
+             ('/etc/profile.d/90-narwhal-banner.sh', shell_hook(), '644'), ('/root/.bashrc', rc, None)]
+    commands = ["set -eu; for tool in awk stty date base64 gzip cmp; do command -v \"$tool\" >/dev/null || exit 1; done; [ ! -L /etc/profile.d ]; mkdir -p /etc/profile.d; changed=0"]
+    for path, content, mode in files:
+        owned = '' if path == '/root/.bashrc' else f"if [ -e {path} ]; then grep -q '^# NARWHAL MANAGED INTERACTIVE BANNER v1$' {path} || exit 1; fi; "
+        commands.append(f"[ ! -L {path} ]; [ ! -e {path} ] || [ -f {path} ]; " + owned +
+                        f"t=$(mktemp {path}.XXXXXX); trap 'rm -f -- \"$t\"' EXIT; " +
+                        (f"chmod {mode} \"$t\"; " if mode else f"if [ -e {path} ]; then cp -p {path} \"$t\"; else chmod 644 \"$t\"; fi; ") +
+                        "printf '%s' " + shlex.quote(content) + f" > \"$t\"; if cmp -s \"$t\" {path}; then rm -f -- \"$t\"; else mv -f -- \"$t\" {path}; changed=1; fi; trap - EXIT; " +
+                        f"printf '%s' {shlex.quote(content)} | cmp -s - {path}")
+    commands.append("printf '\\nNARWHAL_SHELL_OK:%s\\n' \"$changed\"")
+    ok, result = checked_exec(container, '; '.join(commands))
+    return ok and 'NARWHAL_SHELL_OK:' in result, 'NARWHAL_SHELL_OK:1' in result
 
 
 def merge(original, banner):
@@ -174,7 +311,7 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     key=json.dumps([container.get("runtime",""),container.get("project",""),name,str(container.get("id") or "")],ensure_ascii=False)
     entries=incidents.setdefault(key,[])
     now=time.time()
-    relevant=[a for a in alerts if a.get("severity")=="critical" or a.get("type") in threat_types]
+    relevant=[a for a in alerts if a.get("severity") in {"warning", "critical"} or a.get("type") in threat_types]
     for a in relevant:
         e=next((e for e in entries if e.get("type")==a.get("type")),None)
         if e is None:
@@ -183,7 +320,14 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
         rem=a.get("automatic_remediation") or a.get("socks_auth_enforcement") or {}
         success=isinstance(rem,dict) and rem.get("succeeded") is True
         failed=isinstance(rem,dict) and rem.get("attempted") is True and not success
+        observation = a.get('observation') if isinstance(a.get('observation'), dict) else {}
+        metrics = []
+        for field in ('value', 'threshold', 'duration_seconds'):
+            value = observation.get(field, a.get(field))
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                metrics.append(f'{field}={value}')
         e.update(time_epoch=now,timestamp=time.strftime("%Y-%m-%d %H:%M:%S UTC",time.gmtime(now)),
+                 title=safe(a.get('title') or a.get('type')), metrics=' / '.join(metrics),
                  detail=safe(a.get("message")),severity=a.get("severity","warning"),clean_samples=0,
                  state="awaiting_report" if success else "recurring" if failed else "active",
                  action="Execution succeeded; awaiting verification" if success else "Execution failed" if failed else "Detected; not remediated")
@@ -213,12 +357,16 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
         for k in sorted(_checks,key=lambda k:_checks[k][0])[:-1000]:
             _checks.pop(k,None)
     persisted=persist()
-    banner=render(name,entries,version=version) if entries else ""
-    changed=False
+    # Default branding remains even after incident retention expires. A shell hook
+    # renders at session width; MOTD is the fallback only, preventing SSH duplicates.
+    shell_ok, shell_changed = install_shell(container, entries, checked_exec, version, int(now))
+    banner="" if shell_ok else render(name,entries,version=version,sampled_at=int(now))
+    changed=shell_changed
+    delivery['shell_delivery'] = 'installed' if shell_ok else 'failed'
     try:
         pid=int(container.get("pid") or 0)
         if pid>1:
-            changed=write_proc(pid,banner)
+            changed=write_proc(pid,banner) or changed
             delivery.update(status="written" if changed else "unchanged",method="proc_atomic")
         else:
             raise OSError("无容器 PID")
@@ -247,4 +395,6 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
         ok,mechanism=checked_exec(container,"if command -v sshd >/dev/null 2>&1; then sshd -T 2>/dev/null | grep '^printmotd '; fi; if grep -qs pam_motd /etc/pam.d/sshd; then printf 'pam_motd\\n'; fi; if grep -qs '/etc/motd' /etc/profile; then printf 'profile_motd\\n'; fi; true")
         _checks[key]=(now,"configured" if ok and any(v in mechanism for v in ("printmotd yes","pam_motd","profile_motd")) else "unverified")
     delivery["login_display"]=_checks[key][1]
+    if shell_ok:
+        delivery.update(mechanism='interactive_shell_card', login_display='configured')
     return changed

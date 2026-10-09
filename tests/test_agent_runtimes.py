@@ -1544,6 +1544,21 @@ class SecurityTelemetryTests(unittest.TestCase):
             {"cc_total_rps", "cc_single_ip", "cc_4xx_ratio", "web_scan", "http_abuse"},
         )
 
+    def test_newly_discovered_clean_containers_receive_default_banner(self):
+        existing = {'name': 'existing', 'runtime': 'podman', 'security': {}}
+        newborn = {'name': 'newborn', 'runtime': 'incus', 'project': 'default', 'security': {}}
+        with mock.patch.dict(os.environ, {'SECURITY_MONITOR_ENABLED': 'true',
+                'SECURITY_CONFIG_AUDIT_ENABLED': 'false',
+                'SECURITY_PANEL_PAIRING_DETECTION_ENABLED': 'false'}), \
+                mock.patch.object(agent, '_collect_access_log_stats', return_value={'enabled': False, 'readable_files': 0}), \
+                mock.patch.object(agent, 'enforce_socks_auth_policy'), \
+                mock.patch.object(agent, 'update_container_motd_alerts') as install:
+            agent.collect_security_summary([existing], 300)
+            agent.collect_security_summary([existing, newborn], 300)
+        self.assertEqual([call.args[0]['name'] for call in install.call_args_list],
+                         ['existing', 'existing', 'newborn'])
+        self.assertEqual(install.call_args_list[-1].args[1], [])
+
     def test_inbound_ip_alert_requires_more_than_ten_unique_ips(self):
         container = {
             "name": "web",
@@ -1691,7 +1706,8 @@ class SecurityTelemetryTests(unittest.TestCase):
             },
         ]
         rendered = agent.render_cyber_motd("test-container", incidents)
-        self.assertIn("NARWHAL SECURITY", rendered)
+        self.assertIn("弗兰克托管", rendered)
+        self.assertIn("https://t.me/flanker_channel", rendered)
         self.assertNotIn("COMPROMISED", rendered)
         self.assertNotIn("\033", rendered)  # Plain text by default.
         self.assertIn("风险存在", rendered)
@@ -1744,7 +1760,8 @@ class SecurityTelemetryTests(unittest.TestCase):
                 now = time.time()
                 with mock.patch.object(banner.time, "time", return_value=now+90000):
                     self.assertTrue(agent.update_container_motd_alerts(c, []))
-                self.assertEqual(content[0], "Welcome to Ubuntu 24.04 LTS\\n")
+                self.assertIn("目前容器无异常", content[0])
+                self.assertIn("Welcome to Ubuntu 24.04 LTS", content[0])
             banner.incidents.clear()
 
     def test_format_buyer_notification(self):

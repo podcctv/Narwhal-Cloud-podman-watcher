@@ -2,11 +2,15 @@
 
 ## 登录提示
 
-- 只修改容器登录后的 `/etc/motd`，不修改 SSH 认证、端口或登录前 Banner。
+- v1.7.8：默认闭合品牌卡片由主机 Agent 每轮刷新；新建并运行、被 Agent 发现的受监控 Podman/Incus 容器在下一轮自动安装，无需修改创建模板。停止容器待启动后安装；显式关闭安全监测/登录提示及 Docker 仅提醒模式仍保留原策略，不擅自越权写入。
+- 默认显示「弗兰克托管 / FLANKER HOSTING」闭合卡片和频道 `https://t.me/flanker_channel`；无告警也保留品牌提示。不修改系统 hostname、SSH 认证、端口或登录前 Banner。
+- Agent 更新 `/etc/narwhal-banner.sh`，交互会话按 `stty size` 选择 12..100 列的有界预排版；容器拒绝窗口尺寸 ioctl 时使用交互 shell 的 `COLUMNS`（无有效尺寸时回退 80）。宽窗口显示轮廓大字，窄窗口使用紧凑标题。中文按显示格宽度补齐，颜色控制码不计宽度。极窄（小于十二列）不展示卡片，避免折行。
+- `/etc/profile.d/90-narwhal-banner.sh` 用于登录 shell，`/root/.bashrc` 的 Narwhal 标记块用于当前网页控制台的 root Bash。仅交互且 stdout 为 TTY 时显示；同一 shell 不重复展示，脚本/SFTP 不输出。其他用户的非登录 shell、非 Bash 网页 shell 不保证自动展示，需控制台启动端配合。
+- 不要求容器安装 Python；使用已有 sh/awk/stty/date/base64/gzip/cmp。缺工具或拒绝写入时报告 shell 安装失败，并回退原 `/etc/motd` 路径。成功安装 shell 提示时移除旧 MOTD 的 Narwhal 块，保留用户内容，避免 SSH 同时展示两份卡片。
 - 仅更新 Narwhal 标记块，保留原提示。原子替换并读回校验；符号链接、异常文件和权限失败均报告失败，不伪报成功。
 - 状态为风险存在、执行后待复查、证据不足、复查通过或复发。执行成功不是复查通过；恢复需要两次新鲜报告，容器缺失或认证未知不能证明恢复。
-- 显示版本、事件 ID、UTC 采样时间；去除控制符并遮盖常见密钥字段。默认纯文本、不闪烁，按中文字符宽度换行。
-- `SECURITY_MOTD_LANGUAGE=zh|en`、`SECURITY_MOTD_WIDTH=40..100`、`SECURITY_MOTD_COLOR=true` 可调整展示。颜色默认关闭，并尊重 `NO_COLOR` 和 `TERM=dumb`。
+- 显示版本、事件 ID、UTC 采样时间、告警原始描述以及已采集的数值/阈值；去除控制符并遮盖常见密钥字段，不编造缺失数据。默认无异常为绿色，警告/待复查为黄色，严重活动风险为红色；提示快照超过十五分钟显示「当前状态未知」。
+- `SECURITY_MOTD_LANGUAGE=zh|en`、`SECURITY_MOTD_WIDTH=12..100` 可调整回退 MOTD；回退路径默认纯文本。交互卡片默认着色，支持会话中 `SECURITY_MOTD_COLOR=false`、`NO_COLOR`（包括空值）和 `TERM=dumb` 禁用颜色。
 - 状态保存在 `SECURITY_MOTD_STATE_FILE`（默认 `/opt/narwhal-monitor/motd-state.json`），最多 1000 个容器、每容器 3 个事件。默认保留 24 小时，最多七天。
 - 报告中的 `security.motd_delivery` 区分写入结果、持久化结果及登录机制检查。`login_display=configured` 只是配置检查，不是用户确实看见提示的证明；非交互 SSH 通常不展示 MOTD。
 
