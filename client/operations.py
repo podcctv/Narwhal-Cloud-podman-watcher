@@ -124,6 +124,9 @@ def probe(service):
 
 
 def collect(security, containers, interval):
+    # Notice-only Docker entries intentionally have no network counters. Keep
+    # them visible, but do not classify the monitored runtime scan as broken.
+    monitored = [c for c in containers if not (c.get('runtime') == 'docker' and c.get('monitor_mode') == 'notice')]
     access=security.get("access_log",{})
     if not security.get("enabled"):
         log_status="disabled"
@@ -136,7 +139,7 @@ def collect(security, containers, interval):
     else:
         log_status="healthy" if access.get("requests") else "idle"
     health=[{"source":"http_logs","status":log_status,"details":{k:access.get(k,0) for k in ("readable_files","missing_files","unreadable_files","parse_errors","requests")},"guidance":"使用日志向导发现路径，确认 JSON/combined 格式和 Agent 读取权限"},
-            {"source":"network_counters","status":"healthy" if all(c.get("traffic_counters",{}).get("available") for c in containers) and containers else "partial" if containers else "idle","details":{"containers":len(containers),"available":sum(bool(c.get("traffic_counters",{}).get("available")) for c in containers)},"guidance":"检查运行时统计接口、/proc 网络命名空间权限；首采样不产生速率"},
+            {"source":"network_counters","status":"healthy" if all(c.get("traffic_counters",{}).get("available") for c in monitored) and monitored else "partial" if monitored else "idle","details":{"containers":len(monitored),"available":sum(bool(c.get("traffic_counters",{}).get("available")) for c in monitored),"notice_only":len(containers)-len(monitored)},"guidance":"检查运行时统计接口、/proc 网络命名空间权限；首采样不产生速率"},
             {"source":"security","status":"healthy" if security.get("enabled") else "disabled","guidance":"启用 SECURITY_MONITOR_ENABLED；执行复查要求新安全样本"}]
     with ThreadPoolExecutor(max_workers=4) as pool:
         services=list(pool.map(probe,_config.get("services",[])[:20]))

@@ -318,6 +318,21 @@ class OperationsTests(unittest.TestCase):
 
 
 class NodeOperationsTests(unittest.TestCase):
+    def test_notice_only_docker_does_not_block_monitored_scan_health(self):
+        clean = {'runtime': 'incus', 'traffic_counters': {'available': True}}
+        notice = {'runtime': 'docker', 'monitor_mode': 'notice'}
+        with mock.patch.dict(agent_ops._config, {'services': []}):
+            def network(items):
+                result = agent_ops.collect({'enabled': True}, items, 300)
+                return next(h for h in result['health'] if h['source'] == 'network_counters')
+            result = network([clean, notice])
+            self.assertEqual(result['status'], 'healthy')
+            self.assertEqual(result['details'], {'containers': 1, 'available': 1, 'notice_only': 1})
+            self.assertEqual(network([notice])['status'], 'idle')
+            self.assertEqual(network([clean, {'runtime': 'docker', 'monitor_mode': 'full'}])['status'], 'partial')
+            self.assertEqual(network([{'runtime': 'incus'}, notice])['status'], 'partial')
+            self.assertEqual(network([{'runtime': 'docker'}])['status'], 'partial')
+
     def test_probe_tcp_and_failure(self):
         with mock.patch.object(agent_ops.socket,"create_connection") as connect:
             result=agent_ops.probe({"id":1,"kind":"tcp","target":"tcp://127.0.0.1:8080"})

@@ -4,6 +4,7 @@
 
 - v1.7.8：默认闭合品牌卡片由主机 Agent 每轮刷新；新建并运行、被 Agent 发现的受监控 Podman/Incus 容器在下一轮自动安装，无需修改创建模板。停止容器待启动后安装；显式关闭安全监测/登录提示及 Docker 仅提醒模式仍保留原策略，不擅自越权写入。
 - v1.7.9：混合运行时宿主机按容器的实际 runtime 选择 Banner 写入命令，不再回退到宿主机默认 Podman；运行时缺失或不匹配时拒绝写入其他运行时。
+- v1.7.10：升级健康检查的网络计数器范围仅包含真正受监控的容器；Docker `notice` 只提醒项独立统计，不再导致健康节点无法完成升级验证。Docker `full` 及其他运行时缺少计数器仍报告不完整。
 - 默认显示「弗兰克托管 / FLANKER HOSTING」闭合卡片和频道 `https://t.me/flanker_channel`；无告警也保留品牌提示。不修改系统 hostname、SSH 认证、端口或登录前 Banner。
 - Agent 更新 `/etc/narwhal-banner.sh`，交互会话按 `stty size` 选择 12..100 列的有界预排版；容器拒绝窗口尺寸 ioctl 时使用交互 shell 的 `COLUMNS`（无有效尺寸时回退 80）。宽窗口显示轮廓大字，窄窗口使用紧凑标题。中文按显示格宽度补齐，颜色控制码不计宽度。极窄（小于十二列）不展示卡片，避免折行。
 - `/etc/profile.d/90-narwhal-banner.sh` 用于登录 shell，`/root/.bashrc` 的 Narwhal 标记块用于当前网页控制台的 root Bash。仅交互且 stdout 为 TTY 时显示；同一 shell 不重复展示，脚本/SFTP 不输出。其他用户的非登录 shell、非 Bash 网页 shell 不保证自动展示，需控制台启动端配合。
