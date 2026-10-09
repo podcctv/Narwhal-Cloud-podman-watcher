@@ -13,6 +13,33 @@ from client import agent
 
 
 class CardTests(unittest.TestCase):
+    def test_legacy_recovery_is_retained_without_inventing_recovery_time(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                'SECURITY_MOTD_STATE_FILE': str(Path(directory)/'state.json')}), \
+                mock.patch.object(banner, 'install_shell', return_value=(True, True)), \
+                mock.patch.object(banner, 'write_proc', return_value=False):
+            banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
+            c = {'name': 'c', 'runtime': 'incus', 'pid': 99}
+            key = '["incus", "", "c", ""]'
+            banner.incidents[key] = [{'type': 'connections', 'title': '高连接数', 'state': 'verified', 'event_id': 'NW-legacy',
+                                      'time_epoch': 1000, 'detail': '738 条'}]
+            def update(at):
+                with mock.patch.object(banner.time, 'time', return_value=at):
+                    banner.update(c, [], set(), mock.Mock(return_value=(True, '')), [], 'test')
+            update(90000)
+            entry = banner.incidents[key][0]
+            self.assertNotIn('recovered_at_epoch', entry)
+            self.assertEqual(entry['retained_from_epoch'], 90000)
+            text = banner.render('c', [entry], width=100)
+            self.assertIn('已恢复', text)
+            self.assertNotIn('恢复（北京时间）', text)
+            banner.incidents.clear(); banner._loaded_path = ''
+            update(90000+7*86400)
+            self.assertTrue(banner.incidents)
+            update(90000+7*86400+1)
+            self.assertFalse(banner.incidents)
+        banner.incidents.clear(); banner._loaded_path = ''
+
     def test_customer_card_uses_beijing_time_and_hides_internal_fields(self):
         entry = {'title': 'Hysteria 2 高并发', 'detail': 'UDP 连接 64，远端 IP 2，阈值 50。',
                  'state': 'active', 'severity': 'warning', 'time_epoch': 1791509400,

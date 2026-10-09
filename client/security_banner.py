@@ -367,7 +367,10 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     for e in entries:
         if e.get('historical') or e.get('state') == 'verified':
             e['historical'] = True
-            e.setdefault('recovered_at_epoch', now)
+            # Legacy snapshots have no recovery timestamp. Retain them for a full
+            # week after migration, without presenting migration time as recovery.
+            if 'recovered_at_epoch' not in e:
+                e.setdefault('retained_from_epoch', now)
             continue
         matching=next((s for s in server_states if (s.get("runtime"),s.get("project"),s.get("name"),s.get("type"))==(container.get("runtime",""),container.get("project",""),name,e.get("type")) and now-float(s.get("updated_at",0))<900),None)
         if matching:
@@ -387,7 +390,7 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     except ValueError: retention=7*86400
     for k in list(incidents):
         incidents[k][:] = select_entries([e for e in incidents[k] if e.get('state') != 'suppressed'
-            and now-float(e.get('recovered_at_epoch', e.get('time_epoch', 0))) <= retention])
+            and now-float(e.get('recovered_at_epoch', e.get('retained_from_epoch', e.get('time_epoch', 0)))) <= retention])
         if not incidents[k]:
             incidents.pop(k,None)
     for k in list(_checks):
