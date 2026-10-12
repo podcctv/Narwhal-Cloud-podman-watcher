@@ -46,9 +46,12 @@ class RemediationShellTests(unittest.TestCase):
                        "/etc/cron.hourly", "/var/spool/cron", "/proc/"):
             target = self.root.as_posix() + source
             script = script.replace(source, target)
+        # dash rejects hyphens in function names; production commands remain
+        # unchanged, while the fixture uses portable names for its stubs.
+        script = script.replace("rc-service", "fixture_rc_service").replace("rc-update", "fixture_rc_update")
         prefix = (
-            "sleep() { :; }; systemctl() { :; }; rc-service() { :; }; "
-            "rc-update() { :; }; supervisorctl() { :; }; "
+            "sleep() { :; }; systemctl() { :; }; fixture_rc_service() { :; }; "
+            "fixture_rc_update() { :; }; supervisorctl() { :; }; "
             "kill() { printf 'fixture_signal=%s:%s\\n' \"$1\" \"$2\"; "
             + ("return 1; " if fail_signal else "return 0; ") + "}; "
         )
