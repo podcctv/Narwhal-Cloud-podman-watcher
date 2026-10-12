@@ -183,13 +183,13 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
                       <div className="font-semibold text-rose-300">
-                        前次定向处置未成功（节点报告无变更）：
+                        前次定向处置未成功：
                       </div>
                       <div className="text-slate-300 font-mono text-[11px] mt-0.5 break-all">
-                        {alert.latest_action?.result_message || '未匹配到可清理的进程或服务'}
+                        {alert.latest_action?.result_message || '节点未返回具体失败原因'}
                       </div>
                       <div className="text-[11px] text-slate-400 mt-1">
-                        已优化深度查杀机制。可直接点击“重试定向处置”强制杀灭，或点击“标记已解决”消除告警。
+                        请根据回执检查节点版本、权限及残留守护进程后重试。标记已解决只归档告警，不会清理程序；风险仍存在时会再次告警。
                       </div>
                     </div>
                   </div>

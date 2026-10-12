@@ -6076,6 +6076,18 @@ def _configured_panel_config_paths() -> List[str]:
     )
 
 
+def _supervisor_identity_match_shell(result_variable: str) -> str:
+    """Match OpenRC's supervised executable without expanding argv as shell globs."""
+    assert result_variable in ("found", "matched")
+    return (
+        "lower_comm=$(printf '%s' \"$comm\" | tr '[:upper:]' '[:lower:]'); "
+        "case \"$lower_comm\" in supervise-daemo|supervise-daemon) "
+        "if tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | "
+        "sed 's#.*/##' | tr '[:upper:]' '[:lower:]' | grep -Fxq -- \"$pattern\"; "
+        f"then {result_variable}=1; fi;; esac; "
+    )
+
+
 def _incus_host_namespace_kill(
     runtime_bin: str,
     container_name: str,
@@ -6097,7 +6109,8 @@ def _incus_host_namespace_kill(
     safe_patterns = " ".join(shlex.quote(item) for item in patterns)
     safe_pids = " ".join(str(p) for p in (process_pids or []) if isinstance(p, int) and p > 1)
     script = (
-        "set -f; " + _cleanup_receipt_shell() + "matched=0; killed=0; errors=0; "
+        # Globbing must remain enabled for /proc/[0-9]*. Never expand argv words.
+        "set +f; " + _cleanup_receipt_shell() + "matched=0; killed=0; errors=0; "
         f"req_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')}; "
         f"restrict_pids={1 if restrict_pids else 0}; "
         f"for pattern in {safe_patterns}; do "
@@ -6107,18 +6120,17 @@ def _incus_host_namespace_kill(
         "comm=$(cat \"$proc/comm\" 2>/dev/null || true); "
         "argv0=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
         "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); found=0; "
-        "extra_candidates=''; lower_comm=$(printf '%s' \"$comm\" | tr '[:upper:]' '[:lower:]'); "
-        "case \"$lower_comm\" in supervise-daemo|supervise-daemon) "
-        "extra_candidates=$(tr '\\000' '\\n' < \"$proc/cmdline\" 2>/dev/null | sed 's#.*/##');; esac; "
-        "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\" $extra_candidates; do "
+        "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
         "candidate=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); "
         "[ \"$candidate\" = \"$pattern\" ] && found=1; done; "
+        + _supervisor_identity_match_shell("found") +
         "[ \"$found\" -eq 1 ] || continue; "
         "if [ \"$restrict_pids\" -eq 1 ] && [ -n \"$req_pids\" ]; then "
         "case \"$req_pids\" in *\" $pid \"*) ;; *) continue;; esac; fi; "
         "matched=$((matched+1)); "
         "if kill -TERM \"$pid\" 2>/dev/null; then killed=$((killed+1)); nw_receipt process \"$comm:$pid\" ok; "
-        "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; "
+        "sleep 1; if [ -d \"$proc\" ] && ! kill -KILL \"$pid\" 2>/dev/null; then "
+        "errors=$((errors+1)); nw_receipt process \"$comm:$pid\" failed; fi; "
         "else errors=$((errors+1)); nw_receipt process \"$comm:$pid\" failed; fi; done; done; "
         "printf 'host_matched_processes=%s host_killed_processes=%s host_kill_errors=%s\\n' "
         '"$matched" "$killed" "$errors"; [ "$errors" -eq 0 ]'
@@ -6144,14 +6156,16 @@ def _incus_host_namespace_kill(
     )
 
 
-def _verify_remediation_stopped(runtime: str, name: str, project: str, names: List[str]) -> Tuple[bool, str]:
+def _verify_remediation_stopped(
+    runtime: str, name: str, project: str, names: List[str], include_supervisors: bool = False
+) -> Tuple[bool, str]:
     """Re-scan exact executable identities after supervisors have had time to respawn."""
     if not names:
         return True, "no_process_targets=1"
     words = " ".join(shlex.quote(value.lower()) for value in names)
     script = (
-        "sleep 1; remaining=0; for proc in /proc/[0-9]*; do "
-        "pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
+        "set +f; sleep 1; remaining=0; for proc in /proc/[0-9]*; do "
+        "pid=${proc##*/}; [ \"$pid\" = 1 ] && continue; [ \"$pid\" = \"$$\" ] && continue; "
         "[ -r \"$proc/cmdline\" ] || continue; "
         "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null); [ \"$state\" = Z ] && continue; "
         "comm=$(cat \"$proc/comm\" 2>/dev/null); exe=$(readlink \"$proc/exe\" 2>/dev/null); "
@@ -6159,7 +6173,9 @@ def _verify_remediation_stopped(runtime: str, name: str, project: str, names: Li
         f"for pattern in {words}; do "
         "for candidate in \"$comm\" \"${exe##*/}\" \"${argv0##*/}\"; do "
         "[ \"$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]')\" = \"$pattern\" ] && matched=1; "
-        "done; done; remaining=$((remaining+matched)); done; "
+        "done; "
+        + (_supervisor_identity_match_shell("matched") if include_supervisors else "") +
+        "done; remaining=$((remaining+matched)); done; "
         "printf 'remaining_processes=%s\\n' \"$remaining\"; [ \"$remaining\" -eq 0 ]"
     )
     ok, message = _run_action_command(_runtime_exec_cmd(runtime, name, script, project))
@@ -6495,12 +6511,14 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
 
     safe_pids = " ".join(str(p) for p in process_pids if p > 1)
     script_parts = [
-        "set -u",
+        "set -u; set +f",
         _cleanup_receipt_shell().rstrip(' ;'),
         "removed_services=0",
         "removed_configs=0",
         "killed_processes=0",
         "cleanup_errors=0",
+        "matched_processes=0",
+        "signal_errors=0",
     ]
     for pattern in patterns:
         quoted_pattern = shlex.quote(pattern)
@@ -6548,8 +6566,9 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
         # aliases from cgroups before signalling the current process.
         script_parts.append(
             f"_req_pids={shlex.quote((' ' + safe_pids + ' ') if safe_pids else '')};\n"
+            f"pattern={quoted_pattern}; "
             "for proc in /proc/[0-9]*; do "
-            "pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
+            "pid=${proc##*/}; [ \"$pid\" = 1 ] && continue; [ \"$pid\" = \"$$\" ] && continue; "
             "[ -r \"$proc/cmdline\" ] || continue; "
             "state=$(awk '{print $3}' \"$proc/stat\" 2>/dev/null || true); [ \"$state\" = Z ] && continue; "
             "comm=$(cat \"$proc/comm\" 2>/dev/null || true); "
@@ -6557,7 +6576,8 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); matched=0; "
             "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
             f"[ \"$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]')\" = {quoted_pattern} ] && matched=1; done; "
-            "[ \"$matched\" -eq 1 ] || continue; "
+            + _supervisor_identity_match_shell("matched") +
+            "[ \"$matched\" -eq 1 ] || continue; matched_processes=$((matched_processes+1)); "
             "svc=$(sed -n 's#.*[/]openrc\\.\\([^/]*\\)$#\\1#p' \"$proc/cgroup\" 2>/dev/null | head -n 1); "
             "case \"$svc\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *) "
             "command -v rc-service >/dev/null 2>&1 && rc-service \"$svc\" stop >/dev/null 2>&1 || true; "
@@ -6568,7 +6588,9 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
             "case \"$unit\" in ''|*[!A-Za-z0-9_.@:-]*) ;; *.service) "
             "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"$unit\" >/dev/null 2>&1 || true;; esac; "
             "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); nw_receipt process \"$comm:$pid\" ok; "
-            "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; done"
+            "sleep 1; if [ -d \"$proc\" ] && ! kill -KILL \"$pid\" 2>/dev/null; then "
+            "signal_errors=$((signal_errors+1)); nw_receipt process \"$comm:$pid\" failed; fi; "
+            "else signal_errors=$((signal_errors+1)); nw_receipt process \"$comm:$pid\" failed; fi; done"
         )
     for config_file in config_files:
         quoted_file = shlex.quote(config_file)
@@ -6580,7 +6602,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     script_parts.extend(
         [
             "command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true",
-            "printf 'killed_processes=%s removed_services=%s removed_configs=%s cleanup_errors=%s\\n' \"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$cleanup_errors\"",
+            "printf 'killed_processes=%s removed_services=%s removed_configs=%s cleanup_errors=%s matched_processes=%s signal_errors=%s\\n' \"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$cleanup_errors\" \"$matched_processes\" \"$signal_errors\"",
             "changes=$((killed_processes+removed_services+removed_configs))",
             "[ \"$cleanup_errors\" -eq 0 ] && [ \"$changes\" -gt 0 ]",
         ]
@@ -6593,7 +6615,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     counts = {
         key: int(value)
         for key, value in re.findall(
-            r"\b(killed_processes|removed_services|removed_configs|cleanup_errors)=(\d+)\b",
+            r"\b(killed_processes|removed_services|removed_configs|cleanup_errors|matched_processes|signal_errors)=(\d+)\b",
             output or "",
         )
     }
@@ -6601,6 +6623,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
         _, host_killed, host_errors, host_output = _incus_host_namespace_kill(
             runtime_bin, container_name, project, patterns, process_pids
         )
+        output = (output or "") + "; " + host_output
         if host_killed or host_errors:
             counts["killed_processes"] = counts.get("killed_processes", 0) + host_killed
             counts["cleanup_errors"] = counts.get("cleanup_errors", 0) + host_errors
@@ -6608,12 +6631,16 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
                 f"killed_processes={counts.get('killed_processes', 0)} "
                 f"removed_services={counts.get('removed_services', 0)} "
                 f"removed_configs={counts.get('removed_configs', 0)} "
-                f"cleanup_errors={counts.get('cleanup_errors', 0)}; {_cleanup_marker_text(output)}; {host_output}"
+                f"cleanup_errors={counts.get('cleanup_errors', 0)} "
+                f"matched_processes={counts.get('matched_processes', 0)} "
+                f"signal_errors={counts.get('signal_errors', 0)}; {_cleanup_marker_text(output)}; {host_output}"
             )
             changes = sum(counts.get(key, 0) for key in ("killed_processes", "removed_services", "removed_configs"))
             ok = counts.get("cleanup_errors", 0) == 0 and changes > 0
-    if ok:
-        verified, verification = _verify_remediation_stopped(runtime_bin, container_name, project, patterns)
+    if patterns:
+        verified, verification = _verify_remediation_stopped(
+            runtime_bin, container_name, project, patterns, include_supervisors=True
+        )
         ok = ok and verified
         output = (output or "") + "; " + verification
     return ok, output or ("remediation completed" if ok else "remediation command failed")

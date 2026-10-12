@@ -786,7 +786,9 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(host_command[:5], ["nsenter", "-t", "9876", "-p", "-m"])
         self.assertEqual(host_command[6], "/bin/sh")
         self.assertIn('"$candidate" = "$pattern"', host_command[-1])
-        self.assertIn("extra_candidates=", host_command[-1])
+        self.assertIn("set +f;", host_command[-1])
+        self.assertNotIn("set -f;", host_command[-1])
+        self.assertIn('grep -Fxq -- "$pattern"', host_command[-1])
         self.assertIn("supervise-daemo|supervise-daemon", host_command[-1])
         self.assertNotIn("requested_pids", host_command[-1])
 
