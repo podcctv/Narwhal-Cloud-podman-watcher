@@ -3647,7 +3647,7 @@ def collect_top_cpu_process(name: str, runtime: str = "", project: str = "") -> 
         pid = int(parts[1]) if parts[1].isdigit() else 0
         cmd = parts[3] if len(parts) >= 4 else parts[2]
         if cpu >= float(best["cpu_percent"]):
-            best = {"pid": pid, "cpu_percent": cpu, "command": cmd}
+            best = {"pid": pid, "cpu_percent": cpu, "command": _redact_process_command(cmd)}
     return best
 
 
@@ -3690,7 +3690,7 @@ def collect_suspicious_processes(name: str, runtime: str = "", project: str = ""
                 "cpu_percent": cpu_percent,
                 "process": posixpath.basename(parts[2]).lower() if len(parts) > 2 else "",
                 "pattern": matched_pattern,
-                "command": (parts[3] if len(parts) > 3 else text)[:500],
+                "command": _redact_process_command(parts[3] if len(parts) > 3 else text),
             }
         )
         if len(matches) >= 20:
@@ -4073,6 +4073,17 @@ _SOCKS_WEAK_PASSWORDS = {
 }
 
 
+def _socks_short_option(tokens: List[str], option: str) -> Tuple[bool, str]:
+    """Read a short option without treating the following flag as its value."""
+    for index, token in enumerate(tokens):
+        if token == option:
+            value = tokens[index + 1] if index + 1 < len(tokens) else ""
+            return True, value if not value.startswith("-") else ""
+        if token.startswith(option) and len(token) > len(option):
+            return True, token[len(option):]
+    return False, ""
+
+
 def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict[str, object]:
     matches: List[Dict[str, object]] = []
     candidate_matches: List[Dict[str, object]] = []
@@ -4106,12 +4117,16 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
         matches.append({"pid": int(parts[0]), "process": matched})
         process_auth_state = "unknown"
         if matched == "microsocks":
-            username_present = "-u" in tokens
-            password = tokens[tokens.index("-P") + 1] if "-P" in tokens and tokens.index("-P") + 1 < len(tokens) else ""
-            if not username_present or not password:
+            username_present, username = _socks_short_option(tokens, "-u")
+            password_present, password = _socks_short_option(tokens, "-P")
+            # Upstream zero_arg() erases both credentials from argv after
+            # parsing. Missing operands in ps are not proof of no/weak auth.
+            if not username_present and not password_present:
                 auth_modes.add("no_auth")
                 process_auth_state = "no_auth"
-                reasons.add("microsocks 未同时配置用户名和密码")
+                reasons.add("microsocks 未配置认证选项")
+            elif not username_present or not password_present or not username or not password:
+                reasons.add("microsocks 认证参数不可见，不能据此判断无认证或密码强度")
             elif password.lower() in _SOCKS_WEAK_PASSWORDS or len(password) < 8:
                 auth_modes.add("weak_password")
                 process_auth_state = "weak_password"
@@ -5423,6 +5438,12 @@ def _redact_process_command(command: str) -> str:
         r"\1\2[REDACTED]",
         command or "",
     )
+    if re.search(r"\bmicrosocks(?:\b|[-_])", value, re.IGNORECASE):
+        value = re.sub(
+            r"(?<!\S)(-[uP])(?:\s+|=)?(\"[^\"]*\"|'[^']*'|(?!-)[^\s]+)",
+            r"\1 [REDACTED]",
+            value,
+        )
     value = re.sub(r"(?i)(https?://[^\s:/]+:)[^@\s]+@", r"\1[REDACTED]@", value)
     return value[:500]
 

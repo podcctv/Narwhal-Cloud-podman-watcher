@@ -920,6 +920,19 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertNotIn("user:pass", command)
         self.assertGreater(result["items"][0]["rss_bytes"], 0)
 
+    def test_microsocks_wrapper_credentials_are_redacted(self):
+        for command in (
+            "supervise-daemon microsocks --start /usr/local/sbin/microsocks-runner.sh -- -u sampleuser -P samplepassword",
+            "/bin/sh /usr/local/sbin/microsocks-runner.sh -u 'sampleuser' -P 'samplepassword'",
+            "/usr/bin/microsocks -usampleuser -Psamplepassword",
+        ):
+            with self.subTest(command=command):
+                redacted = agent._redact_process_command(command)
+                self.assertNotIn("sampleuser", redacted)
+                self.assertNotIn("samplepassword", redacted)
+                self.assertIn("[REDACTED]", redacted)
+        self.assertEqual(agent._redact_process_command("microsocks -u -P"), "microsocks -u -P")
+
     def test_deep_sample_counts_directional_processes_and_enriches_ip_country(self):
         communication = {
             "communication_detail_available": True,
@@ -1017,6 +1030,37 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(no_auth["auth_mode"], "no_auth")
         self.assertEqual(weak["auth_mode"], "weak_password")
         self.assertNotIn("admin", json.dumps(weak["process_matches"]))
+
+    def test_microsocks_erased_auth_operands_remain_unknown_and_are_not_stopped(self):
+        for args in ("-u -P", "-u '' -P ''", "-u -P ''", "-u user", "-P"):
+            with self.subTest(args=args):
+                evidence = agent._socks_process_evidence(
+                    "42 S microsocks /usr/bin/microsocks -p 1080 " + args, "container"
+                )
+                self.assertEqual(evidence["auth_mode"], "unknown")
+                self.assertEqual(evidence["process_matches"][0]["auth_state"], "unknown")
+                container = {"runtime": "incus", "name": "proxy", "security": {"socks_proxy": evidence}}
+                with mock.patch.object(agent, "stop_unauthenticated_socks") as stop:
+                    result = agent.enforce_socks_auth_policy(container, [])
+                stop.assert_not_called()
+                self.assertFalse(result["attempted"])
+
+    def test_microsocks_compact_auth_options_are_not_misclassified_as_no_auth(self):
+        for password, expected in (("admin123", "weak_password"), ("long-test-value-98273", "configured")):
+            evidence = agent._socks_process_evidence(
+                "42 S microsocks /usr/bin/microsocks -uuser -P" + password, "container"
+            )
+            self.assertEqual(evidence["auth_mode"], expected)
+            self.assertNotIn(password, json.dumps(evidence))
+
+    def test_microsocks_supervisor_and_erased_worker_do_not_create_no_auth_evidence(self):
+        evidence = agent._socks_process_evidence(
+            "40 S supervise-daemo supervise-daemon microsocks --start runner.sh -- -u user -P long-test-value-98273\n"
+            "42 S microsocks /usr/bin/microsocks -i 0.0.0.0 -p 1080 -u -P\n",
+            "container",
+        )
+        self.assertEqual(evidence["auth_mode"], "configured")
+        self.assertFalse(any(item["auth_state"] == "no_auth" for item in evidence["process_matches"]))
 
     def test_socks_process_detection_normalizes_weak_auth_state(self):
         gost = agent._socks_process_evidence(
