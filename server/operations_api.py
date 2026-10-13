@@ -403,6 +403,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         conn=db()
         try:
             conn.execute("DELETE FROM ops_users WHERE username=?",(username,))
+            conn.execute("DELETE FROM commerce_accounts WHERE username=?", (username,))
             conn.commit()
             return {"ok":True}
         finally:

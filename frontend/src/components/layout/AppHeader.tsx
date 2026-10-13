@@ -3,8 +3,8 @@ import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings, Users, LogOu
 import { CountdownTimer } from '../common/CountdownTimer';
 
 interface AppHeaderProps {
-  activeTab: 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations';
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations') => void;
+  activeTab: 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations' | 'commerce';
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations' | 'commerce') => void;
   serverVersion: string;
   activeAlertCount: number;
   countdown: number;
@@ -127,6 +127,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           </button>
           <button type="button" onClick={() => onSelectTab('investigation')} aria-current={activeTab === 'investigation' ? 'page' : undefined} className={`min-h-11 flex items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold ${activeTab === 'investigation' ? 'bg-sky-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'}`}><Users className="h-3.5 w-3.5" /><span>用户排查</span></button>
         </nav>
+        <button type="button" onClick={() => onSelectTab('commerce')} aria-current={activeTab === 'commerce' ? 'page' : undefined} className={`min-h-11 rounded-lg border px-3 py-2 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${activeTab === 'commerce' ? 'border-sky-400 bg-sky-500 text-slate-950' : 'border-slate-700 text-slate-300 hover:border-sky-500'}`}>经营分析</button>
         <button type="button" onClick={() => onSelectTab('operations')} aria-current={activeTab === 'operations' ? 'page' : undefined} className={`min-h-11 rounded-lg border px-3 py-2 text-xs font-semibold ${activeTab === 'operations' ? 'border-sky-400 bg-sky-500 text-slate-950' : 'border-slate-700 text-slate-300 hover:border-sky-500'}`}>运维中心</button>
 
         {/* Search & Timer Tools */}

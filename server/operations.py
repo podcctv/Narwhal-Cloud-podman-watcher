@@ -357,6 +357,9 @@ def authenticate(conn, authorization):
 def permitted(role, method, path):
     if role == "admin":
         return True
+    # Personal settings are scoped to the authenticated identity inside commerce.
+    if path in {"/api/v1/commerce/settings", "/api/v1/commerce/sync"}:
+        return method in {"GET", "HEAD", "POST", "DELETE"}
     # These reads expose credentials/configuration even when the response is masked today.
     if any(path.startswith(p) for p in ("/api/v1/notifications", "/api/v1/settings", "/api/v1/buyer", "/api/v1/ops/users", "/api/v1/ops/backups", "/api/v1/ops/audit")):
         return False

@@ -126,13 +126,14 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce
 except ImportError:
     import operations
     import operations_api
     import investigation
     import buyer_notifications
     import dashboard_auth
+    import commerce
 
 _AGENT_ONLY_PATHS = {
     "/api/v1/report",
@@ -382,6 +383,7 @@ def init_db() -> None:
     operations.initialize(conn)
     buyer_notifications.initialize(conn)
     investigation.initialize(conn)
+    commerce.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -3480,6 +3482,7 @@ async def security_action_result(
 
 
 operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup_old_reports, lambda: APP_VERSION, lambda: DASHBOARD_USERNAME)
+commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD))
 
 
 @app.get("/api/v1/security/actions")
