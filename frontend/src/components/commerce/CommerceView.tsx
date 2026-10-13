@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as echarts from 'echarts';
-import { KeyRound, RefreshCw, Server, ShoppingBag, Receipt, AlertTriangle } from 'lucide-react';
+import { KeyRound, RefreshCw, Server, ShoppingBag, Receipt, AlertTriangle, Trash2, Pencil } from 'lucide-react';
 import { request } from '../../api/client';
 
 type Money = string | null;
-type Settings = { configured: boolean; synced_at: number; last_error: string; api_url: string; syncing: boolean };
+type Settings = { configured: boolean; updated_at: number; synced_at: number; last_error: string; api_url: string; syncing: boolean };
 type Machine = { id: string; name: string; region: string; status: string; sold_current: number; self_current: number; observed_vms: number; vm_count: number | null; buyer_count: number; est_revenue: Money; earned_revenue: Money; locked_value: Money };
 type Overview = { available: boolean; synced_at: number; stale: boolean; last_error: string; machines: Machine[]; profile: { available_balance: Money; escrow_balance: Money; escrow_locked_value: Money; commission_rate: Money } | null; documentation: string };
 type RecordRow = { id: string; vm_id?: string; machine_id?: string; machine_name?: string; status?: string; type: string; amount: Money; discount_amount?: Money; balance_type?: string; balance_after?: Money; created_at: number };
@@ -47,6 +47,7 @@ export function CommerceView() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [history, setHistory] = useState<History | null>(null);
   const [apiKey, setApiKey] = useState('');
+  const [editingKey, setEditingKey] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [historyError, setHistoryError] = useState('');
@@ -61,9 +62,10 @@ export function CommerceView() {
 
   useEffect(() => {
     const controller = new AbortController();
-    Promise.all([request<Settings>('/api/v1/commerce/settings', { signal: controller.signal }), request<Overview>('/api/v1/commerce/overview', { signal: controller.signal })])
-      .then(([s, o]) => { setSettings(s); setOverview(o); })
-      .catch(e => { if (!controller.signal.aborted) setError(e.message); });
+    request<Settings>('/api/v1/commerce/settings', { signal: controller.signal })
+      .then(setSettings).catch(e => { if (!controller.signal.aborted) setError(e.message); });
+    request<Overview>('/api/v1/commerce/overview', { signal: controller.signal })
+      .then(setOverview).catch(e => { if (!controller.signal.aborted) setError(e.message); });
     return () => controller.abort();
   }, [revision]);
 
@@ -99,11 +101,15 @@ export function CommerceView() {
 
   async function act(action: 'save' | 'sync' | 'delete') {
     if (busy) return;
+    if (action === 'delete' && !window.confirm('删除当前账号的个人 API Key 和经营数据缓存？不会影响上游资源或全局买家通知。')) return;
     setBusy(action); setError(''); setNotice('');
+    let saved = false;
     try {
       if (action === 'save') {
         await request('/api/v1/commerce/settings', { method: 'POST', body: JSON.stringify({ api_key: apiKey.trim() }) });
-        setApiKey(''); setOverview(null); setHistory(null);
+        saved = true;
+        setSettings({ configured: true, updated_at: Math.floor(Date.now()/1000), synced_at: 0, last_error: '', api_url: settings?.api_url || '', syncing: false });
+        setEditingKey(false); setApiKey(''); setOverview(null); setHistory(null);
         setNotice('密钥已加密保存，正在同步数据…');
         await synchronize();
         setNotice('个人 API Key 已配置，经营数据已同步');
@@ -111,12 +117,12 @@ export function CommerceView() {
         await synchronize();
         setNotice('已完成同步');
       } else {
-        if (!window.confirm('删除当前账号的个人 API Key 和经营数据缓存？不会影响上游资源或全局买家通知。')) return;
         await request('/api/v1/commerce/settings', { method: 'DELETE' });
-        setOverview(null); setHistory(null); setNotice('个人密钥和缓存已删除');
+        setSettings({ configured: false, updated_at: 0, synced_at: 0, last_error: '', api_url: settings?.api_url || '', syncing: false });
+        setEditingKey(false); setApiKey(''); setOverview(null); setHistory(null); setNotice('个人密钥和缓存已删除');
       }
-    } catch (e) { setNotice(''); setError(e instanceof Error ? e.message : '操作失败'); }
-    finally { setApiKey(''); setBusy(''); setOffset(0); setRevision(r => r + 1); }
+    } catch (e) { setNotice(saved ? 'API Key 已保存；数据同步未完成，可直接重试同步，无需重新输入密钥。' : ''); setError(e instanceof Error ? e.message : '操作失败'); }
+    finally { setBusy(''); setOffset(0); setRevision(r => r + 1); }
   }
 
   async function synchronize() {
@@ -148,12 +154,21 @@ export function CommerceView() {
     {notice && <p role="status" className="text-sm text-emerald-300">{notice}</p>}
     {settings?.syncing && !busy && <p role="status" className="text-sm text-sky-300">后台同步进行中，完成后自动刷新；离开页面不会取消任务。</p>}
     <section className={panel} aria-labelledby="personal-key-heading">
-      <div className="mb-4 flex items-center gap-2"><KeyRound className="h-5 w-5 text-sky-400" /><h3 id="personal-key-heading" className="font-semibold">个人 API Key</h3><span className="text-xs text-slate-400">{settings ? settings.configured ? '已配置，不回显' : '未配置' : '加载中…'}</span></div>
-      <form onSubmit={e => { e.preventDefault(); act('save'); }} className="flex flex-col gap-3 sm:flex-row sm:items-end">
-        <label className="flex-1 text-sm text-slate-300" htmlFor="commerce-key">{settings?.configured ? '更换密钥' : '配置密钥'}<input id="commerce-key" type="password" autoComplete="off" spellCheck={false} maxLength={512} value={apiKey} onChange={e => setApiKey(e.target.value)} className={input + ' mt-2'} placeholder="输入 Narwhal 平台个人 API Key" aria-describedby="key-help" /></label>
-        <button type="submit" className={button + ' bg-sky-500 text-slate-950 hover:bg-sky-400'} disabled={!!busy || !apiKey.trim()}>{busy === 'save' ? '校验并同步…' : '保存并同步'}</button>
-        {settings?.configured && <button type="button" className={button} disabled={!!busy} onClick={() => act('delete')}>删除个人密钥</button>}
-      </form>
+      <div className="mb-4 flex flex-wrap items-center gap-2"><KeyRound className="h-5 w-5 text-sky-400" /><h3 id="personal-key-heading" className="font-semibold">个人 API Key</h3><span className={settings?.configured ? 'rounded-full border border-emerald-500/40 bg-emerald-950/40 px-2 py-1 text-xs text-emerald-300' : 'text-xs text-slate-400'}>{settings ? settings.configured ? '已保存 · 已加密' : '未配置' : '加载中…'}</span></div>
+      {settings?.configured && <div className="mb-4 rounded-xl border border-slate-700 bg-slate-950/60 p-4">
+        <label className="block text-sm text-slate-300">已保存的个人 API Key<input className={input + ' mt-2 cursor-default text-slate-400'} type="text" value="••••••••（已安全保存，不显示原文）" readOnly autoComplete="off" /></label>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          {!editingKey && <button type="button" className={button + ' flex items-center gap-2'} disabled={!!busy || settings.syncing} onClick={() => { setApiKey(''); setEditingKey(true); }}><Pencil className="h-4 w-4" />更换 API Key</button>}
+          <button type="button" className={button + ' flex items-center gap-2 border-rose-500/60 text-rose-300 hover:border-rose-300'} disabled={!!busy || settings.syncing} onClick={() => act('delete')}><Trash2 className="h-4 w-4" />删除 API Key</button>
+          {settings.updated_at > 0 && <span className="text-xs text-slate-400">保存时间：{date(settings.updated_at)} UTC</span>}
+        </div>
+        <p className="mt-3 text-xs leading-5 text-slate-400">密钥已生效，无需重复输入。仅点击“更换 API Key”时输入新密钥；删除会同时清除当前用户的经营缓存。</p>
+      </div>}
+      {settings && (!settings.configured || editingKey) && <form onSubmit={e => { e.preventDefault(); act('save'); }} className="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <label className="min-w-0 flex-1 text-sm text-slate-300" htmlFor="commerce-key">{settings.configured ? '新的个人 API Key' : '配置个人 API Key'}<input id="commerce-key" type="password" autoComplete="off" autoFocus={editingKey} spellCheck={false} maxLength={512} value={apiKey} onChange={e => setApiKey(e.target.value)} className={input + ' mt-2'} placeholder="输入 Narwhal 平台个人 API Key" aria-describedby="key-help" /></label>
+        <button type="submit" className={button + ' bg-sky-500 text-slate-950 hover:bg-sky-400'} disabled={!!busy || !apiKey.trim()}>{busy === 'save' ? '校验并保存…' : settings.configured ? '保存新密钥并同步' : '保存并同步'}</button>
+        {editingKey && <button type="button" className={button} disabled={!!busy} onClick={() => { setApiKey(''); setEditingKey(false); }}>取消更换</button>}
+      </form>}
       <p id="key-help" className="mt-3 text-xs leading-6 text-slate-400">仅用于当前登录用户的数据查询，加密保存在服务端；不修改全局买家通知配置，不执行购买或退款操作。<a className="ml-2 text-sky-300 underline" href="https://api.fuckip.me/openapi.yaml" target="_blank" rel="noreferrer">接口文档</a></p>
     </section>
     {!overview ? <p role="status" className="text-sm text-slate-400">正在加载个人经营数据…</p> : !overview.available ? <div className={panel}><ShoppingBag className="mb-3 h-8 w-8 text-slate-500" /><h3 className="font-semibold">还没有个人经营数据</h3><p className="mt-2 text-sm text-slate-400">{settings?.configured ? '点击“同步经营数据”获取上游数据。' : '配置个人 API Key 后，即可查看母鸡出售现状和账号交易历史。'}</p></div> : <>

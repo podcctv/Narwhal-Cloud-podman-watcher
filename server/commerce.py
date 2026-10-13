@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import urlencode
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, HTTPException, Request
@@ -198,6 +199,97 @@ class Client:
             raise CommerceError("上游分页未完成，旧数据已保留")
         return rows
 
+    def transaction_history(self):
+        """Walk disjoint second-resolution windows, not unstable OFFSET boundaries.
+
+        Rows tied at the oldest timestamp are deferred in full to the next window.
+        A dense single-second bucket is reconciled by ID and exact total, never by
+        silently dropping duplicates from an incomplete financial history.
+        """
+        def fetch(start, end, page=1):
+            data = self.get('/billing/transactions?' + urlencode({
+                'start_time': start, 'end_time': end, 'page': page, 'page_size': 100}))
+            batch, total = data.get('transactions'), data.get('total')
+            if not isinstance(batch, list) or type(total) is not int or not 0 <= total <= LIMIT or len(batch) > 100:
+                raise CommerceError('上游账单时间分段结构不符，旧数据已保留')
+            stamps = []
+            ids = set()
+            for row in batch:
+                if not isinstance(row, dict):
+                    raise CommerceError('上游账单记录结构不符')
+                rid = identity(row.get('id'))
+                stamp = timestamp(row.get('created_at'))
+                if not start <= stamp <= end or rid in ids:
+                    raise CommerceError('上游账单时间筛选或单页记录异常，旧数据已保留')
+                ids.add(rid)
+                stamps.append(stamp)
+            if stamps != sorted(stamps, reverse=True) or len(batch) > total:
+                raise CommerceError('上游账单排序或总数异常，旧数据已保留')
+            return batch, total
+
+        rows, seen, end, remaining, expected = [], set(), self.cutoff, None, None
+        def append(batch):
+            for row in batch:
+                rid = identity(row['id'])
+                if rid in seen:
+                    raise CommerceError('上游账单分段重复，旧数据已保留')
+                seen.add(rid)
+                rows.append(row)
+
+        while end >= 0:
+            batch, total = fetch(0, end)
+            if expected is None:
+                expected = remaining = total
+            if total != remaining:
+                raise CommerceError('上游账单历史在同步期间发生变化，旧数据已保留，请重试')
+            if total == len(batch):
+                append(batch)
+                remaining = 0
+                break
+            if not batch:
+                raise CommerceError('上游账单时间分段不完整，旧数据已保留')
+            boundary = timestamp(batch[-1]['created_at'])
+            head = [row for row in batch if row['created_at'] > boundary]
+            if head:
+                append(head)
+                remaining -= len(head)
+                end = boundary
+                continue
+            # More than one page at exactly the same second: retry only this
+            # bounded bucket. Completion requires every distinct ID in total.
+            first, bucket_total = fetch(boundary, boundary)
+            if not len(batch) <= bucket_total <= remaining or bucket_total == 0:
+                raise CommerceError('上游账单同秒分组总数异常，旧数据已保留')
+            unique = {}
+            page_count = (bucket_total + 99)//100
+            for attempt in range(3):
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = [pool.submit(fetch, boundary, boundary, page)
+                               for page in range(1 if attempt else 2, page_count+1)]
+                    results = ([] if attempt else [(first, bucket_total)]) + [f.result() for f in futures]
+                for page_rows, page_total in results:
+                    if page_total != bucket_total or not page_rows:
+                        raise CommerceError('上游账单同秒分页发生变化，旧数据已保留')
+                    for row in page_rows:
+                        rid = identity(row['id'])
+                        if rid in unique and unique[rid] != row:
+                            raise CommerceError('上游同一账单记录发生变化，旧数据已保留')
+                        unique[rid] = row
+                if len(unique) == bucket_total:
+                    break
+                if len(unique) > bucket_total:
+                    raise CommerceError('上游账单分组超过声明总数，旧数据已保留')
+            if len(unique) != bucket_total:
+                raise CommerceError('上游同秒账单分页无法完整核对，旧数据已保留，请稍后重试')
+            append(unique.values())
+            remaining -= bucket_total
+            end = boundary-1
+            if remaining == 0:
+                break
+        if remaining != 0 or len(rows) != expected:
+            raise CommerceError('上游账单时间分段未完整核对，旧数据已保留')
+        return rows
+
 
 def profile(client):
     data = client.get("/user/me")
@@ -251,7 +343,7 @@ def snapshot(client, account):
             "type": text(raw.get("type"), 40), "amount": money(raw.get("amount")),
             "discount_amount": money(raw.get("discount_amount")), "created_at": timestamp(raw.get("created_at"))})
     transactions = []
-    for raw in client.pages(f"/billing/transactions?end_time={client.cutoff}", "transactions"):
+    for raw in client.transaction_history():
         if identity(raw.get("user_id")) != account["id"]:
             continue
         details = raw.get("data") if isinstance(raw.get("data"), dict) else {}

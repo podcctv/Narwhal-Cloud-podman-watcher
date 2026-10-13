@@ -1,5 +1,6 @@
 """Loopback-only synthetic business UI fixture. Never connects to upstream."""
 import tempfile
+import os
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +17,12 @@ def demo():
     return data
 
 
+def demo_snapshot(client, account):
+    if client.key == 'synthetic-sync-fail':
+        raise commerce.CommerceError('合成测试：上游同步失败，密钥仍已保存')
+    return demo()
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="narwhal-commerce-preview-") as temp:
         server.DB_PATH = str(Path(temp) / "preview.db")
@@ -23,8 +30,8 @@ def main():
         server.DASHBOARD_PASSWORD = "local-preview-only"
         server.APP_VERSION = "test-data"
         commerce.profile = lambda client: fixture()["profile"]
-        commerce.snapshot = lambda client, account: demo()
-        uvicorn.run(server.app, host="127.0.0.1", port=8787, log_level="warning")
+        commerce.snapshot = demo_snapshot
+        uvicorn.run(server.app, host="127.0.0.1", port=int(os.getenv('NARWHAL_PREVIEW_PORT', '8787')), log_level="warning")
 
 
 if __name__ == "__main__":

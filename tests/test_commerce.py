@@ -9,6 +9,7 @@ import uuid
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlsplit, parse_qs
 
 from fastapi.testclient import TestClient
 from server import app as server, commerce, operations
@@ -34,6 +35,79 @@ def fixture():
 
 
 class CommerceMathTests(unittest.TestCase):
+    def window_client(self, rows):
+        client = commerce.Client('synthetic-key-only')
+        client.cutoff = 1000
+        urls = []
+        def fetch(path):
+            urls.append(path)
+            q = parse_qs(urlsplit(path).query)
+            start, end, page = (int(q.get(k, [default])[0]) for k, default in [('start_time', 0), ('end_time', 1000), ('page', 1)])
+            selected = sorted([r for r in rows if start <= r['created_at'] <= end], key=lambda r: r['created_at'], reverse=True)
+            return {'transactions': selected[(page-1)*100:page*100], 'total': len(selected)}
+        client.get = mock.Mock(side_effect=fetch)
+        return client, urls, fetch
+
+    def test_time_windows_avoid_offset_ties_and_reconcile_total(self):
+        rows = [{'id': uid(1000+i), 'created_at': 300 if i < 80 else 200 if i < 160 else 100} for i in range(200)]
+        client, urls, _ = self.window_client(rows)
+        result = client.transaction_history()
+        self.assertEqual(len(result), 200)
+        self.assertEqual(len({r['id'] for r in result}), 200)
+        self.assertEqual(len(urls), 3)
+        self.assertTrue(all('page=1' in url for url in urls))
+
+    def test_dense_same_second_retries_only_bucket_until_complete(self):
+        rows = [{'id': uid(1000+i), 'created_at': 200} for i in range(105)]
+        client, urls, fetch = self.window_client(rows)
+        overlaps = 0
+        def unstable(path):
+            nonlocal overlaps
+            q = parse_qs(urlsplit(path).query)
+            if q.get('start_time') == ['200'] and q.get('page') == ['2']:
+                overlaps += 1
+                if overlaps == 1:
+                    return {'transactions': rows[95:100], 'total': 105}
+            return fetch(path)
+        client.get = mock.Mock(side_effect=unstable)
+        self.assertEqual(len(client.transaction_history()), 105)
+        self.assertEqual(overlaps, 2)
+
+    def test_dense_missing_records_never_silently_deduplicate(self):
+        rows = [{'id': uid(1000+i), 'created_at': 200} for i in range(105)]
+        client, urls, fetch = self.window_client(rows)
+        def unstable(path):
+            if parse_qs(urlsplit(path).query).get('page') == ['2']:
+                return {'transactions': rows[95:100], 'total': 105}
+            return fetch(path)
+        client.get = mock.Mock(side_effect=unstable)
+        with self.assertRaisesRegex(commerce.CommerceError, '无法完整核对'):
+            client.transaction_history()
+
+    def test_window_filter_drift_sort_and_duplicate_rows_rejected(self):
+        rows = [{'id': uid(1000+i), 'created_at': 300 if i < 80 else 200} for i in range(150)]
+        client, _, fetch = self.window_client(rows)
+        def ignored(path):
+            data = fetch(path)
+            if 'end_time=200' in path:
+                data['transactions'][0]['created_at'] = 300
+            return data
+        client.get = mock.Mock(side_effect=ignored)
+        with self.assertRaises(commerce.CommerceError):
+            client.transaction_history()
+        for data in (
+            {'transactions': [{'id':uid(1),'created_at':1},{'id':uid(2),'created_at':2}], 'total':2},
+            {'transactions': [{'id':uid(1),'created_at':2},{'id':uid(1),'created_at':2}], 'total':2},
+            {'transactions': [], 'total':10001},
+        ):
+            client.get = mock.Mock(return_value=data)
+            with self.assertRaises(commerce.CommerceError):
+                client.transaction_history()
+
+    def test_empty_window_returns_empty_history(self):
+        client, _, _ = self.window_client([])
+        self.assertEqual(client.transaction_history(), [])
+
     def test_decimal_completed_and_signed_refunds_not_combined(self):
         result = commerce.analyse(fixture())
         totals = {t["type"]: t for t in result["totals"]}
@@ -104,7 +178,8 @@ class CommerceMathTests(unittest.TestCase):
         vm = {"id": uid(20), "machine_id": uid(2), "user_id": uid(3), "credentials": {"password": "SHOULD-NOT-LEAVE"}}
         order = {"id": uid(10), "user_id": uid(1), "vm_id": uid(999), "type": "refund", "status": "completed", "amount": -1,
             "created_at": 1704067200, "data": {"machine_id": uid(2), "machine_name": "historical", "secret": "SHOULD-NOT-LEAVE"}}
-        client.pages.side_effect = [[machine, {"id": uid(4), "owner_id": uid(5)}], [vm], [], [order], []]
+        client.pages.side_effect = [[machine, {"id": uid(4), "owner_id": uid(5)}], [vm], [], [order]]
+        client.transaction_history.return_value = []
         data = commerce.snapshot(client, {"id": uid(1)})
         self.assertNotIn("SHOULD-NOT-LEAVE", json.dumps(data))
         self.assertEqual(len(data["machines"]), 1)
