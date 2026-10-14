@@ -109,6 +109,42 @@ class ProbeStateTests(unittest.TestCase):
         self.assertEqual(c.execute("SELECT COUNT(*) FROM tcp_jobs").fetchone()[0], 1)
         c.close()
 
+    def test_owner_taiwan_target_is_fixed_counted_and_not_upstream(self):
+        result = tcping.configured_directory(raw_directory())
+        self.assertEqual(result["counts"]["province_groups"], 31)
+        self.assertEqual(result["counts"]["province_nodes"], 93)
+        self.assertEqual(result["counts"]["city_nodes"], 223)
+        self.assertEqual(result["counts"]["total"], 317)
+        self.assertEqual(result["counts"]["unique_endpoints"], 317)
+        self.assertEqual(result["counts"]["province_targets"], 94)
+        self.assertEqual(result["counts"]["zstatic_total"], 316)
+        taiwan = result["nodes"][-1]
+        self.assertEqual((taiwan["province"], taiwan["host"], taiwan["port"]), ("台湾", "hinet.428048.xyz", 36901))
+        tcp_probe.validate_targets(result["nodes"])
+        for changes in ({"host":"hinet.428048.xyz.evil.test"}, {"port":22}, {"province":"北京"}, {"carrier":"mobile"}):
+            bad = {**taiwan, **changes}
+            bad["id"] = tcp_probe.digest({k:v for k,v in bad.items() if k != "id"})[:20]
+            with self.assertRaises(ValueError):
+                tcp_probe.validate_targets([bad])
+        self.assertTrue(tcp_probe.allowed_host("hinet.428048.xyz"))
+        self.assertFalse(tcp_probe.allowed_host("hinet.428048.xyz.evil.test"))
+
+    def test_taiwan_migration_preserves_cache_age_and_old_job_targets(self):
+        old = self.admit()["job"]
+        c = self.db()
+        c.execute("UPDATE tcp_directories SET fetched_at=?", (self.now-200000,))
+        tcping.initialize(c)
+        c.commit()
+        current = tcping.directory(c)
+        self.assertEqual(current["counts"]["total"], 317)
+        self.assertEqual(current["fetched_at"], self.now-200000)
+        self.assertTrue(current["stale"])
+        self.assertEqual(len(tcping.get_job(c,old["id"])["nodes"]), 93)
+        tcping.initialize(c)
+        c.commit()
+        self.assertEqual(c.execute("SELECT count(*) FROM tcp_directories").fetchone()[0], 2)
+        c.close()
+
     def test_cooldown_survives_new_connection_and_scope_switch(self):
         job = self.admit()["job"]
         c = self.db()
@@ -325,6 +361,38 @@ class ProbeHttpTests(ProbeStateTests):
 
 
 class ProbeWorkerTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=="posix","Linux full worker subprocess integration")
+    def test_full_317_target_parent_worker_batches_without_network(self):
+        from threading import Thread
+        targets = tcping.configured_directory(raw_directory())["nodes"]
+        module_dir = str(Path(tcp_probe.__file__).resolve().parent)
+        child_code = (
+            "import sys,json,time;sys.path.insert(0,"+repr(module_dir)+");import tcp_probe;"
+            "tcp_probe.probe=lambda t,s:(time.sleep(.01) or {'target_id':t['id'],'ip':'1.1.1.1','samples_ms':[1.0],'error':''});"
+            "tcp_probe.worker(json.load(sys.stdin))"
+        )
+        original = subprocess.Popen
+        processes, batches = [], []
+        def launch(args, **kwargs):
+            if args[-1] == "worker":
+                self.assertEqual(set(kwargs["env"]), {"PATH","LANG","PYTHONDONTWRITEBYTECODE"})
+                args = [sys.executable,"-u","-c",child_code]
+            child = original(args,**kwargs)
+            processes.append(child)
+            return child
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ,{"NARWHAL_TCP_STATE":temp}):
+            job = {"id":str(uuid.uuid4()),"lease":"x"*43,"generation":"synthetic-test","target_hash":tcp_probe.digest(targets),
+                   "targets":targets,"samples":1,"deadline_at":int(time.time())+30}
+            fd = tcp_probe.claim(job["id"])
+            with mock.patch.object(tcp_probe.subprocess,"Popen",side_effect=launch):
+                thread = Thread(target=tcp_probe.run_job,args=(job,"synthetic-host","synthetic-node",lambda path,p:batches.append(p),fd),daemon=True)
+                thread.start(); thread.join(timeout=12)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(batches[-1]["outcome"],"complete")
+            self.assertEqual(sum(len(b["rows"]) for b in batches),317)
+            self.assertTrue(all(len(b["rows"])<=32 for b in batches))
+            self.assertTrue(all(p.poll()==0 for p in processes))
+
     def test_private_dns_is_rejected_and_resolver_has_hard_timeout(self):
         for ip in ("127.0.0.1","10.0.0.1","169.254.169.254","224.0.0.1","::1"):
             self.assertFalse(tcp_probe.safe_ip(ip))

@@ -18,6 +18,12 @@ from pathlib import Path
 _mutex = threading.Lock()
 _running = {}
 _DOMAIN = re.compile(r"[a-z0-9-]{1,120}-v4\.ip\.zstaticcdn\.com")
+_CUSTOM_HOST = "hinet.428048.xyz"
+_CUSTOM_PORT = 36901
+
+
+def allowed_host(host):
+    return isinstance(host, str) and (bool(_DOMAIN.fullmatch(host)) or host == _CUSTOM_HOST)
 
 
 def available():
@@ -43,7 +49,9 @@ def validate_targets(targets):
     for t in targets:
         if not isinstance(t, dict) or set(t) != {"id", "host", "port", "province", "city", "carrier", "kind"}:
             raise ValueError("invalid target fields")
-        if not isinstance(t["host"], str) or not _DOMAIN.fullmatch(t["host"]) or type(t["port"]) is not int or t["port"] not in (80, 443):
+        custom = t["host"] == _CUSTOM_HOST and t["port"] == _CUSTOM_PORT and t["province"] == "台湾" and t["carrier"] == "custom" and t["kind"] == "province" and t["city"] == ""
+        standard = isinstance(t["host"], str) and bool(_DOMAIN.fullmatch(t["host"])) and t["port"] in (80, 443)
+        if type(t["port"]) is not int or not (custom or standard):
             raise ValueError("invalid target endpoint")
         if any(not isinstance(t[k], str) or len(t[k]) > 40 for k in ("province", "city", "carrier", "kind")):
             raise ValueError("invalid target metadata")
@@ -54,7 +62,7 @@ def validate_targets(targets):
 
 def resolve(host):
     """A killable DNS subprocess; no uninterruptible resolver threads accumulate."""
-    if not _DOMAIN.fullmatch(host):
+    if not allowed_host(host):
         return [], "blocked_dns"
     try:
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "resolve", host],
@@ -178,7 +186,9 @@ def run_job(job, host_id, node_id, post, lock_fd):
             outcome = "deadline"
             return
         process = subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()), "worker"],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   # Worker stderr contains only code errors and public targets,
+                                   # never Agent credentials. Keep it in the service journal.
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
                                    start_new_session=True, pass_fds=(lock_fd,),
                                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"})
         with _mutex:
@@ -216,8 +226,9 @@ def run_job(job, host_id, node_id, post, lock_fd):
                     pending = []
         if process.poll() is None:
             process.wait(timeout=max(.1, min(1, deadline - time.monotonic())))
-        outcome = "complete" if process.returncode == 0 and count == len(allowed) else "deadline"
-    except Exception:
+        outcome = "complete" if process.returncode == 0 and count == len(allowed) else "deadline" if time.monotonic() >= deadline else "worker_error"
+    except Exception as error:
+        print("public TCP worker error: " + type(error).__name__, flush=True)
         outcome = "worker_error"
     finally:
         kill_worker(process)
@@ -228,6 +239,13 @@ def run_job(job, host_id, node_id, post, lock_fd):
                 pass
             if process.stdout:
                 process.stdout.close()
+            if process.stdin and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            if outcome != "complete":
+                print("public TCP worker exited: code=" + str(process.returncode) + " rows=" + str(count) + " outcome=" + outcome, flush=True)
         if timer:
             timer.cancel()
         try:
@@ -278,7 +296,7 @@ def handle(config, host_id, node_id, post):
 if __name__ == "__main__":
     if sys.argv[1:] and sys.argv[1] == "resolve":
         host = sys.argv[2]
-        if not _DOMAIN.fullmatch(host):
+        if not allowed_host(host):
             raise SystemExit(2)
         print(json.dumps(sorted({r[4][0] for r in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)})))
     elif sys.argv[1:] == ["worker"]:
