@@ -20,10 +20,11 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner
+    from client import operations as node_operations, security_banner, tcp_probe
 except ImportError:
     import operations as node_operations
     import security_banner
+    import tcp_probe
 
 try:
     import maxminddb
@@ -6911,6 +6912,11 @@ def _schedule_self_uninstall(action: Dict, node_id: str) -> Tuple[bool, str]:
 def process_security_actions(server: str, secret: str, host_id: str, node_id: str = "") -> bool:
     response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
     node_operations.configure(response.get("operations"))
+    try:
+        tcp_probe.handle(response.get("tcp_probe"), host_id, node_id,
+                         lambda path, payload: signed_post_json(server, secret, path, payload))
+    except Exception:
+        print("public TCP worker could not be scheduled; normal monitoring continues")
     actions = response.get("actions") if isinstance(response.get("actions"), list) else []
     changed = False
     for action in actions:

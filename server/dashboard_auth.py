@@ -15,9 +15,10 @@ from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 try:
-    from server import operations
+    from server import operations, tcping
 except ImportError:
     import operations
+    import tcping
 
 COOKIE = "narwhal_session"
 SESSION_SECONDS = 12 * 3600
@@ -167,6 +168,8 @@ def attach(app, db, credentials, agent_paths, callback_prefix, static_dir):
     @app.middleware("http")
     async def dashboard_session_auth(request, call_next):
         path = request.url.path
+        if tcping.public_route(path, request.method):
+            return await call_next(request)
         if path in agent_paths or path.startswith(callback_prefix):
             return await call_next(request)
         if (path in {"/login", "/api/v1/auth/login", "/api/v1/auth/logout"}

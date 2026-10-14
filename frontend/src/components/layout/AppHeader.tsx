@@ -131,6 +131,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
         <button type="button" onClick={() => onSelectTab('operations')} aria-current={activeTab === 'operations' ? 'page' : undefined} className={`min-h-11 rounded-lg border px-3 py-2 text-xs font-semibold ${activeTab === 'operations' ? 'border-sky-400 bg-sky-500 text-slate-950' : 'border-slate-700 text-slate-300 hover:border-sky-500'}`}>运维中心</button>
 
         {/* Search & Timer Tools */}
+        <a href="/tcping" className="flex min-h-11 items-center rounded-lg border border-slate-700 px-3 text-xs font-semibold text-sky-300 transition-colors hover:border-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">全国 TCP 测试</a>
         <div className="flex items-center justify-between gap-2.5 xl:justify-end">
           {/* Global Search Button */}
           <button

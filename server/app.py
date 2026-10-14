@@ -126,7 +126,7 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping
 except ImportError:
     import operations
     import operations_api
@@ -134,12 +134,14 @@ except ImportError:
     import buyer_notifications
     import dashboard_auth
     import commerce
+    import tcping
 
 _AGENT_ONLY_PATHS = {
     "/api/v1/report",
     "/api/v1/tls/ca",
     "/api/v1/actions/poll",
     "/api/v1/actions/result",
+    "/api/v1/tcp-probe/report",
     "/api/v1/update/version",
 }
 
@@ -384,6 +386,7 @@ def init_db() -> None:
     buyer_notifications.initialize(conn)
     investigation.initialize(conn)
     commerce.initialize(conn)
+    tcping.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -3408,9 +3411,17 @@ async def poll_security_actions(
             actions.append(action)
         conn.commit()
         ops_services = [{"id": r["id"], **operations.loads(r["payload"])} for r in conn.execute("SELECT id,payload FROM ops_services WHERE host_id=? AND enabled=1 LIMIT 20", (host_id,)).fetchall()]
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logging.exception("Public TCP queue failed; signed security polling continues")
+            tcp_probe = {"job": None, "cancelled": []}
     finally:
         conn.close()
-    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services}}, x_timestamp)
+    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services}, "tcp_probe": tcp_probe}, x_timestamp)
 
 
 @app.post("/api/v1/actions/result")
@@ -3483,6 +3494,7 @@ async def security_action_result(
 
 operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup_old_reports, lambda: APP_VERSION, lambda: DASHBOARD_USERNAME)
 commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD))
+tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
 
 
 @app.get("/api/v1/security/actions")
