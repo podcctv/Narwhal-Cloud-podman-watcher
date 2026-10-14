@@ -31,6 +31,13 @@ try:
 except ImportError:  # Optional at import time for source-only/test environments.
     maxminddb = None
 
+try:
+    from client import abuse_guard, abuse_collection, network_quarantine
+except ImportError:
+    import abuse_guard
+    import abuse_collection
+    import network_quarantine
+
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 
 _warned_missing_bins = set()
@@ -52,6 +59,7 @@ _protocol_counters: Dict[str, Dict[str, float]] = {}
 _access_log_states: Dict[str, Dict[str, object]] = {}
 _security_last_sample_ts = 0.0
 _pending_deep_samples: Dict[int, Dict[str, object]] = {}
+_abuse_targets: List[Dict[str, object]] = []
 
 _SOCKS_DIRECT_NAMES = {"microsocks", "sockd", "danted", "srelay", "hev-socks5-server"}
 _SOCKS_CONFIGURABLE_NAMES = {"3proxy", "gost", "xray", "v2ray", "sing-box"}
@@ -2579,6 +2587,56 @@ def update_container_motd_alerts(container, container_alerts):
     return security_banner.update(container, container_alerts, _MOTD_THREAT_TYPES, _checked_banner_exec, _server_motd_states, APP_VERSION)
 
 
+def _abuse_provider(container):
+    """Bind evidence and network mutations to the same immutable instance."""
+    runtime = str(container['runtime'])
+    name = str(container['name'])
+    project = str(container.get('project') or '')
+    if runtime == 'incus':
+        api = network_quarantine.IncusAPI(project)
+        item, _ = api.request('GET', '/1.0/instances/'+quote(name, safe=''))
+        identity = str(item.get('config', {}).get('volatile.uuid') or '')
+        state, _ = api.request('GET', '/1.0/instances/'+quote(name, safe='')+'/state')
+        pid = int(state.get('pid') or 0)
+        driver = network_quarantine.IncusIsolation(api, name, identity)
+    else:
+        binary = get_runtime_bins().get('podman', '')
+        if not binary:
+            raise network_quarantine.QuarantineError('Podman unavailable')
+        ok, output = _run_action_command([binary, 'inspect', name])
+        if not ok:
+            raise network_quarantine.QuarantineError('Podman instance unavailable')
+        item = json.loads(output)[0]
+        identity = str(item.get('Id') or item.get('ID') or '')
+        expected = str(container.get('id') or '')
+        if expected and (len(expected) < 12 or not identity.startswith(expected)):
+            raise network_quarantine.QuarantineError('Podman discovery identity changed')
+        pid = int(item.get('State', {}).get('Pid') or 0)
+        driver = network_quarantine.PodmanIsolation(_run_action_command, binary, name, identity)
+    network_quarantine.target(runtime, project, name, identity)
+    runtime_bin = str(container.get('runtime_bin') or get_runtime_bins().get(runtime, ''))
+    security = _collect_socket_security(pid)
+    communication = _collect_socket_process_details(runtime_bin, name, project, security.get('listening_ports', []))
+    sockets = communication.get('communication_sockets', [])
+    processes = abuse_collection.collect(container, _checked_banner_exec, sockets)
+    driver.check_evidence = lambda findings: abuse_collection.verify_live_processes(container, _checked_banner_exec, findings)
+    return identity, driver, processes, sockets
+
+
+def _schedule_abuse_guard(server, secret, host_id, node_id):
+    if not node_id or os.name != 'posix':
+        return
+    disabled = {'false', '0', 'off', 'no'}
+    if any(os.getenv(key, 'true').strip().lower() in disabled
+           for key in ('SECURITY_MONITOR_ENABLED', 'SECURITY_ABUSE_GUARD_ENABLED')):
+        return  # Disabling monitoring never restores an existing quarantine.
+    def emit(alert):
+        return signed_post_json(server, secret, '/api/v1/abuse/events', {
+            'host_id': host_id, 'node_id': node_id, 'agent_version': APP_VERSION,
+            'timestamp': int(time.time()), 'alert': alert})
+    abuse_guard.engine().schedule(_abuse_targets, _abuse_provider, emit)
+
+
 _CRITICAL_BUYER_NOTIFY_TYPES = {
     "socks_weak_auth",
     "malicious_process",
@@ -2840,6 +2898,12 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 )
             )
             continue
+        abuse_state = abuse_guard.status(container) if container.get('runtime') in {'incus', 'podman'} else {'state': 'unsupported'}
+        if not isinstance(container.get('security'), dict):
+            container['security'] = {}
+        container['security']['abuse_guard'] = abuse_state
+        if isinstance(abuse_state.get('alert'), dict):
+            alerts.append(abuse_state['alert'])
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         enforce_socks_auth_policy(container, socks_enforcement_entries)
         rx_bps = float(container.get("net_rx_bps") or 0)
@@ -4928,6 +4992,7 @@ def _incus_containers(runtime: str) -> List[Dict[str, str]]:
         items.append(
             {
                 "id": name,
+                "stable_id": str(item.get('config', {}).get('volatile.uuid') or ''),
                 "name": name,
                 "image": image,
                 "runtime": "incus",
@@ -6670,6 +6735,28 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
 
 def execute_security_action(action: Dict) -> Tuple[bool, str]:
     action_type = str(action.get("action_type") or "")
+    if action_type == 'release_network_quarantine':
+        params = action.get('params') if isinstance(action.get('params'), dict) else {}
+        target = {'runtime': str(action.get('runtime') or ''), 'project': str(action.get('project') or ''),
+                  'name': str(action.get('container_name') or ''), 'id': str(params.get('instance_id') or '')}
+        try:
+            runtime = target['runtime']
+            identity = target['id']
+            key = network_quarantine.target(runtime, target['project'], target['name'], identity)
+            if runtime == 'incus':
+                driver = network_quarantine.IncusIsolation(network_quarantine.IncusAPI(target['project']), target['name'], identity)
+            else:
+                binary = get_runtime_bins().get('podman', '')
+                if not binary:
+                    raise network_quarantine.QuarantineError('Podman unavailable')
+                driver = network_quarantine.PodmanIsolation(_run_action_command, binary, target['name'], identity)
+            guard = abuse_guard.engine()
+            with guard.lock:
+                network_quarantine.release(guard.journal, key, driver)
+                guard.forget(target, identity)
+            return True, 'Network quarantine released; data preserved; fresh prohibited activity will be isolated again'
+        except (network_quarantine.QuarantineError, OSError, ValueError):
+            return False, 'Network restore could not be verified; inspect the recovery journal; no data deleted'
     if action_type == "release_socks_auth":
         runtime_kind = str(action.get("runtime") or "").strip().lower()
         project = str(action.get("project") or "").strip()
@@ -6910,6 +6997,7 @@ def _schedule_self_uninstall(action: Dict, node_id: str) -> Tuple[bool, str]:
 
 
 def process_security_actions(server: str, secret: str, host_id: str, node_id: str = "") -> bool:
+    _schedule_abuse_guard(server, secret, host_id, node_id)
     response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
     node_operations.configure(response.get("operations"))
     try:
@@ -6990,7 +7078,7 @@ def push(server: str, secret: str, payload: Dict) -> None:
 
 
 def main() -> None:
-    global _security_last_sample_ts
+    global _security_last_sample_ts, _abuse_targets
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", default=os.getenv("SERVER_URL", "https://127.0.0.1:8080"))
     parser.add_argument("--secret", default=os.getenv("SHARED_SECRET", "change-me"))
@@ -7002,6 +7090,8 @@ def main() -> None:
 
     while True:
         containers = list_containers()
+        _abuse_targets = containers
+        _schedule_abuse_guard(args.server, args.secret, args.host_id, args.node_id)
         docker_mode = _docker_monitor_mode()
         monitored_containers = [
             item for item in containers if item.get("runtime") != "docker" or docker_mode == "full"
@@ -7053,6 +7143,7 @@ def main() -> None:
                     host_conntrack,
                 )
             container_security = container_report.get("security")
+            container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
             if security_enabled and isinstance(container_security, dict):
                 container_security["access_log"] = _collect_container_access_log_stats(c, security_interval)
             pending_deep_sample = _pending_deep_sample_for(c)

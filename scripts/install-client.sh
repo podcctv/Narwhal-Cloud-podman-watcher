@@ -463,6 +463,9 @@ mkdir -p "$CLIENT_APP_DIR"
 cp "$ROOT_DIR/client/agent.py" "$CLIENT_APP_DIR/agent.py"
 cp "$ROOT_DIR/client/operations.py" "$CLIENT_APP_DIR/operations.py"
 cp "$ROOT_DIR/client/security_banner.py" "$CLIENT_APP_DIR/security_banner.py"
+for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+  cp "$ROOT_DIR/client/$module.py" "$CLIENT_APP_DIR/$module.py"
+done
 cp "$ROOT_DIR/client/tcp_probe.py" "$CLIENT_APP_DIR/tcp_probe.py"
 install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
 cp "$ROOT_DIR/client/requirements.txt" "$CLIENT_APP_DIR/requirements.txt"

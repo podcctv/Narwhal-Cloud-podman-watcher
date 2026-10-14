@@ -89,10 +89,10 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-bold text-emerald-300">
-                系统当前安全状态良好
+                当前没有新的活动安全告警
               </h2>
               <p className="text-xs text-emerald-400/80">
-                未检测到恶意挖矿、非法面板对接或弱口令/无认证 SOCKS 代理行为。
+                已隔离事件仍需单独复核；没有告警不代表已覆盖所有加密业务行为。
               </p>
             </div>
           </div>

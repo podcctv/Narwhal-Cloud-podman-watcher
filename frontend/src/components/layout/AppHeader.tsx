@@ -132,7 +132,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
 
         {/* Search & Timer Tools */}
         <a href="/tcping" className="flex min-h-11 items-center rounded-lg border border-slate-700 px-3 text-xs font-semibold text-sky-300 transition-colors hover:border-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">全国 TCP 测试</a>
-        <div className="flex items-center justify-between gap-2.5 xl:justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-2.5 xl:justify-end">
           {/* Global Search Button */}
           <button
             type="button"

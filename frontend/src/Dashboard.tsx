@@ -9,6 +9,7 @@ import { api, request } from './api/client';
 import { AppHeader } from './components/layout/AppHeader';
 import { KpiGrid } from './components/dashboard/KpiGrid';
 import { SecurityAlertSection } from './components/dashboard/SecurityAlertSection';
+import { QuarantinePanel } from './components/dashboard/QuarantinePanel';
 import { TelemetrySection } from './components/dashboard/TelemetrySection';
 import { HostContainerList } from './components/dashboard/HostContainerList';
 import { ContainerDrawer } from './components/container/ContainerDrawer';
@@ -229,6 +230,7 @@ export const Dashboard: React.FC = () => {
               />
 
               {/* Active Security Alerts Banner */}
+              <QuarantinePanel onToast={addToast} />
               <SecurityAlertSection
                 alerts={activeAlerts}
                 onRefresh={fetchAllData}

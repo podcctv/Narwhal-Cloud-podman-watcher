@@ -136,7 +136,13 @@ except ImportError:
     import commerce
     import tcping
 
+try:
+    from server import abuse_api
+except ImportError:
+    import abuse_api
+
 _AGENT_ONLY_PATHS = {
+    "/api/v1/abuse/events",
     "/api/v1/report",
     "/api/v1/tls/ca",
     "/api/v1/actions/poll",
@@ -387,6 +393,7 @@ def init_db() -> None:
     investigation.initialize(conn)
     commerce.initialize(conn)
     tcping.initialize(conn)
+    abuse_api.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -522,11 +529,12 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
             jobs = [
                 ("reports", "ts < ?", (raw_cutoff,)),
                 ("host_security", "ts < ?", (raw_cutoff,)),
-                ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ?", (cutoff,)),
+                ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status<>'released')", (cutoff,)),
                 ("security_actions", "status IN ('succeeded','failed','cancelled') AND updated_at < ?", (cutoff,)),
                 ("security_alert_decisions", "created_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
                 ("security_alert_evidence", "captured_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
                 ("telegram_alert_messages", "NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", ()),
+                ("network_quarantines", "status='released' AND updated_at < ?", (cutoff,)),
                 ("connection_overloads", "last_seen < ?", (now - OFFLINE_HOST_PURGE_SECONDS,)),
             ]
             for table, predicate, params in jobs:
@@ -647,6 +655,8 @@ def _alert_fingerprint(host_id: str, alert: Dict[str, Any]) -> str:
         str(alert.get("container_name") or ""),
         str(alert.get("type") or "unknown"),
     ]
+    if alert.get('type') == 'prohibited_activity':
+        parts.append(str(alert.get('instance_id') or ''))
     if str(alert.get("type") or "") == "unauthorized_panel_pairing":
         domains = alert.get("unapproved_domains")
         domain_values = [
@@ -669,6 +679,7 @@ def process_security_alerts(
     host_id: str,
     ts: int,
     alerts: List[Dict[str, Any]],
+    partial: bool = False,
 ) -> List[Dict[str, Any]]:
     active_fingerprints: List[str] = []
     notifications: List[Dict[str, Any]] = []
@@ -695,6 +706,7 @@ def process_security_alerts(
         }
         fingerprint_source = dict(normalized)
         fingerprint_source["unapproved_domains"] = raw_alert.get("unapproved_domains")
+        fingerprint_source['instance_id'] = raw_alert.get('instance_id')
         fingerprint = _alert_fingerprint(host_id, fingerprint_source)
         active_fingerprints.append(fingerprint)
         existing = conn.execute(
@@ -797,6 +809,8 @@ def process_security_alerts(
             notification["event_id"] = f"NW-{row['id']}-{row['first_seen']}" if row is not None else ""
             notifications.append(notification)
 
+    if partial:
+        return notifications
     if active_fingerprints:
         placeholders = ",".join("?" for _ in active_fingerprints)
         conn.execute(
@@ -1149,7 +1163,11 @@ def _telegram_alert_detail(alert_id: int, severity: str, offset: int) -> tuple[s
         f"{html.escape(raw_message)}"
     )
     buttons: List[List[Dict[str, str]]] = []
-    if alert["status"] == "active":
+    if alert['alert_type'] == 'prohibited_activity':
+        text += '\n\n请先通过宿主机控制台排查，再由网页管理员复核解除隔离。解除不等于风险已恢复。'
+        if PUBLIC_BASE_URL:
+            buttons.append([{'text': '打开管理员隔离面板', 'url': PUBLIC_BASE_URL.rstrip('/')+'/'}])
+    elif alert["status"] == "active":
         buttons.append([
             {"text": "本次忽略", "callback_data": f"n:c:{alert_id}:dismiss_once:{severity}:{offset}"},
             {"text": "标记已处理", "callback_data": f"n:c:{alert_id}:resolve:{severity}:{offset}"},
@@ -1322,6 +1340,21 @@ def _telegram_alert_status_card(
     details = _alert_details(alert["details_json"])
     automatic_remediation = details.get("automatic_remediation") if isinstance(details, dict) else None
     remediation_text = ""
+    if alert['alert_type'] == 'prohibited_activity':
+        network_state = str((details.get('network_quarantine') or {}).get('status') or 'unknown')
+        heading = 'Narwhal 严重安全告警 · 违规活动'
+        states = {'isolated':'已双向隔离，等待管理员复核', 'failed':'隔离未能完整验证，需立即人工处理',
+                  'release_failed':'解除隔离未验证成功，需人工检查', 'released':'管理员已解除隔离，正在重新监测（非恢复证明）'}
+        state_line = '状态：<b>'+states.get(network_state, '当前隔离状态待确认')+'</b>'
+        proofs = []
+        for item in (details.get('abuse_evidence') or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            features = item.get('features') or {}
+            proofs.append('PID '+str(item.get('pid') or '-')+' · 连续佐证 '+str(features.get('corroborating_samples') or '-')+' 次'
+                          + (' · 并发配置 '+str(features['concurrency']) if features.get('concurrency') else '')
+                          + (' · 文件 SHA256 '+str(item['source_sha256'])[:12] if item.get('source_sha256') else ''))
+        remediation_text = '\n<b>特征证据</b>\n'+html.escape('\n'.join(proofs))+'\n<b>容器与磁盘保留；隔离会阻断 SSH，请通过宿主机控制台排查。</b>\n'
     if isinstance(automatic_remediation, dict) and automatic_remediation.get("attempted") is True:
         remediation_result = str(
             automatic_remediation.get("message")
@@ -1432,7 +1465,8 @@ def sync_configured_bot_alert_messages(
                 # though the alert is no longer active. Suppressed/dismissed
                 # alerts are explicit user choices; a never-sent recovery is
                 # only historical state and must not create a new message.
-                if mapping is None and str(alert["status"]) in ("suppressed", "dismissed", "resolved"):
+                pending_quarantine = alert['alert_type'] == 'prohibited_activity' and (_alert_details(alert['details_json']).get('network_quarantine') or {}).get('status') in {'isolated', 'failed', 'release_failed'}
+                if mapping is None and str(alert["status"]) in ("suppressed", "dismissed", "resolved") and not pending_quarantine:
                     continue
                 if mapping is None and _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
                     continue
@@ -2990,6 +3024,9 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     if alert is None:
         conn.close()
         raise HTTPException(status_code=404, detail="alert not found")
+    if alert['alert_type'] == 'prohibited_activity' and decision != 'reopen':
+        conn.close()
+        raise HTTPException(status_code=409, detail='隔离事件必须由管理员复核后，通过解除隔离入口处理；不能用忽略、静默或标记恢复替代。')
     if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve", "release_udp_throttle", "apply_udp_throttle"):
         conn.close()
         raise HTTPException(status_code=409, detail="alert is no longer active")
@@ -3397,7 +3434,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback"} and stored.get("expected_node_id") != node_id:
+            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback"} or row['action_type'] == 'release_network_quarantine') and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -3454,7 +3491,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback"} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine"} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"
@@ -3486,6 +3523,7 @@ async def security_action_result(
                 operations.track_recheck(conn, action_id, now)
             if row['alert_id'] is not None:
                 investigation.sync_states(conn, host_id, now, alert_id=row['alert_id'])
+            abuse_api.record_release_result(conn, row, params, status, now)
             conn.commit()
     finally:
         conn.close()
@@ -3495,6 +3533,7 @@ async def security_action_result(
 operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup_old_reports, lambda: APP_VERSION, lambda: DASHBOARD_USERNAME)
 commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD))
 tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
+abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)
 
 
 @app.get("/api/v1/security/actions")

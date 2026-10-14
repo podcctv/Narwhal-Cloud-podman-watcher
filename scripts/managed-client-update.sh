@@ -22,6 +22,11 @@ write_result() {
   mv -f "$base/managed-update-result.json.tmp" "$base/managed-update-result.json"
 }
 restore() {
+  for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+    if [[ -f "$snapshot/$module.py" ]]; then
+      install -m 0644 "$snapshot/$module.py" "$app_dir/$module.py" || return 1
+    fi
+  done
   [[ -f "$snapshot/agent.py" && -f "$snapshot/client.env" ]] || return 1
   systemctl stop narwhal-monitor-client.service || return 1
   install -m 0644 "$snapshot/agent.py" "$app_dir/agent.py" || return 1
@@ -82,10 +87,16 @@ cleanup_stage() {
 }
 trap cleanup_stage EXIT
 git -C "$repo" archive "$revision" | tar -x -C "$stage"
+for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+  "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
+done
 "$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py"
 mkdir -p "$snapshot"
 chmod 0700 "$snapshot"
 install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
+for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+  [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
+done
 [[ ! -f "$app_dir/operations.py" ]] || install -m 0644 "$app_dir/operations.py" "$snapshot/operations.py"
 [[ ! -f "$app_dir/security_banner.py" ]] || install -m 0644 "$app_dir/security_banner.py" "$snapshot/security_banner.py"
 [[ ! -f "$app_dir/tcp_probe.py" ]] || install -m 0644 "$app_dir/tcp_probe.py" "$snapshot/tcp_probe.py"
