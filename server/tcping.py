@@ -18,7 +18,9 @@ from fastapi.responses import FileResponse, JSONResponse
 
 DIRECTORY_URL = "https://www.zstaticcdn.com/api/v1/DescribeAllNodes"
 PUBLIC = "/api/public/tcping"
-CAPABILITY = "public-tcp-v1"
+CAPABILITY = "public-tcp-v2"
+TAIWAN_HOST = "hinet.428048.xyz"
+TAIWAN_PORT = 36901
 ACTIVE = ("queued", "running")
 GROUPS = {"province", "city", "all"}
 PROVINCES = set("河北 山西 辽宁 吉林 黑龙江 江苏 浙江 安徽 福建 江西 山东 河南 湖北 湖南 广东 海南 四川 贵州 云南 陕西 甘肃 青海 内蒙古 广西 西藏 宁夏 新疆 北京 天津 上海 重庆".split())
@@ -93,6 +95,28 @@ def normalize_directory(raw):
     return result
 
 
+def configured_directory(raw):
+    """Keep Zstatic's counts/provenance separate from the owner's fixed target."""
+    return with_custom_target(normalize_directory(raw))
+
+
+def with_custom_target(base):
+    result = json.loads(encoded(base))
+    result["nodes"] = [n for n in result["nodes"] if n["carrier"] != "custom"]
+    taiwan = {"kind": "province", "province": "台湾", "city": "", "carrier": "custom",
+              "host": TAIWAN_HOST, "port": TAIWAN_PORT}
+    taiwan["id"] = digest(taiwan)[:20]
+    result["nodes"].append(taiwan)
+    original_total = len(result["nodes"]) - 1
+    result["counts"].update(zstatic_total=original_total, extra_nodes=1,
+                            province_targets=result["counts"]["province_nodes"]+1,
+                            total=original_total+1, unique_endpoints=len({(n["host"], n["port"]) for n in result["nodes"]}))
+    result["custom_targets"] = [{"province": "台湾", "host": TAIWAN_HOST, "port": TAIWAN_PORT, "source": "owner_configured"}]
+    result.pop("generation")
+    result["generation"] = digest(result)
+    return result
+
+
 def initialize(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS tcp_directories(generation TEXT PRIMARY KEY,payload TEXT NOT NULL,fetched_at INTEGER NOT NULL);
@@ -114,6 +138,14 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS tcp_batches(job_id TEXT NOT NULL,sequence INTEGER NOT NULL,digest TEXT NOT NULL,
       PRIMARY KEY(job_id,sequence));
     """)
+    # Upgrade a last-good cached directory without changing its upstream fetch
+    # timestamp or historical jobs. No dependency on upstream availability.
+    cached = conn.execute("SELECT payload,fetched_at FROM tcp_directories ORDER BY fetched_at DESC,rowid DESC LIMIT 1").fetchone()
+    if cached:
+        value = json.loads(cached[0])
+        current = with_custom_target(value)
+        if current["generation"] != value["generation"]:
+            conn.execute("INSERT OR IGNORE INTO tcp_directories VALUES(?,?,?)", (current["generation"], encoded(current), cached[1]))
 
 
 def public_route(path, method):
@@ -138,7 +170,7 @@ def refresh_directory(db):
     try:
         conn = db()
         try:
-            row = conn.execute("SELECT fetched_at FROM tcp_directories ORDER BY fetched_at DESC LIMIT 1").fetchone()
+            row = conn.execute("SELECT fetched_at FROM tcp_directories ORDER BY fetched_at DESC,rowid DESC LIMIT 1").fetchone()
         finally:
             conn.close()
         if row and time.time() - row[0] < 21600 or time.monotonic() - _attempt < 60:
@@ -152,7 +184,7 @@ def refresh_directory(db):
             body = response.read(262145)
         if len(body) > 262144:
             raise ValueError("oversized directory")
-        directory = normalize_directory(json.loads(body))
+        directory = configured_directory(json.loads(body))
         conn = db()
         try:
             conn.execute("INSERT INTO tcp_directories VALUES(?,?,?) ON CONFLICT(generation) DO UPDATE SET fetched_at=excluded.fetched_at",
@@ -167,7 +199,7 @@ def refresh_directory(db):
 
 
 def directory(conn):
-    row = conn.execute("SELECT payload,fetched_at FROM tcp_directories ORDER BY fetched_at DESC LIMIT 1").fetchone()
+    row = conn.execute("SELECT payload,fetched_at FROM tcp_directories ORDER BY fetched_at DESC,rowid DESC LIMIT 1").fetchone()
     if not row:
         raise HTTPException(503, "节点目录暂不可用，请稍后重试")
     return {**json.loads(row[0]), "fetched_at": row[1], "stale": time.time() - row[1] > 86400, "source": DIRECTORY_URL}
@@ -252,7 +284,7 @@ def admit(conn, source_id, scope, now):
     if not nodes:
         raise HTTPException(409, "所选目录没有测试目标")
     job_id, lease = str(uuid.uuid4()), secrets.token_urlsafe(32)
-    samples = 2 if len(nodes) <= 93 else 1
+    samples = 2 if scope == "province" else 1
     conn.execute("INSERT INTO tcp_jobs(id,source_id,node_id,host_id,source_revision,generation,scope,targets,samples,status,lease,created_at,deadline_at) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
                  (job_id, source_id, source["node_id"], source["host_id"], source["revision"], current["generation"], scope, encoded(nodes), samples, lease, now, now+210))
     conn.execute("INSERT INTO tcp_cooldowns VALUES(?,?) ON CONFLICT(node_id) DO UPDATE SET next_at=excluded.next_at", (source["node_id"], now+(900 if scope == "province" else 1800)))

@@ -10,7 +10,7 @@ export interface Target {
 }
 export interface Directory {
   generation: string; updated_at: string; fetched_at: number; stale: boolean;
-  nodes: Target[]; counts: { province_groups: number; province_nodes: number; city_nodes: number; total: number };
+  nodes: Target[]; counts: { province_groups: number; province_nodes: number; city_nodes: number; total: number; extra_nodes?: number; province_targets?: number };
 }
 export interface Source {
   id: string; name: string; region: string; purchase_url: string; status: string;
@@ -21,9 +21,9 @@ export interface Job {
   status: string; created_at: number; deadline_at: number; started_at: number; finished_at: number;
   message: string; nodes: Target[]; completed: number;
 }
-export const carriers: Record<string, string> = { telecom: '电信', unicom: '联通', mobile: '移动' };
+export const carriers: Record<string, string> = { telecom: '电信', unicom: '联通', mobile: '移动', custom: '指定目标' };
 export const sourceStatus: Record<string, string> = { ready: '在线 · 可测试', offline: '离线', needs_upgrade: '待升级', identity_changed: '来源已变更' };
-export const jobStatus: Record<string, string> = { queued: '等待 Agent 接收', running: '测试进行中', completed: '已完成', partial: '部分完成', expired: '执行超时', cancelled: '已取消' };
+export const jobStatus: Record<string, string> = { queued: '等待 Agent 接收', running: '测试进行中', completed: '已完成', partial: '部分完成', expired: '执行超时', cancelled: '已取消', failed: '执行失败' };
 export const scopes: Record<Scope, string> = { province: '省级运营商', city: '市级节点', all: '全部节点' };
 export const active = (job?: Job | null) => !!job && ['queued', 'running'].includes(job.status);
 export function median(values: number[]) {

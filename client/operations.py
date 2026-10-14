@@ -155,7 +155,7 @@ def collect(security, containers, interval):
         pass
     return {"health":health,"services":services,"log_discovery":_discoveries,"architecture":platform.machine(),"interval_seconds":interval,"upgrade_result":upgrade_result,
             "managed_upgrade":os.path.isfile("/opt/narwhal-monitor/managed-client-update.sh") and bool(shutil.which("systemd-run")),
-            "capabilities":["operations-v1","service-probes","log-discovery","post-remediation-recheck"] + (["public-tcp-v1"] if tcp_probe.available() else []),"schema_version":1}
+            "capabilities":["operations-v1","service-probes","log-discovery","post-remediation-recheck"] + (["public-tcp-v2"] if tcp_probe.available() else []),"schema_version":1}
 
 
 def schedule_upgrade(action,node_id):

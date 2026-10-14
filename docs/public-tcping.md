@@ -7,6 +7,26 @@ an administrator explicitly publishes owned host sources and enables the tool.
 
 ## What is measured
 
+As of 1.7.19, the owner explicitly added the fixed Taiwan target
+`hinet.428048.xyz:36901`. It is identified as an owner-configured target, not a
+Zstatic node or an asserted carrier measurement. The Zstatic counts remain
+31/93/223; province mode now includes 94 targets (2 attempts each), city mode
+223 and all mode 317. The Agent advertises `public-tcp-v2` only after this exact
+host/port allowlist is installed. Arbitrary addresses remain disallowed.
+Cached directory migration preserves upstream freshness and historical job
+targets. Historical results do not invent a Taiwan row; the page explains when
+the selected record predates the new directory. The Taiwan geometry and label
+are always visible, with colors driven only by actual test results.
+
+The map uses ECharts `layoutCenter`/`layoutSize`, not independent box edges,
+to preserve its geographic aspect ratio on wide and narrow panels.
+Province, carrier and status filters share a pure filtering model across the
+table and map. Clicking a province selects the dropdown (clicking it again
+clears it); other provinces become neutral. Carrier changes recompute the map
+from that carrier's actual results. Defaults are national/all carriers; Clear
+resets all filters. Regression tests: Node 24
+`node --experimental-strip-types --test frontend/tests/tcping-model.test.mjs`.
+
 The selected owned VPS connects **outbound to Zstatic's mainland targets**.
 Zstatic provides a target directory, not an API to execute tests from mainland
 probes. This is not mainland-to-VPS testing, ICMP ping, throughput, an SLA, or a
@@ -69,9 +89,18 @@ branding or private execution API is copied.
 
 ## Rollout
 
-Build/test first, publish immutable versioned server and Agent images, back up
+Build/test first, publish immutable versioned server images and pin native Agent revisions, back up
 SQLite online and preserve existing server container/environment/mounts. Deploy
 with public starts disabled, publish a canary source, upgrade the actual host
-Agent, verify all 316 rows and continuing private telemetry, then extend to the
+Agent, verify all 317 rows (316 Zstatic plus the configured Taiwan target) and continuing private telemetry, then extend to the
 remaining supported owned hosts. Offline/old-version sources stay visibly
 unavailable rather than measuring from the central server instead.
+
+### Worker allocator compatibility (1.7.20)
+
+Start the isolated worker with `MALLOC_ARENA_MAX=2` before Python/glibc startup.
+On ARM64/Python 3.14, default per-thread arenas exhausted the existing 256 MiB
+address-space limit during concurrent DNS subprocess creation. The limit,
+four-worker concurrency, deadlines and cooldown are unchanged. The subprocess
+integration test now exercises 317 real child creations without network traffic,
+instead of returning every synthetic row directly from a thread.
