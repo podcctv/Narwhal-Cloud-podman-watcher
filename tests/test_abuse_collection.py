@@ -2,7 +2,11 @@ import base64
 import os
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
+from pathlib import Path
+from unittest import mock
 from client import abuse_collection as collector
 
 
@@ -57,6 +61,54 @@ class AbuseCollectionTests(unittest.TestCase):
         self.assertNotIn('not-allowed', script)
         self.assertIn('case "$p" in 567)', script)
         self.assertEqual(len(collector.parse_processes(sample()+sample())), 1)
+
+    def test_native_pid_one_metadata_without_any_guest_tools(self):
+        process={'host_pid':123,'pid':1,'start_ticks':'456','argv':['python3','-c','print(1)'],
+                 'executable':'/usr/bin/python3','cwd':'/'}
+        with mock.patch.object(collector,'host_metadata',return_value=process):
+            result=collector.collect_host([{'host_pid':123,'pid':1}],
+                [{'pid':1,'direction':'outbound'}],{},lambda c,cmd: (False,''))
+            self.assertEqual(result[0]['source'],'print(1)')
+            collector.verify_host_processes(result,[{'pid':1,'start_ticks':'456'}])
+        with mock.patch.object(collector,'host_metadata',side_effect=OSError('unavailable')):
+            with self.assertRaises(Exception):collector.collect_host([{'host_pid':123,'pid':1}],[],{},lambda c,cmd:(False,''))
+
+    def test_native_namespace_membership_includes_exec_process_not_just_descendants(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'target-ns').touch();(root/'other-ns').touch()
+            for host,pid,ns in ((100,1,'target-ns'),(101,2,'target-ns'),(200,1,'other-ns')):
+                base=root/str(host);(base/'ns').mkdir(parents=True)
+                os.link(root/ns,base/'ns/pid')
+                (base/'status').write_text(f'PPid:\t0\nNSpid:\t{host} {pid}\n')
+                (base/'comm').write_text('synthetic-python')
+            processes=collector.scoped_host_processes(100,str(root))
+            self.assertEqual([(p['host_pid'],p['pid']) for p in processes],[(100,1),(101,2)])
+            with self.assertRaises(Exception):collector.scoped_host_processes(100,str(root),scan_limit=2)
+
+    @unittest.skipUnless(os.name=='posix','kernel proc and no-follow directory descriptors require Linux')
+    def test_native_running_entrypoint_bounded_and_never_reads_history_or_symlinks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source=Path(folder)/'app.py'
+            source.write_text("import time;from pathlib import Path;Path('ready').touch();time.sleep(30)")
+            (Path(folder)/'verify_history.json').write_text('synthetic-private-record-do-not-read')
+            child=subprocess.Popen([sys.executable,str(source),'verify_history.json'],cwd=folder,
+                                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(40):
+                    if (Path(folder)/'ready').exists():break
+                    time.sleep(.025)
+                self.assertTrue((Path(folder)/'ready').exists())
+                process=collector.host_metadata(child.pid)
+                self.assertEqual(collector.read_host_entrypoint(process),source.read_text())
+                self.assertNotIn('synthetic-private-record',collector.read_host_entrypoint(process))
+                linked=Path(folder)/'linked.py';linked.symlink_to(source)
+                with self.assertRaises(OSError):collector.read_host_entrypoint({**process,'argv':[sys.executable,str(linked)]})
+                self.assertIsNone(collector.read_host_entrypoint({**process,'argv':[sys.executable,'../app.py']}))
+                source.write_text('x'*65537)
+                self.assertIsNone(collector.read_host_entrypoint(process))
+                collector.verify_host_processes([process],[{'pid':process['pid'],'start_ticks':process['start_ticks']}])
+            finally:
+                child.terminate();child.wait(timeout=3)
 
     @unittest.skipUnless(os.name == 'posix', 'real proc collector requires Linux')
     def test_real_linux_proc_collector_prioritizes_child_and_checks_incarnation(self):

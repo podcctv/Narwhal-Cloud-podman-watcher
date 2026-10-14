@@ -51,7 +51,7 @@ class Engine:
 
     def _check(self, container, instance_id, driver, processes, sockets, now=None):
         now = time.time() if now is None else now
-        key = isolation.target(container['runtime'], container.get('project', ''), container['name'], instance_id)
+        key = isolation.target(container['runtime'], container.get('project') or '', container['name'], instance_id)
         existing = self._find_record(key)
         if existing:
             findings = existing['evidence']
@@ -100,7 +100,7 @@ class Engine:
         message = (f'高置信度命中：{titles}；已隔离容器全部受管入站和出站网络；容器与磁盘保留，等待管理员复核。'
                    if success else f'高置信度命中：{titles}；双向隔离未能完整验证，必须人工处理；未删除容器或数据。')
         alert = {'type': 'prohibited_activity', 'severity': 'critical', 'title': '违规活动：'+titles,
-                 'runtime': container['runtime'], 'project': container.get('project', ''),
+                 'runtime': container['runtime'], 'project': container.get('project') or '',
                  'container_name': container['name'], 'instance_id': instance_id,
                  'message': message, 'value': len(findings), 'threshold': 1,
                  'abuse_evidence': isolation.safe_evidence(findings), 'network_quarantine': quarantine}
@@ -139,9 +139,11 @@ class Engine:
             selected = [eligible[(self.cursor+i) % len(eligible)] for i in range(min(batch_size, len(eligible)))]
             self.cursor = (self.cursor+len(selected)) % len(eligible)
             selected = [{k: c.get(k) for k in ('runtime', 'runtime_bin', 'project', 'name', 'id', 'pid', 'stable_id')} for c in selected]
+            for container in selected:
+                container['project'] = container.get('project') or ''
             def work():
                 for container in selected:
-                    key = (container['runtime'], container.get('project', ''), container['name'])
+                    key = (container['runtime'], container.get('project') or '', container['name'])
                     try:
                         instance_id, driver, processes, sockets = provider(container)
                         with self.lock:
@@ -168,7 +170,9 @@ class Engine:
 
     def status(self, container, now=None):
         now = time.time() if now is None else now
-        key = (container['runtime'], container.get('project', ''), container['name'])
+        if container.get('name') in isolation.PROTECTED:
+            return {'state':'protected','coverage':'management service excluded from automatic quarantine'}
+        key = (container['runtime'], container.get('project') or '', container['name'])
         with self.lock:
             result = copy.deepcopy(self.results.get(key, {}))
         identity = str(container.get('stable_id') or container.get('id') or '')
@@ -186,9 +190,9 @@ class Engine:
 
     def forget(self, container, instance_id):
         """Called under the engine lock after an explicit reviewed release."""
-        key = isolation.target(container['runtime'], container.get('project', ''), container['name'], instance_id)
-        self.results.pop((container['runtime'], container.get('project', ''), container['name']), None)
-        self.notified.pop((container['runtime'], container.get('project', ''), container['name'], instance_id), None)
+        key = isolation.target(container['runtime'], container.get('project') or '', container['name'], instance_id)
+        self.results.pop((container['runtime'], container.get('project') or '', container['name']), None)
+        self.notified.pop((container['runtime'], container.get('project') or '', container['name'], instance_id), None)
         for token in list(self.candidates):
             if token[0] == key:
                 self.candidates.pop(token, None)

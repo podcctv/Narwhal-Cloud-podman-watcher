@@ -306,7 +306,7 @@ def network_evidence(sockets):
             port = int(str(item.get('remote', '')).rsplit(':', 1)[-1])
         except (ValueError, TypeError):
             continue
-        if ip and pid > 1 and 0 < port <= 65535:
+        if ip and pid >= 1 and 0 < port <= 65535:
             owners[pid].append((ip, port, str(item.get('state', '')).lower().replace('_', '-')))
     findings = []
     for pid, flows in owners.items():
@@ -322,11 +322,11 @@ def network_evidence(sockets):
         horizontal = max((len(v) for k, v in by_port.items() if k in SENSITIVE_PORTS), default=0)
         if vertical >= 32 or horizontal >= 64:
             findings.append({'kind': 'outbound_scan', 'confidence': 'corroboration_required',
-                             'basis': 'same_process_failed_fanout', 'pid': pid,
+                             'basis': 'same_process_pending_fanout', 'pid': pid,
                              'public_target_count': len({ip for ip, _ in attempts if public_ip(ip)}),
                              'private_target_count': len({ip for ip, _ in attempts if not public_ip(ip)}),
                              'pending_attempts': len(attempts), 'vertical_ports': vertical,
-                             'horizontal_targets': horizontal, 'failed_ratio': round(len(attempts)/len(total), 3)})
+                             'horizontal_targets': horizontal, 'pending_ratio': round(len(attempts)/len(total), 3)})
     return findings
 
 
@@ -336,7 +336,7 @@ def evaluate_process(process, sockets):
         pid = int(process.get('pid') or 0)
     except (TypeError, ValueError):
         return []
-    if pid <= 1 or not process.get('start_ticks'):
+    if isinstance(process.get('pid'), bool) or pid < 1 or not process.get('start_ticks'):
         return []
     argv = process.get('argv') or []
     executable = str(process.get('executable') or '').rsplit('/', 1)[-1].lower()

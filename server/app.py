@@ -1353,7 +1353,12 @@ def _telegram_alert_status_card(
                 continue
             features = item.get('features') or {}
             proofs.append('PID '+str(item.get('pid') or '-')+' · 连续佐证 '+str(features.get('corroborating_samples') or '-')+' 次'
+                          + (' · 工具 '+str(item['tool']) if item.get('tool') else '')
                           + (' · 并发配置 '+str(features['concurrency']) if features.get('concurrency') else '')
+                          + (' · SYN 待连接 '+str(item['pending_attempts']) if item.get('pending_attempts') else '')
+                          + (' · 纵向端口 '+str(item['vertical_ports']) if item.get('vertical_ports') else '')
+                          + (' · 横向目标 '+str(item['horizontal_targets']) if item.get('horizontal_targets') else '')
+                          + (' · 待连接占比 '+str(round(float(item.get('pending_ratio',item.get('failed_ratio',0)))*100))+'%' if item.get('pending_ratio') is not None or item.get('failed_ratio') is not None else '')
                           + (' · 文件 SHA256 '+str(item['source_sha256'])[:12] if item.get('source_sha256') else ''))
         remediation_text = '\n<b>特征证据</b>\n'+html.escape('\n'.join(proofs))+'\n<b>容器与磁盘保留；隔离会阻断 SSH，请通过宿主机控制台排查。</b>\n'
     if isinstance(automatic_remediation, dict) and automatic_remediation.get("attempted") is True:

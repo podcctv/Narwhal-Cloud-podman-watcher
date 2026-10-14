@@ -203,6 +203,14 @@ class NetworkQuarantineTests(unittest.TestCase):
         self.assertEqual(api.item['devices']['eth1'], {'type': 'none'})
         self.assertIn('eth1', self.journal.read()[key]['backup']['original'])
 
+    def test_later_passthrough_cannot_be_reported_as_complete_isolation(self):
+        api=FakeIncus();driver=q.IncusIsolation(api,'customer',INSTANCE_ID)
+        key=q.target('incus','','customer',INSTANCE_ID)
+        q.quarantine(self.journal,key,driver,EVIDENCE)
+        api.item['devices']['new-device']={'type':'pci'}
+        with self.assertRaises(q.QuarantineError):q.quarantine(self.journal,key,driver,EVIDENCE)
+        self.assertEqual(self.journal.read()[key]['status'],'failed')
+
     def test_restore_refuses_to_overwrite_operator_device_changes(self):
         api = FakeIncus(); driver = q.IncusIsolation(api, 'customer', INSTANCE_ID)
         key = q.target('incus', '', 'customer', INSTANCE_ID)
@@ -231,6 +239,10 @@ class NetworkQuarantineTests(unittest.TestCase):
             with self.assertRaises(q.QuarantineError):
                 q.PodmanIsolation(runner, 'podman', 'customer', PODMAN_ID).snapshot()
             self.assertEqual(len(runner.calls), 1)
+        runner=FakePodman();runner.item['HostConfig']['PidMode']='host'
+        with self.assertRaises(q.QuarantineError):q.PodmanIsolation(runner,'podman','customer',PODMAN_ID).snapshot()
+        self.assertNotIn('.Env',q.PODMAN_INSPECT_FORMAT)
+        self.assertNotIn('.Labels',q.PODMAN_INSPECT_FORMAT)
 
     def test_podman_partial_disconnect_is_not_reported_as_success(self):
         runner = FakePodman(); runner.fail_network = 'two'

@@ -84,6 +84,11 @@ class AbuseAPITests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 403)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM network_quarantines').fetchone()[0], 0)
 
+    def test_oversized_public_event_stream_rejected_before_signature_work(self):
+        with self.assertRaises(HTTPException) as caught:
+            asyncio.run(self.event(request({'padding':'x'*65537}),str(self.now),'bad'))
+        self.assertEqual(caught.exception.status_code,413)
+
     def test_weak_partial_or_unproven_evidence_rejected(self):
         mutations = [lambda a: a['abuse_evidence'][0].update(confidence='suspected'),
                      lambda a: a['abuse_evidence'][0]['features'].update(corroborating_samples=1),
@@ -94,6 +99,12 @@ class AbuseAPITests(unittest.TestCase):
             value = alert(); mutate(value)
             with self.assertRaises(HTTPException):
                 abuse_api.normalized_alert(value)
+
+    def test_pid_one_container_application_supported_but_boolean_rejected(self):
+        value=alert();value['abuse_evidence'][0]['pid']=1
+        self.assertEqual(abuse_api.normalized_alert(value)['abuse_evidence'][0]['pid'],1)
+        value['abuse_evidence'][0]['pid']=True
+        with self.assertRaises(HTTPException):abuse_api.normalized_alert(value)
 
     def test_failure_never_claims_completed_isolation(self):
         value = alert(); value['network_quarantine']['status'] = 'failed'
@@ -160,12 +171,15 @@ class AbuseAPITests(unittest.TestCase):
         self.assertEqual(json.loads(record['details_json'])['network_quarantine']['status'], 'released')
 
     def test_telegram_card_reports_isolation_not_recovery_even_if_alert_archived(self):
-        self.emit()
+        value=alert();value['abuse_evidence'][0].update(pending_attempts=48,vertical_ports=48,pending_ratio=1)
+        self.emit(value)
         self.conn.execute("UPDATE security_alerts SET status='resolved'"); self.conn.commit()
         row = self.conn.execute('SELECT * FROM security_alerts').fetchone()
         text, keyboard = server._telegram_alert_status_card(row, self.now)
         self.assertIn('已双向隔离', text)
         self.assertIn('连续佐证 2 次', text)
+        self.assertIn('SYN 待连接 48',text)
+        self.assertIn('待连接占比 100%',text)
         self.assertNotIn('状态：<b>已恢复</b>', text)
         self.assertNotIn('private-source', text)
         detail, actions = server._telegram_alert_detail(row['id'], 'all', 0)

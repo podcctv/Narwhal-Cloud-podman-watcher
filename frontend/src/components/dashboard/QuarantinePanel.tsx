@@ -16,7 +16,9 @@ interface Quarantine {
   updated_at: number;
   host_last_seen: number | null;
   release_action_status: string | null;
-  details: { abuse_evidence?: Array<{ kind: string; pid: number; source_sha256?: string;
+  details: { abuse_evidence?: Array<{ kind: string; pid: number; source_sha256?: string; tool?: string;
+    pending_attempts?: number; vertical_ports?: number; horizontal_targets?: number;
+    pending_ratio?: number; failed_ratio?: number;
     features?: { corroborating_samples?: number; concurrency?: number } }> };
 }
 
@@ -108,7 +110,12 @@ export const QuarantinePanel: React.FC<{
                 {(item.details.abuse_evidence || []).slice(0, 5).map((proof, index) => (
                   <li key={index} className="break-all tabular-nums">
                     {labels[proof.kind] || proof.kind} · PID {proof.pid} · 连续佐证 {proof.features?.corroborating_samples || '-'} 次
+                    {proof.tool && ` · 工具 ${proof.tool}`}
                     {!!proof.features?.concurrency && ` · 并发配置 ${proof.features.concurrency}`}
+                    {!!proof.pending_attempts && ` · SYN 待连接 ${proof.pending_attempts}`}
+                    {!!proof.vertical_ports && ` · 纵向端口 ${proof.vertical_ports}`}
+                    {!!proof.horizontal_targets && ` · 横向目标 ${proof.horizontal_targets}`}
+                    {(proof.pending_ratio != null || proof.failed_ratio != null) && ` · 待连接占比 ${Math.round((proof.pending_ratio ?? proof.failed_ratio ?? 0)*100)}%`}
                     {proof.source_sha256 && ` · 入口文件 SHA256 ${proof.source_sha256.slice(0, 12)}`}
                   </li>
                 ))}

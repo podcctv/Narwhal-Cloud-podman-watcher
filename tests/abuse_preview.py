@@ -21,6 +21,7 @@ def main():
             'container_name': 'synthetic-long-container-name-1234567890', 'instance_id': 'a'*36,
             'abuse_evidence': [{'kind': 'identity_enumeration', 'confidence': 'high',
                 'pid': 1234, 'start_ticks': '4567', 'source_sha256': 'b'*64,
+                'pending_attempts':48,'vertical_ports':48,'pending_ratio':1,
                 'features': {'corroborating_samples': 2, 'concurrency': 100}}],
             'network_quarantine': {'status': 'isolated', 'ingress_blocked': True, 'egress_blocked': True}})
         server.process_security_alerts(conn, 'synthetic-lab-host', now, [alert], partial=True)

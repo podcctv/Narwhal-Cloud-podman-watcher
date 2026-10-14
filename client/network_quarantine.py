@@ -19,6 +19,16 @@ from urllib.parse import quote
 _LOCK = threading.RLock()
 PROTECTED = {'narwhal-monitor-client', 'narwhal-monitor-server', 'narwhal-monitor-caddy'}
 NETWORK_DEVICES = {'nic', 'proxy', 'infiniband'}
+PODMAN_INSPECT_FORMAT = ('[{"Id":{{json .ID}},"Pod":{{json .Pod}},"HostConfig":{'
+    '"NetworkMode":{{json .HostConfig.NetworkMode}},"PidMode":{{json .HostConfig.PidMode}},'
+    '"Privileged":{{json .HostConfig.Privileged}},"Devices":{{if .HostConfig.Devices}}[{}]{{else}}[]{{end}}},'
+    '"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}},"State":{"Pid":{{json .State.Pid}}}}]')
+
+
+def podman_inspect_args(name):
+    # Keep restore/identity fields, not arbitrary environment/labels. The Agent's
+    # action transport is bounded; full inspect JSON can exceed its 8 KiB limit.
+    return ['inspect', '--format', PODMAN_INSPECT_FORMAT, name]
 
 
 class QuarantineError(RuntimeError):
@@ -139,16 +149,17 @@ class IncusIsolation:
             raise QuarantineError('Incus instance identity changed; refused')
         if not etag:
             raise QuarantineError('Incus conditional-update support required')
-        if re.search(r'(?m)^\s*lxc\.net\.', str(item.get('config', {}).get('raw.lxc', ''))):
+        effective = item.get('expanded_config') or item.get('config', {})
+        if re.search(r'(?m)^\s*lxc\.(?:net|network)\.', str(effective.get('raw.lxc', ''))):
             raise QuarantineError('unmanaged Incus network requires manual isolation')
+        if any(value.get('type') in {'pci', 'usb', 'unix-hotplug'} for value in item.get('expanded_devices', {}).values()):
+            raise QuarantineError('passthrough devices require manual isolation')
         return item, etag
 
     def snapshot(self):
         item, _ = self.inspect()
         expanded = item.get('expanded_devices', {})
         devices = {k: v for k, v in expanded.items() if v.get('type') in NETWORK_DEVICES}
-        if any(v.get('type') in {'pci', 'usb', 'unix-hotplug'} for v in expanded.values()):
-            raise QuarantineError('passthrough devices require manual isolation')
         if not devices:
             raise QuarantineError('no managed network devices; cannot prove isolation')
         return {'original': {k: copy.deepcopy(item.get('devices', {}).get(k)) for k in devices},
@@ -298,14 +309,15 @@ class PodmanIsolation:
 
     def inspect(self):
         try:
-            item = json.loads(self.command(['inspect', self.name]))[0]
+            item = json.loads(self.command(podman_inspect_args(self.name)))[0]
         except (ValueError, IndexError, TypeError):
             raise QuarantineError('invalid Podman inspection') from None
         identity = str(item.get('Id') or item.get('ID') or '')
         if not identity.startswith(self.instance_id) or len(self.instance_id) < 12:
             raise QuarantineError('Podman container identity changed; refused')
         mode = str(item.get('HostConfig', {}).get('NetworkMode') or '')
-        if item.get('Pod') or mode == 'host' or mode.startswith(('container:', 'ns:', 'pasta', 'slirp4netns')):
+        pid_mode = str(item.get('HostConfig', {}).get('PidMode') or '')
+        if item.get('Pod') or mode == 'host' or mode.startswith(('container:', 'ns:', 'pasta', 'slirp4netns')) or pid_mode == 'host' or pid_mode.startswith('container:'):
             raise QuarantineError('shared/host/rootless network requires manual isolation')
         if item.get('HostConfig', {}).get('Privileged') or item.get('HostConfig', {}).get('Devices'):
             raise QuarantineError('privileged/device-passthrough container requires manual isolation')
@@ -415,7 +427,7 @@ def safe_evidence(evidence):
     result = []
     strings = {'kind', 'confidence', 'basis', 'tool', 'start_ticks', 'source_sha256'}
     numbers = {'pid', 'target_count', 'public_target_count', 'private_target_count', 'owned_http_connections', 'pending_attempts',
-               'vertical_ports', 'horizontal_targets', 'failed_ratio'}
+               'vertical_ports', 'horizontal_targets', 'failed_ratio', 'pending_ratio'}
     for item in evidence[:20]:
         if not isinstance(item, dict):
             continue

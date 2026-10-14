@@ -2603,10 +2603,13 @@ def _abuse_provider(container):
         binary = get_runtime_bins().get('podman', '')
         if not binary:
             raise network_quarantine.QuarantineError('Podman unavailable')
-        ok, output = _run_action_command([binary, 'inspect', name])
+        ok, output = _run_action_command([binary, *network_quarantine.podman_inspect_args(name)])
         if not ok:
             raise network_quarantine.QuarantineError('Podman instance unavailable')
         item = json.loads(output)[0]
+        pid_mode = str(item.get('HostConfig', {}).get('PidMode') or '')
+        if pid_mode == 'host' or pid_mode.startswith('container:'):
+            raise network_quarantine.QuarantineError('shared PID namespace; automatic process attribution unavailable')
         identity = str(item.get('Id') or item.get('ID') or '')
         expected = str(container.get('id') or '')
         if expected and (len(expected) < 12 or not identity.startswith(expected)):
@@ -2614,12 +2617,30 @@ def _abuse_provider(container):
         pid = int(item.get('State', {}).get('Pid') or 0)
         driver = network_quarantine.PodmanIsolation(_run_action_command, binary, name, identity)
     network_quarantine.target(runtime, project, name, identity)
-    runtime_bin = str(container.get('runtime_bin') or get_runtime_bins().get(runtime, ''))
+    if pid <= 1 or not os.path.isdir('/proc/'+str(pid)):
+        raise network_quarantine.QuarantineError('container kernel process is unavailable')
+    namespace = os.stat('/proc/'+str(pid)+'/ns/pid').st_ino
+    if namespace == os.stat('/proc/1/ns/pid').st_ino:
+        raise network_quarantine.QuarantineError('host PID namespace is not a container process scope')
+    init_ticks = abuse_collection.host_metadata(pid)['start_ticks']
+    scoped = abuse_collection.scoped_host_processes(pid)
+    if not scoped or not os.access('/proc/'+str(pid)+'/net/tcp', os.R_OK):
+        raise network_quarantine.QuarantineError('kernel process/socket evidence unavailable')
     security = _collect_socket_security(pid)
-    communication = _collect_socket_process_details(runtime_bin, name, project, security.get('listening_ports', []))
+    communication = _collect_host_proc_socket_details(pid, scoped, security.get('listening_ports', []), 500)
     sockets = communication.get('communication_sockets', [])
-    processes = abuse_collection.collect(container, _checked_banner_exec, sockets)
-    driver.check_evidence = lambda findings: abuse_collection.verify_live_processes(container, _checked_banner_exec, findings)
+    processes = abuse_collection.collect_host(scoped, sockets, container, _checked_banner_exec)
+    def check_evidence(findings):
+        fresh, _ = driver.inspect() if runtime == 'incus' else (driver.inspect(), None)
+        if runtime == 'incus':
+            current, _ = api.request('GET', driver.path+'/state')
+            current_pid = int(current.get('pid') or 0)
+        else:
+            current_pid = int(fresh.get('State', {}).get('Pid') or 0)
+        if current_pid != pid or abuse_collection.host_metadata(pid)['start_ticks'] != init_ticks:
+            raise network_quarantine.QuarantineError('container restarted during collection; no new quarantine')
+        abuse_collection.verify_host_processes(processes, findings)
+    driver.check_evidence = check_evidence
     return identity, driver, processes, sockets
 
 

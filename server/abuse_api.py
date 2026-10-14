@@ -33,7 +33,7 @@ def normalized_alert(value):
     for item in source:
         if not isinstance(item, dict) or item.get('kind') not in KINDS or item.get('confidence') != 'high':
             raise HTTPException(400, 'high-confidence feature evidence required')
-        if not isinstance(item.get('pid'), int) or not 1 < item['pid'] <= 4194304 or not re.fullmatch(r'\d{1,32}', str(item.get('start_ticks') or '')):
+        if not isinstance(item.get('pid'), int) or isinstance(item['pid'], bool) or not 1 <= item['pid'] <= 4194304 or not re.fullmatch(r'\d{1,32}', str(item.get('start_ticks') or '')):
             raise HTTPException(400, 'process incarnation required')
         features = item.get('features', {})
         if not isinstance(features, dict) or not isinstance(features.get('corroborating_samples'), int) or features['corroborating_samples'] < 2:
@@ -44,7 +44,7 @@ def normalized_alert(value):
             if re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', text):
                 clean[key] = text
         clean['features'] = {k: v for k, v in features.items() if k in {'http_calls', 'enumeration', 'dictionary_inputs', 'identity_generator', 'concurrency', 'corroborating_samples'} and isinstance(v, (bool, int)) and 0 <= v <= 1000000}
-        for key in ('target_count', 'private_target_count', 'public_target_count', 'owned_http_connections', 'pending_attempts', 'vertical_ports', 'horizontal_targets', 'failed_ratio'):
+        for key in ('target_count', 'private_target_count', 'public_target_count', 'owned_http_connections', 'pending_attempts', 'vertical_ports', 'horizontal_targets', 'failed_ratio', 'pending_ratio'):
             if isinstance(item.get(key), (int, float)) and 0 <= item[key] <= 1000000000:
                 clean[key] = item[key]
         evidence.append(clean)
@@ -116,10 +116,13 @@ def telegram_delivery(conn, alert_id):
 def attach(app, db, verify_signature, signed_response, process_alerts, sync_bots, queue):
     @app.post('/api/v1/abuse/events')
     async def event(request: Request, x_timestamp: str = Header(default=''), x_signature: str = Header(default='')):
-        body = await request.body()
+        chunks = bytearray()
+        async for chunk in request.stream():
+            if len(chunks)+len(chunk)>65536:
+                raise HTTPException(413, 'event too large')
+            chunks.extend(chunk)
+        body = bytes(chunks)
         verify_signature(body, x_timestamp, x_signature)
-        if len(body) > 65536:
-            raise HTTPException(413, 'event too large')
         try:
             payload = json.loads(body)
             host_id, node_id = str(payload.get('host_id') or ''), str(payload.get('node_id') or '')

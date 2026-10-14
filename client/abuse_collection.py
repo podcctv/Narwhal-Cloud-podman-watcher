@@ -4,9 +4,11 @@ Guest output is untrusted; nothing is executed from an inspected source file.
 The transient argv/source is consumed locally and is never included in reports.
 """
 import base64
+import os
 import posixpath
 import re
 import shlex
+import stat
 
 try:
     from client import network_quarantine as isolation, abuse_detection as detection
@@ -22,7 +24,7 @@ visited=0; emitted=0
 for d in /proc/[0-9]*; do
     visited=$((visited+1)); [ "$visited" -le 512 ] || break
     [ "$emitted" -lt 64 ] || break
-    p=${d##*/}; [ "$p" -gt 1 ] 2>/dev/null || continue
+    p=${d##*/}; [ "$p" -ge 1 ] 2>/dev/null || continue
     [ -r "$d/stat" ] && [ -r "$d/cmdline" ] || continue
     comm=$(cat "$d/comm" 2>/dev/null)
     case "$comm" in python*|node|nmap|masscan|zmap|rustscan|hydra|medusa|ncrack|patator) ;; *) continue;; esac
@@ -115,6 +117,26 @@ def process_script(sockets):
     return script.replace(old, 'case "$p" in '+('|'.join(map(str, pids)))+') ;; *) '+old+';; esac')
 
 
+def resolve_targets(container, execute, process):
+    evidence = detection.source_evidence(process.get('source'))
+    if not evidence.get('kinds'):
+        return
+    process['target_ips'] = {}
+    for host in evidence.get('target_hosts', [])[:4]:
+        literal = detection.public_ip(host)
+        if literal:
+            process['target_ips'][host] = [literal]
+            continue
+        quoted = shlex.quote(host)
+        command = ("command -v timeout >/dev/null 2>&1 || exit 2; "
+                   f"if command -v getent >/dev/null 2>&1; then timeout 2 getent ahosts {quoted} 2>/dev/null | awk '{{print $1}}'; fi; "
+                   f"if command -v nslookup >/dev/null 2>&1; then timeout 2 nslookup {quoted} 2>/dev/null | "
+                   "awk '/^Name[[:space:]]*:/ {answer=1; next} answer && /^Address/ {print $NF}'; fi")
+        success, addresses = execute(container, command)
+        if success:
+            process['target_ips'][host] = sorted({detection.public_ip(value) for value in addresses.split() if detection.public_ip(value)})[:20]
+
+
 def collect(container, execute, sockets):
     ok, output = execute(container, process_script(sockets))
     if not ok:
@@ -147,27 +169,139 @@ def collect(container, execute, sockets):
                 except (ValueError, UnicodeError):
                     pass
         if process.get('source'):
-            evidence = detection.source_evidence(process['source'])
-            if evidence.get('kinds'):
-                process['target_ips'] = {}
-                for host in evidence.get('target_hosts', [])[:4]:
-                    literal = detection.public_ip(host)
-                    if literal:
-                        process['target_ips'][host] = [literal]
-                        continue
-                    # Only hostname metadata is resolved, never URLs, query/body
-                    # contents, identity records or credentials. No HTTP request.
-                    quoted_host = shlex.quote(host)
-                    command = (
-                        "command -v timeout >/dev/null 2>&1 || exit 2; "
-                        f"if command -v getent >/dev/null 2>&1; then timeout 2 getent ahosts {quoted_host} 2>/dev/null | awk '{{print $1}}'; fi; "
-                        f"if command -v nslookup >/dev/null 2>&1; then timeout 2 nslookup {quoted_host} 2>/dev/null | "
-                        "awk '/^Name[[:space:]]*:/ {answer=1; next} answer && /^Address/ {print $NF}'; fi"
-                    )
-                    success, addresses = execute(container, command)
-                    if success:
-                        process['target_ips'][host] = sorted({detection.public_ip(v) for v in addresses.split() if detection.public_ip(v)})[:20]
+            resolve_targets(container, execute, process)
     return processes
+
+
+def host_metadata(host_pid):
+    """Kernel-owned process incarnation; transient argv is never reported."""
+    if not isinstance(host_pid, int) or host_pid <= 1:
+        raise isolation.QuarantineError('invalid host process identity')
+    base = '/proc/'+str(host_pid)
+    with open(base+'/stat', encoding='utf-8') as stream:
+        value = stream.read(4096)
+    fields = value[value.rfind(')')+2:].split()
+    if len(fields) <= 19 or fields[0] == 'Z' or not fields[19].isdigit():
+        raise isolation.QuarantineError('host process is no longer live')
+    with open(base+'/status', encoding='utf-8') as stream:
+        namespace = re.search(r'(?m)^NSpid:\s+(.+)$', stream.read(16384))
+    if not namespace:
+        raise isolation.QuarantineError('kernel PID namespace identity unavailable')
+    pid = int(namespace.group(1).split()[-1])
+    with open(base+'/cmdline', 'rb') as stream:
+        raw = stream.read(8192)
+    if len(raw) >= 8192:
+        raise isolation.QuarantineError('truncated host argument vector')
+    return {'pid':pid,'start_ticks':fields[19],'host_pid':host_pid,
+            'argv':[v.decode('utf-8',errors='replace') for v in raw.split(b'\0') if v],
+            'executable':os.readlink(base+'/exe'),'cwd':os.readlink(base+'/cwd')}
+
+
+def scoped_host_processes(init_pid, proc_root='/proc', scan_limit=20000):
+    """Select by kernel PID namespace, not ancestry (podman exec has another parent)."""
+    root=os.fspath(proc_root)
+    namespace=os.stat(root+'/'+str(init_pid)+'/ns/pid').st_ino
+    pids=sorted(int(value) for value in os.listdir(root) if value.isdigit())
+    if len(pids)>scan_limit:
+        raise isolation.QuarantineError('kernel process inventory exceeded safe bound; coverage unavailable')
+    result=[]
+    for host_pid in pids:
+        base=root+'/'+str(host_pid)
+        try:
+            if os.stat(base+'/ns/pid').st_ino!=namespace:
+                continue
+            with open(base+'/status',encoding='utf-8') as stream:
+                fields=re.search(r'(?m)^NSpid:\s+(.+)$',stream.read(16384))
+            if not fields:
+                continue
+            pid=int(fields.group(1).split()[-1])
+            with open(base+'/comm',encoding='utf-8') as stream:
+                comm=stream.read(256).strip()[:120]
+            result.append({'host_pid':host_pid,'pid':pid,'process':comm})
+        except (OSError,ValueError):
+            continue
+    if not any(value['host_pid']==init_pid for value in result):
+        raise isolation.QuarantineError('container init incarnation disappeared during process discovery')
+    return result
+
+
+def read_host_entrypoint(process):
+    """Read ONLY a running .py entrypoint through its process root/cwd.
+
+    Walk every component without following symlinks. No traversal, magic links,
+    recursive search, history files or reads outside the target process root.
+    """
+    argv = process.get('argv') or []
+    inline, parsed = python_entrypoint({**process,'cwd':'/'})
+    if inline is not None:
+        return inline
+    if parsed is None:
+        return None
+    argument = next((v for v in argv[1:] if not v.startswith('-')), '')
+    pieces = argument.split('/')
+    if '..' in pieces or len(pieces)>64 or '\x00' in argument:
+        return None
+    base='/proc/'+str(process['host_pid'])+('/root' if argument.startswith('/') else '/cwd')
+    directory=os.open(base,os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        components=[v for v in pieces if v and v!='.']
+        for component in components[:-1]:
+            child=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+            os.close(directory);directory=child
+        if not components:
+            return None
+        fd=os.open(components[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+        with os.fdopen(fd,'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            source=stream.read(65537)
+        return source.decode('utf-8') if len(source)<=65536 else None
+    finally:
+        os.close(directory)
+
+
+def collect_host(host_processes, sockets, container, execute):
+    """No dependency on guest ps/ss/base64; no customer record-store reads."""
+    owners={}
+    for flow in sockets:
+        if flow.get('direction')=='outbound':
+            pid=flow.get('pid');owners[pid]=owners.get(pid,0)+1
+    selected=sorted(host_processes,key=lambda p:owners.get(p.get('pid'),0),reverse=True)[:64]
+    result=[];read_sources=0
+    for observed in selected:
+        try:
+            process=host_metadata(observed['host_pid'])
+            if process['pid']<1 or process['pid']!=observed['pid']:
+                continue
+            if owners.get(process['pid']) and read_sources<4:
+                read_sources+=1
+                try:
+                    source=read_host_entrypoint(process)
+                    if source is not None:
+                        process['source']=source
+                        resolve_targets(container,execute,process)
+                except (OSError,ValueError,UnicodeError):
+                    process['source_coverage']='unavailable'
+            if host_metadata(process['host_pid'])['start_ticks']==process['start_ticks']:
+                result.append(process)
+        except (OSError,ValueError,isolation.QuarantineError):
+            continue
+    if not result:
+        raise isolation.QuarantineError('no fresh kernel process metadata; not a clean observation')
+    return result
+
+
+def verify_host_processes(host_processes, findings):
+    for process in host_processes:
+        if not any(item.get('pid')==process.get('pid') and item.get('start_ticks')==process.get('start_ticks') for item in findings):
+            continue
+        try:
+            current=host_metadata(process['host_pid'])
+            if current['pid']==process['pid'] and current['start_ticks']==process['start_ticks']:
+                return
+        except (OSError,ValueError,isolation.QuarantineError):
+            pass
+    raise isolation.QuarantineError('offending kernel process incarnation is no longer fresh')
 
 
 def verify_live_processes(container, execute, findings):

@@ -136,6 +136,13 @@ with ThreadPoolExecutor(max_workers=100) as pool:
     def test_missing_process_incarnation_never_qualifies(self):
         self.assertEqual(abuse.evaluate_process({'pid': 22, 'argv': ['nmap', '8.8.8.8']}, []), [])
 
+    def test_namespace_pid_one_is_a_supported_application_not_a_host_init(self):
+        process={'pid':1,'start_ticks':'123','source':IDENTITY,'argv':['python3','1.py'],
+                 'target_ips':{'example.org':['8.8.8.8']}}
+        self.assertEqual(abuse.evaluate_process(process,[flow(pid=1)])[0]['kind'],'identity_enumeration')
+        self.assertEqual(abuse.network_evidence([flow(pid=1,port=n,state='syn_sent') for n in range(1,40)])[0]['pid'],1)
+        self.assertEqual(abuse.evaluate_process({**process,'pid':True},[flow(pid=1)]),[])
+
 
 if __name__ == '__main__':
     unittest.main()
