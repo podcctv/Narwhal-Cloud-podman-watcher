@@ -135,6 +135,20 @@ class AbuseAPITests(unittest.TestCase):
             asyncio.run(self.release(alert_id, request({'confirmed': True})))
         self.assertEqual(caught.exception.status_code, 409)
 
+    def test_missing_full_report_does_not_resolve_pending_network_review(self):
+        self.emit()
+        server.process_security_alerts(self.conn, 'host', self.now+10, [])
+        self.conn.commit()
+        row = self.conn.execute("SELECT status FROM security_alerts WHERE alert_type='prohibited_activity'").fetchone()
+        self.assertEqual(row[0], 'active')
+
+    def test_pending_review_cannot_be_purged_with_host_identity(self):
+        self.emit()
+        with self.assertRaises(HTTPException) as caught:
+            server._purge_host(self.conn, 'host')
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertTrue(self.conn.execute("SELECT 1 FROM hosts WHERE host_id='host'").fetchone())
+
     def test_release_result_is_not_misrepresented_as_verified_recovery(self):
         self.emit()
         alert_id = self.conn.execute('SELECT alert_id FROM network_quarantines').fetchone()[0]

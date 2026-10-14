@@ -4,6 +4,7 @@ High concurrency, Python, Telegram, TLS and ordinary proxy fanout are not proof.
 Decisions here describe observable prohibited behaviour, not a legal verdict.
 """
 import ast
+import copy
 import hashlib
 import ipaddress
 import re
@@ -29,6 +30,19 @@ def public_ip(value):
         if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped:
             parsed = parsed.ipv4_mapped
         return str(parsed) if parsed.is_global else ''
+    except ValueError:
+        return ''
+
+
+def target_ip(value):
+    """Include lateral unicast targets; exclude local/link/control addresses."""
+    try:
+        address = ipaddress.ip_address(str(value).split('%', 1)[0])
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified or address.is_reserved:
+            return ''
+        return str(address)
     except ValueError:
         return ''
 
@@ -86,6 +100,10 @@ def _nodes(tree):
         seen += 1
         if seen > NODE_LIMIT:
             raise ValueError('source complexity limit')
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not getattr(node, '_narwhal_active', False):
+            continue  # Nested dormant helpers are not executed merely by definition.
+        if isinstance(node, ast.ClassDef):
+            continue
         yield node
         if isinstance(node, ast.If) and isinstance(node.test, ast.Constant):
             queue.extend(node.body if node.test.value else node.orelse)
@@ -106,11 +124,15 @@ def _reachable_tree(tree):
         referenced = {_name(n.func) for n in calls}
         for call in calls:
             referenced.update(arg.id for arg in call.args if isinstance(arg, ast.Name))
+            referenced.update(kw.value.id for kw in call.keywords if isinstance(kw.value, ast.Name))
         newly = (referenced & set(functions)) - included
         if not newly:
             return module
         included.update(newly)
-        bodies.extend(functions[name] for name in newly)
+        for name in newly:
+            function = copy.deepcopy(functions[name])
+            function._narwhal_active = True
+            bodies.append(function)
 
 
 def source_evidence(source):
@@ -240,6 +262,10 @@ def tool_evidence(argv):
         if value in ignored_options:
             skip_value = True
             continue
+        if tool == 'patator' and value.startswith('host='):
+            value = value.split('=', 1)[1]
+        elif tool == 'patator' and '=' in value:
+            continue  # user/password/file fields must never become destinations.
         if value.startswith('-'):
             # Explicit destination options; do not confuse passwords/source IPs
             # or excluded addresses with actual scan/authentication targets.
@@ -254,7 +280,7 @@ def tool_evidence(argv):
             candidate = urlsplit(value).hostname or ''
         try:
             network = ipaddress.ip_network(candidate, strict=False)
-            if network.network_address.is_global and network.broadcast_address.is_global:
+            if target_ip(network.network_address) and target_ip(network.broadcast_address):
                 public_targets.add(str(network))
         except ValueError:
             pass
@@ -263,16 +289,18 @@ def tool_evidence(argv):
         return []
     return [{'kind': 'outbound_scan' if tool in SCANNERS else 'authentication_bruteforce',
              'confidence': 'high', 'basis': 'active_prohibited_tool', 'tool': tool,
-             'public_target_count': len(public_targets)}]
+             'target_count': len(public_targets),
+             'public_target_count': sum(ipaddress.ip_network(value).network_address.is_global for value in public_targets),
+             'private_target_count': sum(not ipaddress.ip_network(value).network_address.is_global for value in public_targets)}]
 
 
 def network_evidence(sockets):
-    """Require same-process public TCP SYN fanout; inbound/CDN/TLS counts do not qualify."""
+    """Require same-process TCP SYN fanout; inbound/CDN/TLS counts do not qualify."""
     owners = defaultdict(list)
     for item in sockets[:2000] if isinstance(sockets, list) else []:
         if not isinstance(item, dict) or item.get('direction') != 'outbound' or item.get('proto') != 'tcp':
             continue
-        ip = public_ip(item.get('remote_ip'))
+        ip = target_ip(item.get('remote_ip'))
         try:
             pid = int(item.get('pid') or 0)
             port = int(str(item.get('remote', '')).rsplit(':', 1)[-1])
@@ -294,7 +322,9 @@ def network_evidence(sockets):
         horizontal = max((len(v) for k, v in by_port.items() if k in SENSITIVE_PORTS), default=0)
         if vertical >= 32 or horizontal >= 64:
             findings.append({'kind': 'outbound_scan', 'confidence': 'corroboration_required',
-                             'basis': 'same_process_failed_public_fanout', 'pid': pid,
+                             'basis': 'same_process_failed_fanout', 'pid': pid,
+                             'public_target_count': len({ip for ip, _ in attempts if public_ip(ip)}),
+                             'private_target_count': len({ip for ip, _ in attempts if not public_ip(ip)}),
                              'pending_attempts': len(attempts), 'vertical_ports': vertical,
                              'horizontal_targets': horizontal, 'failed_ratio': round(len(attempts)/len(total), 3)})
     return findings

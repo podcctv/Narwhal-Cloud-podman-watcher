@@ -6986,6 +6986,12 @@ def _schedule_self_uninstall(action: Dict, node_id: str) -> Tuple[bool, str]:
     action_id = int(action.get("id") or 0)
     if action_id <= 0 or not node_id or str(params.get("expected_node_id") or "") != node_id:
         return False, "host action node identity mismatch"
+    if os.name == 'posix':
+        try:
+            if network_quarantine.Journal().read():
+                return False, 'pending network quarantine review; preserve recovery tooling and release/review first'
+        except (network_quarantine.QuarantineError, OSError, ValueError):
+            return False, 'quarantine recovery journal unavailable; refusing unattended uninstall'
     script = "/opt/narwhal-monitor/client-self-uninstall.sh"
     if not os.path.isfile(script):
         return False, "self-uninstall helper is unavailable; update Client first"

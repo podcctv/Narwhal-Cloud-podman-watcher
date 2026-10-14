@@ -87,6 +87,8 @@ with ThreadPoolExecutor(max_workers=100) as pool:
         self.assertEqual(abuse.source_evidence('# '+repr(IDENTITY))['kinds'], [])
         dormant = 'def unused_attack():\n' + ''.join('    '+line+'\n' for line in IDENTITY.splitlines()) + '\nimport requests\nrequests.get("https://example.org/health")\n'
         self.assertEqual(abuse.source_evidence(dormant)['kinds'], [])
+        nested = 'def main():\n    def unused_attack():\n' + ''.join('        '+line+'\n' for line in IDENTITY.splitlines()) + '\n    return 1\nmain()\n'
+        self.assertEqual(abuse.source_evidence(nested)['kinds'], [])
         for endpoint in ('http://localhost/api', 'http://127.0.0.1/api', 'http://10.0.0.1/api', 'http://service.internal/api'):
             self.assertEqual(abuse.source_evidence(IDENTITY.replace('https://example.org/patient/bind/add', endpoint))['kinds'], [])
 
@@ -99,16 +101,19 @@ with ThreadPoolExecutor(max_workers=100) as pool:
         self.assertFalse(abuse.source_evidence('x'*70000)['available'])
         self.assertFalse(abuse.source_evidence('for !!')['available'])
 
-    def test_active_tools_only_public_targets(self):
+    def test_active_tools_include_lateral_but_not_loopback_or_passive_targets(self):
         for name in ('nmap', 'masscan', 'zmap', 'rustscan'):
             self.assertEqual(abuse.tool_evidence([name, '8.8.8.8'])[0]['kind'], 'outbound_scan')
         for name in ('hydra', 'medusa', 'ncrack', 'patator'):
             self.assertEqual(abuse.tool_evidence([name, '8.8.8.8'])[0]['kind'], 'authentication_bruteforce')
-        for argv in (['nmap', '--help'], ['nmap', '-sL', '8.8.8.8'], ['nmap', '10.0.0.0/8'], ['nmap', '0.0.0.0/0'], ['echo', 'nmap 8.8.8.8']):
+        self.assertEqual(abuse.tool_evidence(['nmap','10.0.0.0/8'])[0]['private_target_count'], 1)
+        for argv in (['nmap', '--help'], ['nmap', '-sL', '8.8.8.8'], ['nmap', '127.0.0.1'], ['nmap', '0.0.0.0/0'], ['echo', 'nmap 8.8.8.8']):
             self.assertEqual(abuse.tool_evidence(argv), [])
-        self.assertEqual(abuse.tool_evidence(['nmap', '--exclude', '8.8.8.8', '10.0.0.1']), [])
-        self.assertEqual(abuse.tool_evidence(['hydra', '-p', '8.8.8.8', '10.0.0.1', 'ssh']), [])
+        self.assertEqual(abuse.tool_evidence(['nmap', '--exclude', '8.8.8.8', '127.0.0.1']), [])
+        self.assertEqual(abuse.tool_evidence(['hydra', '-p', '8.8.8.8', '127.0.0.1', 'ssh']), [])
         self.assertTrue(abuse.tool_evidence(['medusa', '-h', '8.8.8.8', '-u', 'example']))
+        self.assertTrue(abuse.tool_evidence(['patator', 'ssh_login', 'host=8.8.8.8', 'user=example', 'password=FILE0']))
+        self.assertEqual(abuse.tool_evidence(['patator', 'ssh_login', 'host=127.0.0.1', 'password=8.8.8.8']), [])
         fake = {'pid': 22, 'start_ticks': '123', 'argv': ['nmap', '8.8.8.8'], 'executable': '/bin/sleep'}
         self.assertEqual(abuse.evaluate_process(fake, []), [])
         fake['executable'] = '/usr/bin/nmap'
@@ -125,6 +130,8 @@ with ThreadPoolExecutor(max_workers=100) as pool:
         self.assertEqual(abuse.network_evidence([flow(ip=ip, state='syn_sent') for ip in public]), [])
         self.assertEqual(abuse.network_evidence([flow(ip=ip, port=22, state='syn_sent') for ip in public])[0]['horizontal_targets'], 69)
         self.assertEqual(abuse.network_evidence([flow(ip=ip, port=22, state='established') for ip in public]), [])
+        lateral = [flow(ip='10.0.0.2', port=n, state='syn_sent') for n in range(1,40)]
+        self.assertEqual(abuse.network_evidence(lateral)[0]['private_target_count'], 1)
 
     def test_missing_process_incarnation_never_qualifies(self):
         self.assertEqual(abuse.evaluate_process({'pid': 22, 'argv': ['nmap', '8.8.8.8']}, []), [])

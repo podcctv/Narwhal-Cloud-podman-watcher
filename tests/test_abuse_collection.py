@@ -1,4 +1,7 @@
 import base64
+import os
+import subprocess
+import sys
 import unittest
 from client import abuse_collection as collector
 
@@ -54,6 +57,21 @@ class AbuseCollectionTests(unittest.TestCase):
         self.assertNotIn('not-allowed', script)
         self.assertIn('case "$p" in 567)', script)
         self.assertEqual(len(collector.parse_processes(sample()+sample())), 1)
+
+    @unittest.skipUnless(os.name == 'posix', 'real proc collector requires Linux')
+    def test_real_linux_proc_collector_prioritizes_child_and_checks_incarnation(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(20)'])
+        try:
+            script = collector.process_script([{'pid': child.pid, 'direction': 'outbound'}])
+            result = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True, timeout=8)
+            self.assertEqual(result.returncode, 0)
+            item = next(p for p in collector.parse_processes(result.stdout) if p['pid'] == child.pid)
+            self.assertTrue(item['start_ticks'].isdigit())
+            self.assertEqual(item['argv'][1], '-c')
+            collector.verify_live_processes({}, lambda c, cmd: (True, subprocess.check_output(['/bin/sh','-c',cmd],text=True)), [item])
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
 
 
 if __name__ == '__main__':

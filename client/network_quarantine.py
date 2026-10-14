@@ -152,7 +152,15 @@ class IncusIsolation:
         if not devices:
             raise QuarantineError('no managed network devices; cannot prove isolation')
         return {'original': {k: copy.deepcopy(item.get('devices', {}).get(k)) for k in devices},
-                'expanded': copy.deepcopy(devices), 'guest_names': self.guest_names(item, devices)}
+                'expanded': copy.deepcopy(devices), 'guest_names': self.guest_names(item, devices),
+                'volatile_identity': self.volatile_identity(item, devices)}
+
+    def volatile_identity(self, item, devices):
+        # Incus clears per-device volatile keys when a NIC is masked. Preserve
+        # MAC/name, NOT host veth names or transient counters; changing the MAC
+        # can change DHCP/SLAAC addresses and invalidate customer NAT mappings.
+        keys = {'volatile.'+key+'.'+field for key in devices for field in ('hwaddr','name')}
+        return {key: value for key, value in item.get('config', {}).items() if key in keys}
 
     def guest_names(self, item, devices):
         """Resolve auto-named NICs before changing anything, never guess eth0."""
@@ -175,11 +183,13 @@ class IncusIsolation:
             result[key] = str(name)
         return result
 
-    def set_devices(self, item, etag, devices):
+    def set_devices(self, item, etag, devices, restore_identity=None):
         # PUT + If-Match replaces the device map (PATCH can merge it and leave
         # inherited-device masks behind during release). Preserve all other fields.
         data = {k: copy.deepcopy(item[k]) for k in ('architecture', 'config', 'profiles', 'ephemeral', 'description') if k in item}
         data['devices'] = devices
+        if restore_identity:
+            data.setdefault('config', {}).update(restore_identity)
         self.api.request('PUT', self.path, data, etag)
 
     def refresh_backup(self, backup):
@@ -193,6 +203,7 @@ class IncusIsolation:
             backup['original'][key] = copy.deepcopy(item.get('devices', {}).get(key))
             backup['expanded'][key] = copy.deepcopy(value)
         backup.setdefault('guest_names', {}).update(names)
+        backup.setdefault('volatile_identity', {}).update(self.volatile_identity(item, added))
 
     def isolate(self, backup):
         item, etag = self.inspect()
@@ -238,10 +249,41 @@ class IncusIsolation:
                 devices.pop(key)
             else:
                 devices[key] = original
+        identity = backup.get('volatile_identity') or {}
+        if identity:
+            # A none->NIC transition clears volatile keys even if supplied in
+            # that PUT (Incus 6.0). First use explicit original MAC/name, seed
+            # volatile keys while the NIC exists, then restore inheritance.
+            # Keep proxies masked until the final verified configuration step.
+            temporary = copy.deepcopy(item.get('devices', {}))
+            for key, expanded in backup['expanded'].items():
+                if expanded.get('type') not in {'nic', 'infiniband'}:
+                    continue
+                device = copy.deepcopy(expanded)
+                for field in ('hwaddr', 'name'):
+                    if identity.get('volatile.'+key+'.'+field):
+                        device[field] = identity['volatile.'+key+'.'+field]
+                temporary[key] = device
+            self.set_devices(item, etag, temporary)
+            item, etag = self.inspect()
+            self.set_devices(item, etag, item.get('devices', {}), identity)
+            item, etag = self.inspect()
         self.set_devices(item, etag, devices)
         fresh, _ = self.inspect()
         if any(fresh.get('devices', {}).get(k) != original for k, original in backup['original'].items()):
             raise QuarantineError('Incus restore readback mismatch')
+        for key, value in identity.items():
+            if fresh.get('config', {}).get(key) != value:
+                raise QuarantineError('Incus restored NIC identity readback mismatch')
+        for key, expected in backup['expanded'].items():
+            if fresh.get('expanded_devices', {}).get(key) != expected:
+                raise QuarantineError('Incus inherited network configuration changed; manual review required')
+        if identity:
+            state, _ = self.api.request('GET', self.path+'/state')
+            for key, name in backup.get('guest_names', {}).items():
+                mac = identity.get('volatile.'+key+'.hwaddr')
+                if mac and str((state.get('network') or {}).get(name, {}).get('hwaddr', '')).lower() != str(mac).lower():
+                    raise QuarantineError('Incus runtime MAC restoration was not confirmed')
 
 
 class PodmanIsolation:
@@ -372,7 +414,7 @@ def safe_evidence(evidence):
         raise QuarantineError('typed abuse evidence required')
     result = []
     strings = {'kind', 'confidence', 'basis', 'tool', 'start_ticks', 'source_sha256'}
-    numbers = {'pid', 'public_target_count', 'owned_http_connections', 'pending_attempts',
+    numbers = {'pid', 'target_count', 'public_target_count', 'private_target_count', 'owned_http_connections', 'pending_attempts',
                'vertical_ports', 'horizontal_targets', 'failed_ratio'}
     for item in evidence[:20]:
         if not isinstance(item, dict):

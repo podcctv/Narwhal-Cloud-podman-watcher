@@ -44,7 +44,7 @@ def normalized_alert(value):
             if re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', text):
                 clean[key] = text
         clean['features'] = {k: v for k, v in features.items() if k in {'http_calls', 'enumeration', 'dictionary_inputs', 'identity_generator', 'concurrency', 'corroborating_samples'} and isinstance(v, (bool, int)) and 0 <= v <= 1000000}
-        for key in ('public_target_count', 'owned_http_connections', 'pending_attempts', 'vertical_ports', 'horizontal_targets', 'failed_ratio'):
+        for key in ('target_count', 'private_target_count', 'public_target_count', 'owned_http_connections', 'pending_attempts', 'vertical_ports', 'horizontal_targets', 'failed_ratio'):
             if isinstance(item.get(key), (int, float)) and 0 <= item[key] <= 1000000000:
                 clean[key] = item[key]
         evidence.append(clean)

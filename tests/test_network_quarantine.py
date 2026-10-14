@@ -17,7 +17,8 @@ EVIDENCE = [{'kind': 'identity_enumeration', 'confidence': 'high', 'pid': 20,
 class FakeIncus:
     def __init__(self):
         self.profile = {'eth0': {'type': 'nic', 'name': 'eth0', 'network': 'incusbr0'}}
-        self.item = {'config': {'volatile.uuid': INSTANCE_ID, 'user.note': 'preserved'},
+        self.item = {'config': {'volatile.uuid': INSTANCE_ID, 'user.note': 'preserved',
+                                'volatile.eth0.hwaddr':'10:66:6a:00:00:11','volatile.eth0.name':'eth0'},
                      'devices': {'root': {'type': 'disk', 'path': '/', 'pool': 'default'},
                                  'ssh': {'type': 'proxy', 'listen': 'tcp:0.0.0.0:12345', 'connect': 'tcp:127.0.0.1:22'}},
                      'profiles': ['default'], 'description': 'customer data', 'ephemeral': False}
@@ -29,11 +30,24 @@ class FakeIncus:
         self.calls.append((method, path, copy.deepcopy(data), etag))
         if path.endswith('/state'):
             expanded = {**self.profile, **self.item['devices']}
-            return {'network': {v.get('name'): {'state': 'up'} for v in expanded.values() if v.get('type') == 'nic'}}, None
+            return {'network': {v.get('name') or self.item['config'].get('volatile.'+key+'.name'):
+                    {'state': 'up', 'hwaddr':v.get('hwaddr') or self.item['config'].get('volatile.'+key+'.hwaddr')}
+                    for key,v in expanded.items() if v.get('type') == 'nic'}}, None
         if method == 'PUT':
             if self.fail_update or etag != str(self.revision):
                 raise q.QuarantineError('conditional update failed')
+            before = {**self.profile, **self.item['devices']}
             self.item = copy.deepcopy(data)
+            after = {**self.profile, **self.item['devices']}
+            for key in set(before) | set(after):
+                if before.get(key,{}).get('type') != after.get(key,{}).get('type'):
+                    for field in ('hwaddr', 'name', 'host_name'):
+                        self.item['config'].pop('volatile.'+key+'.'+field, None)
+                    if after.get(key,{}).get('type') == 'nic':
+                        if not after[key].get('hwaddr'):
+                            self.item['config']['volatile.'+key+'.hwaddr'] = '10:66:6a:00:00:99'
+                        if not after[key].get('name'):
+                            self.item['config']['volatile.'+key+'.name'] = 'eth0'
             self.revision += 1
             return {}, None
         result = copy.deepcopy(self.item)
@@ -89,7 +103,8 @@ class NetworkQuarantineTests(unittest.TestCase):
         self.assertEqual(api.item['devices']['eth0'], {'type': 'none'})
         self.assertEqual(api.item['devices']['ssh'], {'type': 'none'})
         self.assertEqual(api.item['devices']['root'], original['devices']['root'])
-        self.assertEqual(api.item['config'], original['config'])
+        self.assertEqual({k:v for k,v in api.item['config'].items() if not k.startswith('volatile.eth0.')},
+                         {k:v for k,v in original['config'].items() if not k.startswith('volatile.eth0.')})
         self.assertEqual(api.item['profiles'], ['default'])
         self.assertNotIn('private-source', self.path.read_text())
         self.assertNotIn('private-password', self.path.read_text())
@@ -121,9 +136,24 @@ class NetworkQuarantineTests(unittest.TestCase):
 
     def test_unknown_incUS_nic_name_refused_before_mutation(self):
         api = FakeIncus(); api.profile['eth0'].pop('name')
+        api.item['config'].pop('volatile.eth0.name')
+        api.item['config'].pop('volatile.eth0.hwaddr')
         with self.assertRaises(q.QuarantineError):
             q.IncusIsolation(api, 'customer', INSTANCE_ID).snapshot()
         self.assertFalse(any(c[0] == 'PUT' for c in api.calls))
+
+    def test_incUS_restores_volatile_mac_and_name_without_stale_host_veth(self):
+        api = FakeIncus()
+        api.item['config'].update({'volatile.eth0.hwaddr':'10:66:6a:00:00:11',
+                                  'volatile.eth0.name':'eth0','volatile.eth0.host_name':'old-veth'})
+        driver = q.IncusIsolation(api, 'customer', INSTANCE_ID)
+        key = q.target('incus', '', 'customer', INSTANCE_ID)
+        q.quarantine(self.journal, key, driver, EVIDENCE)
+        self.assertNotIn('volatile.eth0.hwaddr', api.item['config'])
+        q.release(self.journal, key, driver)
+        self.assertEqual(api.item['config']['volatile.eth0.hwaddr'], '10:66:6a:00:00:11')
+        self.assertEqual(api.item['config']['volatile.eth0.name'], 'eth0')
+        self.assertNotIn('volatile.eth0.host_name', api.item['config'])
 
     def test_restored_podman_address_mismatch_rolls_back(self):
         runner = FakePodman(); driver = q.PodmanIsolation(runner, 'podman', 'customer', PODMAN_ID)

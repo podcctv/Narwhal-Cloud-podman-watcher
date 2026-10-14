@@ -550,7 +550,7 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
                     same = " AND ".join(f"newer.{column}={table}.{column}" for column in identity)
                     progress += prune(table, f"id < ? AND EXISTS (SELECT 1 FROM {table} newer WHERE {same} AND newer.id > {table}.id)", (boundary[0],))
             # Drain offline hosts in batches before removing their identity.
-            offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
+            offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.host_id=hosts.host_id AND q.status<>'released') LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
             for host in offline:
                 for table in ("reports", "host_security", "security_actions", "security_alerts", "connection_overloads"):
                     progress += prune(table, "host_id=?", (host[0],))
@@ -811,16 +811,17 @@ def process_security_alerts(
 
     if partial:
         return notifications
+    pending_network_review = "NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status<>'released')"
     if active_fingerprints:
         placeholders = ",".join("?" for _ in active_fingerprints)
         conn.execute(
             f"UPDATE security_alerts SET status='resolved', last_seen=? "
-            f"WHERE host_id=? AND status IN ('active','dismissed') AND fingerprint NOT IN ({placeholders})",
+            f"WHERE host_id=? AND status IN ('active','dismissed') AND fingerprint NOT IN ({placeholders}) AND {pending_network_review}",
             (ts, host_id, *active_fingerprints),
         )
     else:
         conn.execute(
-            "UPDATE security_alerts SET status='resolved', last_seen=? WHERE host_id=? AND status IN ('active','dismissed')",
+            f"UPDATE security_alerts SET status='resolved', last_seen=? WHERE host_id=? AND status IN ('active','dismissed') AND {pending_network_review}",
             (ts, host_id),
         )
     return notifications
@@ -1947,6 +1948,8 @@ def invalidate_security_status_cache() -> None:
 
 
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
+    if conn.execute("SELECT 1 FROM network_quarantines WHERE host_id=? AND status<>'released' LIMIT 1", (host_id,)).fetchone():
+        raise HTTPException(409, '存在待复核的网络隔离；请先核实并解除隔离，避免丢失恢复入口。')
     invalidate_security_status_cache()
     operations.purge_host(conn,host_id)
     investigation.purge_host(conn,host_id)
@@ -3527,6 +3530,10 @@ async def security_action_result(
             conn.commit()
     finally:
         conn.close()
+    if row['action_type'] == 'release_network_quarantine' and status in {'succeeded', 'failed'}:
+        # A resolved release result may not appear in the next live sample;
+        # update the existing Telegram card now, never leave "isolated" forever.
+        sync_configured_bot_alert_messages(host_id, alert_id=row['alert_id'])
     return signed_json_response({"ok": True, "action_id": action_id}, x_timestamp)
 
 
