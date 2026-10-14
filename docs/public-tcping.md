@@ -89,9 +89,18 @@ branding or private execution API is copied.
 
 ## Rollout
 
-Build/test first, publish immutable versioned server and Agent images, back up
+Build/test first, publish immutable versioned server images and pin native Agent revisions, back up
 SQLite online and preserve existing server container/environment/mounts. Deploy
 with public starts disabled, publish a canary source, upgrade the actual host
-Agent, verify all 316 rows and continuing private telemetry, then extend to the
+Agent, verify all 317 rows (316 Zstatic plus the configured Taiwan target) and continuing private telemetry, then extend to the
 remaining supported owned hosts. Offline/old-version sources stay visibly
 unavailable rather than measuring from the central server instead.
+
+### Worker allocator compatibility (1.7.20)
+
+Start the isolated worker with `MALLOC_ARENA_MAX=2` before Python/glibc startup.
+On ARM64/Python 3.14, default per-thread arenas exhausted the existing 256 MiB
+address-space limit during concurrent DNS subprocess creation. The limit,
+four-worker concurrency, deadlines and cooldown are unchanged. The subprocess
+integration test now exercises 317 real child creations without network traffic,
+instead of returning every synthetic row directly from a thread.

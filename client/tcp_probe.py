@@ -190,7 +190,11 @@ def run_job(job, host_id, node_id, post, lock_fd):
                                    # never Agent credentials. Keep it in the service journal.
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
                                    start_new_session=True, pass_fds=(lock_fd,),
-                                   env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"})
+                                   # glibc's per-thread arenas can reserve more than the
+                                   # entire 256 MiB address-space budget on ARM64.
+                                   # Set this before interpreter/allocator startup;
+                                   # keep the resource limit and four-worker bound.
+                                   env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "MALLOC_ARENA_MAX": "2"})
         with _mutex:
             _running["process"] = process
             if _running.get("cancelled"):

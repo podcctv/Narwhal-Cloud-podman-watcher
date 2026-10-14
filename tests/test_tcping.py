@@ -366,27 +366,31 @@ class ProbeWorkerTests(unittest.TestCase):
         from threading import Thread
         targets = tcping.configured_directory(raw_directory())["nodes"]
         module_dir = str(Path(tcp_probe.__file__).resolve().parent)
+        # Exercise concurrent subprocess allocation, not only socket-free fake
+        # rows: glibc arenas previously exhausted RLIMIT_AS on ARM64/Python 3.14.
+        resolver_code = "import sys,json;print(json.dumps({'target_id':sys.argv[1],'ip':'1.1.1.1','samples_ms':[1.0],'error':''}))"
         child_code = (
-            "import sys,json,time;sys.path.insert(0,"+repr(module_dir)+");import tcp_probe;"
-            "tcp_probe.probe=lambda t,s:(time.sleep(.01) or {'target_id':t['id'],'ip':'1.1.1.1','samples_ms':[1.0],'error':''});"
+            "import sys,json,subprocess;sys.path.insert(0,"+repr(module_dir)+");import tcp_probe;"
+            "tcp_probe.probe=lambda t,s:json.loads(subprocess.check_output([sys.executable,'-c',"+repr(resolver_code)+",t['id']],timeout=3));"
             "tcp_probe.worker(json.load(sys.stdin))"
         )
         original = subprocess.Popen
         processes, batches = [], []
         def launch(args, **kwargs):
             if args[-1] == "worker":
-                self.assertEqual(set(kwargs["env"]), {"PATH","LANG","PYTHONDONTWRITEBYTECODE"})
+                self.assertEqual(set(kwargs["env"]), {"PATH","LANG","PYTHONDONTWRITEBYTECODE","MALLOC_ARENA_MAX"})
+                self.assertEqual(kwargs["env"]["MALLOC_ARENA_MAX"], "2")
                 args = [sys.executable,"-u","-c",child_code]
             child = original(args,**kwargs)
             processes.append(child)
             return child
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ,{"NARWHAL_TCP_STATE":temp}):
             job = {"id":str(uuid.uuid4()),"lease":"x"*43,"generation":"synthetic-test","target_hash":tcp_probe.digest(targets),
-                   "targets":targets,"samples":1,"deadline_at":int(time.time())+30}
+                   "targets":targets,"samples":1,"deadline_at":int(time.time())+60}
             fd = tcp_probe.claim(job["id"])
             with mock.patch.object(tcp_probe.subprocess,"Popen",side_effect=launch):
                 thread = Thread(target=tcp_probe.run_job,args=(job,"synthetic-host","synthetic-node",lambda path,p:batches.append(p),fd),daemon=True)
-                thread.start(); thread.join(timeout=12)
+                thread.start(); thread.join(timeout=45)
                 self.assertFalse(thread.is_alive())
             self.assertEqual(batches[-1]["outcome"],"complete")
             self.assertEqual(sum(len(b["rows"]) for b in batches),317)
