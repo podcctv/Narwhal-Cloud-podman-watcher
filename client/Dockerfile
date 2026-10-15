@@ -11,5 +11,6 @@ COPY disk_cleanup.py disk_cleanup_worker.py ./
 COPY security_banner.py .
 COPY abuse_detection.py abuse_collection.py abuse_guard.py network_quarantine.py ./
 COPY tcp_probe.py .
+COPY socks_detector.py .
 
 CMD ["python", "agent.py"]

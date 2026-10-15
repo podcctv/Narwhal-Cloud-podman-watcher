@@ -2744,7 +2744,7 @@ def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
     # process_matches but did not copy the safe process list into the alert.
     # Only allowlisted executable names and confirmed weak states are retained.
     legacy_matches = details.get("socks_process_matches")
-    if isinstance(legacy_matches, list):
+    if isinstance(legacy_matches, list) and not details.get('socks_action_scope_verified'):
         for item in legacy_matches:
             if not isinstance(item, dict):
                 continue
@@ -2759,6 +2759,7 @@ def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
     if (
         not socks_processes
         and details["socks_auth_mode"] in ("no_auth", "weak_password")
+        and not details.get('socks_action_scope_verified')
     ):
         process_match = re.search(
             r"(?:^|[；;，,\n])\s*(?:进程|process)\s*(?:[:=：])?\s*([^；;，,\n]+)",

@@ -984,6 +984,13 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.close()
         self.assertEqual(params["auth_mode"], "weak_password")
 
+    def test_scoped_socks_never_restores_unsafe_engine_from_message(self):
+        raw = {'socks_auth_mode':'no_auth','socks_action_scope_verified':True,
+               'socks_processes':[], 'message':'SOCKS no auth；进程 xray；',
+               'socks_process_matches':[{'process':'xray','auth_state':'no_auth','action_safe':False}]}
+        details = server._alert_details(json.dumps(raw))
+        self.assertEqual(details['socks_processes'], [])
+
     def test_legacy_weak_socks_without_config_file_is_actionable(self):
         alert = {
             "type": "socks_weak_auth",

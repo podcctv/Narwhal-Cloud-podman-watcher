@@ -1099,8 +1099,8 @@ class SecurityTelemetryTests(unittest.TestCase):
 
     def test_config_confirmed_xray_socks_keeps_safe_process_target(self):
         process_output = "12 S xray /usr/bin/xray run -config /etc/xray/config.json\n"
-        markers = "@@SOCKS:/etc/xray/config.json\n@@NOAUTH:/etc/xray/config.json\n"
-        with mock.patch.object(agent, "run", side_effect=[process_output, markers, ""]):
+        config = json.dumps({'inbounds':[{'protocol':'socks','port':1080,'settings':{'auth':'noauth'}}]})
+        with mock.patch.object(agent, "run", side_effect=[process_output, '', config, ""]):
             result = agent.collect_panel_pairing_indicators(
                 "proxy", "incus", "default", "xray:latest"
             )
@@ -1109,7 +1109,7 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(socks["auth_mode"], "no_auth")
         self.assertEqual(
             socks["process_matches"],
-            [{"pid": 12, "process": "xray", "auth_state": "no_auth"}],
+            [{"pid": 12, "process": "xray", "auth_state": "unknown", 'action_safe': True, 'config_scoped': True}],
         )
 
     def test_config_confirmed_sockd_uses_config_auth_for_safe_process_target(self):

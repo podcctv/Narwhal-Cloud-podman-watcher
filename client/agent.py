@@ -11,7 +11,9 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
@@ -20,12 +22,13 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup
+    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector
 except ImportError:
     import operations as node_operations
     import security_banner
     import tcp_probe
     import disk_cleanup
+    import socks_detector
 
 try:
     import maxminddb
@@ -61,6 +64,8 @@ _access_log_states: Dict[str, Dict[str, object]] = {}
 _security_last_sample_ts = 0.0
 _pending_deep_samples: Dict[int, Dict[str, object]] = {}
 _abuse_targets: List[Dict[str, object]] = []
+_socks_probe_cache = {}
+_socks_probe_lock = threading.Lock()
 
 _SOCKS_DIRECT_NAMES = {"microsocks", "sockd", "danted", "srelay", "hev-socks5-server"}
 _SOCKS_CONFIGURABLE_NAMES = {"3proxy", "gost", "xray", "v2ray", "sing-box"}
@@ -3207,7 +3212,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 throttle_state['violation_last_at'] = 0
 
         socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
-        socks_detected = bool(socks_proxy.get("detected"))
+        socks_detected = bool(socks_proxy.get("detected")) and not socks_proxy.get('internal_only', False)
         socks_auth_mode = str(socks_proxy.get("auth_mode") or "unknown")
         if socks_detected and socks_auth_mode in ("no_auth", "weak_password"):
             public_exposure = bool(socks_proxy.get("public_exposure"))
@@ -3228,6 +3233,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 item
                 for item in process_matches
                 if str(item.get("auth_state") or socks_auth_mode) in ("no_auth", "weak_password")
+                and item.get('action_safe', True)
             ]
             socks_alert = _security_alert(
                 "socks_weak_auth",
@@ -3244,6 +3250,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             socks_alert.update(
                 {
                     "socks_auth_mode": socks_auth_mode,
+                    "socks_action_scope_verified": bool(socks_proxy.get('listener_scope_verified')),
+                    "auth_verification": socks_proxy.get('auth_verification', []),
                     "automatic_remediation": socks_proxy.get("auth_enforcement") or {},
                     "service_listeners": socks_proxy.get('service_listeners', []),
                     "socks_processes": sorted(
@@ -3273,6 +3281,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             attention = _security_alert('socks_auth_unknown','warning','SOCKS 认证待核实',
                 'SOCKS 服务正在监听，但当前采样无法确认认证设置；不据此自动停止服务',1,0,container)
             attention.update(socks_auth_mode='unknown',service_listeners=socks_proxy['service_listeners'],
+                auth_verification=socks_proxy.get('auth_verification', []),
                 socks_processes=sorted({str(i.get('process')) for i in socks_proxy.get('process_matches',[]) if isinstance(i,dict) and i.get('process')}))
             alerts.append(attention)
         inbound_unique_ips = int(security.get("inbound_unique_ips") or 0)
@@ -4222,7 +4231,10 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
                 auth_modes.add("configured")
                 process_auth_state = "configured"
         elif matched == "gost":
-            urls = re.findall(r"socks(?:4|5|5h)?://[^\s]+", args, flags=re.IGNORECASE)
+            # -F is an OUTBOUND proxy chain, never evidence about a listener.
+            urls = [tokens[i + 1] for i, t in enumerate(tokens[:-1]) if t == '-L']
+            urls += [t[2:] for t in tokens if t.startswith('-L') and len(t) > 2]
+            urls = [u for u in urls if re.match(r'^socks(?:4|5|5h)?://', u, re.I)]
             gost_modes = set()
             if any("@" not in url.split("/", 3)[2] for url in urls):
                 auth_modes.add("no_auth")
@@ -4246,6 +4258,18 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
                 "configured" if "configured" in gost_modes else "unknown"
             )
         matches[-1]["auth_state"] = process_auth_state
+        if matched == 'gost':
+            ports = []
+            for url in urls:
+                try:
+                    if urlparse(url).port:
+                        ports.append(urlparse(url).port)
+                except ValueError:
+                    pass
+            if urls:
+                matches[-1]['allowed_ports'] = ports
+            matches[-1]['listener_declared'] = bool(urls)
+            matches[-1]['action_safe'] = False  # Multiprotocol engine; require config proof.
     if "no_auth" in auth_modes:
         auth_mode = "no_auth"
     elif "weak_password" in auth_modes:
@@ -4265,13 +4289,14 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
 
 
 def _collect_socks_config_evidence(
-    runtime: str, name: str, project: str, enabled: bool
+    runtime: str, name: str, project: str, enabled: bool, process_output: str = ''
 ) -> Dict[str, object]:
     result: Dict[str, object] = {
         "detected": False,
         "config_files": [],
         "auth_mode": "unknown",
         "risk_reasons": [],
+        "json_processes": [],
     }
     if not enabled:
         return result
@@ -4286,9 +4311,8 @@ def _collect_socks_config_evidence(
         path.strip()
         for path in raw_paths.split(",")
         if re.fullmatch(r"/[A-Za-z0-9_./-]+", path.strip())
+        and path.strip().endswith(('.conf', '.cfg'))
     ][:30]
-    if not paths:
-        return result
     quoted_paths = " ".join(shlex.quote(path) for path in paths)
     socks_pattern = r"socks5|socksmethod|(^|[[:space:]])socks([[:space:]]|$)|['\"]?(protocol|type)['\"]?[[:space:]]*:[[:space:]]*['\"]?socks"
     # `clientmethod: none` in Dante controls only outbound client behaviour;
@@ -4304,7 +4328,7 @@ def _collect_socks_config_evidence(
         f"head -c 262144 \"$p\" 2>/dev/null | grep -Eiq {shlex.quote(weak_pattern)} && echo \"@@WEAK:$p\"; "
         f"head -c 262144 \"$p\" 2>/dev/null | grep -Eiq {shlex.quote(auth_pattern)} && echo \"@@AUTH:$p\"; done"
     )
-    output = run(_runtime_exec_cmd(runtime, name, command, project))
+    output = run(_runtime_exec_cmd(runtime, name, command, project)) if paths else ''
     files = set()
     modes = set()
     reasons = set()
@@ -4324,6 +4348,21 @@ def _collect_socks_config_evidence(
             reasons.add("SOCKS 配置命中短密码或常见弱密码")
         elif marker == "@@AUTH":
             modes.add("configured")
+    json_processes = []
+    for proc in socks_detector.process_configs(process_output):
+        documents = []
+        for path in proc['paths']:
+            # Raw JSON is local-only and bounded; it never enters a report/log.
+            raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project))
+            document = socks_detector.parse_config(raw, proc['process'])
+            documents.append(document)
+            if document['endpoints']:
+                files.add(path)
+        parsed = bool(documents) and all(d['parsed'] for d in documents)
+        endpoints = [e for d in documents for e in d['endpoints']]
+        json_processes.append({**{k: proc[k] for k in ('pid', 'process')}, 'parsed': parsed,
+                               'endpoints': endpoints,
+                               'single_purpose': parsed and len(documents) == 1 and documents[0]['single_purpose']})
     result.update(
         {
             "detected": bool(files),
@@ -4336,9 +4375,109 @@ def _collect_socks_config_evidence(
             if "configured" in modes
             else "unknown",
             "risk_reasons": sorted(reasons),
+            "json_processes": json_processes,
         }
     )
     return result
+
+
+def _probe_socks_listener(init_pid, key, listener):
+    """Bounded greeting in the container netns. Never CONNECT or submit credentials."""
+    now = time.monotonic()
+    if init_pid <= 1 or not shutil.which('nsenter'):
+        return {'mode': 'unknown', 'reason': 'network_namespace_unavailable'}
+    host, port = socks_detector.endpoint(listener.get('local'))
+    try:
+        ipaddress.ip_address(host if host not in {'*', ''} else '0.0.0.0')
+    except ValueError:
+        return {'mode': 'unknown', 'reason': 'invalid_listener_address'}
+    if not 0 < port < 65536:
+        return {'mode': 'unknown', 'reason': 'invalid_listener_port'}
+    host = '::1' if host == '::' else '127.0.0.1' if host in {'*', '0.0.0.0'} else host
+    cache_key = (*key, init_pid, listener.get('pid'), host, port)
+    with _socks_probe_lock:
+        previous = _socks_probe_cache.get(cache_key, {})
+        if previous.get('inflight'):
+            return {'mode': 'unknown', 'reason': 'probe_in_progress'}
+        if now < previous.get('next_at', 0):
+            return {'mode': 'unknown', 'reason': 'probe_cooldown', 'retry_after_seconds': int(previous['next_at'] - now)}
+        if len(_socks_probe_cache) >= 512 and cache_key not in _socks_probe_cache:
+            _socks_probe_cache.pop(next(iter(_socks_probe_cache)))
+        _socks_probe_cache[cache_key] = {**previous, 'inflight': True}
+    mode = 'unknown'
+    try:
+        response = subprocess.run(['nsenter', '-t', str(init_pid), '-n', '--', sys.executable,
+            '-c', socks_detector.PROBE_CODE, json.dumps([host, port])],
+            capture_output=True, text=True, timeout=3, check=False)
+        if response.returncode == 0 and response.stdout.strip() in {'no_auth', 'auth_required'}:
+            mode = response.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    failures = previous.get('failures', 0) + 1 if mode == 'unknown' else 0
+    with _socks_probe_lock:
+        _socks_probe_cache[cache_key] = {'failures': failures, 'next_at': now + (1800 if failures >= 3 else 30 if failures else 0)}
+    return {'mode': mode, 'reason': 'greeting_only' if mode != 'unknown' else 'timeout_rejected_or_not_socks'}
+
+
+def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, project, init_pid):
+    """Port/PID scoped evidence; loopback-only dependencies are not auto-stopped."""
+    matches = socks.get('process_matches', [])
+    endpoints = socks.get('inbound_endpoints', [])
+    selected, refined, probes = [], [], []
+    deadline, probe_count = time.monotonic() + 4, 0
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        owned = [l for l in listeners if l.get('pid') == match.get('pid') and l.get('proto') == 'tcp']
+        for listener in owned:
+            entries = [e for e in endpoints if e['pid'] == match.get('pid') and e['port'] == listener.get('port')]
+            if match.get('config_scoped') and not entries:
+                continue
+            if 'allowed_ports' in match and listener.get('port') not in match['allowed_ports']:
+                continue
+            # A config bound to loopback cannot authenticate a different wildcard socket.
+            actual_host, _ = socks_detector.endpoint(listener.get('local'))
+            entries = [e for e in entries if e['listen'] in {'*', '0.0.0.0', '::', ''}
+                or e['listen'] == actual_host
+                or (socks_detector.loopback(e['listen']) and socks_detector.loopback(actual_host))]
+            if match.get('config_scoped') and not entries:
+                continue
+            exposed = socks_detector.exposed(listener, forwards)
+            mode = entries[0]['auth_state'] if entries else match.get('auth_state', 'unknown')
+            if not entries and match.get('process') in {'sockd', 'danted', '3proxy'} and mode == 'configured':
+                mode = 'unknown'  # PAM/users marker proves a method, not password strength.
+            probe = {'mode': 'unknown', 'reason': 'internal_loopback_only'}
+            if exposed is not False:
+                if probe_count < 2 and time.monotonic() < deadline:
+                    probe = _probe_socks_listener(init_pid, (runtime, project, name), listener)
+                    probe_count += 1
+                else:
+                    probe = {'mode': 'unknown', 'reason': 'sample_probe_budget'}
+                if probe['mode'] == 'no_auth':
+                    mode = 'no_auth'
+                elif probe['mode'] == 'auth_required':
+                    mode = mode if mode in {'configured', 'weak_password'} else 'unknown'
+                    if mode == 'unknown': probe['reason'] = 'password_strength_unverified'
+                else:
+                    mode = 'unknown'  # Config alone is not proof about a live endpoint.
+            # Unparsed configurable listeners are candidates, not SOCKS until a greeting proves it.
+            if not entries and match.get('process') in socks_detector.FAMILIES and probe['mode'] == 'unknown':
+                if not match.get('listener_declared'):
+                    continue
+            safe = (entries[0]['action_safe'] if entries else match.get('action_safe', match.get('process') in _SOCKS_DIRECT_NAMES))
+            selected.append({**listener, 'auth_state': mode, 'public_exposure': exposed,
+                             'action_safe': bool(safe), 'verification': probe['reason']})
+            refined.append({**match, 'auth_state': mode,
+                            'action_safe': bool(safe and exposed is True and probe['mode'] != 'unknown'),
+                            'public_exposure': exposed})
+            probes.append({'pid': listener.get('pid'), 'port': listener.get('port'), **probe})
+    modes = {l['auth_state'] for l in selected if l['public_exposure'] is not False}
+    socks.update(detected=bool(selected), service_listeners=selected,
+        process_matches=refined, listener_scope_verified=True,
+        public_exposure=any(l['public_exposure'] is True for l in selected),
+        internal_only=bool(selected) and all(l['public_exposure'] is False for l in selected),
+        auth_mode=next((m for m in ('no_auth', 'weak_password', 'unknown', 'configured') if m in modes), 'unknown'),
+        listening_ports=sorted({l['port'] for l in selected}), auth_verification=probes)
 
 
 def collect_panel_pairing_indicators(
@@ -4373,7 +4512,7 @@ def collect_panel_pairing_indicators(
     combined_identity = f"{name} {image}".lower()
     socks_process = _socks_process_evidence(process_output, combined_identity)
     socks_config = _collect_socks_config_evidence(
-        runtime, name, project, bool(socks_process.get("candidate_found"))
+        runtime, name, project, bool(socks_process.get("candidate_found")), process_output
     )
     socks_auth_modes = {str(socks_process.get("auth_mode") or "unknown"), str(socks_config.get("auth_mode") or "unknown")}
     socks_auth_mode = (
@@ -4395,6 +4534,11 @@ def collect_panel_pairing_indicators(
         for item in socks_process.get("candidate_matches", []):
             if not isinstance(item, dict):
                 continue
+            if item.get('process') not in {'sockd', 'danted', '3proxy'}:
+                # A plaintext daemon config says nothing about another engine.
+                config_confirmed_matches.extend(m for m in socks_process_matches
+                    if m.get('pid') == item.get('pid'))
+                continue
             identity = (int(item.get("pid") or 0), str(item.get("process") or ""))
             auth_state = detected_auth_states.get(identity, "unknown")
             config_confirmed_matches.append(
@@ -4406,11 +4550,31 @@ def collect_panel_pairing_indicators(
                 }
             )
         socks_process_matches = config_confirmed_matches
+    # Structured, process-owned JSON overrides global text matches. Do not
+    # assign a Dante file or another engine's auth settings to every candidate.
+    json_processes = socks_config.get('json_processes', [])
+    structured_pids = {p['pid'] for p in json_processes}
+    socks_process_matches = [m for m in socks_process_matches if m['pid'] not in structured_pids]
+    endpoints = []
+    for proc in json_processes:
+        for entry in proc['endpoints']:
+            endpoints.append({**entry, 'pid': proc['pid'], 'process': proc['process'],
+                              'action_safe': proc['single_purpose']})
+        if proc['endpoints'] or not proc['parsed']:
+            socks_process_matches.append({'pid': proc['pid'], 'process': proc['process'],
+                'auth_state': 'unknown', 'action_safe': proc['single_purpose'],
+                'config_scoped': proc['parsed']})
+    if json_processes:
+        modes = {e['auth_state'] for e in endpoints} | {
+            m.get('auth_state', 'unknown') for m in socks_process_matches if m['pid'] not in structured_pids}
+        socks_auth_mode = next((m for m in ('no_auth', 'weak_password', 'unknown', 'configured') if m in modes), 'unknown')
     result["socks_proxy"] = {
-        "detected": bool(socks_process.get("detected") or socks_config.get("detected")),
+        "detected": bool(socks_process_matches),
         "process_matches": socks_process_matches,
         "config_files": socks_config.get("config_files", []),
         "auth_mode": socks_auth_mode,
+        "inbound_endpoints": endpoints,
+        "direction_verified": any(p['parsed'] for p in json_processes),
         "risk_reasons": sorted(
             set(socks_process.get("risk_reasons", [])) | set(socks_config.get("risk_reasons", []))
         ),
@@ -5457,12 +5621,8 @@ def collect_container(
         matches = indicators.get('process_matches', [])
         pids = {int(item.get('pid') or 0) for item in matches if isinstance(item,dict)}
         indicators['service_listeners'] = [item for item in owned_listeners if item.get('pid') in pids]
-    socks_proxy['listening_ports'] = sorted({item['port'] for item in socks_proxy.get('service_listeners',[])})
-    socks_proxy['public_exposure'] = any(
-        str(item.get('local','')).startswith(('0.0.0.0:','[::]:','*:'))
-        or any(_parse_exposure_endpoint(str(exposure.get('target') or ''))[2] == item['port']
-               for exposure in network_exposure if isinstance(exposure,dict))
-        for item in socks_proxy.get('service_listeners',[]))
+    _refine_socks_listener_evidence(socks_proxy, owned_listeners, network_exposure,
+                                  runtime, name, project, pid)
     socket_security.update(
         {
             "net_rx_pps": net_rx_pps,
@@ -6405,6 +6565,10 @@ def enforce_socks_auth_policy(
     socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
     auth_mode = str(socks_proxy.get("auth_mode") or "unknown")
     auto_enabled = os.getenv("SECURITY_AUTO_REMEDIATE_SOCKS", "true").lower() not in ("0", "false", "no", "off")
+    if socks_proxy.get('listener_scope_verified') and socks_proxy.get('internal_only'):
+        result = {'active': False, 'attempted': False, 'reason': 'internal_loopback_dependency'}
+        socks_proxy['auth_enforcement'] = result
+        return result
     if policy is None and auto_enabled and str(container.get("runtime")) in ("incus", "podman"):
         policy = {"process_names": list(_SOCKS_PROCESS_NAMES)}
     if policy is None:
@@ -6432,10 +6596,12 @@ def enforce_socks_auth_policy(
         if isinstance(item, dict)
         and str(item.get("process") or "").strip().lower() in _SOCKS_PROCESS_NAMES
         and str(item.get("auth_state") or auth_mode) in ("no_auth", "weak_password")
+        and item.get('action_safe', True)
     }
     approved_names = sorted(set(policy.get("process_names", [])) & current_names)
     if not approved_names:
-        result = {"active": True, "attempted": False, "reason": "process_identity_changed"}
+        result = {"active": True, "attempted": False, "reason": "mixed_or_unverified_process_scope"
+                  if socks_proxy.get('listener_scope_verified') else "process_identity_changed"}
         socks_proxy["auth_enforcement"] = result
         return result
     process_pids = [
@@ -6444,6 +6610,7 @@ def enforce_socks_auth_policy(
         if isinstance(item, dict)
         and str(item.get("process") or "").strip().lower() in approved_names
         and str(item.get("auth_state") or auth_mode) in ("no_auth", "weak_password")
+        and item.get('action_safe', True)
         and int(item.get("pid") or 0) > 1
     ]
     ok, message = stop_unauthenticated_socks(
