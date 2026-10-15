@@ -20,6 +20,13 @@ export interface ContainerItem {
   agent_version?: string;
   cpu_effective_cpus?: number;
   container_disk_rw_bytes?: number;
+  disk_root_used_percent?: number | null;
+  disk_used_percent?: number;
+  disk_root_total_bytes?: number;
+  disk_root_avail_bytes?: number;
+  disk_data_total_bytes?: number;
+  disk_data_avail_bytes?: number;
+  disk_data_mountpoint?: string;
   container_fs_root_total_bytes?: number;
   container_fs_root_avail_bytes?: number;
   top_cpu_process_command?: string;

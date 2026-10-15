@@ -462,6 +462,8 @@ docker rm -f narwhal-monitor-client >/dev/null 2>&1 || true
 mkdir -p "$CLIENT_APP_DIR"
 cp "$ROOT_DIR/client/agent.py" "$CLIENT_APP_DIR/agent.py"
 cp "$ROOT_DIR/client/operations.py" "$CLIENT_APP_DIR/operations.py"
+cp "$ROOT_DIR/client/disk_cleanup.py" "$CLIENT_APP_DIR/disk_cleanup.py"
+cp "$ROOT_DIR/client/disk_cleanup_worker.py" "$CLIENT_APP_DIR/disk_cleanup_worker.py"
 cp "$ROOT_DIR/client/security_banner.py" "$CLIENT_APP_DIR/security_banner.py"
 for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
   cp "$ROOT_DIR/client/$module.py" "$CLIENT_APP_DIR/$module.py"

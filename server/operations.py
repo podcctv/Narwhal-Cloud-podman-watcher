@@ -10,6 +10,10 @@ import sqlite3
 import statistics
 import threading
 import time
+try:
+    from server import disk_cleanup
+except ImportError:
+    import disk_cleanup
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -47,6 +51,8 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS ops_audit(id INTEGER PRIMARY KEY,ts INTEGER,username TEXT,method TEXT,path TEXT,status INTEGER);
     CREATE TABLE IF NOT EXISTS security_action_receipts(action_id INTEGER PRIMARY KEY,payload TEXT,updated_at INTEGER);
     CREATE TABLE IF NOT EXISTS ops_settings(key TEXT PRIMARY KEY,payload TEXT);
+    CREATE TABLE IF NOT EXISTS ops_disk_cleanup_policies(node TEXT PRIMARY KEY,host_id TEXT,payload TEXT);
+    CREATE TABLE IF NOT EXISTS ops_disk_cleanup_runs(node TEXT,run_id TEXT,host_id TEXT,ts INTEGER,payload TEXT,PRIMARY KEY(node,run_id));
     """)
 
 
@@ -150,6 +156,9 @@ def ingest(conn, host_id, node_id, ts, data):
     if previous and ts <= previous[0]:
         return []  # Old/replayed report must not mutate ledger/baseline/rechecks.
     operations = data.get("operations") if isinstance(data.get("operations"), dict) else {}
+    maintenance=operations.get('disk_cleanup',{})
+    if isinstance(maintenance,dict):
+        for run in maintenance.get('runs',[])[:20]:disk_cleanup.record(conn,host_id,node_id,run)
     conn.execute("INSERT INTO ops_hosts VALUES(?,?,?,?) ON CONFLICT(node) DO UPDATE SET host_id=excluded.host_id,ts=excluded.ts,payload=excluded.payload", (node, host_id, ts, json.dumps(operations)))
     interval = max(60, min(3600, number(data.get("client_config", {}).get("report_interval", 300))))
     alerts = data.get("security", {}).get("alerts", [])
@@ -378,16 +387,18 @@ def purge_host(conn,host_id):
     for table in ("ops_meter","ops_rollups","ops_policies","ops_rechecks","ops_incidents"):
         conn.execute(f"DELETE FROM {table} WHERE substr(entity,1,?)=?",(len(prefix),prefix))
     conn.execute("DELETE FROM ops_hosts WHERE node=?",(node,))
+    conn.execute('DELETE FROM ops_disk_cleanup_policies WHERE node=?',(node,))
+    conn.execute('DELETE FROM ops_disk_cleanup_runs WHERE node=?',(node,))
     conn.execute("DELETE FROM ops_service_results WHERE service_id IN (SELECT id FROM ops_services WHERE host_id=?)",(host_id,))
     conn.execute("DELETE FROM ops_services WHERE host_id=?",(host_id,))
     conn.execute("DELETE FROM ops_upgrade_nodes WHERE host_id=?",(host_id,))
 
 
 def maintain(conn, now):
-    for table, column, days in (("ops_rollups", "bucket", 400), ("ops_events", "ts", 90), ("ops_incidents", "last_seen", 90), ("ops_audit", "ts", 180), ("ops_rechecks", "ts", 90)):
+    for table, column, days in (("ops_rollups", "bucket", 400), ("ops_events", "ts", 90), ("ops_incidents", "last_seen", 90), ("ops_audit", "ts", 180), ("ops_rechecks", "ts", 90),('ops_disk_cleanup_runs','ts',30)):
         conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {column}<? LIMIT 5000)", (now-days*86400,))
     conn.execute("DELETE FROM ops_rollups WHERE rowid IN (SELECT rowid FROM ops_rollups WHERE period='hour' AND bucket<? LIMIT 5000)", (now-30*86400,))
-    for table, cap in (("ops_rollups", 200000), ("ops_events", 20000), ("ops_incidents", 5000), ("ops_audit", 20000)):
+    for table, cap in (("ops_rollups", 200000), ("ops_events", 20000), ("ops_incidents", 5000), ("ops_audit", 20000),('ops_disk_cleanup_runs',20000)):
         conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} ORDER BY rowid DESC LIMIT 5000 OFFSET ?)", (cap,))
     conn.execute("UPDATE ops_rechecks SET status='unverified',message='主机未上报，无法确认处置效果' WHERE status IN ('awaiting_report','retrying') AND ts<?", (now-3600,))
     conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE status='dispatched' AND action_id IN (SELECT id FROM security_actions WHERE status='failed' OR created_at<?)", (now-1800,))

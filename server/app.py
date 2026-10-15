@@ -126,10 +126,11 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup
 except ImportError:
     import operations
     import operations_api
+    import disk_cleanup
     import investigation
     import buyer_notifications
     import dashboard_auth
@@ -2247,7 +2248,9 @@ def latest(include_stale: bool = False) -> JSONResponse:
     host_disk_map: Dict[str, Dict[str, Any]] = {}
     for h in host_rows:
         payload = json.loads(h["payload_json"]) if h["payload_json"] else {}
-        host_disk_map[h["host_id"]] = payload.get("disk", {})
+        candidate_disk=payload.get('disk',{})
+        if isinstance(candidate_disk,dict) and candidate_disk.get('root_total_bytes'):
+            host_disk_map[h['host_id']]=candidate_disk
 
     now = int(time.time())
     out = []
@@ -2334,6 +2337,7 @@ def latest(include_stale: bool = False) -> JSONResponse:
             "disk_used_percent": r["disk_used_percent"],
             "disk_root_device": host_disk.get("root_device") or disk.get("root_device", ""),
             "disk_root_total_bytes": host_disk.get("root_total_bytes") or disk.get("root_total_bytes", 0),
+            "disk_root_used_percent": host_disk.get('root_used_percent',disk.get('root_used_percent')),
             "disk_root_avail_bytes": host_disk.get("root_avail_bytes") or disk.get("root_avail_bytes", 0),
             "disk_data_total_bytes": host_disk.get("data_total_bytes") or disk.get("data_total_bytes", 0),
             "disk_data_avail_bytes": host_disk.get("data_avail_bytes") or disk.get("data_avail_bytes", 0),
@@ -3442,7 +3446,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback"} or row['action_type'] == 'release_network_quarantine') and stored.get("expected_node_id") != node_id:
+            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute'} or row['action_type'] == 'release_network_quarantine') and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -3456,6 +3460,7 @@ async def poll_security_actions(
             actions.append(action)
         conn.commit()
         ops_services = [{"id": r["id"], **operations.loads(r["payload"])} for r in conn.execute("SELECT id,payload FROM ops_services WHERE host_id=? AND enabled=1 LIMIT 20", (host_id,)).fetchall()]
+        cleanup_policy=disk_cleanup.node_config(conn,node_id)
         try:
             conn.execute("BEGIN IMMEDIATE")
             tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
@@ -3466,7 +3471,7 @@ async def poll_security_actions(
             tcp_probe = {"job": None, "cancelled": []}
     finally:
         conn.close()
-    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services}, "tcp_probe": tcp_probe}, x_timestamp)
+    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy}, "tcp_probe": tcp_probe}, x_timestamp)
 
 
 @app.post("/api/v1/actions/result")
@@ -3499,7 +3504,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine"} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute'} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"
@@ -3509,6 +3514,8 @@ async def security_action_result(
             status = "failed"
             message = f"no matching process, service or config was removed; {message}"[:2000]
         if row["status"] not in ("succeeded", "failed"):
+            if row['action_type'] in disk_cleanup.TYPES:
+                disk_cleanup.record(conn,host_id,node_id,payload.get('cleanup_run'))
             conn.execute(
                 "UPDATE security_actions SET status=?, result_message=?, updated_at=? WHERE id=?",
                 (status, message, now, action_id),
@@ -3543,6 +3550,7 @@ async def security_action_result(
 
 
 operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup_old_reports, lambda: APP_VERSION, lambda: DASHBOARD_USERNAME)
+disk_cleanup.attach(app,db)
 commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD))
 tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)

@@ -20,11 +20,12 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe
+    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup
 except ImportError:
     import operations as node_operations
     import security_banner
     import tcp_probe
+    import disk_cleanup
 
 try:
     import maxminddb
@@ -5979,6 +5980,7 @@ def collect_disk_alert() -> Dict:
         "root_device": str(root_usage["device"]),
         "root_total_bytes": int(root_usage["total_bytes"]),
         "root_avail_bytes": int(root_usage["avail_bytes"]),
+        "root_used_percent": float(root_usage['used_percent']),
         "data_requested_path": requested_main_path,
         "data_mountpoint": str(main_usage["mountpoint"] or requested_main_path),
         "data_total_bytes": int(main_usage["total_bytes"]),
@@ -7027,6 +7029,9 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
     _schedule_abuse_guard(server, secret, host_id, node_id)
     response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
     node_operations.configure(response.get("operations"))
+    if disk_cleanup.available():
+        try:disk_cleanup.controller().configure(response.get('operations',{}).get('disk_cleanup'),node_id)
+        except (OSError,ValueError):print('disk cleanup state unavailable; cleanup disabled')
     try:
         tcp_probe.handle(response.get("tcp_probe"), host_id, node_id,
                          lambda path, payload: signed_post_json(server, secret, path, payload))
@@ -7049,6 +7054,9 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
             params = action.get("params", {})
             ok = bool(node_id) and params.get("expected_node_id") == node_id
             message = json.dumps(node_operations.discover_logs(_parse_access_log_line), ensure_ascii=False) if ok else "host action node identity mismatch"
+        elif action_type in {'disk_cleanup_scan','disk_cleanup_execute'}:
+            try:ok,message=disk_cleanup.controller().action(action,node_id,_abuse_targets,_run_action_command)
+            except Exception:ok,message=False,'cleanup safety checks unavailable'
         elif action_type in {"managed_upgrade", "managed_rollback"}:
             ok, message = node_operations.schedule_upgrade(action, node_id)
         elif action_type == "update_host_config":
@@ -7065,7 +7073,7 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
                 "action_id": action_id,
                 "host_id": host_id,
                 "node_id": node_id,
-                "status": "running" if ok and action_type in {"self_uninstall", "managed_upgrade", "managed_rollback"} else ("succeeded" if ok else "failed"),
+                "status": "running" if ok and action_type in {"self_uninstall", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute'} else ("succeeded" if ok else "failed"),
                 "message": message,
                 "items": _cleanup_items(message),
             },
@@ -7074,6 +7082,11 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
         changed = changed or ok
         if ok and action_type == "update_host_config":
             raise SystemExit(0)
+    if disk_cleanup.available():
+        try:
+            disk_cleanup.controller().tick(_abuse_targets,_run_action_command,
+                lambda aid,status,message,run:signed_post_json(server,secret,'/api/v1/actions/result',{'host_id':host_id,'node_id':node_id,'action_id':aid,'status':status,'message':message,'cleanup_run':run}))
+        except Exception:print('disk cleanup worker unavailable; normal monitoring continues')
     return changed
 
 

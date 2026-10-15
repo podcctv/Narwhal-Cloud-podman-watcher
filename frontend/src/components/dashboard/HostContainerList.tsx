@@ -26,6 +26,7 @@ import { api, fmtBytes, fmtMbps } from '../../api/client';
 import { DashboardToolbar, ViewMode, FilterState } from './DashboardToolbar';
 import { ContainerCardCompact } from './ContainerCardCompact';
 import { ContainerTableView } from './ContainerTableView';
+import { HostDiskPressure, hostDiskPressure } from './HostDiskPressure';
 
 interface HostContainerListProps {
   containers: ContainerItem[];
@@ -428,6 +429,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
           // Status indicator color for host card left border
           let hostStatusAccent = 'border-l-emerald-500';
+          if (hostDiskPressure(hostContainers)) hostStatusAccent = 'border-l-amber-500';
           if (hostRiskyCount > 0) {
             hostStatusAccent = 'border-l-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.06)]';
           }
@@ -528,6 +530,8 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                   />
                 </div>
               </button>
+
+              <HostDiskPressure items={hostContainers} />
 
               {/* Sub-container Canvas Area */}
               {isExpanded && (

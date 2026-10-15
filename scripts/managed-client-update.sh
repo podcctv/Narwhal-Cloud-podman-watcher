@@ -22,7 +22,7 @@ write_result() {
   mv -f "$base/managed-update-result.json.tmp" "$base/managed-update-result.json"
 }
 restore() {
-  for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+  for module in abuse_detection abuse_collection abuse_guard network_quarantine disk_cleanup disk_cleanup_worker; do
     if [[ -f "$snapshot/$module.py" ]]; then
       install -m 0644 "$snapshot/$module.py" "$app_dir/$module.py" || return 1
     fi
@@ -87,14 +87,14 @@ cleanup_stage() {
 }
 trap cleanup_stage EXIT
 git -C "$repo" archive "$revision" | tar -x -C "$stage"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine disk_cleanup disk_cleanup_worker; do
   "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
 done
-"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py"
+"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py"
 mkdir -p "$snapshot"
 chmod 0700 "$snapshot"
 install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine disk_cleanup disk_cleanup_worker; do
   [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
 done
 [[ ! -f "$app_dir/operations.py" ]] || install -m 0644 "$app_dir/operations.py" "$snapshot/operations.py"
