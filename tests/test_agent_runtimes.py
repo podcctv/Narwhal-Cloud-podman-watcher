@@ -1756,10 +1756,10 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertIn("https://t.me/flanker_channel", rendered)
         self.assertNotIn("COMPROMISED", rendered)
         self.assertNotIn("\033", rendered)  # Plain text by default.
-        self.assertIn("风险存在", rendered)
+        self.assertIn("尚未确认恢复", rendered)
         self.assertNotIn("test-container", rendered)
-        self.assertIn("cc_attack", rendered)
-        self.assertIn("socks_weak_auth", rendered)
+        self.assertIn("HTTP 访问异常", rendered)
+        self.assertIn("代理认证风险", rendered)
 
     def test_build_motd_content_and_cleanup(self):
         original = "Welcome to Debian GNU/Linux 12\n\nSystem info here.\n"
@@ -1800,7 +1800,7 @@ class SecurityTelemetryTests(unittest.TestCase):
             alerts = [{"type": "socks_weak_auth", "severity": "critical", "message": "No auth", "socks_auth_enforcement": {"succeeded": True}}]
             with mock.patch.object(banner, "write_proc", side_effect=write), mock.patch.object(agent, "_checked_banner_exec", return_value=(True, "printmotd yes")):
                 self.assertTrue(agent.update_container_motd_alerts(c, alerts))
-                self.assertIn("已执行，待复查", content[0])
+                self.assertIn("已执行处理，等待复查确认", content[0])
                 self.assertNotIn("COMPROMISED", content[0])
                 self.assertIn("Welcome to Ubuntu 24.04 LTS", content[0])
                 now = time.time()

@@ -35,7 +35,7 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
   const data = useMemo(() => [...[...new Set(nodes.map(n => n.province))].map(p => {
     const { rows, completed, good, value, filteredOut } = provinceSummary(nodes, p, { province, carrier, status });
     return { name: fullName(p), short: p, value, completed, total: rows.length, good, filteredOut,
-      label: { show: p === '台湾', formatter: p, color: '#e2e8f0', fontSize: 11, position: 'right', distance: 5 },
+      label: { show: false },
       itemStyle: { areaColor: filteredOut ? '#172033' : value === null ? (completed === rows.length && completed ? '#7f1d1d' : '#1e293b') : latencyColor(value),
         borderColor: province === p ? '#f8fafc' : '#08101f', borderWidth: province === p ? 2 : 1 },
       carriers: Object.entries(carriers).filter(([key]) => !carrier || carrier === key).map(([key, label]) => {
@@ -46,7 +46,7 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
   }), ...['台湾省', '香港特别行政区', '澳门特别行政区'].filter(name => !nodes.some(n => fullName(n.province) === name)).map(name => ({
     name, short: '', value: null, completed: 0, total: 0, good: 0, carriers: [], filteredOut: false,
     itemStyle: { areaColor: '#475569', borderColor: '#a8b7cb', borderWidth: 1 },
-    label: { show: name === '台湾省', formatter: name === '台湾省' ? '台湾' : name, color: '#e2e8f0', fontSize: 11, position: 'right', distance: 5 },
+    label: { show: false },
   }))], [nodes, province, carrier, status]);
   useEffect(() => {
     if (!el.current) return;
@@ -68,8 +68,6 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
         // layoutCenter/layoutSize retain the geographic aspect ratio. Setting
         // all four box edges independently stretches the map on wide panels.
         layoutCenter: ['50%', '50%'], layoutSize: '96%',
-        labelLayout: (p: { text: string; rect: { x: number; y: number; width: number; height: number } }) =>
-          p.text === '台湾' ? { x: p.rect.x + p.rect.width + 8, y: p.rect.y + p.rect.height / 2, align: 'left', verticalAlign: 'middle' } : {},
         label: { show: false }, itemStyle: { areaColor: '#172033', borderColor: '#08101f', borderWidth: 1 },
         emphasis: { label: { show: false }, itemStyle: { borderColor: '#e2e8f0', borderWidth: 2 } }, data }] }, { notMerge: true });
   }, [data, mapName]);

@@ -35,7 +35,7 @@ FONT = {
     'I': [' ___ ', '|_ _|', ' | | ', ' | | ', '|___|'],
     'G': ['  ____ ', ' / ___|', '| |  _ ', '| |_| |', ' \\____|'],
 }
-LABELS = {"active": ("风险存在", "ACTIVE"), "awaiting_report": ("已执行，待复查", "AWAITING VERIFICATION"),
+LABELS = {"active": ("待检查，尚未确认恢复", "Needs review; recovery unconfirmed"), "awaiting_report": ("已执行处理，等待复查确认", "Action executed; awaiting verification"),
           "verified": ("已恢复", "RECOVERED"), "resolved": ("本轮未检出，待复查", "NOT OBSERVED; AWAITING VERIFICATION"),
           "recurring": ("风险复发 / 处置失败", "RECURRING / FAILED"), "unverified": ("证据不足，未确认恢复", "UNVERIFIED")}
 
@@ -74,13 +74,63 @@ def beijing_time(epoch=None, legacy=""):
 
 
 def customer_metrics(entry, english=False):
-    """Keep numeric evidence without raw internal field names or duplicate values."""
-    numbers = set(re.findall(r'-?\d+(?:\.\d+)?', safe(entry.get('detail'))))
-    labels = {'value': ('观测值', 'Observed'), 'threshold': ('参考阈值', 'Threshold'),
-              'duration_seconds': ('持续秒数', 'Duration (seconds)')}
-    return '；'.join(labels[field][int(english)] + '：' + value
-                    for field, value in re.findall(r'(value|threshold|duration_seconds)=(-?\d+(?:\.\d+)?)', safe(entry.get('metrics')))
-                    if value not in numbers)
+    """Only meaningful typed measurements, not generic value/threshold counters."""
+    numbers = {f'{float(n):g}' for n in re.findall(r'-?\d+(?:\.\d+)?', safe(entry.get('detail')))}
+    values = {k: f'{float(v):g}' for k, v in re.findall(r'(value|threshold|duration_seconds)=(-?\d+(?:\.\d+)?)', safe(entry.get('metrics')))}
+    kind = entry.get('type')
+    unit = {'container_connection_count': ('连接', '条', 'Connections'), 'connections': ('连接', '条', 'Connections'),
+            'hy2_high_concurrency': ('UDP 并发', '条', 'UDP connections'), 'cpu': ('CPU', '%', 'CPU'),
+            'memory': ('内存占用', '%', 'Memory'), 'process_fanout_abuse': ('进程', '个', 'Processes'),
+            'inbound_ip_fanout': ('访问来源', '个 IP', 'Client IPs'), 'outbound_fanout': ('外部地址', '个 IP', 'External IPs')}.get(kind)
+    result = []
+    if unit and 'value' in values and values['value'] not in numbers:
+        result.append(f'{unit[2] if english else unit[0]} {values["value"]}{"" if english else " " + unit[1]}')
+        if 'threshold' in values:
+            result[-1] += f' (warning {values["threshold"]})' if english else f'（预警 {values["threshold"]} {unit[1]}）'
+    if 'duration_seconds' in values:
+        minutes = float(values['duration_seconds']) / 60
+        if minutes >= 0:
+            result.append(f'Duration {minutes:g} min' if english else f'持续 {minutes:g} 分钟')
+    return '；'.join(result)
+
+
+def customer_copy(entry, english=False):
+    """Version 2: a concrete cause and actionable advice, never a raw report."""
+    title, reason = safe(entry.get('title') or entry.get('type')), safe(entry.get('detail'))
+    if not english and (not entry.get('title') or title == entry.get('type')):
+        title = {'cc_attack':'HTTP 访问异常','socks_weak_auth':'代理认证风险','socks_auth_unknown':'代理认证待确认',
+                 'container_connection_count':'容器连接数偏高','connections':'容器连接数偏高',
+                 'cpu':'CPU 占用偏高','memory':'内存占用偏高','malicious_process':'可疑程序',
+                 'outbound_fanout':'外部连接偏多','port_scan':'疑似端口扫描'}.get(entry.get('type'), title or '运行异常')
+    details = entry.get('customer') if isinstance(entry.get('customer'), dict) else {}
+    extra = []
+    advice = 'Please check the related settings and background tasks.' if english else '请检查相关设置和后台任务；需要协助时请联系管理员。'
+    if entry.get('type') == 'unauthorized_panel_pairing':
+        def field(key, label):
+            items = details.get(key)
+            if isinstance(items, list):
+                return '、'.join(safe(v, 100) for v in items[:4] if isinstance(v, str))
+            match = re.search(label + r'\s+([^；;]+)', reason)
+            return safe(match[1], 200) if match else ''
+        domains, programs = field('domains', '未授权面板域名'), field('programs', '节点程序特征')
+        title = 'Suspected third-party panel integration' if english else '疑似第三方面板对接'
+        program = programs or ('A panel component' if english else '面板对接组件')
+        if domains:
+            reason = f'{program} points to a panel outside the allowed list.' if english else f'{program} 配置的面板地址不在允许列表内。'
+            extra.append(('Panel: ' if english else '面板：') + domains)
+        else:
+            reason = f'Panel integration indicators found for {program}; authorization needs review.' if english else f'检测到 {program} 面板对接特征，需确认是否经过允许。'
+        advice = 'Please confirm whether you configured this panel and contact the administrator to review it.' if english else '请确认该面板是否为你自行配置；如需继续使用，请联系管理员核实。'
+    elif entry.get('type') in {'container_connection_count', 'connections', 'hy2_high_concurrency'}:
+        advice = 'Please check shared proxy accounts, background tasks and unexpected connections.' if english else '请检查代理账号共享、后台任务及异常连接。'
+    elif entry.get('type') in {'socks_weak_auth', 'socks_auth_unknown'}:
+        advice = 'Please secure the proxy authentication or disable the unwanted service.' if english else '请检查代理认证，设置安全密码，或关闭不需要的代理。'
+    elif entry.get('type') in {'malicious_process', 'confirmed_abuse'}:
+        advice = 'Please review the program source and startup tasks; contact the administrator before restoring access.' if english else '请检查程序来源及启动任务；如已隔离，请联系管理员复核后恢复。'
+    elif entry.get('type') in {'cpu', 'memory', 'process_fanout_abuse'}:
+        advice = 'Please check resource usage and repeated background tasks.' if english else '请检查资源占用及重复运行的后台任务。'
+    reason = re.sub(r'\b(?:value|threshold|duration_seconds)=\S+', '', reason).strip(' /；;')
+    return title, reason, extra, advice
 
 
 def observed_epoch(entry):
@@ -163,7 +213,7 @@ def render(name, entries, target_hint="", version="dev", language=None, width=No
         status = 'Monitoring sample expired; current status unknown' if english else '监测数据已过期，当前状态未知'
         status_color = '33'
     elif outstanding:
-        status = 'Warnings / notices require attention' if english else '存在警告或通知，请检查以下内容'
+        status = f'{len(outstanding)} security notice(s) need review' if english else f'有 {len(outstanding)} 项安全提醒待确认'
         status_color = '31' if any(e.get('severity') == 'critical' and e.get('state', 'active') in {'active', 'recurring'} for e in outstanding) else '33'
     else:
         status = 'No anomalies currently detected' if english else '目前容器无异常'
@@ -176,10 +226,12 @@ def render(name, entries, target_hint="", version="dev", language=None, width=No
         state = e.get('state', 'active')
         code = '32' if state == 'verified' else '31' if state in {'active', 'recurring'} and e.get('severity') == 'critical' else '33'
         historical = state == 'verified'
+        title, reason, extra, advice = customer_copy(e, english)
         if historical:
             row('Historical alert · Recovered' if english else '历史告警 · 已恢复', code)
-            row(safe(e.get('title') or e.get('type')), code)
-            row(('At the time: ' if english else '当时情况：') + historical_detail(e), code)
+            row(title, code)
+            reason = historical_detail({'detail': reason})
+            row(('At the time: ' if english else '当时情况：') + reason, code)
             epoch = observed_epoch(e)
             if _dynamic_history_age and epoch is not None and epoch >= 0:
                 # A bounded metadata row, replaced by the login-time shell renderer.
@@ -187,9 +239,24 @@ def render(name, entries, target_hint="", version="dev", language=None, width=No
             else:
                 reference = (' (as of update)' if english else '（截至更新时间）') if sampled_at is not None and epoch is not None else ''
                 row(('Last occurred: ' if english else '最近发生：') + relative_age(epoch, sampled_at if sampled_at is not None else time.time(), english) + reference)
+            recovery_epoch = observed_epoch({'time_epoch': e.get('recovered_at_epoch')})
+            if recovery_epoch is not None and recovery_epoch >= 0:
+                if _dynamic_history_age:
+                    lines.append(f'@@AGE:{int(recovery_epoch)}:{int(english)}:1')
+                else:
+                    row(('Recovered: ' if english else '恢复于：') + relative_age(recovery_epoch, sampled_at if sampled_at is not None else time.time(), english))
+                first_epoch = observed_epoch({'time_epoch': e.get('first_seen_epoch')})
+                if first_epoch is not None and 0 <= first_epoch <= recovery_epoch and 'duration_seconds=' not in str(e.get('metrics', '')):
+                    minutes = (recovery_epoch - first_epoch) / 60
+                    row(f'Alert duration about {minutes:.0f} minutes' if english else f'告警持续约 {minutes:.0f} 分钟', code)
         else:
-            row(safe(e.get('title') or e.get('type')) + ' / ' + LABELS.get(state, LABELS['unverified'])[int(english)], code)
-            row(safe(e.get('detail')), code)
+            row('【' + title + '】', code)
+            row(('Cause: ' if english else '原因：') + reason, code)
+        for detail in extra:
+            row(detail, code)
+        if not historical:
+            row(('Handling: ' if english else '处理：') + LABELS.get(state, LABELS['unverified'])[int(english)], code)
+            row(('Advice: ' if english else '建议：') + advice, code)
         metrics = customer_metrics(e, english)
         if metrics:
             row((('Historical data: ' if english else '当时数据：') if historical else '') + metrics, code)
@@ -259,9 +326,9 @@ base64 -d <<'NARWHAL_CARD_DATA' | gzip -dc | LC_ALL=C awk -v key="@@$stale:$widt
         age_line(part,cells)
     }
     /^@@[01]:[0-9]+$/ { selected=($0 == key); next }
-    selected && /^@@AGE:[0-9]+:[01]$/ {
+    selected && /^@@AGE:[0-9]+:[01](:[01])?$/ {
         split($0,fields,":")
-        age_rows((fields[3]==1 ? "Last occurred: " : "最近发生：") age(fields[2],fields[3]))
+        age_rows((fields[4]==1 ? (fields[3]==1 ? "Recovered: " : "恢复于：") : (fields[3]==1 ? "Last occurred: " : "最近发生：")) age(fields[2],fields[3]))
         next
     }
     selected { if (!color) gsub(sprintf("%c",27) "\\\\[[0-9;]*m", ""); print }
@@ -421,7 +488,7 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     for a in relevant:
         e=next((e for e in entries if e.get("type")==a.get("type") and not e.get('historical') and e.get('state') != 'verified'),None)
         if e is None:
-            e={"type":a.get("type"),"event_id":"LOCAL-"+hashlib.sha256((key+str(a.get("type"))+str(int(now))).encode()).hexdigest()[:12]}
+            e={"type":a.get("type"),"first_seen_epoch":now,"event_id":"LOCAL-"+hashlib.sha256((key+str(a.get("type"))+str(int(now))).encode()).hexdigest()[:12]}
             entries.append(e)
         rem=a.get("automatic_remediation") or a.get("socks_auth_enforcement") or {}
         success=isinstance(rem,dict) and rem.get("succeeded") is True
@@ -437,6 +504,8 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
                  detail=safe(a.get("message")),severity=a.get("severity","warning"),clean_samples=0,
                  state="awaiting_report" if success else "recurring" if failed else "active",
                  action="Execution succeeded; awaiting verification" if success else "Execution failed" if failed else "Detected; not remediated")
+        e['customer'] = {key: [safe(v, 100) for v in a.get(field, [])[:4] if isinstance(v, str)]
+                         for key, field in (('domains', 'unapproved_domains'), ('programs', 'process_patterns')) if isinstance(a.get(field), list)}
     present={a.get("type") for a in relevant}
     for e in entries:
         if e.get('historical') or e.get('state') == 'verified':
@@ -506,6 +575,8 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
         except (OSError,ValueError):
             delivery.update(status="failed",error="MOTD 写入 / 校验失败；原内容或符号链接已保留")
     delivery["state_persisted"]=persisted
+    if shell_ok or delivery.get('status') in {'written','unchanged'}:
+        delivery['format_version'] = 2
     delivery["event_ids"]=[e["event_id"] for e in entries]
     # Read-only login mechanism check, not a promise that an SSH session displayed it.
     if key not in _checks or now-_checks[key][0]>3600:

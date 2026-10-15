@@ -27,7 +27,7 @@ export const TcpingPage: React.FC = () => {
   const showJob = useCallback(async (id: string, sourceId: string, generation: number) => {
     const result = await publicRequest<Job>('jobs/' + encodeURIComponent(id));
     if (epoch.current === generation && selectedRef.current === sourceId && result.source_id === sourceId) {
-      setJob(result); setScope(result.scope);
+      setJob(result);
     }
     return result;
   }, []);
@@ -41,7 +41,7 @@ export const TcpingPage: React.FC = () => {
         try {
           const resumed = await publicRequest<Job>('jobs/' + id);
           if (alive && list.some(s => s.id === resumed.source_id)) {
-            selectedRef.current = resumed.source_id; setSelected(resumed.source_id); setJob(resumed); setScope(resumed.scope); resumeDone.current = true;
+            selectedRef.current = resumed.source_id; setSelected(resumed.source_id); setJob(resumed); resumeDone.current = true;
           }
         } catch { if (alive) setNotice('原测试记录已过期或来源已撤回，请重新选择小鸡'); }
       }
@@ -73,7 +73,7 @@ export const TcpingPage: React.FC = () => {
   const source = sources.find(s => s.id === selected);
   const selectSource = (id: string) => {
     if (selectedRef.current === id) return;
-    epoch.current++; selectedRef.current = id; setSelected(id); setJob(null); setNotice(''); setError(''); setProvince(''); setCarrier(''); setStatus('');
+    epoch.current++; selectedRef.current = id; setSelected(id); setScope('province'); setJob(null); setNotice(''); setError(''); setProvince(''); setCarrier(''); setStatus('');
     window.history.replaceState(null, '', '/tcping');
     document.querySelector('.tcp-console')?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
   };
@@ -83,7 +83,7 @@ export const TcpingPage: React.FC = () => {
     try {
       const result = await publicRequest<{ job: Job; reused: string }>('jobs', { source_id: id, scope });
       if (epoch.current !== generation) return;
-      setJob(result.job); setScope(result.job.scope);
+      setJob(result.job);
       setNotice(result.reused === 'cache' ? '已复用 15 分钟内的完整结果，没有重复探测。' : result.reused === 'running' ? '该小鸡已有测试进行中，已合并到同一任务。' : '任务已提交，等待所选小鸡接收。');
       window.history.replaceState(null, '', '/tcping?job=' + result.job.id);
       await refreshSources();
@@ -107,6 +107,7 @@ export const TcpingPage: React.FC = () => {
     {loading && <div className="tcp-message" role="status"><Loader2 size={16} className="tcp-spin" />正在加载公开目录…</div>}
     {error && <div className="tcp-message tcp-error" role="alert">{error}<button onClick={() => window.location.reload()} aria-label="重新加载页面"><RotateCw size={16} /></button></div>}
     {notice && <div className="tcp-message" role="status">{notice}</div>}
+    {job && job.scope !== scope && <div className="tcp-message" role="status">当前展示{scopes[job.scope]}的测试记录；下次新测试按所选的{scopes[scope]}执行。</div>}
     {directory?.stale && <div className="tcp-message">上游目录暂未刷新，正在使用最近一次有效目录：{directory.updated_at}。</div>}
     {job && directory && job.generation !== directory.generation && <div className="tcp-message">当前为历史目录的测试记录。新增台湾目标将在下次新测试中采集；冷却期内不会强制重复探测。</div>}
     {!enabled && !loading && <div className="tcp-message">当前暂停新测试，已有公开结果仍可查看。</div>}

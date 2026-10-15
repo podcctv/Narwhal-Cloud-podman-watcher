@@ -26,7 +26,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
   const strokeDashoffset = circumference - progress * circumference;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/90 px-2.5 py-1.5 shadow-sm">
+    <div className="flex h-12 shrink-0 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/90 px-2 shadow-sm" aria-label="自动刷新控制">
       {/* Circular Countdown Indicator */}
       <div className="relative flex h-6 w-6 items-center justify-center">
         <svg className="h-6 w-6 -rotate-90 transform" viewBox="0 0 24 24">
@@ -62,7 +62,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
           {isPaused ? '自动刷新已暂停' : `自动轮询 (${Math.ceil(countdown)}s)`}
         </span>
         {lastRefreshTime && (
-          <span className="text-[10px] text-slate-500 tabular-nums">
+          <span className="text-[10px] text-slate-400 tabular-nums">
             {lastRefreshTime}
           </span>
         )}

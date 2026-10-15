@@ -78,9 +78,34 @@ class CardTests(unittest.TestCase):
             self.assertEqual(banner.beijing_time(0), '1970-01-01 08:00:00')
 
     def test_numeric_evidence_not_in_description_is_customer_friendly(self):
-        text = banner.render('c', [{'detail': '连接数量偏高', 'metrics': 'value=738 / threshold=500 / duration_seconds=720'}], width=100)
-        self.assertIn('观测值：738；参考阈值：500；持续秒数：720', text)
+        text = banner.render('c', [{'type':'container_connection_count','detail': '连接数量偏高', 'metrics': 'value=738 / threshold=500 / duration_seconds=720'}], width=100)
+        self.assertIn('连接 738 条（预警 500 条）；持续 12 分钟', text)
         self.assertNotIn('value=', text)
+        self.assertNotIn('观测值',text)
+        self.assertNotIn('参考阈值',text)
+
+    def test_version2_panel_keeps_cause_but_not_ports_files_or_binary_counters(self):
+        entry = {'type':'unauthorized_panel_pairing','state':'awaiting_report','severity':'critical',
+                 'detail':'未授权面板域名 xb.netech.eu.org；节点程序特征 xboard-node；配置文件 /etc/xboard-node/config.yml；容器内部监听端口 22,25,53,5355,65530',
+                 'metrics':'value=1 / threshold=1'}
+        text = banner.render('c',[entry],width=100)
+        for item in ('疑似第三方面板对接','原因：xboard-node 配置的面板地址不在允许列表内','面板：xb.netech.eu.org','处理：已执行处理，等待复查确认','建议：请确认该面板是否为你自行配置'):
+            self.assertIn(item,text)
+        for item in ('观测值','参考阈值','5355','65530','config.yml','风险存在'):
+            self.assertNotIn(item,text)
+        entry['detail']='节点程序特征 xboard-node；配置文件 /etc/test'
+        self.assertIn('需确认是否经过允许',banner.render('c',[entry],width=100))
+        self.assertNotIn('不在允许列表',banner.render('c',[entry],width=100))
+
+    def test_history_has_recovery_age_and_bounded_alarm_duration(self):
+        entry={'type':'connections','title':'连接数过高','state':'verified','historical':True,'first_seen_epoch':1000,
+               'time_epoch':1600,'recovered_at_epoch':2800,'detail':'当前连接 738 条'}
+        text=banner.render('c',[entry],sampled_at=6400,width=100)
+        self.assertIn('历史告警 · 已恢复',text)
+        self.assertIn('恢复于：1小时0分钟前',text)
+        self.assertIn('告警持续约 30 分钟',text)
+        self.assertNotIn('建议：',text)
+        self.assertIn('目前容器无异常',text)
 
     def test_first_clean_sample_is_not_claimed_as_recovered(self):
         text = banner.render('c', [{'state': 'resolved', 'title': '高连接数'}])
@@ -142,7 +167,7 @@ class CardTests(unittest.TestCase):
             self.assertEqual(len([e for e in entries if e['state'] == 'active']), 3)
             text = banner.render('c', entries, width=100)
             self.assertIn('历史告警 · 已恢复', text)
-            self.assertIn('风险存在', text)
+            self.assertIn('尚未确认恢复', text)
             script = banner.shell_renderer('c', entries, 'test', 1030)
             self.assertLess(len(script.encode()), 65536)
             banner.incidents.clear(); banner._loaded_path = ''
@@ -188,7 +213,7 @@ class CardTests(unittest.TestCase):
         self.assertIn('\x1b[31m', banner.render('c', entries, color=True))
         entries[0]['state'] = 'awaiting_report'
         self.assertNotIn('\x1b[31m', banner.render('c', entries, color=True))
-        self.assertIn('已执行，待复查', banner.render('c', entries))
+        self.assertIn('已执行处理，等待复查确认', banner.render('c', entries))
 
     def test_font_rows_are_placed_at_same_offset(self):
         text = banner.render('c', [], width=68, color=False)
@@ -223,6 +248,7 @@ class CardTests(unittest.TestCase):
                 banner.update(c, [{'type': 'memory', 'severity': 'warning', 'message': '92%', 'observation': {'value': 92, 'threshold': 90}}], set(), mock.Mock(return_value=(True,'')), [], 'test')
                 self.assertIn('value=92', install.call_args.args[1][0]['metrics'])
                 self.assertEqual(c['security']['motd_delivery']['shell_delivery'], 'installed')
+                self.assertEqual(c['security']['motd_delivery']['format_version'], 2)
             banner.incidents.clear()
 
 

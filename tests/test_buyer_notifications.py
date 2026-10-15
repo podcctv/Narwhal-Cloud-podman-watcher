@@ -259,7 +259,7 @@ class BannerTests(unittest.TestCase):
         entry={"state":"awaiting_report","severity":"warning","detail":"x","type":"SOCKS"}
         text=banner.render("name",[entry],version="1.7.1")
         self.assertNotIn("COMPROMISED",text); self.assertNotIn("CRITICAL",text)
-        self.assertIn("已执行，待复查",text); self.assertNotIn("1.7.1",text)
+        self.assertIn("已执行处理，等待复查确认",text); self.assertNotIn("1.7.1",text)
         with mock.patch.dict(os.environ,{"TERM":"xterm","NO_COLOR":""}):
             entry["state"]="verified"
             self.assertIn("\033[32m",banner.render("name",[entry],color=True))

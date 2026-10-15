@@ -29,6 +29,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     }
   }, [isOpen]);
 
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [query]);
+
   if (!isOpen) return null;
 
   const q = query.trim().toLowerCase();
@@ -51,10 +55,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { id: 'operations', label: '运维中心', hint: 'Operations', icon: Server, color: 'text-sky-300', run: () => onSelectTab('operations') },
   ] : [];
   const resultCount = quickActions.length + filteredContainers.length;
-
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [query]);
 
   const activate = (index: number) => {
     if (index < quickActions.length) {
@@ -84,7 +84,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+    <div role="dialog" aria-modal="true" aria-label="全局检索" className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
       <div className="relative w-full max-w-2xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl overflow-hidden">
         {/* Search Header */}
         <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-3">
@@ -92,6 +92,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           <input
             ref={inputRef}
             type="text"
+            aria-label="搜索节点或容器"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onInputKeyDown}
@@ -101,6 +102,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           <button
             type="button"
             onClick={onClose}
+            aria-label="关闭全局检索"
             className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
           >
             <X className="h-4 w-4" />

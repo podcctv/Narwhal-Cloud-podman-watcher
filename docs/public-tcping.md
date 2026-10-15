@@ -27,6 +27,13 @@ checks keyboard saving, persistent opt-in, backfill, withdrawal and responsive
 
 ## Host rename synchronization (1.7.24)
 
+As of v1.7.31, restoring a previous job (including an explicit job link) never
+changes the new-test scope. New pages and source switches default to province /
+Taiwan targets; historical results retain their actual scope and show an
+explanation when it differs from the new-test selection. Taiwan remains on the
+map with its target, colors, tooltip and filtering; its permanent Chinese label
+is hidden.
+
 Published sources remain bound to their immutable `node_id`. Renaming a host
 in the overview updates its TCP PING association in the same report transaction.
 The default public name follows the host name (up to the public 120-character
