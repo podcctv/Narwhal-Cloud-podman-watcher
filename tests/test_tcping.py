@@ -608,6 +608,52 @@ class ProbeHttpTests(ProbeStateTests):
                           item["product"]["virtualization_type"], item["product"]["purchase_url"]),
                          ("unknown", None, "", ""))
 
+    def test_empty_product_link_uses_unique_fresh_instance_mapping(self):
+        machine_id = str(uuid.uuid4())
+        c = self.db()
+        host = 'internal-host-'+self.source
+        c.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,scope,enabled,source,vm_id,verified_at) VALUES(?,'incus','default',?,?,'private-buyer','Synthetic VPS','user',1,'upstream',?,?)",
+                  (host,str(uuid.uuid4()),machine_id,str(uuid.uuid4()),self.now))
+        before = dict(c.execute('SELECT * FROM tcp_sources WHERE id=?',(self.source,)).fetchone())
+        c.commit()
+        product = {'product_id':machine_id,'product_name':'Synthetic VPS','virtualization_type':'incus',
+                   'sale_status':'available','remaining':9,'purchase_url':f'https://dash.fuckip.me/deploy?machine_id={machine_id}&plan_id={uuid.uuid4()}',
+                   'catalog_updated_at':self.now,'catalog_stale':False}
+        link = f'https://dash.fuckip.me/deploy?machine_id={machine_id}'
+        with mock.patch.object(tcping,'schedule_public_products') as schedule, mock.patch.object(tcping,'public_product_item',return_value=product) as public_item:
+            response = self.client.get(tcping.PUBLIC+'/sources')
+        item = next(i for i in response.json()['items'] if i['id']==self.source)
+        self.assertEqual(item['purchase_url'],link)
+        self.assertEqual((item['product']['sale_status'],item['product']['remaining'],item['product']['mapping_state']),('available',9,'verified'))
+        public_item.assert_called_once_with(link,mock.ANY)
+        self.assertIn(machine_id,list(schedule.call_args.args[0]))
+        self.assertNotIn('private-buyer',response.text)
+        self.assertNotIn('verified_at',response.text)
+        self.assertNotIn('node_id',response.text)
+        self.assertEqual(dict(c.execute('SELECT * FROM tcp_sources WHERE id=?',(self.source,)).fetchone()),before)
+        c.close()
+
+    def test_automatic_product_mapping_rejects_stale_manual_conflicting_and_other_node(self):
+        c = self.db();host='internal-host-'+self.source
+        def put(machine,source='upstream',verified=None,enabled=1):
+            vm=str(uuid.uuid4())
+            c.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,enabled,source,verified_at) VALUES(?,'incus','default',?,?,'private-buyer',?,?,?)",(host,vm,machine,enabled,source,self.now if verified is None else verified))
+        row=c.execute('SELECT * FROM tcp_sources WHERE id=?',(self.source,)).fetchone()
+        for source,verified,enabled in [('manual',self.now,1),('upstream',self.now-901,1),('upstream',self.now+61,1),('upstream',self.now,0)]:
+            c.execute('DELETE FROM buyer_targets');put(str(uuid.uuid4()),source,verified,enabled)
+            self.assertEqual(tcping.source_product_link(c,row,self.now),'')
+        c.execute('DELETE FROM buyer_targets');put('not-a-uuid')
+        self.assertEqual(tcping.source_product_link(c,row,self.now),'')
+        c.execute('DELETE FROM buyer_targets');put(str(uuid.uuid4()));put(str(uuid.uuid4()))
+        self.assertEqual(tcping.source_product_link(c,row,self.now),'')
+        c.execute('DELETE FROM buyer_targets');machine=str(uuid.uuid4());put(machine);put(machine)
+        self.assertEqual(tcping.public_machine_id(tcping.source_product_link(c,row,self.now)),machine)
+        c.execute('UPDATE hosts SET node_id=? WHERE host_id=?',('different-node',host))
+        self.assertEqual(tcping.source_product_link(c,row,self.now),'')
+        explicit=dict(row);explicit['purchase_url']='https://example.com/operator-override'
+        self.assertEqual(tcping.source_product_link(c,explicit,self.now),explicit['purchase_url'])
+        c.close()
+
     def test_result_endpoint_requires_signed_node_and_lease(self):
         self.admit()
         lease = self.lease()

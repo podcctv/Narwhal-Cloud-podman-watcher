@@ -355,6 +355,29 @@ def public_machine_id(value):
         return ""
 
 
+def source_product_link(conn, row, now):
+    """Reuse verified VM -> machine identities, not a guess from a host name.
+
+    Explicit operator links always win. Automatic lookup is read-only: do not
+    change source revisions, saved links, probe history or physical cooldowns.
+    Buyer identifiers/VM identities never leave this function.
+    """
+    if row['purchase_url']:
+        return row['purchase_url']
+    candidates = list(conn.execute(
+        "SELECT DISTINCT t.machine_id FROM buyer_targets t JOIN hosts h ON h.host_id=t.host_id "
+        "WHERE h.node_id=? AND h.host_id=? AND t.source='upstream' AND t.enabled=1 "
+        "AND t.verified_at>=? AND t.verified_at<=? LIMIT 2",
+        (row['node_id'], row['host_id'], now-900, now+60)))
+    if len(candidates) != 1:
+        return ''
+    try:
+        machine_id = str(uuid.UUID(str(candidates[0]['machine_id'])))
+    except (ValueError, TypeError, AttributeError):
+        return ''
+    return 'https://dash.fuckip.me/deploy?' + urlencode({'machine_id': machine_id})
+
+
 def fetch_public_product(machine_id):
     """Fetch allow-listed inventory fields from the upstream's unauthenticated product API."""
     request = urllib.request.Request(
@@ -691,11 +714,13 @@ def attach(app, db, static_dir, verify_signature, signed_response):
         conn, now = db(), int(time.time())
         try:
             rows = list(conn.execute("SELECT * FROM tcp_sources WHERE enabled=1 ORDER BY sort_order,name LIMIT 200"))
-            schedule_public_products((public_machine_id(row["purchase_url"]) for row in rows), now)
+            links = {row['id']: source_product_link(conn, row, now) for row in rows}
+            schedule_public_products((public_machine_id(link) for link in links.values()), now)
             items = []
             for row in rows:
                 item = source_item(conn, row, now)
-                item["product"] = verified_public_product(public_product_item(row["purchase_url"], now), row["name"])
+                item['purchase_url'] = links[row['id']]
+                item["product"] = verified_public_product(public_product_item(links[row['id']], now), row["name"])
                 items.append(item)
             return JSONResponse({"enabled": enabled(conn), "items": items}, headers={"Cache-Control": "no-store"})
         finally:

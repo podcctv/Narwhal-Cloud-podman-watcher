@@ -122,6 +122,22 @@ For Narwhal's verified deploy route use
 a validated `plan_id`. Never guess ownership from fuzzy names. No VM credentials,
 customer identifiers, revenue, API keys or internal node identity are published.
 
+When the saved link is empty, the public source read path derives a fixed deploy
+URL from the existing verified instance-UUID mapping. It requires the registered
+stable node and current host label to agree, one unique upstream machine UUID,
+an enabled automatic mapping verified within 15 minutes, and then an exact
+normalized public product-name match. Manual, stale, invalid or conflicting
+mappings cannot generate a checkout link. Explicit administrator links take
+precedence. This does not modify saved sources/revisions, probe history or
+cooldowns; no private buyer/VM fields are returned, and public requests do not
+send private API credentials to the upstream.
+
+Available products show the actual remaining quantity and a validated in-stock
+plan link. A confirmed zero stock shows sold out without a purchase button.
+Cold-cache/loading, failed inventory fetches and uncertain associations are
+explicitly shown as unconfirmed, never fabricated as zero stock. Newly published
+sources gain inventory after their existing automatic instance mapping completes.
+
 ## Map provenance
 
 Local map asset: `frontend/src/china-map.json`.
