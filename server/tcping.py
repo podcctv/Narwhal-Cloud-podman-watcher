@@ -192,7 +192,7 @@ def initialize(conn):
         value = json.loads(cached[0])
         current = with_custom_target(value)
         if current["generation"] != value["generation"]:
-            conn.execute("INSERT INTO tcp_directories VALUES(?,?,?) ON CONFLICT(generation) DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at",
+            conn.execute("INSERT OR REPLACE INTO tcp_directories VALUES(?,?,?)",
                          (current["generation"], encoded(current), cached[1]))
 
 
