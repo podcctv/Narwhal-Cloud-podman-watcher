@@ -438,6 +438,85 @@ class ProbeHttpTests(ProbeStateTests):
                 pass  # Worker-thread connections close in admit() itself.
         self.temp.cleanup()
 
+    def post_host(self, name, node):
+        payload = {'host_id':name,'node_id':node,'agent_version':'1.7.29','timestamp':self.now,'containers':[], 'security':{'alerts':[]}}
+        body = json.dumps(payload).encode();ts = str(self.now)
+        signature = hmac.new(b'synthetic-shared',body+ts.encode(),hashlib.sha256).hexdigest()
+        response = self.client.post('/api/v1/report',content=body,headers={'X-Timestamp':ts,'X-Signature':signature})
+        self.assertEqual(response.status_code,200,response.text)
+
+    def test_auto_discovery_is_opt_in_and_admin_only(self):
+        self.post_host('new-private-host','new-node')
+        self.assertEqual(len(self.client.get(tcping.PUBLIC+'/sources').json()['items']),1)
+        route = '/api/v1/tcping/settings'
+        self.assertEqual(self.client.post(route,json={'auto_publish_new_hosts':True}).status_code,401)
+        auth = ('synthetic-admin','synthetic-password')
+        for bad in ({},{'auto_publish_new_hosts':1},{'auto_publish_new_hosts':'true'},{'arbitrary':True}):
+            self.assertEqual(self.client.post(route,json=bad,auth=auth).status_code,400)
+        self.assertFalse(self.client.get('/api/v1/tcping/manage',auth=auth).json()['auto_publish_new_hosts'])
+
+    def test_enabling_discovery_backfills_without_resetting_existing_sources(self):
+        self.post_host('GB CN2 伦敦优化线路','new-node')
+        c = server.db()
+        c.execute('UPDATE tcp_sources SET name=?,region=?,purchase_url=? WHERE id=?',('custom-name','HK','https://example.com/plan',self.source))
+        c.execute('INSERT INTO tcp_cooldowns VALUES(?,?)',(self.node,self.now+900));c.commit();c.close()
+        auth = ('synthetic-admin','synthetic-password')
+        result = self.client.post('/api/v1/tcping/settings',json={'auto_publish_new_hosts':True},auth=auth)
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(result.json()['added_sources'],1)
+        data = self.client.get('/api/v1/tcping/manage',auth=auth).json()
+        self.assertTrue(data['enabled']);self.assertTrue(data['auto_publish_new_hosts'])
+        old = next(s for s in data['sources'] if s['id']==self.source)
+        self.assertEqual((old['name'],old['region'],old['purchase_url'],old['cooldown_until']),('custom-name','HK','https://example.com/plan',self.now+900))
+        new = next(s for s in data['sources'] if s['node_id']=='new-node')
+        self.assertEqual((new['name'],new['region'],new['purchase_url'],new['status']),('GB CN2 伦敦优化线路','','','needs_upgrade'))
+        again = self.client.post('/api/v1/tcping/settings',json={'auto_publish_new_hosts':True},auth=auth)
+        self.assertEqual(again.json()['added_sources'],0)
+        response = self.client.post(tcping.PUBLIC+'/jobs',json={'source_id':new['id'],'scope':'province'})
+        self.assertEqual(response.status_code,409)
+
+    def test_future_signed_registration_is_idempotent_and_respects_withdrawal(self):
+        auth = ('synthetic-admin','synthetic-password')
+        self.client.post('/api/v1/tcping/settings',json={'auto_publish_new_hosts':True},auth=auth)
+        self.post_host('new-host','future-node');self.post_host('new-host','future-node')
+        data = self.client.get('/api/v1/tcping/manage',auth=auth).json()
+        self.assertEqual(len(data['sources']),2)
+        new = next(s for s in data['sources'] if s['node_id']=='future-node')
+        save = self.client.post('/api/v1/tcping/sources',auth=auth,json={'id':new['id'],'host_id':'new-host','name':'custom-public','region':'','purchase_url':'','enabled':False})
+        self.assertEqual(save.status_code,200,save.text)
+        self.post_host('renamed-host','future-node')
+        c = server.db();tcping.initialize(c);c.commit();c.close()
+        self.client.post('/api/v1/tcping/settings',json={'auto_publish_new_hosts':True},auth=auth)
+        public = self.client.get(tcping.PUBLIC+'/sources').json()['items']
+        self.assertNotIn(new['id'],[s['id'] for s in public])
+        hidden = next(s for s in self.client.get('/api/v1/tcping/manage',auth=auth).json()['sources'] if s['id']==new['id'])
+        self.assertEqual((hidden['host_id'],hidden['name'],hidden['enabled']),('renamed-host','custom-public',False))
+
+    def test_disabling_discovery_preserves_sources_and_global_pause(self):
+        auth = ('synthetic-admin','synthetic-password')
+        self.client.post('/api/v1/tcping/settings',json={'enabled':False,'auto_publish_new_hosts':True},auth=auth)
+        self.post_host('still-published-while-tests-paused','new-node')
+        public = self.client.get(tcping.PUBLIC+'/sources').json()
+        self.assertFalse(public['enabled']);self.assertEqual(len(public['items']),2)
+        self.client.post('/api/v1/tcping/settings',json={'auto_publish_new_hosts':False},auth=auth)
+        self.post_host('not-published','other-node')
+        public = self.client.get(tcping.PUBLIC+'/sources').json()
+        self.assertFalse(public['enabled']);self.assertEqual(len(public['items']),2)
+        self.post_host('no-stable-identity','')
+        self.assertEqual(len(self.client.get(tcping.PUBLIC+'/sources').json()['items']),2)
+
+    def test_startup_backfills_missing_stable_hosts_only_when_opted_in(self):
+        self.post_host('before-startup','new-node')
+        c = server.db()
+        tcping.initialize(c)
+        self.assertEqual(c.execute('SELECT count(*) FROM tcp_sources').fetchone()[0],1)
+        c.execute("UPDATE tcp_settings SET value='true' WHERE key='auto_publish_new_hosts'")
+        tcping.initialize(c);c.commit()
+        self.assertEqual(c.execute('SELECT count(*) FROM tcp_sources').fetchone()[0],2)
+        row = c.execute("SELECT * FROM tcp_sources WHERE node_id='new-node'").fetchone()
+        self.assertEqual(row['host_id'],'before-startup')
+        c.close()
+
     def test_signed_host_report_synchronizes_public_name_and_private_editing(self):
         old = 'internal-host-'+self.source
         new = '[Hytron2.0][AdguardVPN+Hurricane Electric + 公益家宽]船新上线'

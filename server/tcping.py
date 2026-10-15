@@ -163,6 +163,7 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS tcp_directories(generation TEXT PRIMARY KEY,payload TEXT NOT NULL,fetched_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS tcp_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
     INSERT OR IGNORE INTO tcp_settings VALUES('enabled','false');
+    INSERT OR IGNORE INTO tcp_settings VALUES('auto_publish_new_hosts','false');
     CREATE TABLE IF NOT EXISTS tcp_sources(id TEXT PRIMARY KEY,host_id TEXT NOT NULL,node_id TEXT NOT NULL UNIQUE,
       name TEXT NOT NULL,region TEXT NOT NULL DEFAULT '',purchase_url TEXT NOT NULL DEFAULT '',
       enabled INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,sort_order INTEGER NOT NULL DEFAULT 0);
@@ -185,6 +186,7 @@ def initialize(conn):
                            "WHERE h.node_id<>'' AND h.host_id<>s.host_id").fetchall()
     for host in renamed:
         reconcile_host(conn, host["host_id"], host["node_id"], int(time.time()))
+    sync_missing_hosts(conn, int(time.time()))
     # Upgrade a last-good cached directory without changing its upstream fetch
     # timestamp or historical jobs. No dependency on upstream availability.
     cached = conn.execute("SELECT payload,fetched_at FROM tcp_directories ORDER BY fetched_at DESC,rowid DESC LIMIT 1").fetchone()
@@ -204,7 +206,12 @@ def reconcile_host(conn, host_id, node_id, now):
     if len(hosts) != 1 or hosts[0]["host_id"] != host_id:
         return  # Missing/ambiguous identities must still fail closed.
     source = conn.execute("SELECT id,host_id,name FROM tcp_sources WHERE node_id=?", (node_id,)).fetchone()
-    if not source or source["host_id"] == host_id:
+    if not source:
+        if auto_publish_new_hosts(conn):
+            conn.execute("INSERT INTO tcp_sources(id,host_id,node_id,name,enabled) VALUES(?,?,?,?,1)",
+                         (str(uuid.uuid4()), host_id, node_id, host_id[:120]))
+        return
+    if source["host_id"] == host_id:
         return
     # A separately configured public alias remains private/admin controlled.
     # Only the original default label follows the host's display name.
@@ -217,6 +224,23 @@ def reconcile_host(conn, host_id, node_id, now):
     conn.execute("UPDATE tcp_jobs SET status='cancelled',finished_at=?,message=? "
                  "WHERE source_id=? AND node_id=? AND host_id<>? AND status IN ('queued','running')",
                  (now, "主机已改名，旧任务已取消；已测结果保留，请在冷却期结束后重新测试", source["id"], node_id, host_id))
+
+
+def auto_publish_new_hosts(conn):
+    row = conn.execute("SELECT value FROM tcp_settings WHERE key='auto_publish_new_hosts'").fetchone()
+    return bool(row and row[0] == "true")
+
+
+def sync_missing_hosts(conn, now):
+    """Backfill opted-in hosts, never republish an explicitly withdrawn source."""
+    if not auto_publish_new_hosts(conn):
+        return 0
+    missing = conn.execute("SELECT h.host_id,h.node_id FROM hosts h LEFT JOIN tcp_sources s ON s.node_id=h.node_id "
+                           "WHERE h.node_id<>'' AND s.id IS NULL").fetchall()
+    before = conn.total_changes
+    for host in missing:
+        reconcile_host(conn, host["host_id"], host["node_id"], now)
+    return conn.total_changes - before
 
 
 def public_route(path, method):
@@ -732,7 +756,7 @@ def attach(app, db, static_dir, verify_signature, signed_response):
         admin(request)
         conn, now = db(), int(time.time())
         try:
-            return {"enabled": enabled(conn), "sources": [source_item(conn, r, now, True) for r in conn.execute("SELECT * FROM tcp_sources ORDER BY sort_order,name LIMIT 200")],
+            return {"enabled": enabled(conn), "auto_publish_new_hosts": auto_publish_new_hosts(conn), "sources": [source_item(conn, r, now, True) for r in conn.execute("SELECT * FROM tcp_sources ORDER BY sort_order,name LIMIT 200")],
                     "candidates": [dict(r) for r in conn.execute("SELECT host_id,node_id,agent_version,last_seen FROM hosts WHERE node_id<>'' ORDER BY host_id LIMIT 200")]}
         finally:
             conn.close()
@@ -741,16 +765,18 @@ def attach(app, db, static_dir, verify_signature, signed_response):
     async def settings(request: Request):
         admin(request)
         p = await body_json(request)
-        if set(p) != {"enabled"} or type(p["enabled"]) is not bool:
+        if not p or set(p) - {"enabled", "auto_publish_new_hosts"} or any(type(v) is not bool for v in p.values()):
             raise HTTPException(400, "invalid setting")
         conn = db()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE tcp_settings SET value=? WHERE key='enabled'", ("true" if p["enabled"] else "false",))
-            if not p["enabled"]:
+            for key, value in p.items():
+                conn.execute("UPDATE tcp_settings SET value=? WHERE key=?", ("true" if value else "false", key))
+            added = sync_missing_hosts(conn, int(time.time()))
+            if p.get("enabled") is False:
                 conn.execute("UPDATE tcp_jobs SET status='cancelled',finished_at=? WHERE status IN ('queued','running')", (int(time.time()),))
             conn.commit()
-            return {"ok": True}
+            return {"ok": True, "added_sources": added}
         finally:
             conn.close()
 

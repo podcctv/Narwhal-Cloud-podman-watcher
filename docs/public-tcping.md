@@ -5,6 +5,26 @@ authenticated administrator configuration page. No private monitoring or
 commerce data is fetched by the public page. New jobs are disabled by default;
 an administrator explicitly publishes owned host sources and enables the tool.
 
+## Automatic source discovery (1.7.29)
+
+Administrators can enable **自动加入新主机** at `/tcping/manage`. This explicitly
+opts in to publishing registered host display names, backfills hosts without a
+source, and publishes future stable-node registrations in their signed report
+transaction. New installations default to off. Only names are copied; region
+and purchase links remain empty until configured, and private node IDs never
+appear in the public API.
+
+Existing sources (including manually withdrawn ones), aliases, links, source
+IDs, cooldowns and result history are preserved. Disabling discovery only stops
+future additions; it does not withdraw existing sources or change the separate
+new-test switch. Offline and unsupported Agents retain their actual readiness
+status and cannot start jobs. Startup fills missed registrations only when the
+administrator has opted in; ambiguous or absent node IDs are never published.
+Loopback UI verification: `python -m tests.tcping_auto_preview`, then
+`node tests/test_tcping_auto_ui.cjs` (Playwright). Synthetic fixtures only;
+checks keyboard saving, persistent opt-in, backfill, withdrawal and responsive
+375/768/1440 layouts without starting probe jobs.
+
 ## Host rename synchronization (1.7.24)
 
 Published sources remain bound to their immutable `node_id`. Renaming a host
