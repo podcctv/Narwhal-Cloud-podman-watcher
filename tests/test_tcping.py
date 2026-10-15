@@ -198,7 +198,10 @@ class ProbeStateTests(unittest.TestCase):
     def test_taiwan_migration_preserves_cache_age_and_old_job_targets(self):
         old = self.admit()["job"]
         c = self.db()
-        c.execute("UPDATE tcp_directories SET fetched_at=?", (self.now-200000,))
+        base = tcping.normalize_directory(raw_directory())
+        targeted = tcping.configured_directory(raw_directory())
+        c.execute("UPDATE tcp_directories SET fetched_at=? WHERE generation=?", (self.now-200000, base["generation"]))
+        c.execute("INSERT INTO tcp_directories VALUES(?,?,?)", (targeted["generation"], tcping.encoded(targeted), self.now-300000))
         tcping.initialize(c)
         c.commit()
         current = tcping.directory(c)

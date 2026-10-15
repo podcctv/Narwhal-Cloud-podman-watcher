@@ -192,7 +192,8 @@ def initialize(conn):
         value = json.loads(cached[0])
         current = with_custom_target(value)
         if current["generation"] != value["generation"]:
-            conn.execute("INSERT OR IGNORE INTO tcp_directories VALUES(?,?,?)", (current["generation"], encoded(current), cached[1]))
+            conn.execute("INSERT INTO tcp_directories VALUES(?,?,?) ON CONFLICT(generation) DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at",
+                         (current["generation"], encoded(current), cached[1]))
 
 
 def reconcile_host(conn, host_id, node_id, now):
