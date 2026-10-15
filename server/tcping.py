@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
 import re
 import secrets
 import statistics
@@ -10,8 +11,9 @@ import threading
 import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -19,8 +21,10 @@ from fastapi.responses import FileResponse, JSONResponse
 DIRECTORY_URL = "https://www.zstaticcdn.com/api/v1/DescribeAllNodes"
 PUBLIC = "/api/public/tcping"
 CAPABILITY = "public-tcp-v2"
-TAIWAN_HOST = "hinet.428048.xyz"
+_PUBLIC_HOSTNAME = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z", re.IGNORECASE)
+TAIWAN_HOST = os.environ.get("TCPING_TAIWAN_HOST", "").strip().lower().rstrip(".")
 TAIWAN_PORT = 36901
+PUBLIC_TAIWAN_TARGET_LABEL = "台湾指定目标"
 ACTIVE = ("queued", "running")
 GROUPS = {"province", "city", "all"}
 PROVINCES = set("河北 山西 辽宁 吉林 黑龙江 江苏 浙江 安徽 福建 江西 山东 河南 湖北 湖南 广东 海南 四川 贵州 云南 陕西 甘肃 青海 内蒙古 广西 西藏 宁夏 新疆 北京 天津 上海 重庆".split())
@@ -28,6 +32,12 @@ CARRIERS = {"mobile", "unicom", "telecom"}
 ERRORS = {"", "timeout", "refused", "network_error", "dns_error", "blocked_dns", "deadline", "worker_error", "cancelled"}
 _refresh_lock = threading.Lock()
 _attempt = 0.0
+_PRODUCT_TTL = 300
+_PRODUCT_RETRY = 60
+_product_lock = threading.Lock()
+_product_cache = {}
+_product_pending = set()
+_product_refreshing = False
 
 
 def encoded(value):
@@ -103,6 +113,11 @@ def configured_directory(raw):
 def with_custom_target(base):
     result = json.loads(encoded(base))
     result["nodes"] = [n for n in result["nodes"] if n["carrier"] != "custom"]
+    if not _PUBLIC_HOSTNAME.fullmatch(TAIWAN_HOST):
+        result["custom_targets"] = []
+        result.pop("generation")
+        result["generation"] = digest(result)
+        return result
     taiwan = {"kind": "province", "province": "台湾", "city": "", "carrier": "custom",
               "host": TAIWAN_HOST, "port": TAIWAN_PORT}
     taiwan["id"] = digest(taiwan)[:20]
@@ -114,6 +129,32 @@ def with_custom_target(base):
     result["custom_targets"] = [{"province": "台湾", "host": TAIWAN_HOST, "port": TAIWAN_PORT, "source": "owner_configured"}]
     result.pop("generation")
     result["generation"] = digest(result)
+    return result
+
+
+def public_target(target):
+    """Hide the owner's Taiwan DNS name from unauthenticated API consumers."""
+    is_taiwan = isinstance(target, dict) and target.get("province") == "台湾" and target.get("port") == TAIWAN_PORT
+    is_directory_node = is_taiwan and target.get("city") == "" and target.get("carrier") == "custom" and target.get("kind") == "province"
+    is_custom_target_metadata = is_taiwan and target.get("source") == "owner_configured"
+    if is_directory_node or is_custom_target_metadata:
+        return {**target, "host": PUBLIC_TAIWAN_TARGET_LABEL}
+    return target
+
+
+def public_directory_payload(value):
+    result = {**value}
+    if isinstance(result.get("nodes"), list):
+        result["nodes"] = [public_target(target) for target in result["nodes"]]
+    if isinstance(result.get("custom_targets"), list):
+        result["custom_targets"] = [public_target(target) for target in result["custom_targets"]]
+    return result
+
+
+def public_job_payload(value):
+    result = {**value}
+    if isinstance(result.get("nodes"), list):
+        result["nodes"] = [public_target(target) for target in result["nodes"]]
     return result
 
 
@@ -268,6 +309,159 @@ def source_item(conn, row, now, private=False):
                 latest_job=dict(latest) if latest else None)
     if private:
         item.update(host_id=row["host_id"], node_id=row["node_id"], enabled=bool(row["enabled"]))
+    return item
+
+
+def public_machine_id(value):
+    """Accept only our fixed public product route; never fetch an admin-supplied URL."""
+    if not isinstance(value, str) or len(value) > 1000:
+        return ""
+    try:
+        parts = urlsplit(value)
+        if (parts.scheme != "https" or parts.hostname != "dash.fuckip.me" or
+                parts.username or parts.password or parts.port not in (None, 443) or
+                parts.path != "/deploy" or parts.fragment):
+            return ""
+        matches = [item for key, item in parse_qsl(parts.query, keep_blank_values=True) if key == "machine_id"]
+        if len(matches) != 1:
+            return ""
+        return str(uuid.UUID(matches[0]))
+    except (ValueError, TypeError, AttributeError):
+        return ""
+
+
+def fetch_public_product(machine_id):
+    """Fetch allow-listed inventory fields from the upstream's unauthenticated product API."""
+    request = urllib.request.Request(
+        f"https://api.fuckip.me/api/v1/machines/{machine_id}/public",
+        headers={"Accept": "application/json", "User-Agent": "Narwhal-TCPing-Catalog/1"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=6) as response:
+            raw = response.read(1_000_001)
+        if len(raw) > 1_000_000:
+            return None
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
+            return None
+        machine = payload.get("data")
+        if not isinstance(machine, dict) or str(uuid.UUID(str(machine.get("id", "")))) != machine_id:
+            return None
+
+        plans = machine.get("plans")
+        active = [plan for plan in plans if isinstance(plan, dict) and plan.get("status") == "active"] if isinstance(plans, list) else []
+        remaining = [plan.get("remaining") for plan in active]
+        inventory_known = bool(active) and all(type(value) is int and 0 <= value <= 1_000_000 for value in remaining)
+        stock = sum(remaining) if inventory_known else None
+        if machine.get("sold_out") is True or (inventory_known and stock == 0):
+            sale_status = "sold_out"
+            stock = 0
+        elif inventory_known and stock > 0 and machine.get("status") == "online":
+            sale_status = "available"
+        elif machine.get("status") != "online" or (isinstance(plans, list) and not active):
+            sale_status = "unavailable"
+        else:
+            sale_status = "unknown"
+
+        vm_type = machine.get("vm_type")
+        if not isinstance(vm_type, str) or len(vm_type) > 40:
+            vm_type = ""
+        name = machine.get("name")
+        if not isinstance(name, str) or len(name) > 160:
+            name = ""
+        purchase_url = ""
+        region = machine.get("region")
+        if sale_status == "available" and isinstance(region, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,24}", region):
+            for plan in active:
+                if type(plan.get("remaining")) is not int or plan["remaining"] <= 0:
+                    continue
+                try:
+                    plan_id = str(uuid.UUID(str(plan.get("id", ""))))
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                purchase_url = "https://dash.fuckip.me/deploy?" + urlencode(
+                    {"machine_id": machine_id, "plan_id": plan_id, "region": region})
+                break
+        return {"product_id": machine_id, "product_name": name, "virtualization_type": vm_type,
+                "sale_status": sale_status, "remaining": stock, "purchase_url": purchase_url}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def refresh_public_products():
+    global _product_refreshing
+    while True:
+        with _product_lock:
+            machine_ids = list(_product_pending)
+            _product_pending.clear()
+            if not machine_ids:
+                _product_refreshing = False
+                return
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(fetch_public_product, machine_id): machine_id for machine_id in machine_ids}
+            for future in as_completed(futures):
+                machine_id = futures[future]
+                try:
+                    value = future.result()
+                except Exception:
+                    value = None
+                checked_at = int(time.time())
+                with _product_lock:
+                    previous = _product_cache.get(machine_id, {})
+                    if value is not None:
+                        _product_cache[machine_id] = {"value": value, "fetched_at": checked_at, "checked_at": checked_at}
+                    else:
+                        _product_cache[machine_id] = {"value": previous.get("value"),
+                            "fetched_at": previous.get("fetched_at", 0), "checked_at": checked_at}
+
+
+def schedule_public_products(machine_ids, now):
+    global _product_refreshing
+    with _product_lock:
+        for machine_id in set(machine_ids) - {""}:
+            cached = _product_cache.get(machine_id)
+            if cached:
+                interval = _PRODUCT_TTL if cached.get("value") is not None else _PRODUCT_RETRY
+                last_check = cached.get("checked_at", 0)
+                if now - last_check < interval:
+                    continue
+            _product_pending.add(machine_id)
+        if not _product_pending or _product_refreshing:
+            return
+        _product_refreshing = True
+    threading.Thread(target=refresh_public_products, name="tcping-public-catalog", daemon=True).start()
+
+
+def public_product_item(value, now):
+    machine_id = public_machine_id(value)
+    if not machine_id:
+        return None
+    with _product_lock:
+        cached = _product_cache.get(machine_id)
+        cached = dict(cached) if cached else None
+    product = cached.get("value") if cached else None
+    if not product:
+        return {"product_id": machine_id, "product_name": "", "virtualization_type": "",
+                "sale_status": "unknown", "remaining": None, "purchase_url": "",
+                "catalog_updated_at": 0, "catalog_stale": False}
+    fetched_at = cached.get("fetched_at", 0)
+    stale = now - fetched_at >= _PRODUCT_TTL
+    return {**product, "catalog_updated_at": fetched_at, "catalog_stale": stale}
+
+
+def verified_public_product(product, source_name):
+    """Only expose inventory and checkout data when it identifies this source."""
+    if not isinstance(product, dict):
+        return None
+    item = dict(product)
+    product_name = item.get("product_name")
+    source_key = re.sub(r"\s+", " ", source_name).strip().casefold() if isinstance(source_name, str) else ""
+    product_key = re.sub(r"\s+", " ", product_name).strip().casefold() if isinstance(product_name, str) else ""
+    if source_key and product_key and source_key == product_key:
+        item["mapping_state"] = "verified"
+        return item
+    item.update(product_name="", virtualization_type="", sale_status="unknown",
+                remaining=None, purchase_url="", mapping_state="mismatch" if product_key else "unverified")
     return item
 
 
@@ -463,7 +657,7 @@ def attach(app, db, static_dir, verify_signature, signed_response):
         refresh_directory(db)
         conn = db()
         try:
-            return JSONResponse(directory(conn), headers={"Cache-Control": "public, max-age=60"})
+            return JSONResponse(public_directory_payload(directory(conn)), headers={"Cache-Control": "no-store"})
         finally:
             conn.close()
 
@@ -471,7 +665,14 @@ def attach(app, db, static_dir, verify_signature, signed_response):
     def sources():
         conn, now = db(), int(time.time())
         try:
-            return JSONResponse({"enabled": enabled(conn), "items": [source_item(conn, r, now) for r in conn.execute("SELECT * FROM tcp_sources WHERE enabled=1 ORDER BY sort_order,name LIMIT 200")]}, headers={"Cache-Control": "no-store"})
+            rows = list(conn.execute("SELECT * FROM tcp_sources WHERE enabled=1 ORDER BY sort_order,name LIMIT 200"))
+            schedule_public_products((public_machine_id(row["purchase_url"]) for row in rows), now)
+            items = []
+            for row in rows:
+                item = source_item(conn, row, now)
+                item["product"] = verified_public_product(public_product_item(row["purchase_url"], now), row["name"])
+                items.append(item)
+            return JSONResponse({"enabled": enabled(conn), "items": items}, headers={"Cache-Control": "no-store"})
         finally:
             conn.close()
 
@@ -486,7 +687,9 @@ def attach(app, db, static_dir, verify_signature, signed_response):
             raise HTTPException(400, "请选择公开目录中的小鸡与测试范围")
         conn = db()
         try:
-            return JSONResponse(admit(conn, payload["source_id"], payload["scope"], int(time.time())), headers={"Cache-Control": "no-store"})
+            result = admit(conn, payload["source_id"], payload["scope"], int(time.time()))
+            result["job"] = public_job_payload(result["job"])
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
         finally:
             conn.close()
 
@@ -496,7 +699,7 @@ def attach(app, db, static_dir, verify_signature, signed_response):
         try:
             expire(conn, int(time.time()))
             conn.commit()
-            return JSONResponse(get_job(conn, job_id), headers={"Cache-Control": "no-store"})
+            return JSONResponse(public_job_payload(get_job(conn, job_id)), headers={"Cache-Control": "no-store"})
         finally:
             conn.close()
 

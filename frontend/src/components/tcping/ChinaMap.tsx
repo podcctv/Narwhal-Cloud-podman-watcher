@@ -9,13 +9,29 @@ import { provinceSummary } from './model';
 
 echarts.use([MapChart, TooltipComponent, CanvasRenderer]);
 const fullName = (name: string) => ({ 内蒙古: '内蒙古自治区', 广西: '广西壮族自治区', 西藏: '西藏自治区', 宁夏: '宁夏回族自治区', 新疆: '新疆维吾尔自治区', 北京: '北京市', 天津: '天津市', 上海: '上海市', 重庆: '重庆市' }[name] || name + '省');
+type MapFeature = { properties?: { name?: string }; [key: string]: unknown };
+type MapData = { features: MapFeature[]; [key: string]: unknown };
+const mapData = china as unknown as MapData;
+const registeredMaps = new Set(['narwhal-china']);
 echarts.registerMap('narwhal-china', china as Parameters<typeof echarts.registerMap>[1]);
+function mapForProvince(province: string) {
+  if (!province) return 'narwhal-china';
+  const name = fullName(province), feature = mapData.features.find(item => item.properties?.name === name);
+  if (!feature) return 'narwhal-china';
+  const mapName = `narwhal-province-${name}`;
+  if (!registeredMaps.has(mapName)) {
+    echarts.registerMap(mapName, { ...mapData, features: [feature] } as unknown as Parameters<typeof echarts.registerMap>[1]);
+    registeredMaps.add(mapName);
+  }
+  return mapName;
+}
 const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: string; status: string; onSelect: (value: string) => void }> = ({ nodes, province, carrier, status, onSelect }) => {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<echarts.ECharts>();
   const callback = useRef(onSelect); callback.current = onSelect;
+  const mapName = mapForProvince(province);
   const data = useMemo(() => [...[...new Set(nodes.map(n => n.province))].map(p => {
     const { rows, completed, good, value, filteredOut } = provinceSummary(nodes, p, { province, carrier, status });
     return { name: fullName(p), short: p, value, completed, total: rows.length, good, filteredOut,
@@ -46,9 +62,9 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
     chart.current?.setOption({ animation: false, tooltip: { trigger: 'item', confine: true, backgroundColor: '#0f172a', borderColor: '#475569', textStyle: { color: '#f8fafc', fontSize: 12 },
       formatter: (event: unknown) => {
         const d = (event as { name: string; data?: typeof data[number] });
-        if (d.data?.filteredOut) return `${escape(d.name)}<br/>当前筛选没有该省的结果；点击地图可切换省份。`;
-        return d.data?.total ? `<b>${escape(d.name)}</b><br/>${d.data.value === null ? '无有效时延' : d.data.value.toFixed(1) + ' ms · 中位数'}<br/>已返回 ${d.data.completed}/${d.data.total} · 可达 ${d.data.good}/${d.data.total}<br/>${d.data.carriers.join('<br/>')}` : `${escape(d.name || '南海诸岛')}<br/>${d.name === '台湾省' ? '本次记录未检测 · 新测试使用 hinet.428048.xyz:36901' : '未检测 · 目录暂无测试目标'}`;
-      } }, series: [{ type: 'map', map: 'narwhal-china', roam: false,
+        if (d.data?.filteredOut) return `${escape(d.name)}<br/>该省没有符合当前筛选的结果；请调整筛选或选择其他省份。`;
+        return d.data?.total ? `<b>${escape(d.name)}</b><br/>${d.data.value === null ? '无有效时延' : d.data.value.toFixed(1) + ' ms · 中位数'}<br/>已返回 ${d.data.completed}/${d.data.total} · 可达 ${d.data.good}/${d.data.total}<br/>${d.data.carriers.join('<br/>')}` : `${escape(d.name || '南海诸岛')}<br/>${d.name === '台湾省' ? '本次记录未检测 · 新测试使用指定 TCP 目标（端口 36901）' : '未检测 · 目录暂无测试目标'}`;
+      } }, series: [{ type: 'map', map: mapName, roam: false,
         // layoutCenter/layoutSize retain the geographic aspect ratio. Setting
         // all four box edges independently stretches the map on wide panels.
         layoutCenter: ['50%', '50%'], layoutSize: '96%',
@@ -56,6 +72,6 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
           p.text === '台湾' ? { x: p.rect.x + p.rect.width + 8, y: p.rect.y + p.rect.height / 2, align: 'left', verticalAlign: 'middle' } : {},
         label: { show: false }, itemStyle: { areaColor: '#172033', borderColor: '#08101f', borderWidth: 1 },
         emphasis: { label: { show: false }, itemStyle: { borderColor: '#e2e8f0', borderWidth: 2 } }, data }] }, { notMerge: true });
-  }, [data]);
-  return <div className="tcp-map" ref={el} role="img" aria-label={`等比中国 TCP 地图，当前显示${province || '全国'}、${carriers[carrier] || '全部运营商'}。含台湾指定目标 hinet.428048.xyz:36901；地图与右侧筛选同步。`} />;
+  }, [data, mapName]);
+  return <div className="tcp-map" ref={el} role="img" aria-label={`${province ? province + '省级区域聚焦图' : '全国省级'} TCP 地图，当前显示${carriers[carrier] || '全部运营商'}。台湾含指定 TCP 目标（端口 36901）；地图与右侧筛选同步。`} />;
 };

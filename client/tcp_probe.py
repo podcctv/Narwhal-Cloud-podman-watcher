@@ -18,12 +18,12 @@ from pathlib import Path
 _mutex = threading.Lock()
 _running = {}
 _DOMAIN = re.compile(r"[a-z0-9-]{1,120}-v4\.ip\.zstaticcdn\.com")
-_CUSTOM_HOST = "hinet.428048.xyz"
+_PUBLIC_HOSTNAME = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z", re.IGNORECASE)
 _CUSTOM_PORT = 36901
 
 
 def allowed_host(host):
-    return isinstance(host, str) and (bool(_DOMAIN.fullmatch(host)) or host == _CUSTOM_HOST)
+    return isinstance(host, str) and (bool(_DOMAIN.fullmatch(host)) or bool(_PUBLIC_HOSTNAME.fullmatch(host)))
 
 
 def available():
@@ -49,7 +49,7 @@ def validate_targets(targets):
     for t in targets:
         if not isinstance(t, dict) or set(t) != {"id", "host", "port", "province", "city", "carrier", "kind"}:
             raise ValueError("invalid target fields")
-        custom = t["host"] == _CUSTOM_HOST and t["port"] == _CUSTOM_PORT and t["province"] == "台湾" and t["carrier"] == "custom" and t["kind"] == "province" and t["city"] == ""
+        custom = isinstance(t["host"], str) and bool(_PUBLIC_HOSTNAME.fullmatch(t["host"])) and t["port"] == _CUSTOM_PORT and t["province"] == "台湾" and t["carrier"] == "custom" and t["kind"] == "province" and t["city"] == ""
         standard = isinstance(t["host"], str) and bool(_DOMAIN.fullmatch(t["host"])) and t["port"] in (80, 443)
         if type(t["port"]) is not int or not (custom or standard):
             raise ValueError("invalid target endpoint")

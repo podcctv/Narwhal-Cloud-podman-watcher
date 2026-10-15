@@ -16,8 +16,12 @@ from unittest import mock
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+os.environ["TCPING_TAIWAN_HOST"] = "taiwan-target.invalid"
 from server import app as server, tcping, operations
 from client import tcp_probe
+
+# Other test modules may import server.tcping before this module is loaded.
+tcping.TAIWAN_HOST = "taiwan-target.invalid"
 
 
 def raw_directory():
@@ -181,15 +185,15 @@ class ProbeStateTests(unittest.TestCase):
         self.assertEqual(result["counts"]["province_targets"], 94)
         self.assertEqual(result["counts"]["zstatic_total"], 316)
         taiwan = result["nodes"][-1]
-        self.assertEqual((taiwan["province"], taiwan["host"], taiwan["port"]), ("台湾", "hinet.428048.xyz", 36901))
+        self.assertEqual((taiwan["province"], taiwan["host"], taiwan["port"]), ("台湾", tcping.TAIWAN_HOST, 36901))
         tcp_probe.validate_targets(result["nodes"])
-        for changes in ({"host":"hinet.428048.xyz.evil.test"}, {"port":22}, {"province":"北京"}, {"carrier":"mobile"}):
+        for changes in ({"host":"127.0.0.1"}, {"port":22}, {"province":"北京"}, {"carrier":"mobile"}):
             bad = {**taiwan, **changes}
             bad["id"] = tcp_probe.digest({k:v for k,v in bad.items() if k != "id"})[:20]
             with self.assertRaises(ValueError):
                 tcp_probe.validate_targets([bad])
-        self.assertTrue(tcp_probe.allowed_host("hinet.428048.xyz"))
-        self.assertFalse(tcp_probe.allowed_host("hinet.428048.xyz.evil.test"))
+        self.assertTrue(tcp_probe.allowed_host(tcping.TAIWAN_HOST))
+        self.assertFalse(tcp_probe.allowed_host("127.0.0.1"))
 
     def test_taiwan_migration_preserves_cache_age_and_old_job_targets(self):
         old = self.admit()["job"]
@@ -366,6 +370,38 @@ class ProbeStateTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 tcping.purchase_url(url)
 
+    def test_public_product_checkout_uses_available_plan_and_hides_sold_out_link(self):
+        machine_id, plan_id = str(uuid.uuid4()), str(uuid.uuid4())
+
+        def fetch(remaining):
+            payload = {"code": 0, "data": {"id": machine_id, "name": "CloudCone LA",
+                "region": "US", "status": "online", "vm_type": "incus", "plans": [
+                    {"id": plan_id, "name": "1 GB", "status": "active", "remaining": remaining},
+                    {"id": str(uuid.uuid4()), "name": "retired", "status": "inactive", "remaining": 99}]}}
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+            with mock.patch.object(tcping.urllib.request, "urlopen", return_value=response):
+                return tcping.fetch_public_product(machine_id)
+
+        available = fetch(3)
+        self.assertEqual((available["sale_status"], available["remaining"], available["virtualization_type"]), ("available", 3, "incus"))
+        self.assertEqual(available["purchase_url"], f"https://dash.fuckip.me/deploy?machine_id={machine_id}&plan_id={plan_id}&region=US")
+        sold_out = fetch(0)
+        self.assertEqual((sold_out["sale_status"], sold_out["remaining"], sold_out["purchase_url"]), ("sold_out", 0, ""))
+
+    def test_product_mapping_mismatch_fails_closed(self):
+        product = {"product_id": str(uuid.uuid4()), "product_name": "商品 A", "virtualization_type": "podman",
+                   "sale_status": "available", "remaining": 2, "purchase_url": "https://dash.fuckip.me/deploy?plan_id=wrong"}
+        matched = tcping.verified_public_product(product, "  商品   A ")
+        self.assertEqual(matched["mapping_state"], "verified")
+        self.assertEqual(matched["purchase_url"], product["purchase_url"])
+        mismatched = tcping.verified_public_product(product, "来源 B")
+        self.assertEqual(mismatched["mapping_state"], "mismatch")
+        self.assertEqual((mismatched["sale_status"], mismatched["remaining"], mismatched["purchase_url"], mismatched["virtualization_type"]),
+                         ("unknown", None, "", ""))
+        unverified = tcping.verified_public_product({**product, "product_name": ""}, "来源 B")
+        self.assertEqual((unverified["mapping_state"], unverified["purchase_url"]), ("unverified", ""))
+
 
 class ProbeHttpTests(ProbeStateTests):
     def setUp(self):
@@ -423,8 +459,16 @@ class ProbeHttpTests(ProbeStateTests):
     def test_public_pages_isolated_private_apis_unchanged(self):
         self.assertEqual(self.client.get("/tcping").status_code,200)
         self.assertEqual(self.client.get("/tcping/manage").status_code,303)
+        c = self.db()
+        d = tcping.configured_directory(raw_directory())
+        c.execute("INSERT OR REPLACE INTO tcp_directories VALUES(?,?,?)", (d["generation"],tcping.encoded(d),self.now))
+        c.commit(); c.close()
         with mock.patch.object(tcping,"refresh_directory"):
-            self.assertEqual(self.client.get(tcping.PUBLIC+"/directory").json()["counts"]["total"],316)
+            directory_response = self.client.get(tcping.PUBLIC+"/directory")
+        self.assertEqual(directory_response.json()["counts"]["total"],317)
+        self.assertNotIn(tcping.TAIWAN_HOST, directory_response.text)
+        self.assertEqual(next(n for n in directory_response.json()["nodes"] if n["carrier"] == "custom")["host"], tcping.PUBLIC_TAIWAN_TARGET_LABEL)
+        self.assertEqual(directory_response.json()["custom_targets"][0]["host"], tcping.PUBLIC_TAIWAN_TARGET_LABEL)
         sources = self.client.get(tcping.PUBLIC+"/sources")
         self.assertEqual(sources.status_code,200)
         self.assertNotIn("node_id", sources.text)
@@ -436,6 +480,50 @@ class ProbeHttpTests(ProbeStateTests):
         created = self.client.post(tcping.PUBLIC+"/jobs",json={"source_id":self.source,"scope":"province"})
         self.assertEqual(created.status_code,200,created.text)
         self.assertNotIn("lease",created.text)
+        self.assertNotIn(tcping.TAIWAN_HOST, created.text)
+        job_id = created.json()["job"]["id"]
+        public_job = self.client.get(tcping.PUBLIC+"/jobs/"+job_id)
+        self.assertEqual(public_job.status_code,200)
+        self.assertNotIn(tcping.TAIWAN_HOST, public_job.text)
+        self.assertEqual(next(n for n in public_job.json()["nodes"] if n["carrier"] == "custom")["host"], tcping.PUBLIC_TAIWAN_TARGET_LABEL)
+        c = self.db()
+        raw_job = c.execute("SELECT targets FROM tcp_jobs WHERE id=?", (job_id,)).fetchone()
+        self.assertEqual(next(n for n in json.loads(raw_job[0]) if n["carrier"] == "custom")["host"], tcping.TAIWAN_HOST)
+        lease = tcping.lease_jobs(c, "internal-host-"+self.source, self.node, self.now)["job"]
+        self.assertEqual(next(n for n in lease["targets"] if n["carrier"] == "custom")["host"], tcping.TAIWAN_HOST)
+        c.commit(); c.close()
+
+    def test_public_source_catalog_exposes_only_name_verified_checkout(self):
+        machine_id, plan_id = str(uuid.uuid4()), str(uuid.uuid4())
+        source_url = f"https://dash.fuckip.me/deploy?machine_id={machine_id}"
+        checkout_url = f"https://dash.fuckip.me/deploy?machine_id={machine_id}&plan_id={plan_id}&region=US"
+        c = self.db()
+        c.execute("UPDATE tcp_sources SET purchase_url=? WHERE id=?", (source_url, self.source))
+        c.commit(); c.close()
+        product = {"product_id": machine_id, "product_name": "Synthetic VPS", "virtualization_type": "incus",
+                   "sale_status": "available", "remaining": 3, "purchase_url": checkout_url,
+                   "catalog_updated_at": self.now, "catalog_stale": False}
+        with mock.patch.object(tcping, "schedule_public_products"), \
+                mock.patch.object(tcping, "public_product_item", return_value=product):
+            response = self.client.get(tcping.PUBLIC + "/sources")
+        self.assertEqual(response.status_code, 200)
+        item = next(x for x in response.json()["items"] if x["id"] == self.source)
+        self.assertEqual(item["product"]["mapping_state"], "verified")
+        self.assertEqual((item["product"]["sale_status"], item["product"]["remaining"],
+                          item["product"]["virtualization_type"], item["product"]["purchase_url"]),
+                         ("available", 3, "incus", checkout_url))
+
+        c = self.db()
+        c.execute("UPDATE tcp_sources SET name='Different Source' WHERE id=?", (self.source,))
+        c.commit(); c.close()
+        with mock.patch.object(tcping, "schedule_public_products"), \
+                mock.patch.object(tcping, "public_product_item", return_value=product):
+            response = self.client.get(tcping.PUBLIC + "/sources")
+        item = next(x for x in response.json()["items"] if x["id"] == self.source)
+        self.assertEqual(item["product"]["mapping_state"], "mismatch")
+        self.assertEqual((item["product"]["sale_status"], item["product"]["remaining"],
+                          item["product"]["virtualization_type"], item["product"]["purchase_url"]),
+                         ("unknown", None, "", ""))
 
     def test_result_endpoint_requires_signed_node_and_lease(self):
         self.admit()

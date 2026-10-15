@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 node_modules/
+.codex/
 *.key
 *.pem
 id_*

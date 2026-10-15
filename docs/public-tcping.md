@@ -21,12 +21,17 @@ cannot bypass the cooldown or admit old-identity result batches.
 
 ## What is measured
 
-As of 1.7.19, the owner explicitly added the fixed Taiwan target
-`hinet.428048.xyz:36901`. It is identified as an owner-configured target, not a
-Zstatic node or an asserted carrier measurement. The Zstatic counts remain
+As of 1.7.19, the owner can configure a Taiwan TCP target on port `36901`. Its
+hostname is supplied through the server's `TCPING_TAIWAN_HOST` runtime
+environment setting and is redacted from anonymous directory and job APIs. Do
+not commit the hostname to source files. It is not a Zstatic node or an asserted
+carrier measurement. The Zstatic counts remain
 31/93/223; province mode now includes 94 targets (2 attempts each), city mode
-223 and all mode 317. The Agent advertises `public-tcp-v2` only after this exact
-host/port allowlist is installed. Arbitrary addresses remain disallowed.
+223 and all mode 317 when the target is configured. The Agent accepts a
+server-signed Taiwan/custom target only on the fixed port; DNS answers must be
+public IPv4 addresses before a connection is attempted. Zstatic endpoints keep
+their stricter suffix and port allowlist. Arbitrary client-supplied addresses
+remain disallowed.
 Cached directory migration preserves upstream freshness and historical job
 targets. Historical results do not invent a Taiwan row; the page explains when
 the selected record predates the new directory. The Taiwan geometry and label
@@ -55,8 +60,9 @@ Upstream: https://www.zstaticcdn.com/
 Province mode tests all province/carrier entries twice. City/all mode tests all
 entries in that scope once. Four worker slots, 2.5-second killable DNS resolution,
 1.5-second connection timeout, 180-second process deadline. DNS is excluded from
-TCP latency. Only pinned public IPv4 addresses from the fixed Zstatic hostname
-allowlist and TCP ports 80/443 are accepted. No application payload is sent.
+TCP latency. Zstatic endpoints use their fixed hostname allowlist and TCP ports
+80/443; the signed Taiwan target uses its fixed port and rejects DNS answers
+that are not public IPv4. No application payload is sent.
 Containerized Agents do not advertise the host-source capability.
 
 The map shows the median of valid endpoint medians per province, with a tooltip
