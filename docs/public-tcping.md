@@ -5,6 +5,20 @@ authenticated administrator configuration page. No private monitoring or
 commerce data is fetched by the public page. New jobs are disabled by default;
 an administrator explicitly publishes owned host sources and enables the tool.
 
+## Host rename synchronization (1.7.24)
+
+Published sources remain bound to their immutable `node_id`. Renaming a host
+in the overview updates its TCP PING association in the same report transaction.
+The default public name follows the host name (up to the public 120-character
+limit); separately configured public aliases, purchase links and visibility
+are preserved. Startup repairs existing label mismatches using only a unique
+matching node identity; missing/replaced nodes still show `来源已变更`.
+
+Source IDs, completed results and physical-node cooldowns are not reset.
+In-flight old-label leases are cancelled with an explicit rename explanation,
+preserving measured rows. They are not rebound to a different host, and a rename
+cannot bypass the cooldown or admit old-identity result batches.
+
 ## What is measured
 
 As of 1.7.19, the owner explicitly added the fixed Taiwan target

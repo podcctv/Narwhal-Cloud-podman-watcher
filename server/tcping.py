@@ -138,6 +138,12 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS tcp_batches(job_id TEXT NOT NULL,sequence INTEGER NOT NULL,digest TEXT NOT NULL,
       PRIMARY KEY(job_id,sequence));
     """)
+    # Repair older releases which renamed hosts but left public sources pointing
+    # at their previous labels. Only a unique, stable node identity may rebind.
+    renamed = conn.execute("SELECT h.host_id,h.node_id FROM hosts h JOIN tcp_sources s ON s.node_id=h.node_id "
+                           "WHERE h.node_id<>'' AND h.host_id<>s.host_id").fetchall()
+    for host in renamed:
+        reconcile_host(conn, host["host_id"], host["node_id"], int(time.time()))
     # Upgrade a last-good cached directory without changing its upstream fetch
     # timestamp or historical jobs. No dependency on upstream availability.
     cached = conn.execute("SELECT payload,fetched_at FROM tcp_directories ORDER BY fetched_at DESC,rowid DESC LIMIT 1").fetchone()
@@ -146,6 +152,29 @@ def initialize(conn):
         current = with_custom_target(value)
         if current["generation"] != value["generation"]:
             conn.execute("INSERT OR IGNORE INTO tcp_directories VALUES(?,?,?)", (current["generation"], encoded(current), cached[1]))
+
+
+def reconcile_host(conn, host_id, node_id, now):
+    """Follow display-name changes without replacing a published node identity."""
+    if not node_id:
+        return
+    hosts = conn.execute("SELECT host_id FROM hosts WHERE node_id=? LIMIT 2", (node_id,)).fetchall()
+    if len(hosts) != 1 or hosts[0]["host_id"] != host_id:
+        return  # Missing/ambiguous identities must still fail closed.
+    source = conn.execute("SELECT id,host_id,name FROM tcp_sources WHERE node_id=?", (node_id,)).fetchone()
+    if not source or source["host_id"] == host_id:
+        return
+    # A separately configured public alias remains private/admin controlled.
+    # Only the original default label follows the host's display name.
+    name = host_id[:120] if source["name"] in (source["host_id"], source["host_id"][:120]) else source["name"]
+    conn.execute("UPDATE tcp_sources SET host_id=?,name=? WHERE id=? AND node_id=?",
+                 (host_id, name, source["id"], node_id))
+    # A worker holds the old host label in its signed lease. Do not mutate that
+    # lease or accept batches under a different label. Preserve measured rows,
+    # finished history, source revision and the physical-node cooldown.
+    conn.execute("UPDATE tcp_jobs SET status='cancelled',finished_at=?,message=? "
+                 "WHERE source_id=? AND node_id=? AND host_id<>? AND status IN ('queued','running')",
+                 (now, "主机已改名，旧任务已取消；已测结果保留，请在冷却期结束后重新测试", source["id"], node_id, host_id))
 
 
 def public_route(path, method):

@@ -2054,6 +2054,7 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
         "node_id=CASE WHEN excluded.node_id<>'' THEN excluded.node_id ELSE hosts.node_id END,config_json=excluded.config_json",
         (host_id, ts, agent_version, node_id, json.dumps(config, ensure_ascii=False)),
     )
+    tcping.reconcile_host(conn, host_id, node_id, ts)
     return host_id
 
 

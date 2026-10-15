@@ -28,6 +28,7 @@ def raw_directory():
 
 class ProbeStateTests(unittest.TestCase):
     def setUp(self):
+        self.connections = []
         self.temp = tempfile.TemporaryDirectory()
         self.path = str(Path(self.temp.name)/"probe.db")
         self.now = int(time.time())
@@ -45,11 +46,17 @@ class ProbeStateTests(unittest.TestCase):
         c.close()
 
     def tearDown(self):
+        for connection in self.connections:
+            try:
+                connection.close()
+            except sqlite3.ProgrammingError:
+                pass  # Worker-thread connections close in admit() itself.
         self.temp.cleanup()
 
     def db(self):
         c = sqlite3.connect(self.path, timeout=10)
         c.row_factory = sqlite3.Row
+        self.connections.append(c)
         return c
 
     def add_source(self, c, source_id, node_id):
@@ -108,6 +115,61 @@ class ProbeStateTests(unittest.TestCase):
         c = self.db()
         self.assertEqual(c.execute("SELECT COUNT(*) FROM tcp_jobs").fetchone()[0], 1)
         c.close()
+
+    def test_startup_repairs_renamed_default_source_without_resetting_identity(self):
+        c = self.db()
+        old = "internal-host-"+self.source
+        new = "[Hytron2.0][AdguardVPN+Hurricane Electric + 公益家宽]船新上线"
+        c.execute("UPDATE tcp_sources SET name=host_id,region='香港',purchase_url='https://example.com/plan' WHERE id=?", (self.source,))
+        c.execute("INSERT INTO tcp_cooldowns VALUES(?,?)", (self.node,self.now+900))
+        c.execute("UPDATE hosts SET host_id=? WHERE node_id=?", (new,self.node))
+        c.commit()
+        tcping.initialize(c)
+        source = c.execute("SELECT * FROM tcp_sources WHERE id=?", (self.source,)).fetchone()
+        self.assertEqual((source['host_id'],source['name'],source['node_id'],source['revision']), (new,new,self.node,1))
+        self.assertEqual((source['region'],source['purchase_url'],source['enabled']), ('香港','https://example.com/plan',1))
+        self.assertEqual(tcping.source_item(c,source,self.now)['status'], 'ready')
+        self.assertEqual(c.execute('SELECT next_at FROM tcp_cooldowns WHERE node_id=?',(self.node,)).fetchone()[0],self.now+900)
+        tcping.initialize(c)
+        self.assertEqual(c.execute('SELECT count(*) FROM tcp_sources').fetchone()[0],1)
+        c.close()
+
+    def test_startup_preserves_custom_public_name_and_rejects_other_node(self):
+        c = self.db()
+        old = "internal-host-"+self.source
+        c.execute("UPDATE hosts SET host_id='renamed-host' WHERE node_id=?", (self.node,))
+        c.execute("INSERT INTO hosts(host_id,node_id,last_seen,config_json) VALUES(?,?,?,?)",(old,'replacement-node',self.now,'{}'))
+        c.commit()
+        tcping.initialize(c)
+        source = c.execute('SELECT * FROM tcp_sources WHERE id=?',(self.source,)).fetchone()
+        self.assertEqual((source['host_id'],source['name'],source['node_id']),('renamed-host','Synthetic VPS',self.node))
+        c.execute('DELETE FROM hosts WHERE node_id=?',(self.node,));c.commit()
+        tcping.initialize(c)
+        source = c.execute('SELECT * FROM tcp_sources WHERE id=?',(self.source,)).fetchone()
+        self.assertEqual(tcping.host_state(c,source,self.now),'identity_changed')
+        self.assertEqual(source['node_id'],self.node)
+        c.close()
+
+    def test_rename_cancels_old_active_leases_but_keeps_results_and_cooldown(self):
+        job = self.admit()['job']
+        lease = self.lease()
+        row = {'target_id':lease['targets'][0]['id'],'ip':'1.1.1.1','samples_ms':[1.0,2.0],'error':''}
+        self.report(self.batch(lease,[row]))
+        c = self.db()
+        before = c.execute('SELECT next_at FROM tcp_cooldowns WHERE node_id=?',(self.node,)).fetchone()[0]
+        c.execute("UPDATE hosts SET host_id='renamed-host' WHERE node_id=?",(self.node,));c.commit()
+        tcping.initialize(c);c.commit()
+        result = tcping.get_job(c,job['id'])
+        self.assertEqual((result['status'],result['completed']),('cancelled',1))
+        self.assertIn('改名',result['message'])
+        self.assertEqual(c.execute('SELECT next_at FROM tcp_cooldowns WHERE node_id=?',(self.node,)).fetchone()[0],before)
+        c.close()
+        with self.assertRaises(HTTPException) as error:
+            self.report(self.batch(lease,sequence=1))
+        self.assertEqual(error.exception.status_code,409)
+        with self.assertRaises(HTTPException) as error:
+            self.admit()
+        self.assertEqual(error.exception.status_code,429)
 
     def test_owner_taiwan_target_is_fixed_counted_and_not_upstream(self):
         result = tcping.configured_directory(raw_directory())
@@ -307,6 +369,7 @@ class ProbeStateTests(unittest.TestCase):
 
 class ProbeHttpTests(ProbeStateTests):
     def setUp(self):
+        self.connections = []
         self.temp = tempfile.TemporaryDirectory()
         self.path = str(Path(self.temp.name)/"monitor.db")
         self.now = int(time.time())
@@ -328,7 +391,34 @@ class ProbeHttpTests(ProbeStateTests):
     def tearDown(self):
         self.client.close()
         self.patch.stop()
+        for connection in self.connections:
+            try:
+                connection.close()
+            except sqlite3.ProgrammingError:
+                pass  # Worker-thread connections close in admit() itself.
         self.temp.cleanup()
+
+    def test_signed_host_report_synchronizes_public_name_and_private_editing(self):
+        old = 'internal-host-'+self.source
+        new = '[Hytron2.0][AdguardVPN+Hurricane Electric + 公益家宽]船新上线'
+        c = server.db()
+        c.execute('UPDATE tcp_sources SET name=host_id WHERE id=?',(self.source,));c.commit();c.close()
+        payload = {'host_id':new,'node_id':self.node,'agent_version':'1.7.23','timestamp':self.now,'containers':[], 'security':{'alerts':[]}}
+        body = json.dumps(payload).encode();ts = str(self.now)
+        signature = hmac.new(b'synthetic-shared',body+ts.encode(),hashlib.sha256).hexdigest()
+        response = self.client.post('/api/v1/report',content=body,headers={'X-Timestamp':ts,'X-Signature':signature})
+        self.assertEqual(response.status_code,200,response.text)
+        sources = self.client.get(tcping.PUBLIC+'/sources').json()['items']
+        source = next(s for s in sources if s['id']==self.source)
+        self.assertEqual((source['name'],source['status']),(new,'ready'))
+        self.assertNotIn('node_id',source)
+        auth = ('synthetic-admin','synthetic-password')
+        data = self.client.get('/api/v1/tcping/manage',auth=auth).json()
+        private = next(s for s in data['sources'] if s['id']==self.source)
+        self.assertEqual(private['host_id'],new)
+        save = self.client.post('/api/v1/tcping/sources',auth=auth,json={'id':self.source,'host_id':new,'name':new,'region':'香港','purchase_url':'','enabled':True})
+        self.assertEqual(save.status_code,200,save.text)
+        self.assertNotIn(old,self.client.get(tcping.PUBLIC+'/sources').text)
 
     def test_public_pages_isolated_private_apis_unchanged(self):
         self.assertEqual(self.client.get("/tcping").status_code,200)
