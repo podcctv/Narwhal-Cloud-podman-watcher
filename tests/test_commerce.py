@@ -1,6 +1,11 @@
 """Synthetic fixtures only. No upstream credential or production data in tests."""
 import json
 import os
+import io
+import socket
+import ssl
+import http.client
+import urllib.error
 import tempfile
 import threading
 import time
@@ -148,16 +153,62 @@ class CommerceMathTests(unittest.TestCase):
             with self.assertRaises(commerce.CommerceError):
                 commerce.timestamp(bad)
 
-    def test_only_transient_get_errors_are_retried_once(self):
+    def test_only_transient_get_errors_are_retried_with_bounded_backoff(self):
         client = commerce.Client("synthetic-key-only")
-        transient = commerce.CommerceError("上游连接暂时异常，旧数据已保留")
-        with mock.patch.object(client, "_get", side_effect=[transient, {"ok": True}]) as get, mock.patch.object(commerce.time, "sleep"):
+        transient = commerce.CommerceConnectionError("synthetic transient")
+        with mock.patch.object(client, "_get", side_effect=[transient, transient, {"ok": True}]) as get, mock.patch.object(commerce.time, "sleep") as sleep:
             self.assertEqual(client.get("/user/me"), {"ok": True})
-            self.assertEqual(get.call_count, 2)
+            self.assertEqual(get.call_count, 3)
+            self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+        with mock.patch.object(client, "_get", side_effect=transient) as get, mock.patch.object(commerce.time, "sleep"):
+            with self.assertRaises(commerce.CommerceConnectionError):
+                client.get("/user/me")
+            self.assertEqual(get.call_count, 3)
         with mock.patch.object(client, "_get", side_effect=commerce.CommerceError("上游认证失败")) as get:
             with self.assertRaises(commerce.CommerceError):
                 client.get("/user/me")
             self.assertEqual(get.call_count, 1)
+
+    def test_transport_failure_messages_do_not_leak_upstream_details(self):
+        for failure, message, attempts in (
+            (urllib.error.URLError(socket.gaierror(-2, 'synthetic-secret')), '域名解析失败', 3),
+            (urllib.error.URLError(TimeoutError('synthetic-secret')), '超时', 3),
+            (ConnectionResetError('synthetic-secret'), '网络连接中断', 3),
+            (http.client.IncompleteRead(b'synthetic-secret', 100), '网络连接中断', 3),
+            (urllib.error.URLError(ssl.SSLCertVerificationError('synthetic-secret')), '证书验证失败', 1),
+        ):
+            with self.subTest(message=message):
+                client = commerce.Client('synthetic-key-only')
+                opener = mock.Mock(); opener.open.side_effect = failure
+                client.opener_factory = lambda: opener
+                with mock.patch.object(commerce.time, 'sleep'), self.assertRaisesRegex(commerce.CommerceError, message) as result:
+                    client.get('/user/me')
+                self.assertNotIn('synthetic-secret', str(result.exception))
+                self.assertEqual(opener.open.call_count, attempts)
+
+    def test_retry_after_is_honored_and_auth_is_not_retried(self):
+        for status, delay, attempts in ((429, '5', 3), (503, '2', 3), (429, '120', 1), (401, '1', 1), (403, '1', 1)):
+            client = commerce.Client('synthetic-key-only')
+            opener = mock.Mock()
+            opener.open.side_effect = urllib.error.HTTPError('https://synthetic-secret.invalid', status, 'synthetic-secret', {'Retry-After': delay}, io.BytesIO(b'synthetic-secret'))
+            client.opener_factory = lambda: opener
+            with mock.patch.object(commerce.time, 'sleep') as sleep, self.assertRaises(commerce.CommerceError) as result:
+                client.get('/user/me')
+            self.assertEqual(opener.open.call_count, attempts)
+            self.assertNotIn('synthetic-secret', str(result.exception))
+            if attempts > 1:
+                self.assertEqual(sleep.call_args_list, [mock.call(float(delay))]*2)
+            else:
+                sleep.assert_not_called()
+        client.deadline = time.monotonic() + 0.1
+        with mock.patch.object(client, '_get', side_effect=commerce.CommerceConnectionError('bounded', 1)) as get, mock.patch.object(commerce.time, 'sleep') as sleep:
+            with self.assertRaises(commerce.CommerceConnectionError):
+                client.get('/user/me')
+            get.assert_called_once(); sleep.assert_not_called()
+        with mock.patch.object(commerce.time, 'time', return_value=0):
+            self.assertEqual(commerce.retry_after('Thu, 01 Jan 1970 00:00:07 GMT'), 7)
+        self.assertIsNone(commerce.retry_after('invalid'))
+        self.assertIsNone(commerce.retry_after(None))
 
     def test_pagination_complete_and_duplicate_incomplete_drift(self):
         client = commerce.Client("synthetic-key-only")

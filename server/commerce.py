@@ -5,16 +5,20 @@ Only allowlisted fields leave this module; upstream VM credentials are discarded
 """
 import asyncio
 import hashlib
+import http.client
 import json
 import os
 import re
 import stat
+import socket
+import ssl
 import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -32,6 +36,21 @@ _tasks = set()
 
 class CommerceError(ValueError):
     pass
+
+
+class CommerceConnectionError(CommerceError):
+    """Safe public message; never retain an upstream URL, body or credentials."""
+    def __init__(self, message, delay=None):
+        super().__init__(message)
+        self.delay = delay
+
+
+def retry_after(value):
+    try:
+        delay = float(value) if str(value).isdigit() else parsedate_to_datetime(value).timestamp() - time.time()
+        return max(0, delay)
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def initialize(conn):
@@ -109,13 +128,16 @@ class Client:
         self.opener_factory = lambda: urllib.request.build_opener(NoRedirect)
 
     def get(self, path):
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 return self._get(path)
-            except CommerceError as exc:
-                if attempt or str(exc) != "上游连接暂时异常，旧数据已保留":
+            except CommerceConnectionError as exc:
+                delay = exc.delay if exc.delay is not None else (2 ** attempt)
+                # Do not retry before the upstream's Retry-After, or extend the
+                # existing total budget. Never retry auth/schema/data failures.
+                if attempt == 2 or delay > 30 or delay >= self.deadline - time.monotonic():
                     raise
-                time.sleep(1)
+                time.sleep(delay)
 
     def _get(self, path):
         remaining = self.deadline - time.monotonic()
@@ -146,11 +168,16 @@ class Client:
             return data
         except urllib.error.HTTPError as exc:
             if exc.code in (429, 502, 503, 504):
-                raise CommerceError("上游连接暂时异常，旧数据已保留") from None
+                reason = "上游请求过于频繁（HTTP 429），请稍后重试" if exc.code == 429 else f"上游服务暂时不可用（HTTP {exc.code}），请稍后重试"
+                raise CommerceConnectionError(reason + "；旧数据已保留", retry_after((exc.headers or {}).get('Retry-After'))) from None
             raise CommerceError("上游认证失败，请更换 API Key" if exc.code in (401, 403) else
                                 f"上游请求失败（HTTP {exc.code}），旧数据已保留") from None
-        except OSError:
-            raise CommerceError("上游连接暂时异常，旧数据已保留") from None
+        except (OSError, http.client.IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                raise CommerceError("上游 TLS 证书验证失败，请联系管理员；旧数据已保留") from None
+            message = "上游域名解析失败" if isinstance(reason, socket.gaierror) else "上游连接或读取超时" if isinstance(reason, TimeoutError) else "上游网络连接中断或不可达"
+            raise CommerceConnectionError(message + "，请稍后重试；旧数据已保留") from None
         except ValueError as exc:
             if isinstance(exc, CommerceError):
                 raise
