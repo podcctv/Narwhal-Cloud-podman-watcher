@@ -4362,7 +4362,7 @@ def _collect_socks_config_evidence(
         endpoints = [e for d in documents for e in d['endpoints']]
         json_processes.append({**{k: proc[k] for k in ('pid', 'process')}, 'parsed': parsed,
                                'endpoints': endpoints,
-                               'single_purpose': parsed and len(documents) == 1 and documents[0]['single_purpose']})
+                               'single_purpose': parsed and not proc['additional_configs'] and len(documents) == 1 and documents[0]['single_purpose']})
     result.update(
         {
             "detected": bool(files),
@@ -4465,6 +4465,11 @@ def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, p
                 if not match.get('listener_declared'):
                     continue
             safe = (entries[0]['action_safe'] if entries else match.get('action_safe', match.get('process') in _SOCKS_DIRECT_NAMES))
+            # Configs can be edited before a reload or supplemented dynamically.
+            # Additional live TCP/UDP listeners invalidate whole-process stop safety.
+            if any(l.get('pid') == match.get('pid') and
+                   (l.get('port') != listener.get('port') or l.get('local') != listener.get('local')) for l in listeners):
+                safe = False
             selected.append({**listener, 'auth_state': mode, 'public_exposure': exposed,
                              'action_safe': bool(safe), 'verification': probe['reason']})
             refined.append({**match, 'auth_state': mode,

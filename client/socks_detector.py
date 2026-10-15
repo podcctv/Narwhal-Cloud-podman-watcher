@@ -54,10 +54,12 @@ def parse_config(raw, process):
             continue
         port = inbound.get('port') if process in {'xray', 'v2ray'} else inbound.get('listen_port')
         try:
-            ports = [int(port)] if not isinstance(port, bool) else []
-        except (TypeError, ValueError):
+            ports = [int(port)] if not isinstance(port, (bool, float)) else []
+        except (TypeError, ValueError, OverflowError):
             ports = []  # Ranges/dynamic ports must not accidentally match other listeners.
         ports = [p for p in ports if 0 < p < 65536]
+        if not ports:
+            result['parsed'] = False
         mode = 'unknown'
         if process in {'xray', 'v2ray'}:
             settings = inbound.get('settings', {})
@@ -102,7 +104,8 @@ def process_configs(output):
                 paths.append(value)
         if not paths and not any(t.startswith(('-c', '--config', '-config', '-confdir')) for t in tokens):
             paths = [f'/etc/{process}/config.json']
-        rows.append({'pid': int(parts[0]), 'process': process, 'paths': list(dict.fromkeys(paths))[:4]})
+        rows.append({'pid': int(parts[0]), 'process': process, 'paths': list(dict.fromkeys(paths))[:4],
+                     'additional_configs': any(t.startswith(('-confdir', '--config-dir')) for t in tokens)})
         if len(rows) >= 8:
             break
     return rows

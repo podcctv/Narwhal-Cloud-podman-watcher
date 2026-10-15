@@ -60,7 +60,16 @@ class DirectionTests(unittest.TestCase):
 
     def test_real_executable_and_explicit_path_only(self):
         output='1 S supervise-daemo supervise-daemon xray --start\n12 S xray /usr/bin/xray run -config /opt/proxy/test.json\n'
-        self.assertEqual(detector.process_configs(output),[{'pid':12,'process':'xray','paths':['/opt/proxy/test.json']}])
+        self.assertEqual(detector.process_configs(output),[{'pid':12,'process':'xray','paths':['/opt/proxy/test.json'],'additional_configs':False}])
+
+    def test_additional_config_directory_invalidates_single_file_proof(self):
+        output='12 S xray /usr/bin/xray run -config /etc/xray/config.json -confdir /etc/xray/conf.d'
+        self.assertTrue(detector.process_configs(output)[0]['additional_configs'])
+
+    def test_invalid_and_non_integer_ports_remain_unverified(self):
+        for port in (float('inf'),1080.5,True,{},'1080-1085',70000):
+            result=detector.parse_config(json.dumps({'inbounds':[{'protocol':'socks','port':port}]}),'xray')
+            self.assertFalse(result['parsed'])
 
     def test_outbound_only_gost_cli_does_not_infer_noauth(self):
         facts=agent._socks_process_evidence('12 S gost /usr/bin/gost -L http://:443 -F socks5://:1080','')
@@ -133,11 +142,23 @@ class LiveEvidenceTests(unittest.TestCase):
 
     def test_dedicated_confirmed_public_proxy_can_be_stopped(self):
         self.socks['inbound_endpoints'][0]['action_safe']=True
+        self.listeners=self.listeners[1:]
         self.refine()
         container={'runtime':'incus','name':'fixture','security':{'socks_proxy':self.socks}}
         with mock.patch.object(agent,'stop_unauthenticated_socks',return_value=(True,'fixture stopped')) as stop:
             result=agent.enforce_socks_auth_policy(container,[])
         self.assertTrue(result['attempted']); self.assertEqual(stop.call_args[0][0]['params']['process_pids'],[12])
+
+    def test_extra_live_listener_overrides_stale_single_purpose_config(self):
+        self.socks['inbound_endpoints'][0]['action_safe']=True
+        self.refine()
+        self.assertFalse(self.socks['process_matches'][0]['action_safe'])
+
+    def test_extra_udp_listener_also_prevents_whole_engine_stop(self):
+        self.socks['inbound_endpoints'][0]['action_safe']=True
+        self.listeners[0]['proto']='udp'
+        self.refine()
+        self.assertFalse(self.socks['process_matches'][0]['action_safe'])
 
     def test_config_loopback_cannot_authenticate_wildcard_listener(self):
         self.socks['inbound_endpoints'][0]['listen']='127.0.0.1'
