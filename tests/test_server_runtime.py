@@ -399,6 +399,8 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("SECURITY_AUTO_REMEDIATE_XMRIG=$auto_remediate_xmrig", client_installer)
         self.assertIn("SECURITY_AUTO_REMEDIATE_XRAYR=$auto_remediate_xrayr", client_installer)
         self.assertIn("NARWHAL_VERSION=$PROJECT_VERSION", server_installer)
+        self.assertIn('env_tcping_taiwan_host="$(load_kv_from_file "$SERVER_ENV_FILE" TCPING_TAIWAN_HOST || true)"', server_installer)
+        self.assertIn("TCPING_TAIWAN_HOST=$env_tcping_taiwan_host", server_installer)
 
     def test_client_installer_waits_for_signed_server_version(self):
         installer = (ROOT / "scripts" / "install-client.sh").read_text(

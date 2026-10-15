@@ -1097,7 +1097,7 @@ main() {
   default_cloudflare_api_token="$(load_non_empty_or_default "$SERVER_INSTALL_ENV_FILE" CLOUDFLARE_API_TOKEN "$default_cloudflare_api_token")"
 
   local env_secret env_th env_alert_webhook_url env_alert_webhook_min_severity env_public_base_url env_telegram_proxy_url env_dashboard_username env_dashboard_password
-  local env_conn_warning_threshold env_conn_critical_threshold env_connection_stop_threshold env_connection_stop_duration_seconds env_connection_stop_max_gap_seconds env_offline_host_purge_seconds
+  local env_conn_warning_threshold env_conn_critical_threshold env_connection_stop_threshold env_connection_stop_duration_seconds env_connection_stop_max_gap_seconds env_offline_host_purge_seconds env_tcping_taiwan_host
   env_secret="$(load_kv_from_file "$SERVER_ENV_FILE" SHARED_SECRET || true)"
   env_th="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_DISK_THRESHOLD_PERCENT || true)"
   env_alert_webhook_url="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_WEBHOOK_URL || true)"
@@ -1112,6 +1112,12 @@ main() {
   env_connection_stop_duration_seconds="$(load_kv_from_file "$SERVER_ENV_FILE" CONNECTION_STOP_DURATION_SECONDS || true)"
   env_connection_stop_max_gap_seconds="$(load_kv_from_file "$SERVER_ENV_FILE" CONNECTION_STOP_MAX_GAP_SECONDS || true)"
   env_offline_host_purge_seconds="$(load_kv_from_file "$SERVER_ENV_FILE" OFFLINE_HOST_PURGE_SECONDS || true)"
+  env_tcping_taiwan_host="$(load_kv_from_file "$SERVER_ENV_FILE" TCPING_TAIWAN_HOST || true)"
+  if [[ -n "$env_tcping_taiwan_host" ]] \
+    && ! [[ "$env_tcping_taiwan_host" =~ ^([[:alnum:]]([[:alnum:]-]{0,61}[[:alnum:]])?\.)+[[:alnum:]]([[:alnum:]-]{0,61}[[:alnum:]])?$ ]]; then
+    echo "[WARN] 忽略无效的 TCPING_TAIWAN_HOST 配置。"
+    env_tcping_taiwan_host=""
+  fi
   default_secret="${env_secret:-$default_secret}"
   default_th="${env_th:-$default_th}"
   default_alert_webhook_url="${env_alert_webhook_url:-$default_alert_webhook_url}"
@@ -1214,6 +1220,7 @@ PURGE_SECONDS=$retention_seconds
 RAW_RETENTION_SECONDS=$raw_retention
 REPORT_MAX_ROWS=$report_max_rows
 HOST_SECURITY_MAX_ROWS=$host_security_max_rows
+TCPING_TAIWAN_HOST=$env_tcping_taiwan_host
 SHARED_SECRET=$secret
 ALERT_DISK_THRESHOLD_PERCENT=$th
 ALERT_CONN_WARNING_THRESHOLD=$default_conn_warning_threshold
