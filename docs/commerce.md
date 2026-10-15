@@ -21,7 +21,7 @@
 
 | 视图 | 数据源 | 口径 |
 | --- | --- | --- |
-| 账号余额 | GET /user/me | USD；可提现、托管、托管冻结分开显示，不推断净利润 |
+| 账号余额 | GET /user/me | USD；普通可用余额（不可提现）、托管总余额、托管可用余额与托管冻结分开显示，不推断净利润 |
 | 母鸡现状 | GET /machines 与 /machines/{id}/vms | 仅 owner_id 等于个人账号；当前归属其他用户的小鸡与自用小鸡分开计数，不当累计销量 |
 | 收益对比 | /machines 的 est_revenue、earned_revenue、locked_value | 直接展示平台值，缺失为未提供；已结算收益不含退款、补偿和进行中的冻结值 |
 | 订单历史 | GET /billing/orders | 仅当前账号的购买/退款/续费等订单；不声称覆盖所有买家历史。只有 status=completed 的金额进入汇总；状态缺失/其他状态不计入金额 |
@@ -29,6 +29,8 @@
 | 母鸡归属 | 订单或流水 data.machine_id；订单缺失时按当前 VM ID 关联 | 历史字段优先。无法可靠映射时明确归属未知，不分析 note 文本猜归属 |
 
 2026-10-13 只读核验实际接口确认：订单还包含 `status`、`machine_owner_id`、`data.machine_id` 和 `data.machine_name`；流水有 `data.machine_id`。这些字段比当时公开 YAML 更完整。仅采纳 ID/名称等白名单，不保存整个 data、credentials、agent_token、邮件、支付资料或 note。
+
+`available_balance` 是普通消费余额，不可当作可提现余额。`escrow_balance` 是托管总余额，包含 `escrow_locked_value` 冻结部分；服务端用同一份快照的 Decimal 精确计算 `escrow_available_balance = escrow_balance - escrow_locked_value`，对应托管可用资金，提现仍以平台规则为准。缺少总额或冻结值、冻结值为负或超过总额时显示“未提供”，不按零猜测。读取旧快照时也补充此派生字段，无需重新同步或修改旧缓存。
 
 历史筛选作用于记录、总数、类型金额、UTC 每日笔数及分页；不影响“当前母鸡/余额快照”。类型金额使用 Decimal 计算，前端仅格式化。走势图仅展示有记录的 UTC 日期，非连续等距日历时间序列。
 账单流水笔数（如托管扣减）不是售出小鸡数量，扣减也不必然是退款。没有完整卖家订单契约时，不从流水反推累计销量或退款率。

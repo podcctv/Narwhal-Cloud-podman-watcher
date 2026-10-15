@@ -318,10 +318,21 @@ class Client:
         return rows
 
 
+def account_balances(data):
+    values = {k: money(data.get(k)) for k in
+              ("available_balance", "escrow_balance", "escrow_locked_value", "commission_rate")}
+    total, locked = values['escrow_balance'], values['escrow_locked_value']
+    # Ordinary available_balance is spending credit, not withdrawable escrow.
+    # Missing/inconsistent inputs must not become zero or a fabricated balance.
+    available = None
+    if total is not None and locked is not None and Decimal(0) <= Decimal(locked) <= Decimal(total):
+        available = format(Decimal(total) - Decimal(locked), 'f')
+    return {**values, 'escrow_available_balance': available}
+
+
 def profile(client):
     data = client.get("/user/me")
-    return {"id": identity(data.get("id")), **{k: money(data.get(k)) for k in
-        ("available_balance", "escrow_balance", "escrow_locked_value", "commission_rate")}}
+    return {"id": identity(data.get("id")), **account_balances(data)}
 
 
 def snapshot(client, account):
@@ -552,7 +563,7 @@ def attach(app, db, database_path, credentials):
         if row and row["sync_token"] and time.time()-row["sync_started"] >= 240:
             error = "上次同步未完成，请重试；旧数据已保留"
         return {"synced_at": row["synced_at"] if row else 0, "stale": bool(row and (error or time.time()-row["synced_at"] > 900)),
-                "last_error": error, "profile": data["profile"] if data else None,
+                "last_error": error, "profile": {"id": data["profile"]["id"], **account_balances(data["profile"])} if data else None,
                 "machines": data["machines"] if data else [], "available": data is not None,
                 "source": BASE, "documentation": DOC, "currency": "USD"}
 

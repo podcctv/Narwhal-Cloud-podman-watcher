@@ -40,6 +40,22 @@ def fixture():
 
 
 class CommerceMathTests(unittest.TestCase):
+    def test_escrow_available_is_not_ordinary_available_balance(self):
+        client = mock.Mock()
+        client.get.return_value = {'id': uid(1), 'available_balance': Decimal('18.10'),
+            'escrow_balance': Decimal('142.16'), 'escrow_locked_value': Decimal('105.03')}
+        result = commerce.profile(client)
+        self.assertEqual(result['available_balance'], '18.10')
+        self.assertEqual(result['escrow_available_balance'], '37.13')
+        self.assertEqual(commerce.account_balances({'escrow_balance': '0.3', 'escrow_locked_value': '0.1'})['escrow_available_balance'], '0.2')
+
+    def test_missing_or_inconsistent_escrow_is_not_fabricated(self):
+        for data in ({}, {'available_balance': '18.10'}, {'escrow_balance': '142.16'},
+                     {'escrow_balance': '1', 'escrow_locked_value': '2'},
+                     {'escrow_balance': '1', 'escrow_locked_value': '-1'}):
+            self.assertIsNone(commerce.account_balances(data)['escrow_available_balance'])
+        self.assertEqual(commerce.account_balances({'escrow_balance': '1', 'escrow_locked_value': '1'})['escrow_available_balance'], '0')
+
     def window_client(self, rows):
         client = commerce.Client('synthetic-key-only')
         client.cutoff = 1000
@@ -337,6 +353,16 @@ class CommerceHTTPTests(unittest.TestCase):
         self.assertTrue(overview["available"])
         self.assertTrue(overview["stale"])
         self.assertEqual(overview["machines"][0]["sold_current"], 3)
+
+    def test_legacy_cached_profile_gets_correct_balance_without_resync(self):
+        self.login(viewer=True)
+        self.save()
+        self.seed()
+        with mock.patch.object(commerce.Client, 'get') as upstream:
+            result = self.client.get('/api/v1/commerce/overview').json()
+        upstream.assert_not_called()
+        self.assertEqual(result['profile']['available_balance'], '1.23')
+        self.assertEqual(result['profile']['escrow_available_balance'], '4.44')
 
     def test_new_key_and_delete_clear_cached_history(self):
         self.login(viewer=True)
