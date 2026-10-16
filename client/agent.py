@@ -2575,6 +2575,7 @@ MOTD_MARKER_END = "# <<< NARWHAL SECURITY ALERT END <<<"
 
 _MOTD_THREAT_TYPES = {
     "socks_weak_auth",
+    "socks_password_review",
     "malicious_process",
     "unauthorized_panel_pairing",
     "cc_attack",
@@ -3310,10 +3311,15 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             )
             alerts.append(socks_alert)
         elif socks_detected and socks_auth_mode == 'unknown' and socks_proxy.get('service_listeners'):
-            attention = _security_alert('socks_auth_unknown','warning','SOCKS 认证待核实',
-                'SOCKS 服务正在监听，但当前采样无法确认认证设置；不据此自动停止服务',1,0,container)
+            review = socks_proxy.get('password_review', [])
+            attention = _security_alert('socks_password_review' if review else 'socks_auth_unknown',
+                'warning', 'SOCKS 密码待人工评估' if review else 'SOCKS 认证待核实',
+                '已确认服务要求认证；请查看密码组成后选择放行或停止，未自动停止服务' if review else
+                '当前采样无法确认认证设置；不据此自动停止服务',1,0,container)
             attention.update(socks_auth_mode='unknown',service_listeners=socks_proxy['service_listeners'],
                 auth_verification=socks_proxy.get('auth_verification', []),
+                password_review=review, review_token=socks_proxy.get('review_token', ''),
+                review_observed_at=int(time.time()),
                 socks_processes=sorted({str(i.get('process')) for i in socks_proxy.get('process_matches',[]) if isinstance(i,dict) and i.get('process')}))
             alerts.append(attention)
         inbound_unique_ips = int(security.get("inbound_unique_ips") or 0)
@@ -4381,15 +4387,47 @@ def _collect_socks_config_evidence(
         elif marker == "@@AUTH":
             modes.add("configured")
     json_processes = []
+    review_processes = []
+    scan_deadline = time.monotonic() + 8
     for proc in socks_detector.process_configs(process_output):
+        if time.monotonic() >= scan_deadline:
+            break
         documents = []
+        sources = []
+        password_facts = []
+        start_ticks = run(_runtime_exec_cmd(runtime, name,
+            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip()
         for path in proc['paths']:
+            if time.monotonic() >= scan_deadline:
+                documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
+                break
             # Raw JSON is local-only and bounded; it never enters a report/log.
-            raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project))
+            raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
             document = socks_detector.parse_config(raw, proc['process'])
+            metadata = run(_runtime_exec_cmd(runtime, name,
+                f"stat -Lc '%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null", project), timeout=2).strip()
+            if raw and metadata:
+                sources.append({'path': path, 'generation': metadata[:180]})
+                password_facts.extend(socks_detector.legacy_profiles(raw, proc['process'])
+                                      if proc['process'] not in socks_detector.FAMILIES else [])
+            for entry in document['endpoints']:
+                entry['config_path'] = path
             documents.append(document)
             if document['endpoints']:
                 files.add(path)
+        cli = socks_detector.gost_cli(process_output, proc['pid']) if proc['process'] == 'gost' else None
+        if cli:
+            # -L is inbound, -F chains are deliberately excluded. A config plus CLI
+            # is not single-purpose proof unless no readable config was discovered.
+            if not sources:
+                documents = [cli]
+        if not password_facts:
+            password_facts = socks_detector.legacy_profiles('', proc['process'])
+        review_processes.append({'pid': proc['pid'], 'process': proc['process'],
+            'start_ticks': start_ticks if start_ticks.isdigit() else '', 'sources': sources,
+            'password_profiles': password_facts})
+        if proc['process'] not in socks_detector.FAMILIES:
+            continue
         parsed = bool(documents) and all(d['parsed'] for d in documents)
         endpoints = [e for d in documents for e in d['endpoints']]
         json_processes.append({**{k: proc[k] for k in ('pid', 'process')}, 'parsed': parsed,
@@ -4408,6 +4446,7 @@ def _collect_socks_config_evidence(
             else "unknown",
             "risk_reasons": sorted(reasons),
             "json_processes": json_processes,
+            "review_processes": review_processes,
         }
     )
     return result
@@ -4451,11 +4490,11 @@ def _probe_socks_listener(init_pid, key, listener):
     return {'mode': mode, 'reason': 'greeting_only' if mode != 'unknown' else 'timeout_rejected_or_not_socks'}
 
 
-def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, project, init_pid):
+def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, project, init_pid, scope_complete=True):
     """Port/PID scoped evidence; loopback-only dependencies are not auto-stopped."""
     matches = socks.get('process_matches', [])
     endpoints = socks.get('inbound_endpoints', [])
-    selected, refined, probes = [], [], []
+    selected, refined, probes, reviews = [], [], [], []
     deadline, probe_count = time.monotonic() + 4, 0
     for match in matches:
         if not isinstance(match, dict):
@@ -4497,6 +4536,7 @@ def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, p
                 if not match.get('listener_declared'):
                     continue
             safe = (entries[0]['action_safe'] if entries else match.get('action_safe', match.get('process') in _SOCKS_DIRECT_NAMES))
+            safe = safe and scope_complete
             # Configs can be edited before a reload or supplemented dynamically.
             # Additional live TCP/UDP listeners invalidate whole-process stop safety.
             if any(l.get('pid') == match.get('pid') and
@@ -4508,6 +4548,15 @@ def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, p
                             'action_safe': bool(safe and exposed is True and probe['mode'] != 'unknown'),
                             'public_exposure': exposed})
             probes.append({'pid': listener.get('pid'), 'port': listener.get('port'), **probe})
+            if probe['mode'] == 'auth_required' and mode == 'unknown':
+                proc = next((p for p in socks.get('review_processes', []) if p['pid'] == match.get('pid')), {})
+                facts = entries[0].get('password_profiles') if entries else None
+                reviews.append({'pid': match.get('pid'), 'process': match.get('process'),
+                    'port': listener.get('port'), 'local': listener.get('local'),
+                    'password_profiles': facts or proc.get('password_profiles') or socks_detector.legacy_profiles('', ''),
+                    'config_path': entries[0].get('config_path', '') if entries else '',
+                    'start_ticks': proc.get('start_ticks', ''), 'sources': proc.get('sources', []),
+                    'action_safe': bool(safe and exposed is True and proc.get('start_ticks'))})
     modes = {l['auth_state'] for l in selected if l['public_exposure'] is not False}
     socks.update(detected=bool(selected), service_listeners=selected,
         process_matches=refined, listener_scope_verified=True,
@@ -4515,6 +4564,10 @@ def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, p
         internal_only=bool(selected) and all(l['public_exposure'] is False for l in selected),
         auth_mode=next((m for m in ('no_auth', 'weak_password', 'unknown', 'configured') if m in modes), 'unknown'),
         listening_ports=sorted({l['port'] for l in selected}), auth_verification=probes)
+    socks['password_review'] = reviews[:20]
+    # Hash only non-secret evidence and filesystem/process generations, never credentials.
+    material = {'runtime': runtime, 'project': project, 'name': name, 'init_pid': init_pid, 'reviews': reviews}
+    socks['review_token'] = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest() if reviews else ''
 
 
 def collect_panel_pairing_indicators(
@@ -4611,6 +4664,7 @@ def collect_panel_pairing_indicators(
         "config_files": socks_config.get("config_files", []),
         "auth_mode": socks_auth_mode,
         "inbound_endpoints": endpoints,
+        "review_processes": socks_config.get('review_processes', []),
         "direction_verified": any(p['parsed'] for p in json_processes),
         "risk_reasons": sorted(
             set(socks_process.get("risk_reasons", [])) | set(socks_config.get("risk_reasons", []))
@@ -5662,7 +5716,9 @@ def collect_container(
         pids = {int(item.get('pid') or 0) for item in matches if isinstance(item,dict)}
         indicators['service_listeners'] = [item for item in owned_listeners if item.get('pid') in pids]
     _refine_socks_listener_evidence(socks_proxy, owned_listeners, network_exposure,
-                                  runtime, name, project, pid)
+                                  runtime, name, project, pid,
+                                  scope_complete=communication.get('communication_detail_available') is True
+                                      and not communication.get('communication_snapshot_truncated'))
     socket_security.update(
         {
             "net_rx_pps": net_rx_pps,
@@ -6498,6 +6554,48 @@ def _verify_remediation_stopped(
 
 def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
     """Stop only the allowlisted SOCKS process/service inside one container."""
+    params = action.get('params') if isinstance(action.get('params'), dict) else {}
+    if str(params.get('auth_mode') or '') not in ('no_auth', 'weak_password'):
+        return False, 'SOCKS stop requires confirmed empty or weak authentication evidence'
+    return _stop_scoped_socks(action)
+
+
+def stop_reviewed_socks(action: Dict) -> Tuple[bool, str]:
+    """Explicit human decision; re-prove live ownership and the reviewed generation."""
+    params = action.get('params') if isinstance(action.get('params'), dict) else {}
+    runtime, name, project = (str(action.get(k) or '') for k in ('runtime', 'container_name', 'project'))
+    if runtime not in {'incus', 'podman'} or not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name) or (project and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', project)):
+        return False, 'invalid or notice-only target'
+    if params.get('manual_review') is not True or not re.fullmatch(r'[0-9a-f]{64}', str(params.get('review_token', ''))):
+        return False, 'explicit reviewed evidence is required'
+    try:
+        age = time.time() - float(params.get('review_observed_at', 0))
+    except (TypeError, ValueError):
+        age = float('inf')
+    if not 0 <= age <= 900:
+        return False, 'review evidence expired; refresh and confirm again'
+    binary = get_runtime_bins().get(runtime, '')
+    if not binary:
+        return False, 'runtime unavailable'
+    pid_text = str(_incus_instance_pid(binary, name, project)) if runtime == 'incus' else run([binary, 'inspect', '--format', '{{.State.Pid}}', name]).strip()
+    if not pid_text.isdigit() or int(pid_text) <= 1:
+        return False, 'container process unavailable'
+    socks = collect_panel_pairing_indicators(name, binary, project).get('socks_proxy', {})
+    sockets = _collect_socket_security(int(pid_text))
+    communication = _collect_socket_process_details(binary, name, project, sockets.get('listening_ports', []))
+    _refine_socks_listener_evidence(socks, communication.get('service_listeners', []), [], binary, name, project, int(pid_text),
+        scope_complete=communication.get('communication_detail_available') is True and not communication.get('communication_snapshot_truncated'))
+    reviews = socks.get('password_review', [])
+    if socks.get('review_token') != params['review_token'] or not reviews or not all(r.get('action_safe') for r in reviews):
+        return False, 'ownership/configuration/listeners changed or mixed service; refresh and review again'
+    # Only PID-scoped stops; no persistent weak-auth policy and no whole-container stop.
+    scoped = {**action, 'params': {'process_names': sorted({r['process'] for r in reviews}),
+                                'process_pids': sorted({r['pid'] for r in reviews}),
+                                'process_starts': {str(r['pid']): r.get('start_ticks', '') for r in reviews}}}
+    return _stop_scoped_socks(scoped)
+
+
+def _stop_scoped_socks(action: Dict) -> Tuple[bool, str]:
     runtime_kind = str(action.get("runtime") or "").strip().lower()
     container_name = str(action.get("container_name") or "").strip()
     project = str(action.get("project") or "").strip()
@@ -6508,8 +6606,6 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
     if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
         return False, "invalid Incus project"
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
-    if str(params.get("auth_mode") or "") not in ("no_auth", "weak_password"):
-        return False, "SOCKS stop requires confirmed empty or weak authentication evidence"
     requested_names = params.get("process_names") if isinstance(params.get("process_names"), list) else []
     process_names = sorted(
         {
@@ -6534,8 +6630,22 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
 
     names = " ".join(shlex.quote(item) for item in process_names)
     pids = " ".join(str(item) for item in process_pids)
+    starts = params.get('process_starts')
+    start_guard = ''
+    signal_guard = ''
+    kill_guard = '[ -d "/proc/$pid" ]'
+    if starts is not None:
+        if not isinstance(starts, dict) or not process_pids or any(not str(starts.get(str(pid), '')).isdigit() for pid in process_pids):
+            return False, 'reviewed process generation is unavailable'
+        # Immediately recheck the kernel process generation before any service/PID mutation.
+        for pid in process_pids:
+            start_guard += f"[ \"$(awk '{{print $22}}' /proc/{pid}/stat 2>/dev/null)\" = {shlex.quote(str(starts[str(pid)]))} ] || exit 73; "
+        cases = ' '.join(f'{pid}) expected={shlex.quote(str(starts[str(pid)]))};;' for pid in process_pids)
+        signal_guard = (f'case "$pid" in {cases} *) exit 73;; esac; '
+            "[ \"$(awk '{print $22}' /proc/$pid/stat 2>/dev/null)\" = \"$expected\" ] || exit 73; ")
+        kill_guard = "[ \"$(awk '{print $22}' /proc/$pid/stat 2>/dev/null)\" = \"$expected\" ]"
     script = (
-        "set -u; " + _cleanup_receipt_shell() + "stopped_services=0; killed_processes=0; stop_errors=0; targets=''; "
+        "set -u; " + start_guard + _cleanup_receipt_shell() + "stopped_services=0; killed_processes=0; stop_errors=0; targets=''; "
         f"requested_pids={shlex.quote((' ' + pids + ' ') if pids else '')}; "
         f"for pattern in {names}; do "
         "for proc in /proc/[0-9]*; do pid=${proc##*/}; [ \"$pid\" = \"$$\" ] && continue; "
@@ -6563,8 +6673,9 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
         "case \"$unit\" in *.service) case \"$unit\" in *[!A-Za-z0-9_.@:-]*) ;; *) "
         "command -v systemctl >/dev/null 2>&1 && systemctl stop \"$unit\" >/dev/null 2>&1 && "
         "{ stopped_services=$((stopped_services+1)); nw_receipt stop_service \"$unit\" ok; } || true;; esac;; esac; "
+        "[ -r \"/proc/$pid/stat\" ] || continue; " + signal_guard +
         "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); nw_receipt process \"$comm:$pid\" ok; "
-        "sleep 1; [ -d \"/proc/$pid\" ] && kill -KILL \"$pid\" 2>/dev/null || true; else nw_receipt process \"$comm:$pid\" failed; fi; done; "
+        "sleep 1; " + kill_guard + " && kill -KILL \"$pid\" 2>/dev/null || true; else nw_receipt process \"$comm:$pid\" failed; fi; done; "
         "printf 'stopped_services=%s killed_processes=%s stop_errors=%s\\n' "
         "\"$stopped_services\" \"$killed_processes\" \"$stop_errors\"; [ \"$stop_errors\" -eq 0 ]"
     )
@@ -6577,7 +6688,9 @@ def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
             r"\b(stopped_services|killed_processes|stop_errors)=(\d+)\b", output or ""
         )
     }
-    if runtime_kind == "incus":
+    if starts is not None and not (counts.get('stopped_services', 0) or counts.get('killed_processes', 0)):
+        return False, 'reviewed process changed or no target stopped; refresh evidence before retrying'
+    if runtime_kind == "incus" and starts is None:
         container_stop_ok = ok
         receipts = _cleanup_marker_text(output)
         _, host_killed, host_errors, host_output = _incus_host_namespace_kill(
@@ -7008,6 +7121,8 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         except (OSError, ValueError) as exc:
             return False, f"SOCKS enforcement policy removal failed: {exc}"
         return True, f"policy_removed={1 if removed else 0}; SOCKS service is allowed to recover"
+    if action_type == "stop_reviewed_socks":
+        return stop_reviewed_socks(action)
     if action_type == "enforce_socks_auth":
         runtime_kind = str(action.get("runtime") or "").strip().lower()
         project = str(action.get("project") or "").strip()

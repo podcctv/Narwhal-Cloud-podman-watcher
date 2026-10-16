@@ -4,12 +4,107 @@ import json
 import posixpath
 import re
 import shlex
+import string
+from collections import Counter
+from urllib.parse import urlsplit, unquote
 
 MAX_CONFIG_BYTES = 262144
 FAMILIES = {'xray', 'v2ray', 'sing-box', 'gost'}
 WEAK = {'123456', '12345678', '123123', 'admin', 'admin123', 'changeme',
         'default', 'guest', 'letmein', 'pass', 'password', 'qwerty', 'root',
         'socks', 'socks5', 'test', 'toor'}
+
+
+def password_profile(value):
+    """Only aggregate counts leave the node: no characters, order, username or hash."""
+    if not isinstance(value, str) or len(value) > 4096 or '${' in value:
+        return {'available': False, 'reason': '密码缺失、外部引用或超过统计上限'}
+    digits = Counter(c for c in value if c in string.digits)
+    longest = current = 0
+    previous = None
+    for char in value:
+        current = current + 1 if char == previous else 1
+        previous = char
+        longest = max(longest, current)
+    return {'available': True, 'length': len(value),
+            'lowercase': sum(c in string.ascii_lowercase for c in value),
+            'uppercase': sum(c in string.ascii_uppercase for c in value),
+            'digits': sum(digits.values()), 'symbols': sum(c in string.punctuation for c in value),
+            'other': sum(c not in string.ascii_letters + string.digits + string.punctuation for c in value),
+            'repeated_digits': sum(n - 1 for n in digits.values()),
+            'max_digit_frequency': max(digits.values(), default=0), 'longest_identical_run': longest}
+
+
+def profiles(users, key):
+    if not isinstance(users, list) or not users:
+        return [{'available': False, 'reason': '未找到内联入站认证账号；可能使用外部认证'}]
+    result = [dict(password_profile(u.get(key) if isinstance(u, dict) else None), account_index=i+1)
+              for i, u in enumerate(users[:20])]
+    if len(users) > 20:
+        result.append({'available': False, 'reason': '仅展示前 20 个账号，未统计其余账号'})
+    return result
+
+
+def gost_url(value):
+    """GOST v2 inbound URL only. The caller must never pass a forwarding chain."""
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.split('+')[0] not in {'socks', 'socks5'} or not parsed.port:
+            return None
+        profile = password_profile(unquote(parsed.password)) if parsed.password is not None else {
+            'available': False, 'reason': '入站 URL 未提供内联密码；以握手结果为准'}
+        return {'port': parsed.port, 'listen': parsed.hostname or '*', 'auth_state': 'unknown',
+                'password_profiles': [profile]}
+    except (ValueError, TypeError):
+        return None
+
+
+def gost_config(raw):
+    result = {'parsed': False, 'endpoints': [], 'single_purpose': False}
+    if len(raw.encode('utf-8')) > MAX_CONFIG_BYTES:
+        return result
+    try:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            import yaml
+            # No aliases, custom tags, or expansive graph construction. Deep input fails closed.
+            for token in yaml.scan(raw):
+                if isinstance(token, (yaml.tokens.AliasToken, yaml.tokens.AnchorToken, yaml.tokens.TagToken)):
+                    return result
+            data = yaml.safe_load(raw)
+        if not isinstance(data, dict):
+            return result
+        services = data.get('services', data.get('serveNodes', []))
+        if not isinstance(services, list) or not services or len(services) > 100:
+            return result
+        for service in services:
+            if isinstance(service, str):
+                entry = gost_url(service)
+                if entry:
+                    result['endpoints'].append(entry)
+                continue
+            if not isinstance(service, dict):
+                continue
+            handler = service.get('handler', {})
+            if not isinstance(handler, dict) or handler.get('type') not in {'socks', 'socks5'}:
+                continue
+            host, port = endpoint(service.get('addr'))
+            if not 0 < port < 65536:
+                continue
+            auth = handler.get('auth')
+            users = [auth] if isinstance(auth, dict) else []
+            # Authers are live external sources; their contents are not proved by this file.
+            facts = profiles(users, 'password') if not handler.get('auther') else [
+                {'available': False, 'reason': '使用外部 auther，配置未包含可统计的入站密码'}]
+            result['endpoints'].append({'port': port, 'listen': host or '*', 'auth_state': 'unknown',
+                                        'password_profiles': facts})
+        result['parsed'] = True
+        result['single_purpose'] = len(services) == 1 and len(result['endpoints']) == 1
+    except Exception:
+        # YAML/JSON errors can embed source lines. Never log exception text or raw config.
+        return {'parsed': False, 'endpoints': [], 'single_purpose': False}
+    return result
 
 
 def auth_strength(users, user_key, password_key):
@@ -33,6 +128,8 @@ def parse_config(raw, process):
     result = {'parsed': False, 'endpoints': [], 'single_purpose': False}
     if process not in FAMILIES or len(raw.encode('utf-8')) > MAX_CONFIG_BYTES:
         return result
+    if process == 'gost':
+        return gost_config(raw)
     # JSONC comments are allowed by Xray. Preserve quoted strings, including URLs.
     raw = re.sub(r'"(?:\\.|[^"\\])*"|//[^\r\n]*|/\*.*?\*/',
                  lambda m: m[0] if m[0].startswith('"') else ' ', raw, flags=re.S)
@@ -41,8 +138,6 @@ def parse_config(raw, process):
     except (ValueError, RecursionError):
         return result
     if not isinstance(data, dict):
-        return result
-    if process == 'gost':  # External authers/YAML remain unknown, verified by handshake.
         return result
     inbounds = data.get('inbounds', [])
     if not isinstance(inbounds, list) or len(inbounds) > 100 or any(not isinstance(i, dict) for i in inbounds):
@@ -61,6 +156,7 @@ def parse_config(raw, process):
         if not ports:
             result['parsed'] = False
         mode = 'unknown'
+        password_facts = []
         if process in {'xray', 'v2ray'}:
             settings = inbound.get('settings', {})
             if isinstance(settings, dict):
@@ -68,13 +164,19 @@ def parse_config(raw, process):
                 if auth == 'noauth':
                     mode = 'no_auth'
                 elif auth == 'password':
-                    mode = auth_strength(settings.get('users', settings.get('accounts')), 'user', 'pass')
+                    users = settings.get('users', settings.get('accounts'))
+                    mode = auth_strength(users, 'user', 'pass')
+                    password_facts = profiles(users, 'pass')
         else:
             users = inbound.get('users', [])
             mode = 'no_auth' if users == [] else auth_strength(users, 'username', 'password')
+            password_facts = profiles(users, 'password') if users else []
         for p in ports:
             listen = inbound.get('listen', '*')
-            result['endpoints'].append({'port': p, 'listen': listen if isinstance(listen, str) else '*', 'auth_state': mode})
+            entry = {'port': p, 'listen': listen if isinstance(listen, str) else '*', 'auth_state': mode}
+            if password_facts:
+                entry['password_profiles'] = password_facts
+            result['endpoints'].append(entry)
     result['single_purpose'] = len(inbounds) == 1 and len(result['endpoints']) == 1
     return result
 
@@ -91,24 +193,73 @@ def process_configs(output):
         except ValueError:
             continue
         process = parts[2].lower()
-        if process not in FAMILIES or not tokens or posixpath.basename(tokens[0]).lower() != process:
+        if process not in FAMILIES | {'danted', 'sockd', '3proxy'} or not tokens or posixpath.basename(tokens[0]).lower() != process:
             continue
         paths = []
         for index, token in enumerate(tokens):
             value = ''
-            if token in {'-c', '-config', '--config', '-conf', '--config-file'} and index + 1 < len(tokens):
+            if token in {'-c', '-C', '-f', '-config', '--config', '-conf', '--config-file'} and index + 1 < len(tokens):
                 value = tokens[index + 1]
             elif token.startswith(('--config=', '-config=')):
                 value = token.split('=', 1)[1]
-            if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', value) and value.endswith('.json'):
+            if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', value) and value.endswith(('.json', '.yaml', '.yml', '.conf', '.cfg')) and '..' not in value.split('/'):
                 paths.append(value)
-        if not paths and not any(t.startswith(('-c', '--config', '-config', '-confdir')) for t in tokens):
-            paths = [f'/etc/{process}/config.json']
+        if process == '3proxy':
+            paths += [t for t in tokens[1:] if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}\.cfg', t) and '..' not in t.split('/')]
+        if not paths and not any(t.startswith(('-c', '-C', '-f', '--config', '-config', '-confdir')) for t in tokens):
+            paths = {'danted': ['/etc/danted.conf'], 'sockd': ['/etc/sockd.conf'],
+                     '3proxy': ['/etc/3proxy/3proxy.cfg'], 'gost': ['/etc/gost/config.json', '/etc/gost/config.yaml']}.get(process, [f'/etc/{process}/config.json'])
         rows.append({'pid': int(parts[0]), 'process': process, 'paths': list(dict.fromkeys(paths))[:4],
                      'additional_configs': any(t.startswith(('-confdir', '--config-dir')) for t in tokens)})
         if len(rows) >= 8:
             break
     return rows
+
+
+def legacy_profiles(raw, process):
+    if process in {'danted', 'sockd'}:
+        return [{'available': False, 'reason': 'Dante 使用系统/PAM 认证；不能从密码哈希还原长度或组成'}]
+    if process == '3proxy' and len(raw.encode('utf-8')) <= MAX_CONFIG_BYTES:
+        found = []
+        for line in raw.splitlines():
+            try:
+                tokens = shlex.split(line, comments=True)
+            except ValueError:
+                continue
+            if tokens[:1] != ['users']:
+                continue
+            for token in tokens[1:21]:
+                parts = token.split(':', 2)
+                found.append(password_profile(parts[2]) if len(parts) == 3 and parts[1] == 'CL' else
+                             {'available': False, 'reason': '加密或外部密码，不能还原组成'})
+                if len(found) >= 20:
+                    return found
+        if found:
+            return found
+    return [{'available': False, 'reason': '配置未读取、格式不支持或认证保存在外部；未按空密码处理'}]
+
+
+def gost_cli(output, pid):
+    for line in output.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) != 4 or parts[0] != str(pid):
+            continue
+        try:
+            tokens = shlex.split(parts[3])
+        except ValueError:
+            return None
+        listeners = []
+        for i, token in enumerate(tokens):
+            if token == '-L' and i+1 < len(tokens):
+                listeners.append(tokens[i+1])
+            elif token.startswith('-L='):
+                listeners.append(token[3:])
+        if listeners:
+            entries = [e for e in (gost_url(v) for v in listeners[:100]) if e]
+            return {'parsed': len(listeners) <= 100, 'endpoints': entries,
+                    'single_purpose': len(listeners) == 1 and len(entries) == 1
+                        and not any(t in {'-C', '-c', '--config'} or t.startswith('--config=') for t in tokens)}
+    return None
 
 
 def endpoint(value):

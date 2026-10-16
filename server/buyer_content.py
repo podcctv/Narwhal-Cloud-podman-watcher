@@ -90,8 +90,10 @@ def issue(alert, details):
         if obs.get("http_requests"):
             facts += f"本次统计 {fmt(obs['http_requests'])} 次请求。"
         return description, facts, advice
-    if kind in {"socks_weak_auth", "socks_auth_unknown"}:
+    if kind in {"socks_weak_auth", "socks_auth_unknown", "socks_password_review"}:
         service = names(details.get("socks_processes")) or "SOCKS"
+        if kind == 'socks_password_review':
+            return f"发现 {service} 代理正在提供服务，已确认要求认证，但密码安全性需要检查", listener_text(details), "请核对是否为本人安装，检查密码是否足够安全，或关闭不需要的代理。"
         mode = details.get("socks_auth_mode")
         reason = "没有密码保护" if mode == "no_auth" else "密码过于简单" if mode == "weak_password" else "认证设置尚未确认"
         facts = listener_text(details)

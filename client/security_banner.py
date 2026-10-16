@@ -97,6 +97,8 @@ def customer_metrics(entry, english=False):
 def customer_copy(entry, english=False):
     """Version 2: a concrete cause and actionable advice, never a raw report."""
     title, reason = safe(entry.get('title') or entry.get('type')), safe(entry.get('detail'))
+    if entry.get('type') == 'user_notice':
+        return title, safe(entry.get('detail'), 1600), [], ''
     if not english and (not entry.get('title') or title == entry.get('type')):
         title = {'cc_attack':'HTTP 访问异常','socks_weak_auth':'代理认证风险','socks_auth_unknown':'代理认证待确认',
                  'container_connection_count':'容器连接数偏高','connections':'容器连接数偏高',
@@ -165,11 +167,12 @@ def historical_detail(entry):
 
 def select_entries(entries):
     # Reserve a separate slot for the latest recovery, even when new risks appear.
-    current = sorted((e for e in entries if not e.get('historical')), key=lambda e: (
+    notices = sorted((e for e in entries if e.get('type') == 'user_notice'), key=lambda e: -e.get('time_epoch', 0))[:1]
+    current = sorted((e for e in entries if not e.get('historical') and e.get('type') != 'user_notice'), key=lambda e: (
         e.get('state', 'active') not in {'active', 'recurring'}, e.get('severity') != 'critical', -e.get('time_epoch', 0)))[:3]
     history = sorted((e for e in entries if e.get('historical')),
                      key=lambda e: e.get('recovered_at_epoch', e.get('time_epoch', 0)), reverse=True)[:1]
-    return current + history
+    return notices + current[:3-len(notices)] + history
 
 
 def render(name, entries, target_hint="", version="dev", language=None, width=None, color=None, stale=False, sampled_at=None, _dynamic_history_age=False):
@@ -484,6 +487,18 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     key=json.dumps([container.get("runtime",""),container.get("project",""),name,str(container.get("id") or "")],ensure_ascii=False)
     entries=incidents.setdefault(key,[])
     now=time.time()
+    notices = [s for s in server_states if s.get('type') == 'user_notice'
+        and (s.get('runtime'), s.get('project'), s.get('name')) == (container.get('runtime',''), container.get('project',''), name)
+        and (not s.get('expected_container_id') or s.get('expected_container_id') == str(container.get('id') or ''))
+        and now-float(s.get('updated_at',0)) < 900 and float(s.get('expires_at',0)) > now
+        and re.fullmatch(r'NOTICE-[0-9a-f]{32}', str(s.get('event_id','')))]
+    # Manual notices remain until their explicit expiry, independent of alert recovery.
+    entries[:] = [e for e in entries if e.get('type') != 'user_notice']
+    for s in notices[:5]:
+        entries.append({'type':'user_notice','event_id':s['event_id'],'time_epoch':s.get('created_at',now),
+            'first_seen_epoch':s.get('created_at',now), 'title':safe(s.get('title')),
+            'detail':safe(str(s.get('message','')).replace('\n','；'),1600), 'severity':'warning','state':'active','clean_samples':0,
+            'action':'用户通知；请检查设置', 'expires_at':s['expires_at']})
     relevant=[a for a in alerts if a.get("severity") in {"warning", "critical"} or a.get("type") in threat_types]
     for a in relevant:
         e=next((e for e in entries if e.get("type")==a.get("type") and not e.get('historical') and e.get('state') != 'verified'),None)
@@ -508,6 +523,8 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
                          for key, field in (('domains', 'unapproved_domains'), ('programs', 'process_patterns')) if isinstance(a.get(field), list)}
     present={a.get("type") for a in relevant}
     for e in entries:
+        if e.get('type') == 'user_notice':
+            continue
         if e.get('historical') or e.get('state') == 'verified':
             e['historical'] = True
             # Legacy snapshots have no recovery timestamp. Retain them for a full
@@ -520,7 +537,7 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
             e["event_id"]=safe(matching.get("event_id"),80)
         if e.get("type") not in present:
             socks=container.get("security",{}).get("socks_proxy",{})
-            unknown=e.get("type")=="socks_weak_auth" and ("detected" not in socks or (socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}))
+            unknown=e.get("type") in {"socks_weak_auth", "socks_password_review"} and ("detected" not in socks or (socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}))
             e["clean_samples"]=0 if unknown else int(e.get("clean_samples",0))+1
             e["state"]="unverified" if unknown else "verified" if e["clean_samples"]>=2 else "resolved"
             e["action"]="Two fresh samples verified clean" if e["state"]=="verified" else "Awaiting fresh evidence"
@@ -578,6 +595,8 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     if shell_ok or delivery.get('status') in {'written','unchanged'}:
         delivery['format_version'] = 2
     delivery["event_ids"]=[e["event_id"] for e in entries]
+    # Only IDs selected for actual rendering may be acknowledged as delivered.
+    delivery['notice_ids'] = [e['event_id'] for e in select_entries(entries) if e.get('type') == 'user_notice']
     # Read-only login mechanism check, not a promise that an SSH session displayed it.
     if key not in _checks or now-_checks[key][0]>3600:
         ok,mechanism=checked_exec(container,"if command -v sshd >/dev/null 2>&1; then sshd -T 2>/dev/null | grep '^printmotd '; fi; if grep -qs pam_motd /etc/pam.d/sshd; then printf 'pam_motd\\n'; fi; if grep -qs '/etc/motd' /etc/profile; then printf 'profile_motd\\n'; fi; true")

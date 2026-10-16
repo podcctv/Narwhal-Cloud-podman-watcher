@@ -13,6 +13,8 @@ import { SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
+import { SocksPasswordReview } from '../alerts/SocksPasswordReview';
+import { UserNoticeAction } from '../alerts/UserNoticeAction';
 
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
@@ -176,6 +178,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 <p className="text-xs text-slate-300 leading-relaxed">
                   {alert.message}
                 </p>
+                <SocksPasswordReview alert={alert} onRefresh={onRefresh} onToast={onToast} />
 
                 {/* Remediation Failure Explanation Banner */}
                 {isActionFailed && (
@@ -198,6 +201,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
               {/* Action Buttons */}
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                <UserNoticeAction alertId={alert.id} onToast={onToast} />
                 {canRemediate && <button
                   type="button"
                   disabled={isProcessing}

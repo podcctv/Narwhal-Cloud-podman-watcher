@@ -48,7 +48,15 @@ def initialize(conn):
     CREATE INDEX IF NOT EXISTS idx_buyer_due ON buyer_outbox(status,due_at);
     CREATE TABLE IF NOT EXISTS buyer_cooldowns(machine_id TEXT PRIMARY KEY,next_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS buyer_checks(alert_id INTEGER PRIMARY KEY,episode INTEGER,clean_samples INTEGER DEFAULT 0,last_sample INTEGER,state TEXT);
+    CREATE TABLE IF NOT EXISTS buyer_user_notices(
+      id TEXT PRIMARY KEY,alert_id INTEGER,episode INTEGER,host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,
+      subject TEXT,message TEXT,machine_id TEXT,user_id TEXT,requested_by TEXT,created_at INTEGER,expires_at INTEGER,container_id TEXT DEFAULT '',
+      telegram_status TEXT,banner_status TEXT DEFAULT 'queued',last_error TEXT DEFAULT '',updated_at INTEGER,
+      attempts INTEGER DEFAULT 0,due_at INTEGER DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS idx_user_notices_host ON buyer_user_notices(host_id,expires_at);
     """)
+    if 'container_id' not in {r[1] for r in conn.execute('PRAGMA table_info(buyer_user_notices)')}:
+        conn.execute("ALTER TABLE buyer_user_notices ADD COLUMN container_id TEXT DEFAULT ''")
     buyer_mapping.initialize(conn)
 
 
@@ -112,6 +120,13 @@ def current_state(conn, alert):
 def observe(conn, host, ts, containers, alerts):
     """Inline remediation verification needs fresh samples, not just a successful kill."""
     lookup={(c.get("runtime",""),c.get("project",""),c.get("name")):c for c in containers}
+    for notice in conn.execute("SELECT * FROM buyer_user_notices WHERE host_id=? AND expires_at>? AND banner_status='queued'", (host, ts)).fetchall():
+        c = lookup.get((notice['runtime'], notice['project'], notice['container_name']))
+        if notice['container_id'] and (not c or str(c.get('id') or '') != notice['container_id']):
+            continue
+        delivery = c.get('security', {}).get('motd_delivery', {}) if c else {}
+        if (delivery.get('status') in {'written', 'unchanged'} or delivery.get('shell_delivery') == 'installed') and 'NOTICE-'+notice['id'] in delivery.get('notice_ids', []):
+            conn.execute("UPDATE buyer_user_notices SET banner_status='written',updated_at=? WHERE id=?", (ts, notice['id']))
     observed={(a.get("type"),a.get("runtime",""),a.get("project",""),a.get("container_name")) for a in alerts}
     for a in conn.execute("SELECT * FROM security_alerts WHERE host_id=? AND status IN ('active','remediated','resolved') AND last_seen>=?",(host,ts-86400)).fetchall():
         c=lookup.get((a["runtime"],a["project"],a["container_name"]))
@@ -122,7 +137,7 @@ def observe(conn, host, ts, containers, alerts):
             continue
         present=(a["alert_type"],a["runtime"],a["project"],a["container_name"]) in observed
         socks=c.get("security",{}).get("socks_proxy",{})
-        unknown=a["alert_type"]=="socks_weak_auth" and ("detected" not in socks or (socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}))
+        unknown=a["alert_type"] in {"socks_weak_auth", "socks_password_review"} and ("detected" not in socks or (socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}))
         if a["alert_type"] == "ops_bandwidth_saturation":
             unknown = not c.get("bandwidth_monitor", {}).get("available", False)
         # Only verify events with an existing observation/remediation history.
@@ -135,7 +150,7 @@ def render(alert, state, node="", conn=None):
     action = None
     if conn is not None:
         action = conn.execute("SELECT * FROM security_actions WHERE alert_id=? AND created_at>=? "
-                              "AND action_type IN ('remediate_panel_pairing','remediate_malicious_process','enforce_socks_auth','apply_udp_throttle','stop_container') "
+                              "AND action_type IN ('remediate_panel_pairing','remediate_malicious_process','enforce_socks_auth','stop_reviewed_socks','apply_udp_throttle','stop_container') "
                               "ORDER BY id DESC LIMIT 1", (alert['id'], alert['first_seen'])).fetchone()
     if action:
         action = dict(action)
@@ -147,6 +162,11 @@ def render(alert, state, node="", conn=None):
 def reconcile(conn, host, now):
     cfg = config(conn)
     for alert in conn.execute("SELECT * FROM security_alerts WHERE host_id=? AND last_seen>=? ORDER BY id DESC LIMIT 1000", (host, now-7*86400)).fetchall():
+        if alert['alert_type'] == 'socks_password_review':
+            # Pending administrator judgement is not a confirmed customer risk.
+            # Only the explicit user-notice workflow may notify the buyer.
+            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='密码待人工判断，买家通知由管理员明确触发' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
+            continue
         if alert["alert_type"] == "ops_traffic_quota":
             conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
             continue
@@ -182,7 +202,130 @@ def banner_states(conn, host):
             continue
         states.append({"runtime": a["runtime"], "project": a["project"], "name": a["container_name"], "type": a["alert_type"],
                        "event_id": f"NW-{a['id']}-{a['first_seen']}", "state": current_state(conn,a), "updated_at": a["last_seen"]})
-    return states
+    now = int(time.time())
+    notices = []
+    for n in conn.execute("SELECT * FROM buyer_user_notices WHERE host_id=? AND expires_at>? ORDER BY created_at DESC LIMIT 200", (host, now)):
+        t = target(conn, n, now)
+        if n['user_id'] and (not t or (t['machine_id'], t['user_id'], t['scope']) != (n['machine_id'], n['user_id'], 'user')):
+            continue  # Do not leave the old owner's notice on a reassigned container.
+        if n['container_id'] and container_id(conn,n) != n['container_id']:
+            continue
+        notices.append({'runtime': n['runtime'], 'project': n['project'], 'name': n['container_name'], 'expected_container_id': n['container_id'],
+            'type': 'user_notice', 'event_id': 'NOTICE-'+n['id'], 'state': 'active', 'updated_at': now,
+            'created_at': n['created_at'], 'expires_at': n['expires_at'], 'title': n['subject'], 'message': n['message']})
+    return notices + states[:1000-len(notices)]
+
+
+def container_id(conn, row):
+    report = conn.execute('SELECT payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1',
+        tuple(row[k] for k in buyer_mapping.IDENTITY)).fetchone()
+    return str(buyer_content.loads(report[0]).get('id') or '')[:200] if report else ''
+
+
+def notice_preview(conn, alert_id):
+    a = conn.execute('SELECT * FROM security_alerts WHERE id=?', (alert_id,)).fetchone()
+    if not a:
+        raise ValueError('告警不存在')
+    now = int(time.time())
+    t = target(conn, a, now)
+    mapped = bool(t and t['scope'] == 'user' and t['user_id'])
+    cfg = config(conn)
+    subject, message = render(a, current_state(conn, a), t['node_name'] if t else '', conn)
+    snapshot = [a[k] for k in ('id', 'first_seen', 'status', 'host_id', 'runtime', 'project', 'container_name')]
+    instance = container_id(conn, a)
+    snapshot += [t['machine_id'] if mapped else '', t['user_id'] if mapped else '', instance, subject, message]
+    token = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False).encode()).hexdigest()
+    live = a['runtime'] in {'incus', 'podman'} and 0 <= now-a['last_seen'] <= 900
+    return {'subject': subject, 'message': message, 'preview_token': token, 'can_submit': live, 'container_id': instance,
+        'audience': f"用户 {t['user_id']} / {t['node_name'] or a['container_name']}" if mapped else '收件未映射（不会整机广播）',
+        'telegram': 'ready' if mapped and cfg['enabled'] and cfg['api_key'] else 'blocked',
+        'telegram_note': '通过买家通知 API 投递；受理不等于用户已阅读，Telegram 绑定由上游维护' if mapped else '请先补齐精确用户收件映射；SSH 提醒可以独立排队',
+        'banner': 'ready' if live else 'blocked',
+        'banner_note': '写入该容器的 SSH 登录后提醒；不修改 SSH 认证前横幅。离线时等待节点回连。',
+        'latest': [dict(n) for n in conn.execute('SELECT id,telegram_status,banner_status,last_error,created_at,expires_at FROM buyer_user_notices WHERE alert_id=? ORDER BY created_at DESC LIMIT 5', (alert_id,))]}
+
+
+def queue_user_notice(conn, alert_id, payload, requested_by):
+    notice_id = str(payload.get('request_id', ''))
+    if not re.fullmatch(r'[0-9a-f]{32}', notice_id) or payload.get('confirm') is not True:
+        raise ValueError('需要明确确认和有效请求 ID')
+    old = conn.execute('SELECT * FROM buyer_user_notices WHERE id=?', (notice_id,)).fetchone()
+    if old:
+        if old['alert_id'] != alert_id or old['requested_by'] != requested_by:
+            raise ValueError('请求 ID 与目标不匹配')
+        return {'ok': True, 'id': notice_id, 'duplicate': True, 'telegram': old['telegram_status'], 'banner': old['banner_status']}
+    preview = notice_preview(conn, alert_id)
+    if payload.get('preview_token') != preview['preview_token'] or not preview['can_submit']:
+        raise ValueError('目标、收件人或通知内容已变化/过期，请重新预览')
+    a = conn.execute('SELECT * FROM security_alerts WHERE id=?', (alert_id,)).fetchone()
+    now = int(time.time())
+    recent = conn.execute('SELECT 1 FROM buyer_user_notices WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND created_at>?',
+                          (*tuple(a[k] for k in buyer_mapping.IDENTITY), now-120)).fetchone()
+    if recent:
+        raise ValueError('该容器两分钟内已请求通知，请查看投递记录，勿重复发送')
+    t = target(conn, a, now)
+    mapped = bool(t and t['scope'] == 'user' and t['user_id'])
+    telegram_state = 'queued' if preview['telegram'] == 'ready' else preview['telegram']
+    banner_state = 'queued' if preview['banner'] == 'ready' else preview['banner']
+    if conn.execute('SELECT COUNT(*) FROM buyer_user_notices').fetchone()[0] >= 10000:
+        raise ValueError('通知记录已达到上限，请等待保留期清理')
+    conn.execute('INSERT INTO buyer_user_notices(id,alert_id,episode,host_id,runtime,project,container_name,subject,message,machine_id,user_id,requested_by,created_at,expires_at,telegram_status,banner_status,updated_at,due_at,container_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (notice_id, alert_id, a['first_seen'], *(a[k] for k in buyer_mapping.IDENTITY), preview['subject'], preview['message'],
+         t['machine_id'] if mapped else '', t['user_id'] if mapped else '', requested_by, now, now+86400,
+         telegram_state, banner_state, now, now, preview['container_id']))
+    return {'ok': True, 'id': notice_id, 'duplicate': False, 'telegram': telegram_state, 'banner': banner_state}
+
+
+def work_user_notices(db, now, sender):
+    """Independent receipts; freeze recipients and never retry uncertain delivery."""
+    conn = db()
+    notice = None
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute("DELETE FROM buyer_user_notices WHERE id IN (SELECT id FROM buyer_user_notices WHERE expires_at<? LIMIT 500)", (now-30*86400,))
+        conn.execute("UPDATE buyer_user_notices SET telegram_status='uncertain',last_error='发送进程中断，需核对上游结果' WHERE telegram_status='sending' AND updated_at<?", (now-120,))
+        conn.execute("UPDATE buyer_user_notices SET telegram_status='expired' WHERE expires_at<=? AND telegram_status IN ('queued','blocked','retrying')", (now,))
+        conn.execute("UPDATE buyer_user_notices SET banner_status='expired' WHERE expires_at<=? AND banner_status='queued'", (now,))
+        cfg = config(conn)
+        if not cfg['enabled'] or not cfg['api_key']:
+            conn.commit()
+            return
+        for n in conn.execute("SELECT * FROM buyer_user_notices WHERE telegram_status IN ('queued','blocked','retrying') AND due_at<=? AND expires_at>? ORDER BY created_at LIMIT 100", (now, now)).fetchall():
+            if n['container_id'] and container_id(conn,n) != n['container_id']:
+                conn.execute("UPDATE buyer_user_notices SET telegram_status='cancelled',banner_status=CASE WHEN banner_status='queued' THEN 'cancelled' ELSE banner_status END,last_error='容器已重建，请重新预览' WHERE id=?", (n['id'],))
+                continue
+            t = target(conn, n, now)
+            if not n['user_id'] or not t or t['scope'] != 'user' or (t['machine_id'], t['user_id']) != (n['machine_id'], n['user_id']):
+                conn.execute("UPDATE buyer_user_notices SET telegram_status='blocked',last_error='收件未映射或已变化，请重新预览并发送',due_at=? WHERE id=?", (now+300,n['id']))
+                continue
+            cooldown = conn.execute('SELECT next_at FROM buyer_cooldowns WHERE machine_id=?', (n['machine_id'],)).fetchone()
+            if cooldown and cooldown[0] > now:
+                continue
+            notice = dict(n)
+            conn.execute('INSERT INTO buyer_cooldowns VALUES(?,?) ON CONFLICT(machine_id) DO UPDATE SET next_at=excluded.next_at', (n['machine_id'], now+120))
+            conn.execute("UPDATE buyer_user_notices SET telegram_status='sending',attempts=attempts+1,updated_at=? WHERE id=?", (now,n['id']))
+            break
+        conn.commit()
+        if not notice:
+            return
+        status, error, due = 'uncertain', '网络结果不确定；请核对上游，系统不会自动重发', now+86400
+        try:
+            status, _ = sender(cfg,notice['machine_id'],notice['user_id'],'user',notice['subject'],notice['message'],'user-notice-'+notice['id'])
+            error = '' if status == 'succeeded' else '上游未确认投递成功'
+        except urllib.error.HTTPError as exc:
+            error = f'上游 HTTP {exc.code}'
+            status = 'retrying' if exc.code == 429 else 'failed'
+            due = retry_after(exc.headers,now) if exc.code == 429 else due
+        except ValueError:
+            status,error='failed','API 配置无效'
+        except Exception:
+            pass
+        if status == 'retrying' and notice['attempts']+1 >= MAX_ATTEMPTS:
+            status = 'failed'
+        conn.execute("UPDATE buyer_user_notices SET telegram_status=?,last_error=?,due_at=?,updated_at=? WHERE id=? AND telegram_status='sending'", (status,error,due,now,notice['id']))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def validate_url(url, resolve=False):
@@ -258,6 +401,7 @@ def retry_after(headers, now):
 
 def work_once(db, now=None, sender=deliver):
     now = int(time.time()) if now is None else int(now)
+    work_user_notices(db, now, sender)
     conn = db()
     batch = ""
     ids = []
@@ -407,6 +551,33 @@ def test_notification(db, payload, sender=deliver):
 
 def attach(app, db):
     from fastapi import HTTPException, Request
+
+    @app.get('/api/v1/security/alerts/{alert_id}/notify-user')
+    def preview_user_notice(alert_id: int):
+        conn = db()
+        try:
+            return notice_preview(conn, alert_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/security/alerts/{alert_id}/notify-user')
+    async def send_user_notice(alert_id: int, request: Request):
+        conn = db()
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError('请求必须是对象')
+            conn.execute('BEGIN IMMEDIATE')
+            result = queue_user_notice(conn, alert_id, payload, str(getattr(request.state, 'dashboard_user', 'dashboard'))[:100])
+            conn.commit()
+            return result
+        except (ValueError, TypeError) as exc:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail=str(exc))
+        finally:
+            conn.close()
 
     @app.get("/api/v1/buyer/records")
     def records():

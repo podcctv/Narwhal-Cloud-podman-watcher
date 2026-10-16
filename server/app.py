@@ -1882,7 +1882,7 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
-    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads"):
+    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices"):
         conn.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
     conn.execute("DELETE FROM hosts WHERE host_id=?", (host_id,))
 
@@ -2947,7 +2947,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     decision = str(payload.get("decision") or "").strip().lower()
     if decision == "allow_silent" and getattr(request.state,"dashboard_role","admin") != "admin":
         raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略")
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle"):
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "stop_reviewed_socks"):
         raise HTTPException(
             status_code=400,
             detail="decision must be deny, allow_silent, dismiss_once, reopen, resolve, release_udp_throttle, or apply_udp_throttle",
@@ -2972,7 +2972,21 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     now = int(time.time())
     action = None
     queued = False
-    if decision == "deny":
+    if decision == 'stop_reviewed_socks':
+        details = json.loads(alert['details_json'])
+        reviews = details.get('password_review', [])
+        observed = details.get('review_observed_at', 0)
+        token = details.get('review_token', '')
+        if (alert['alert_type'] != 'socks_password_review' or alert['status'] != 'active'
+            or alert['runtime'] not in {'incus', 'podman'} or not isinstance(observed, (int, float))
+            or not 0 <= now-observed <= 900 or not 0 <= now-alert['last_seen'] <= 900
+            or not isinstance(reviews, list) or not reviews or not all(isinstance(r, dict) and r.get('action_safe') is True for r in reviews)
+            or not re.fullmatch(r'[0-9a-f]{64}', str(token)) or payload.get('review_token') != token):
+            conn.close()
+            raise HTTPException(status_code=409, detail='证据过期、目标不明确或包含混合业务；请刷新后重新审核，未停止服务')
+        action, queued = _queue_security_action_row(conn, alert, 'stop_reviewed_socks',
+            {'manual_review': True, 'review_token': token, 'review_observed_at': observed}, requested_by)
+    elif decision == "deny":
         if alert["alert_type"] not in _ACTIONABLE_ALERT_TYPES:
             conn.close()
             raise HTTPException(
@@ -3452,7 +3466,7 @@ async def security_action_result(
                 _purge_host(conn, host_id)
                 invalidate_security_status_cache()
             if status == "succeeded" and row["action_type"] in (
-                "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth"
+                "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth", "stop_reviewed_socks"
             ):
                 conn.execute(
                     "UPDATE security_alerts SET status='remediated' WHERE id=? AND status='active'",

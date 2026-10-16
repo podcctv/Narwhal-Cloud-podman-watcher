@@ -158,6 +158,22 @@ export const api = {
       body: JSON.stringify({ decision }),
     }),
 
+  stopReviewedSocks: (alertId: number, reviewToken: string) =>
+    request<{ queued?: boolean }>(`/api/v1/security/alerts/${alertId}/disposition`, {
+      method: 'POST', body: JSON.stringify({ decision: 'stop_reviewed_socks', review_token: reviewToken }),
+    }),
+
+  previewUserNotice: (alertId: number) => request<{
+    subject: string; message: string; preview_token: string; can_submit: boolean;
+    audience: string; telegram: string; telegram_note: string; banner: string; banner_note: string;
+    latest: { id: string; telegram_status: string; banner_status: string; last_error: string }[];
+  }>(`/api/v1/security/alerts/${alertId}/notify-user`),
+
+  sendUserNotice: (alertId: number, previewToken: string, requestId: string) =>
+    request<{ id: string; duplicate: boolean; telegram: string; banner: string }>(`/api/v1/security/alerts/${alertId}/notify-user`, {
+      method: 'POST', body: JSON.stringify({ confirm: true, preview_token: previewToken, request_id: requestId }),
+    }),
+
   dispositionContainer: (
     identity: ContainerIdentity,
     decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve' | 'release_udp_throttle' | 'apply_udp_throttle' | string

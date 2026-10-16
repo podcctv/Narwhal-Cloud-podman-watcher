@@ -71,7 +71,7 @@ def _key(host_key, identity, container=None):
 def category(kind):
     if kind in {"socks_weak_auth", "unauthorized_panel_pairing", "malicious_process", "container_security_risk"}:
         return "security"
-    if kind == 'socks_auth_unknown':
+    if kind in {'socks_auth_unknown', 'socks_password_review'}:
         return 'security_attention'
     if kind.startswith('outbound_') or kind in {'udp_outbound_flood', 'process_fanout_abuse'}:
         return 'network_signal'
@@ -114,7 +114,7 @@ def _evidence(alert):
 
 def _action(conn, alert):
     row = conn.execute("SELECT id,action_type,status,updated_at FROM security_actions WHERE alert_id=? "
-                       "AND created_at>=? AND action_type IN ('enforce_socks_auth','remediate_panel_pairing',"
+                       "AND created_at>=? AND action_type IN ('enforce_socks_auth','stop_reviewed_socks','remediate_panel_pairing',"
                        "'remediate_malicious_process','stop_container','apply_udp_throttle','release_udp_throttle',"
                        "'release_socks_auth','allow_panel_domains','disallow_panel_domains') ORDER BY id DESC LIMIT 1",
                        (alert["id"], alert["first_seen"])).fetchone()

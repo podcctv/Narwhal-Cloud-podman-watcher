@@ -12,6 +12,8 @@ import {
 import { SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
+import { SocksPasswordReview } from './SocksPasswordReview';
+import { UserNoticeAction } from './UserNoticeAction';
 
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
@@ -293,6 +295,8 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                     <p className="text-xs text-slate-300 leading-relaxed">
                       {alert.message}
                     </p>
+                    <SocksPasswordReview alert={alert} onRefresh={() => loadData(true)} onToast={onToast} />
+                    <UserNoticeAction alertId={alert.id} onToast={onToast} />
                   </div>
 
                   <span className="text-xs text-slate-500 tabular-nums shrink-0">

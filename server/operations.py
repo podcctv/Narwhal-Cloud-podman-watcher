@@ -318,7 +318,7 @@ def record_connection_guard(conn, action_id, ts):
 
 def track_recheck(conn, action_id, ts):
     row = conn.execute("SELECT a.*,s.alert_type FROM security_actions a JOIN security_alerts s ON s.id=a.alert_id WHERE a.id=?", (action_id,)).fetchone()
-    if not row or row["action_type"] not in {"remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth"}:
+    if not row or row["action_type"] not in {"remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth", "stop_reviewed_socks"}:
         return
     host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (row["host_id"],)).fetchone()
     entity = identity((host[0] if host and host[0] else row["host_id"]), row["runtime"], row["project"], row["container_name"])
@@ -329,7 +329,7 @@ def track_recheck(conn, action_id, ts):
 def recheck(conn, entity, container, alerts, ts):
     for row in conn.execute("SELECT * FROM ops_rechecks WHERE entity=? AND status IN ('awaiting_report','retrying') AND ts<?", (entity, ts)).fetchall():
         socks = container.get("security",{}).get("socks_proxy",{})
-        if row["alert_type"] == "socks_weak_auth" and socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}:
+        if row["alert_type"] in {"socks_weak_auth", "socks_password_review"} and socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}:
             # A still-present service with unknown authentication is not clean.
             conn.execute("UPDATE ops_rechecks SET clean_samples=0,message='SOCKS 仍存在，但认证采集证据不足' WHERE action_id=?",(row["action_id"],))
             continue
@@ -344,6 +344,9 @@ def recheck(conn, entity, container, alerts, ts):
         clean = 0 if failed else row["clean_samples"] + 1
         status = "recurring" if failed and row["attempts"] >= 2 else "retrying" if failed else "verified" if clean >= 2 else "awaiting_report"
         attempts = row["attempts"] + int(status == "retrying")
+        action = conn.execute('SELECT action_type FROM security_actions WHERE id=?', (row['action_id'],)).fetchone()
+        if status == 'retrying' and action and action[0] == 'stop_reviewed_socks':
+            status = 'recurring'  # One human approval is not permission for a later generation.
         if status == "retrying":
             # Original action retains server/agent safeguards; refresh PID at dispatch.
             conn.execute("UPDATE security_actions SET status='queued',attempts=0,updated_at=? WHERE id=? AND status IN ('succeeded','failed')", (ts, row["action_id"]))
@@ -383,7 +386,7 @@ def permitted(role, method, path):
         return True
     if role != "operator":
         return False
-    return (path.startswith("/api/v1/containers/") or path.startswith("/api/v1/security/alerts/")) and (path.endswith("/diagnostics") or path.endswith("/disposition") or path.endswith("/actions")) or path == "/api/v1/ops/logs/discover"
+    return (path.startswith("/api/v1/containers/") or path.startswith("/api/v1/security/alerts/")) and (path.endswith("/diagnostics") or path.endswith("/disposition") or path.endswith("/actions") or path.endswith('/notify-user')) or path == "/api/v1/ops/logs/discover"
 
 
 def purge_host(conn,host_id):

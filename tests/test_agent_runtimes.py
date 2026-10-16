@@ -1100,7 +1100,7 @@ class SecurityTelemetryTests(unittest.TestCase):
     def test_config_confirmed_xray_socks_keeps_safe_process_target(self):
         process_output = "12 S xray /usr/bin/xray run -config /etc/xray/config.json\n"
         config = json.dumps({'inbounds':[{'protocol':'socks','port':1080,'settings':{'auth':'noauth'}}]})
-        with mock.patch.object(agent, "run", side_effect=[process_output, '', config, ""]):
+        with mock.patch.object(agent, "run", side_effect=[process_output, '', '12345', config, 'fixture-generation', ""]):
             result = agent.collect_panel_pairing_indicators(
                 "proxy", "incus", "default", "xray:latest"
             )
@@ -1115,7 +1115,7 @@ class SecurityTelemetryTests(unittest.TestCase):
     def test_config_confirmed_sockd_uses_config_auth_for_safe_process_target(self):
         process_output = "14 S sockd /usr/sbin/sockd -f /etc/sockd.conf\n"
         markers = "@@SOCKS:/etc/sockd.conf\n@@NOAUTH:/etc/sockd.conf\n"
-        with mock.patch.object(agent, "run", side_effect=[process_output, markers, ""]):
+        with mock.patch.object(agent, "run", side_effect=[process_output, markers, '12345', 'socksmethod: none', 'fixture-generation', ""]):
             result = agent.collect_panel_pairing_indicators(
                 "proxy", "incus", "default", "debian:latest"
             )
