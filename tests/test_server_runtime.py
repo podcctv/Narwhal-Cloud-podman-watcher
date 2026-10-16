@@ -1230,19 +1230,25 @@ class ServerRuntimeTests(unittest.TestCase):
             "conn_count": server.CONNECTION_STOP_THRESHOLD,
         }
         conn = server.db()
-        self.assertEqual(server.process_connection_overloads(conn, "host", 900, [container]), 0)
+        def observe(ts):
+            count = container['conn_count']
+            container['security'] = {'connection_metrics': {'schema':1,'valid':True,'source':'container_proc_net','epoch':'boot:ns:pid',
+                'sampled_at':ts,'total':count,'tcp_total':count,'tcp_established':count,'tcp_pending':0,'tcp_time_wait':0,'udp_sockets':0}}
+            with mock.patch.object(server.connection_policy.time, 'time', return_value=ts):
+                return server.process_connection_overloads(conn, 'host', ts, [container])
+        self.assertEqual(observe(900), 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM connection_overloads").fetchone()[0], 0)
         container["conn_count"] += 1
-        for ts in (1000, 1600, 2200, 2800, 3400, 4000):
-            self.assertEqual(server.process_connection_overloads(conn, "host", ts, [container]), 0)
-        self.assertEqual(server.process_connection_overloads(conn, "host", 4600, [container]), 1)
-        self.assertEqual(server.process_connection_overloads(conn, "host", 4900, [container]), 0)
+        for ts in (1000, 1300, 1600):
+            self.assertEqual(observe(ts), 0)
+        self.assertEqual(observe(1900), 1)
+        self.assertEqual(observe(2200), 0)
         action = conn.execute("SELECT * FROM security_actions").fetchone()
         state = conn.execute("SELECT sample_count, stop_action_id FROM connection_overloads").fetchone()
         conn.close()
         self.assertEqual(action["action_type"], "stop_container")
         self.assertEqual(action["requested_by"], "system:connection-guard")
-        self.assertEqual(tuple(state), (8, action["id"]))
+        self.assertEqual(tuple(state), (5, action["id"]))
 
     def test_connection_overload_gap_resets_continuous_timer(self):
         container = {
@@ -1251,10 +1257,12 @@ class ServerRuntimeTests(unittest.TestCase):
             "conn_count": server.CONNECTION_STOP_THRESHOLD + 1,
         }
         conn = server.db()
-        server.process_connection_overloads(conn, "host", 1000, [container])
-        server.process_connection_overloads(
-            conn, "host", 1000 + server.CONNECTION_STOP_MAX_GAP_SECONDS + 1, [container]
-        )
+        for ts in (1000, 1000 + server.CONNECTION_STOP_MAX_GAP_SECONDS + 1):
+            count = container['conn_count']
+            container['security'] = {'connection_metrics': {'schema':1,'valid':True,'source':'container_proc_net','epoch':'boot:ns:pid',
+                'sampled_at':ts,'total':count,'tcp_total':count,'tcp_established':count,'tcp_pending':0,'tcp_time_wait':0,'udp_sockets':0}}
+            with mock.patch.object(server.connection_policy.time, 'time', return_value=ts):
+                server.process_connection_overloads(conn, 'host', ts, [container])
         state = conn.execute("SELECT first_seen, sample_count FROM connection_overloads").fetchone()
         actions = conn.execute("SELECT COUNT(*) FROM security_actions").fetchone()[0]
         conn.close()
@@ -1483,6 +1491,37 @@ class ServerRuntimeTests(unittest.TestCase):
         ).fetchone()[0]
         conn.close()
         self.assertEqual(action_count, 0)
+
+    def test_connection_evidence_refresh_is_bounded_and_critical_upgrade_refreshes(self):
+        now = int(time.time())
+        alert = {'type':'container_connection_count','severity':'warning','runtime':'incus','project':'default','container_name':'node1'}
+        conn = server.db()
+        server.process_security_alerts(conn,'host1',now,[alert])
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn,'host1',now),1)
+        conn.execute("UPDATE security_actions SET status='succeeded'")
+        server.process_security_alerts(conn,'host1',now+100,[alert])
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn,'host1',now+100),0)
+        alert['severity']='critical'
+        server.process_security_alerts(conn,'host1',now+200,[alert])
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn,'host1',now+200),1)
+        conn.execute("UPDATE security_actions SET status='succeeded'")
+        server.process_security_alerts(conn,'host1',now+1200,[alert])
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn,'host1',now+1200),1)
+        conn.close()
+
+    def test_old_truncated_evidence_never_looks_current_or_complete(self):
+        now = int(time.time())
+        conn = server.db()
+        server.process_security_alerts(conn,'host',now,[{'type':'container_connection_count','severity':'critical'}])
+        row=conn.execute('SELECT * FROM security_alerts').fetchone()
+        text,_=server._telegram_alert_status_card(row,now,{'sampled_at':now-3600,'socket_snapshot_truncated':True,'inbound_unique_ips':1,'inbound_ips':[]})
+        self.assertIn('历史快照，已过期',text)
+        self.assertIn('明细已截断',text)
+        self.assertIn('公网源 IP 尚未映射',text)
+        self.assertIn('入站：0 IP',text)
+        self.assertIn('事件跨度',text)
+        self.assertIn('连续严重超标时长尚未验证',text)
+        conn.close()
 
     def test_high_connection_alert_queues_and_preserves_automatic_evidence(self):
         now = int(time.time())
@@ -1771,7 +1810,7 @@ class ServerRuntimeTests(unittest.TestCase):
         recovery = telegram.call_args_list[2].args[2]
         self.assertEqual(recovery["message_id"], 77)
         self.assertIn("已恢复", recovery["text"])
-        self.assertIn("持续：<b>2 分钟</b>", recovery["text"])
+        self.assertIn("事件跨度：<b>2 分钟</b>", recovery["text"])
         conn = server.db()
         server.process_security_alerts(conn, "host1", 300, alerts)
         row = conn.execute("SELECT first_seen,occurrence_count,status FROM security_alerts WHERE host_id='host1'").fetchone()

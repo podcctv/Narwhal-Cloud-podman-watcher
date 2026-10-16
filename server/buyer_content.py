@@ -5,6 +5,11 @@ import re
 import time
 import unicodedata
 
+try:
+    from server import connection_policy
+except ImportError:
+    import connection_policy
+
 
 def clean(value, limit=500):
     text = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", str(value or ""))
@@ -207,6 +212,8 @@ def render(alert, state, node="", action=None):
     alert = dict(alert)
     details = loads(alert.get("details_json"))
     description, facts, advice = issue(alert, details)
+    if alert.get('alert_type') == 'container_connection_count':
+        facts += '\n' + connection_policy.text(details.get('connection_policy'))
     name = clean(node or alert.get("host_id"), 100)
     # Full instance identity avoids ambiguous short IDs across two tenants.
     instance = clean(alert.get("container_name"), 200)

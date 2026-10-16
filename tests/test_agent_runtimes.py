@@ -1541,10 +1541,14 @@ class SecurityTelemetryTests(unittest.TestCase):
                 "reason": "sustained_connection_overload",
                 "connection_count": 1600,
                 "duration_seconds": 3600,
+                'required_duration_seconds': 900, 'threshold': 1500,
+                'expires_at': int(time.time()) + 600, 'metric_schema': 1, 'metric_epoch': 'fixture',
             },
         }
         with mock.patch.object(
             agent, "get_runtime_bins", return_value={"incus": "incus"}
+        ), mock.patch.object(agent, '_incus_instance_pid', return_value=123), mock.patch.object(
+            agent, '_collect_socket_security', return_value={'connection_metrics':{'valid':True,'epoch':'fixture','total':1600}}
         ), mock.patch.object(
             agent, "_run_action_command", return_value=(True, "stopped")
         ) as runner:

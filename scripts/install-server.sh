@@ -1079,7 +1079,7 @@ main() {
   local default_conn_warning_threshold="500"
   local default_conn_critical_threshold="1000"
   local default_connection_stop_threshold="1500"
-  local default_connection_stop_duration_seconds="3600"
+  local default_connection_stop_duration_seconds="900"
   local default_connection_stop_max_gap_seconds="600"
   local default_offline_host_purge_seconds="86400"
   local default_dashboard_username
@@ -1209,6 +1209,8 @@ main() {
   fi
 
   local retention_seconds raw_retention report_max_rows host_security_max_rows
+  local connection_auto_stop_enabled
+  connection_auto_stop_enabled="$(load_non_empty_or_default "$SERVER_ENV_FILE" CONNECTION_AUTO_STOP_ENABLED "true")"
   retention_seconds="$(load_non_empty_or_default "$SERVER_ENV_FILE" PURGE_SECONDS "2592000")"
   raw_retention="$(load_non_empty_or_default "$SERVER_ENV_FILE" RAW_RETENTION_SECONDS "604800")"
   report_max_rows="$(load_non_empty_or_default "$SERVER_ENV_FILE" REPORT_MAX_ROWS "50000")"
@@ -1226,6 +1228,7 @@ ALERT_DISK_THRESHOLD_PERCENT=$th
 ALERT_CONN_WARNING_THRESHOLD=$default_conn_warning_threshold
 ALERT_CONN_CRITICAL_THRESHOLD=$default_conn_critical_threshold
 CONNECTION_STOP_THRESHOLD=$default_connection_stop_threshold
+CONNECTION_AUTO_STOP_ENABLED=$connection_auto_stop_enabled
 CONNECTION_STOP_DURATION_SECONDS=$default_connection_stop_duration_seconds
 CONNECTION_STOP_MAX_GAP_SECONDS=$default_connection_stop_max_gap_seconds
 OFFLINE_HOST_PURGE_SECONDS=$default_offline_host_purge_seconds

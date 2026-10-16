@@ -42,8 +42,9 @@ ALERT_CONN_WARNING_THRESHOLD = int(
 )
 ALERT_CONN_CRITICAL_THRESHOLD = int(os.getenv("ALERT_CONN_CRITICAL_THRESHOLD", "1000"))
 CONNECTION_STOP_THRESHOLD = int(os.getenv("CONNECTION_STOP_THRESHOLD", "1500"))
-CONNECTION_STOP_DURATION_SECONDS = int(os.getenv("CONNECTION_STOP_DURATION_SECONDS", "3600"))
-CONNECTION_STOP_MAX_GAP_SECONDS = int(os.getenv("CONNECTION_STOP_MAX_GAP_SECONDS", "600"))
+CONNECTION_AUTO_STOP_ENABLED = os.getenv('CONNECTION_AUTO_STOP_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
+CONNECTION_STOP_DURATION_SECONDS = max(60, int(os.getenv("CONNECTION_STOP_DURATION_SECONDS", "900")))
+CONNECTION_STOP_MAX_GAP_SECONDS = max(1, min(600, int(os.getenv("CONNECTION_STOP_MAX_GAP_SECONDS", "600"))))
 STALE_SECONDS = int(os.getenv("STALE_SECONDS", "900"))
 OFFLINE_HIDE_SECONDS = int(os.getenv("OFFLINE_HIDE_SECONDS", str(24 * 3600)))
 OFFLINE_HOST_PURGE_SECONDS = int(os.getenv("OFFLINE_HOST_PURGE_SECONDS", str(24 * 3600)))
@@ -126,9 +127,10 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy
 except ImportError:
     import operations
+    import connection_policy
     import operations_api
     import disk_cleanup
     import investigation
@@ -390,6 +392,7 @@ def init_db() -> None:
         """
     )
     operations.initialize(conn)
+    connection_policy.initialize(conn)
     buyer_notifications.initialize(conn)
     investigation.initialize(conn)
     commerce.initialize(conn)
@@ -711,7 +714,7 @@ def process_security_alerts(
         fingerprint = _alert_fingerprint(host_id, fingerprint_source)
         active_fingerprints.append(fingerprint)
         existing = conn.execute(
-            "SELECT id, status, severity, occurrence_count FROM security_alerts WHERE fingerprint=?",
+            "SELECT id, status, severity, occurrence_count,details_json FROM security_alerts WHERE fingerprint=?",
             (fingerprint,),
         ).fetchone()
         allow_policy = conn.execute(
@@ -752,6 +755,9 @@ def process_security_alerts(
                     should_notify = False
             else:
                 should_notify = previous_status == "resolved" or _SEVERITY_RANK[severity] > _SEVERITY_RANK.get(str(existing["severity"]), 0)
+                if alert_type == 'container_connection_count':
+                    was_escalated = _alert_details(existing['details_json']).get('connection_policy', {}).get('escalated')
+                    should_notify = should_notify or bool(raw_alert.get('connection_policy', {}).get('escalated') and not was_escalated)
             conn.execute(
                 """
                 UPDATE security_alerts
@@ -831,7 +837,7 @@ def process_security_alerts(
 def queue_connection_alert_deep_samples(
     conn: sqlite3.Connection, host_id: str, now: int
 ) -> int:
-    """Queue one bounded evidence snapshot for each new high-connection incident."""
+    """Refresh bounded evidence every 15 minutes and on critical escalation."""
     queued = 0
     alerts = conn.execute(
         """
@@ -842,20 +848,28 @@ def queue_connection_alert_deep_samples(
         (host_id, now),
     ).fetchall()
     for alert in alerts:
+        if queued >= 10:
+            break  # Avoid a large incident fan-out starving the report transaction.
         if str(alert["runtime"]) not in ("incus", "podman"):
             continue
         alert_id = int(alert["id"])
         existing = conn.execute(
             """
-            SELECT id FROM security_actions
+            SELECT id,status,created_at,params_json FROM security_actions
             WHERE alert_id=? AND action_type='request_deep_sample' AND created_at>=?
-              AND CAST(COALESCE(json_extract(params_json, '$.evidence_schema'), 0) AS INTEGER) >= 2
             ORDER BY id DESC LIMIT 1
             """,
             (alert_id, int(alert["first_seen"])),
         ).fetchone()
+        stage = str(alert['severity']) + (':escalated' if _alert_details(alert['details_json']).get('connection_policy', {}).get('escalated') else '')
         if existing is not None:
-            continue
+            previous_params = _alert_details(existing['params_json'])
+            if existing['status'] in ('queued', 'dispatched', 'running'):
+                if now - int(existing['created_at']) > 900:
+                    conn.execute("UPDATE security_actions SET status='failed',result_message='深度取证等待超过15分钟，需要重新采样',updated_at=? WHERE id=?", (now, existing['id']))
+                continue
+            if now - int(existing['created_at']) < 900 and (previous_params.get('stage') == stage or existing['status'] == 'failed'):
+                continue
         conn.execute(
             """
             INSERT INTO security_actions(
@@ -866,7 +880,7 @@ def queue_connection_alert_deep_samples(
             (
                 alert_id, str(alert["host_id"]), str(alert["runtime"]),
                 str(alert["project"]), str(alert["container_name"]), "request_deep_sample",
-                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 2}),
+                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 3, 'stage': stage}),
                 now, now,
             ),
         )
@@ -1340,6 +1354,8 @@ def _telegram_alert_status_card(
         heading = f"Narwhal 告警{state_labels.get(status, '已结束')}"
         state_line = f"状态：<b>{state_labels.get(status, '已结束')}</b>　持续：<b>{duration}</b>"
     details = _alert_details(alert["details_json"])
+    if alert['alert_type'] == 'container_connection_count':
+        state_line = state_line.replace('持续：', '事件跨度：')
     automatic_remediation = details.get("automatic_remediation") if isinstance(details, dict) else None
     remediation_text = ""
     if alert['alert_type'] == 'prohibited_activity':
@@ -1386,6 +1402,18 @@ def _telegram_alert_status_card(
         outbound_items = deep_evidence.get("outbound_ips") if isinstance(deep_evidence.get("outbound_ips"), list) else [
             item for item in all_ips if isinstance(item, dict) and int(item.get("outbound") or 0) > 0
         ]
+        # Legacy counts may include private/proxy peers absent from public lists.
+        inbound_ips = len(inbound_items)
+        outbound_ips = len(outbound_items)
+        captured = int(deep_evidence.get('sampled_at') or 0)
+        age = max(0, now - captured) if captured else None
+        evidence_time = datetime.fromtimestamp(captured, timezone(timedelta(hours=8))).strftime('%m-%d %H:%M:%S') if 0 < captured < 253402271999 else '时间未知'
+        evidence_note = f'采集时间：{evidence_time}（UTC+8）；'
+        evidence_note += '历史快照，已过期，不能代表当前状态。' if age is None or age > 900 else '近期快照，不代表完整流量。'
+        if deep_evidence.get('socket_snapshot_truncated'):
+            evidence_note += ' 明细已截断，仅展示部分连接和进程。'
+        if not inbound_items and int(deep_evidence.get('observed_inbound_unique_ips', deep_evidence.get('inbound_unique_ips', 0)) or 0):
+            evidence_note += ' 检测到入站来源，但公网源 IP 尚未映射。'
         def ip_lines(items: List[Dict[str, Any]], direction: str) -> str:
             """Telegram-friendly, one public endpoint per line, safely HTML escaped."""
             label = "入站连接" if direction == "inbound" else "出站连接"
@@ -1407,6 +1435,7 @@ def _telegram_alert_status_card(
             return "\n".join(lines) or "-"
         evidence_text = (
             f"\n<b>自动深度取证</b>\n"
+            f"{html.escape(evidence_note)}\n"
             f"入站：{inbound_ips} IP / {inbound_processes} 进程\n"
             f"出站：{outbound_ips} IP / {outbound_processes} 进程\n"
             f"<b>入站 IP（每行一个）</b>\n{ip_lines(inbound_items, 'inbound')}\n"
@@ -1414,6 +1443,11 @@ def _telegram_alert_status_card(
         )
     raw_msg = str(alert['message'] or '')[:400]
     msg_escaped = html.escape(raw_msg)
+    if alert['alert_type'] == 'container_connection_count':
+        msg_escaped += '\n' + html.escape(connection_policy.text(details.get('connection_policy')))
+        metric = details.get('connection_metrics') or {}
+        if metric.get('valid') is True:
+            msg_escaped += html.escape(f"\nTCP已建立 {metric.get('tcp_established', 0)} · 待连接 {metric.get('tcp_pending', 0)} · TIME_WAIT {metric.get('tcp_time_wait', 0)} · UDP socket {metric.get('udp_sockets', 0)}")
     text = (
         f"<b>{heading}</b>\n"
         f"<b>{html.escape(str(alert['title'] or alert['alert_type'] or '-'))}</b>\n"
@@ -1819,126 +1853,11 @@ def process_connection_overloads(
     ts: int,
     containers: List[Dict[str, Any]],
 ) -> int:
-    """Track uninterrupted overload windows and queue one signed stop action."""
-    active_keys: set[tuple[str, str, str]] = set()
-    queued = 0
-    for container in containers:
-        runtime = str(container.get("runtime") or "podman")[:40].lower()
-        project = str(container.get("project") or "")[:100]
-        container_name = str(container.get("name") or "unknown")[:200]
-        key = (runtime, project, container_name)
-        active_keys.add(key)
-        try:
-            conn_count = int(container.get("conn_count") or 0)
-        except (TypeError, ValueError):
-            conn_count = 0
-        if conn_count <= CONNECTION_STOP_THRESHOLD or runtime not in ("podman", "docker", "incus"):
-            conn.execute(
-                "DELETE FROM connection_overloads WHERE host_id=? AND runtime=? AND project=? AND container_name=?",
-                (host_id, runtime, project, container_name),
-            )
-            continue
-
-        state = conn.execute(
-            """
-            SELECT first_seen, last_seen, sample_count, stop_action_id
-            FROM connection_overloads
-            WHERE host_id=? AND runtime=? AND project=? AND container_name=?
-            """,
-            (host_id, runtime, project, container_name),
-        ).fetchone()
-        continuous = (
-            state is not None
-            and int(state["last_seen"]) <= ts
-            and ts - int(state["last_seen"]) <= CONNECTION_STOP_MAX_GAP_SECONDS
-        )
-        first_seen = int(state["first_seen"]) if continuous else ts
-        sample_count = int(state["sample_count"]) + 1 if continuous else 1
-        stop_action_id = int(state["stop_action_id"] or 0) if continuous else 0
-        if stop_action_id:
-            previous_action = conn.execute(
-                "SELECT status FROM security_actions WHERE id=?", (stop_action_id,)
-            ).fetchone()
-            previous_status = str(previous_action["status"]) if previous_action is not None else "failed"
-            if previous_status == "failed":
-                stop_action_id = 0
-            elif previous_status == "succeeded":
-                first_seen = ts
-                sample_count = 1
-                stop_action_id = 0
-        conn.execute(
-            """
-            INSERT INTO connection_overloads(
-                host_id, runtime, project, container_name, first_seen, last_seen,
-                sample_count, stop_action_id
-            ) VALUES(?,?,?,?,?,?,?,?)
-            ON CONFLICT(host_id, runtime, project, container_name) DO UPDATE SET
-                first_seen=excluded.first_seen,
-                last_seen=excluded.last_seen,
-                sample_count=excluded.sample_count,
-                stop_action_id=excluded.stop_action_id
-            """,
-            (
-                host_id,
-                runtime,
-                project,
-                container_name,
-                first_seen,
-                ts,
-                sample_count,
-                stop_action_id or None,
-            ),
-        )
-        if stop_action_id or ts - first_seen < CONNECTION_STOP_DURATION_SECONDS:
-            continue
-        params = {
-            "reason": "sustained_connection_overload",
-            "connection_count": conn_count,
-            "threshold": CONNECTION_STOP_THRESHOLD,
-            "duration_seconds": ts - first_seen,
-            "required_duration_seconds": CONNECTION_STOP_DURATION_SECONDS,
-            "sample_count": sample_count,
-        }
-        cur = conn.execute(
-            """
-            INSERT INTO security_actions(
-                alert_id, host_id, runtime, project, container_name, action_type,
-                params_json, status, requested_by, created_at, updated_at
-            ) VALUES(0,?,?,?,?,?,?,'queued','system:connection-guard',?,?)
-            """,
-            (
-                host_id,
-                runtime,
-                project,
-                container_name,
-                "stop_container",
-                json.dumps(params, ensure_ascii=False),
-                ts,
-                ts,
-            ),
-        )
-        action_id = int(cur.lastrowid)
-        conn.execute(
-            """
-            UPDATE connection_overloads SET stop_action_id=?
-            WHERE host_id=? AND runtime=? AND project=? AND container_name=?
-            """,
-            (action_id, host_id, runtime, project, container_name),
-        )
-        queued += 1
-
-    existing = conn.execute(
-        "SELECT runtime, project, container_name FROM connection_overloads WHERE host_id=?",
-        (host_id,),
-    ).fetchall()
-    for row in existing:
-        key = (str(row["runtime"]), str(row["project"]), str(row["container_name"]))
-        if key not in active_keys:
-            conn.execute(
-                "DELETE FROM connection_overloads WHERE host_id=? AND runtime=? AND project=? AND container_name=?",
-                (host_id, *key),
-            )
-    return queued
+    """Count only fresh, comparable samples; legacy agents remain alert-only."""
+    return connection_policy.observe(conn, host_id, ts, containers,
+        ALERT_CONN_CRITICAL_THRESHOLD, CONNECTION_STOP_THRESHOLD,
+        CONNECTION_STOP_DURATION_SECONDS, CONNECTION_STOP_MAX_GAP_SECONDS,
+        auto_stop=CONNECTION_AUTO_STOP_ENABLED)
 
 
 _latest_cache: Dict[str, Any] | None = None
@@ -1958,6 +1877,7 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
         raise HTTPException(409, '存在待复核的网络隔离；请先核实并解除隔离，避免丢失恢复入口。')
     invalidate_security_status_cache()
     operations.purge_host(conn,host_id)
+    conn.execute('DELETE FROM connection_windows WHERE host_id=?', (host_id,))
     investigation.purge_host(conn,host_id)
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
@@ -2094,6 +2014,7 @@ async def report(
     automatic_deep_samples_queued = 0
     try:
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config)
+        automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
         for c in containers:
             stored_payload = dict(c)
             stored_payload["_agent_version"] = agent_version
@@ -2166,15 +2087,15 @@ async def report(
                                 json.dumps(deep_sample, ensure_ascii=False),
                             ),
                         )
-        automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
         operations_alerts = operations.ingest(conn, host_id, node_id, ts, data)
         security = data.get("security")
         if isinstance(security, dict):
             security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
+            combined_alerts = connection_policy.enrich_alerts(security_alerts + operations_alerts, containers)
             previous_sample = conn.execute("SELECT MAX(ts) FROM host_security WHERE host_id=?", (host_id,)).fetchone()[0] or 0
             if security.get("enabled", True) and ts > previous_sample:
-                notifications = process_security_alerts(conn, host_id, ts, security_alerts + operations_alerts)
-                buyer_notifications.observe(conn, host_id, ts, containers, security_alerts + operations_alerts)
+                notifications = process_security_alerts(conn, host_id, ts, combined_alerts)
+                buyer_notifications.observe(conn, host_id, ts, containers, combined_alerts)
             automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, host_id, ts)
             conn.execute(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",

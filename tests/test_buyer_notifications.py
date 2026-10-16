@@ -70,6 +70,21 @@ class BuyerTests(unittest.TestCase):
             send.assert_not_called()
         self.assertNotIn("secret-value",self.rows()[0]["message"])
 
+    def test_connection_escalation_notifies_once_and_supersedes_unsent_initial(self):
+        self.alert.update(type='container_connection_count', title='连接过多', value=1061, threshold=1000,
+            connection_policy={'metric':'TCP 各状态 + UDP socket 总数','critical_duration_seconds':0,
+                'stop_threshold':1500,'required_duration_seconds':900,'valid':True,'reason':'未达到停机门槛'})
+        self.ingest()
+        self.alert['connection_policy']['escalated']=True
+        self.alert['connection_policy']['critical_duration_seconds']=900
+        self.ingest(when=self.now+900)
+        self.ingest(when=self.now+1000)
+        rows=self.rows()
+        self.assertEqual(len(rows),2)
+        self.assertEqual(rows[0]['status'],'cancelled')
+        self.assertTrue(rows[1]['event_key'].endswith(':connection-escalated'))
+        self.assertIn('15 分钟',rows[1]['message'])
+
     def test_persistent_dedup_and_machine_cooldown(self):
         self.mapping()
         self.mapping("c2")

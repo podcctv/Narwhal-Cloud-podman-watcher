@@ -286,7 +286,14 @@ def ingest(conn, host_id, node_id, ts, data):
             continue
         payload=loads(row["payload"])
         payload.update(observed_at=row["last_seen"],data_stale=payload.get('data_stale',False) or ts-row["last_seen"]>interval*2.5)
-        generated.append({"runtime":parts[1],"project":parts[2],"container_name":parts[3],"type":"ops_"+row["kind"],"severity":payload.get("severity","warning"),"title":"运维信号："+row["kind"],"message":json.dumps(payload,ensure_ascii=False)[:1000],"observation":payload,"data_stale":payload['data_stale'],"value":payload.get('rate_mbps',0),"threshold":payload.get('capacity_mbps',0)*payload.get('ratio',0)})
+        message = json.dumps(payload, ensure_ascii=False)[:1000]
+        title = '运维信号：' + row['kind']
+        if row['kind'] == 'policy_signal':
+            labels = {'connections': 'socket 总数', 'rx_bps': '接收速率（B/s）', 'http_rps': 'HTTP 请求（次/秒）'}
+            facts = [f"{labels[k]} {payload.get('values', {}).get(k, 0):g}，提醒门槛 {payload.get('thresholds', {}).get(k, 0):g}" for k in labels if payload.get('signals', {}).get(k)]
+            title = '实例使用情况超出提醒范围'
+            message = '；'.join(facts) + '。此策略用于提醒，自动停机由独立的连续超标保护规则决定。'
+        generated.append({"runtime":parts[1],"project":parts[2],"container_name":parts[3],"type":"ops_"+row["kind"],"severity":payload.get("severity","warning"),"title":title,"message":message,"observation":payload,"data_stale":payload['data_stale'],"value":payload.get('rate_mbps',0),"threshold":payload.get('capacity_mbps',0)*payload.get('ratio',0)})
     return generated
 
 

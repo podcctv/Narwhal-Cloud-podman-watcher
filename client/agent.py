@@ -803,6 +803,21 @@ def _count_connections_from_pid(pid: int) -> int:
     return total
 
 
+def _connection_metric_epoch(pid: int) -> str:
+    """Bind observations to a boot, network namespace and PID start time."""
+    try:
+        namespace = os.readlink(f'/proc/{pid}/ns/net')
+        if namespace == os.readlink('/proc/1/ns/net'):
+            return ''  # Host-network totals are not owned by this container.
+        with open('/proc/sys/kernel/random/boot_id', encoding='utf-8') as handle:
+            boot = handle.read().strip()
+        with open(f'/proc/{pid}/stat', encoding='utf-8') as handle:
+            start = handle.read().rsplit(')', 1)[1].split()[19]
+        return f'{boot}:{namespace}:{pid}:{start}'
+    except (OSError, ValueError, IndexError):
+        return ''
+
+
 def _decode_proc_addr(hex_ip: str, is_v6: bool = False) -> str:
     try:
         raw = bytes.fromhex(hex_ip)
@@ -1389,6 +1404,7 @@ def _parse_port(hex_port: str) -> int:
 
 def _collect_socket_security(pid: int) -> Dict[str, object]:
     result: Dict[str, object] = {
+        'connection_metrics': {'schema': 1, 'valid': False},
         "tcp_states": {},
         "syn_recv_count": 0,
         "incoming_established": 0,
@@ -1412,16 +1428,21 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         return result
 
     entries: List[Dict[str, object]] = []
+    metric_epoch = _connection_metric_epoch(pid)
+    read_files = 0
+    malformed = False
     for filename, is_v6 in (("tcp", False), ("tcp6", True), ("udp", False), ("udp6", True)):
         try:
             with open(f"/proc/{pid}/net/{filename}", "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.read().splitlines()[1:]
+                read_files += 1
         except Exception:
             continue
         proto = "udp" if filename.startswith("udp") else "tcp"
         for line in lines:
             parts = line.split()
             if len(parts) < 4 or ":" not in parts[1] or ":" not in parts[2]:
+                malformed = True
                 continue
             local_ip_hex, local_port_hex = parts[1].rsplit(":", 1)
             remote_ip_hex, remote_port_hex = parts[2].rsplit(":", 1)
@@ -1436,6 +1457,17 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
                 }
             )
 
+    tcp_entries = [x for x in entries if x['proto'] == 'tcp']
+    result['connection_metrics'] = {
+        'schema': 1, 'source': 'container_proc_net', 'sampled_at': int(time.time()),
+        'epoch': metric_epoch,
+        'valid': bool(metric_epoch) and read_files == 4 and not malformed and metric_epoch == _connection_metric_epoch(pid),
+        'total': len(entries), 'tcp_total': len(tcp_entries),
+        'tcp_established': sum(x['state'] == '01' for x in tcp_entries),
+        'tcp_pending': sum(x['state'] in ('02', '03') for x in tcp_entries),
+        'tcp_time_wait': sum(x['state'] == '06' for x in tcp_entries),
+        'udp_sockets': len(entries) - len(tcp_entries),
+    }
     listening_ports = {
         int(x["local_port"])
         for x in entries
@@ -5566,6 +5598,9 @@ def collect_container(
     panel_pairing = collect_panel_pairing_indicators(name, runtime, project, image)
     socks_proxy = panel_pairing.pop("socks_proxy", {})
     socket_security = _collect_socket_security(pid)
+    connection_metrics = socket_security.get('connection_metrics') or {}
+    if connection_metrics.get('valid') is True:
+        conn_count = int(connection_metrics['total'])
     hy2_protocol = collect_hy2_indicators(
         name,
         runtime,
@@ -6089,8 +6124,12 @@ def collect_container_deep_sample(
         "processes": process_snapshot,
         "connection_count": max(int(base_report.get("conn_count") or 0), len(sockets)),
         "unique_connection_ips": len(connection_ips),
-        "inbound_unique_ips": max(int(security.get("inbound_unique_ips") or 0), len(inbound_ip_counts)),
-        "outbound_unique_ips": max(int(security.get("outbound_unique_ips") or 0), len(outbound_ip_counts)),
+        "inbound_unique_ips": len(inbound_ip_counts),
+        "outbound_unique_ips": len(outbound_ip_counts),
+        "observed_inbound_unique_ips": int(security.get('inbound_unique_ips') or 0),
+        "observed_outbound_unique_ips": int(security.get('outbound_unique_ips') or 0),
+        "connection_metrics": security.get('connection_metrics', {}),
+        "evidence_schema": 3,
         "inbound_process_count": inbound_process_count,
         "outbound_process_count": outbound_process_count,
         "inbound_country_stats": _geoip_country_batch(inbound_ip_counts),
@@ -7036,6 +7075,26 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         runtime_bin = get_runtime_bins().get(runtime_kind, "")
         if not runtime_bin:
             return False, f"runtime {runtime_kind} is unavailable"
+        if params.get('metric_schema') != 1:
+            return False, 'legacy automatic stop lacks validated socket evidence; fresh samples required'
+        try:
+            threshold = int(params['threshold'])
+            expires = int(params['expires_at'])
+            required = int(params['required_duration_seconds'])
+            if threshold < 1 or required < 1 or int(params['duration_seconds']) < required or int(time.time()) > expires:
+                return False, 'automatic stop evidence expired or continuous duration is insufficient'
+        except (KeyError, TypeError, ValueError):
+            return False, 'automatic stop evidence is incomplete'
+        pid = _incus_instance_pid(runtime_bin, container_name, project) if runtime_kind == 'incus' else 0
+        if runtime_kind != 'incus':
+            try:
+                pid = int(json.loads(run([runtime_bin, 'inspect', container_name]))[0]['State']['Pid'])
+            except (ValueError, KeyError, IndexError, TypeError):
+                return False, 'cannot verify current container identity'
+        fresh = _collect_socket_security(pid).get('connection_metrics') or {}
+        if (fresh.get('valid') is not True or fresh.get('epoch') != params.get('metric_epoch')
+                or int(fresh.get('total') or 0) <= threshold):
+            return False, 'automatic stop cancelled: container restarted, recovered or fresh evidence unavailable'
         command = _runtime_base(runtime_bin, project) + ["stop", container_name]
         ok, message = _run_action_command(command)
         if ok:

@@ -163,6 +163,9 @@ def reconcile(conn, host, now):
         t = target(conn, alert)
         subject, message = render(alert, state, t["node_name"] if t else "", conn)
         event_key = f"{alert['id']}:{alert['first_seen']}:{state}:{alert['severity']}"
+        if alert['alert_type'] == 'container_connection_count' and state in ('active', 'recurring') and buyer_content.loads(alert['details_json']).get('connection_policy', {}).get('escalated'):
+            event_key += ':connection-escalated'
+            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='已升级为连续严重超标提醒' WHERE alert_id=? AND event_key<>? AND status IN ('queued','retrying','blocked')", (now,alert['id'],event_key))
         # Bounded outbox protects the monitoring database from notification growth.
         count = conn.execute("SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')").fetchone()[0]
         if count >= 10000:
