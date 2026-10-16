@@ -57,6 +57,8 @@ def initialize(conn):
     """)
     if 'container_id' not in {r[1] for r in conn.execute('PRAGMA table_info(buyer_user_notices)')}:
         conn.execute("ALTER TABLE buyer_user_notices ADD COLUMN container_id TEXT DEFAULT ''")
+    if 'connection_stop_json' not in {r[1] for r in conn.execute('PRAGMA table_info(buyer_user_notices)')}:
+        conn.execute("ALTER TABLE buyer_user_notices ADD COLUMN connection_stop_json TEXT DEFAULT ''")
     buyer_mapping.initialize(conn)
 
 
@@ -162,10 +164,10 @@ def render(alert, state, node="", conn=None):
 def reconcile(conn, host, now):
     cfg = config(conn)
     for alert in conn.execute("SELECT * FROM security_alerts WHERE host_id=? AND last_seen>=? ORDER BY id DESC LIMIT 1000", (host, now-7*86400)).fetchall():
-        if alert['alert_type'] == 'socks_password_review':
+        if alert['alert_type'] in {'socks_password_review', 'standalone_proxy_panel'}:
             # Pending administrator judgement is not a confirmed customer risk.
             # Only the explicit user-notice workflow may notify the buyer.
-            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='密码待人工判断，买家通知由管理员明确触发' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
+            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='仅提醒管理员，买家通知由管理员明确触发' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
             continue
         if alert["alert_type"] == "ops_traffic_quota":
             conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
@@ -276,6 +278,65 @@ def queue_user_notice(conn, alert_id, payload, requested_by):
     return {'ok': True, 'id': notice_id, 'duplicate': False, 'telegram': telegram_state, 'banner': banner_state}
 
 
+def connection_stop_gate(conn, identity, params, now):
+    row=dict(zip(buyer_mapping.IDENTITY, identity))
+    notice_id=hashlib.sha256(json.dumps([identity,params['metric_epoch'],params['threshold'],params['required_duration_seconds'],params['stop_since']]).encode()).hexdigest()[:32]
+    notice=conn.execute('SELECT * FROM buyer_user_notices WHERE id=?',(notice_id,)).fetchone()
+    t=target(conn,row,now)
+    mapped=bool(t and t['scope']=='user' and t['user_id'])
+    if notice:
+        same=mapped and (notice['machine_id'],notice['user_id'])==(t['machine_id'],t['user_id'])
+        context=buyer_content.loads(notice['connection_stop_json'])
+        if same and notice['telegram_status']=='succeeded' and context.get('accepted_at'):
+            return {'ready':True,'params':{'notice_required':True,'notice_id':notice_id,'notification_accepted_at':context['accepted_at']}}
+        if same and (notice['telegram_status'] in {'queued','retrying'} or (notice['telegram_status']=='expired' and notice['attempts']==0)):
+            # Refresh proof, not the network outcome; uncertain sends are never replayed.
+            conn.execute("UPDATE buyer_user_notices SET connection_stop_json=?,telegram_status=CASE WHEN telegram_status='expired' THEN 'queued' ELSE telegram_status END WHERE id=?",(json.dumps(params),notice_id))
+        return {'ready':False,'notice_id':notice_id,'status':notice['telegram_status'] if same else 'blocked',
+            'reason':'等待用户通知投递确认；未执行停机。收件变化或结果不确定时需管理员核查。'}
+    cfg=config(conn)
+    if not mapped or not cfg['enabled'] or not cfg['api_key']:
+        return {'ready':False,'status':'blocked','reason':'用户收件映射或通知配置缺失；为保证先通知后停机，暂未停止容器'}
+    if conn.execute('SELECT COUNT(*) FROM buyer_user_notices').fetchone()[0]>=10000:
+        return {'ready':False,'status':'blocked','reason':'通知队列已满，未执行停机'}
+    existing=conn.execute("SELECT id,first_seen FROM security_alerts WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND alert_type='container_connection_count' ORDER BY last_seen DESC LIMIT 1",identity).fetchone()
+    title='服务器连接数过高提醒'
+    message=clean(f"您的 {t['node_name'] or identity[0]} 服务器（实例 {identity[3]}）检测时连接数 {params['connection_count']}，有效采样已连续 {params['duration_seconds']//60} 分钟超过 {params['threshold']} 个。\n为保护服务，通知投递确认后系统将重新核验连接数；若仍超标，将关闭该容器，不删除数据。请检查代理账号和后台任务。如有疑问，请发工单。",1600)
+    conn.execute('INSERT INTO buyer_user_notices(id,alert_id,episode,host_id,runtime,project,container_name,subject,message,machine_id,user_id,requested_by,created_at,expires_at,telegram_status,banner_status,updated_at,due_at,container_id,connection_stop_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (notice_id,existing['id'] if existing else 0,existing['first_seen'] if existing else now,*identity,title,message,
+         t['machine_id'],t['user_id'],'system:connection-guard',now,now+86400,'queued','queued',now,now,container_id(conn,row),json.dumps(params)))
+    return {'ready':False,'notice_id':notice_id,'status':'queued','reason':'连续超标已确认；先向用户发送停机前提醒，投递确认前不下发停止指令'}
+
+
+def activate_notified_stop(conn, notice, context, now):
+    """Called only after buyer API acknowledgement, never before network acceptance."""
+    if os.getenv('CONNECTION_AUTO_STOP_ENABLED','true').lower() not in {'1','true','yes','on'}:
+        return
+    identity=tuple(notice[k] for k in buyer_mapping.IDENTITY)
+    t=target(conn,notice,now)
+    if not t or t['scope']!='user' or (t['machine_id'],t['user_id'])!=(notice['machine_id'],notice['user_id']):
+        return
+    window=conn.execute('SELECT payload FROM connection_windows WHERE host_id=? AND runtime=? AND project=? AND container_name=?',identity).fetchone()
+    current=buyer_content.loads(window[0]) if window else {}
+    policy=current.get('policy',{})
+    if (not policy.get('valid') or current.get('stop_since')!=context.get('stop_since')
+        or not str(current.get('epoch','')).startswith(str(context.get('metric_epoch'))+':')
+        or now>context.get('expires_at',0) or now-current.get('last',0)>policy.get('max_gap_seconds',0)
+        or policy.get('stop_threshold')!=context.get('threshold') or policy.get('required_duration_seconds')!=context.get('required_duration_seconds')
+        or policy.get('stop_duration_seconds',0)<context.get('required_duration_seconds',1)
+        or policy.get('status')=='disabled'):
+        return
+    if conn.execute("SELECT 1 FROM security_actions WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND action_type='stop_container' AND status IN ('queued','dispatched','running')",identity).fetchone():
+        return
+    params={**context,'notice_required':True,'notice_id':notice['id'],'notification_accepted_at':now}
+    params.pop('accepted_at',None)
+    action=conn.execute("INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,?,?,?,'stop_container',?,'queued','system:connection-guard',?,?)",(*identity,json.dumps(params),now,now)).lastrowid
+    current['retries']=current.get('retries',0)+1
+    current['policy'].update(status='queued',action_id=action,reason='用户通知已获上游确认，已下发停机保护；不删除实例')
+    conn.execute('UPDATE connection_windows SET payload=? WHERE host_id=? AND runtime=? AND project=? AND container_name=?',(json.dumps(current),*identity))
+    conn.execute('UPDATE connection_overloads SET stop_action_id=? WHERE host_id=? AND runtime=? AND project=? AND container_name=?',(action,*identity))
+
+
 def work_user_notices(db, now, sender):
     """Independent receipts; freeze recipients and never retry uncertain delivery."""
     conn = db()
@@ -290,7 +351,11 @@ def work_user_notices(db, now, sender):
         if not cfg['enabled'] or not cfg['api_key']:
             conn.commit()
             return
-        for n in conn.execute("SELECT * FROM buyer_user_notices WHERE telegram_status IN ('queued','blocked','retrying') AND due_at<=? AND expires_at>? ORDER BY created_at LIMIT 100", (now, now)).fetchall():
+        for n in conn.execute("SELECT * FROM buyer_user_notices WHERE telegram_status IN ('queued','blocked','retrying') AND due_at<=? AND expires_at>? ORDER BY (requested_by='system:connection-guard') DESC,created_at LIMIT 100", (now, now)).fetchall():
+            guard=buyer_content.loads(n['connection_stop_json'])
+            if guard and now>guard.get('expires_at',0):
+                conn.execute("UPDATE buyer_user_notices SET telegram_status='expired',last_error='超标证据过期，等待新的连续采样' WHERE id=?",(n['id'],))
+                continue
             if n['container_id'] and container_id(conn,n) != n['container_id']:
                 conn.execute("UPDATE buyer_user_notices SET telegram_status='cancelled',banner_status=CASE WHEN banner_status='queued' THEN 'cancelled' ELSE banner_status END,last_error='容器已重建，请重新预览' WHERE id=?", (n['id'],))
                 continue
@@ -299,7 +364,10 @@ def work_user_notices(db, now, sender):
                 conn.execute("UPDATE buyer_user_notices SET telegram_status='blocked',last_error='收件未映射或已变化，请重新预览并发送',due_at=? WHERE id=?", (now+300,n['id']))
                 continue
             cooldown = conn.execute('SELECT next_at FROM buyer_cooldowns WHERE machine_id=?', (n['machine_id'],)).fetchone()
-            if cooldown and cooldown[0] > now:
+            if cooldown and cooldown[0] > now and not guard:
+                continue
+            if guard and (conn.execute("SELECT 1 FROM buyer_user_notices WHERE machine_id=? AND telegram_status='sending'",(n['machine_id'],)).fetchone()
+                or conn.execute("SELECT 1 FROM buyer_outbox WHERE machine_id=? AND status='sending'",(n['machine_id'],)).fetchone()):
                 continue
             notice = dict(n)
             conn.execute('INSERT INTO buyer_cooldowns VALUES(?,?) ON CONFLICT(machine_id) DO UPDATE SET next_at=excluded.next_at', (n['machine_id'], now+120))
@@ -323,6 +391,11 @@ def work_user_notices(db, now, sender):
         if status == 'retrying' and notice['attempts']+1 >= MAX_ATTEMPTS:
             status = 'failed'
         conn.execute("UPDATE buyer_user_notices SET telegram_status=?,last_error=?,due_at=?,updated_at=? WHERE id=? AND telegram_status='sending'", (status,error,due,now,notice['id']))
+        context=buyer_content.loads(notice.get('connection_stop_json'))
+        if status=='succeeded' and context:
+            context['accepted_at']=now
+            conn.execute('UPDATE buyer_user_notices SET connection_stop_json=? WHERE id=?',(json.dumps(context),notice['id']))
+            activate_notified_stop(conn,notice,context,now)
         conn.commit()
     finally:
         conn.close()

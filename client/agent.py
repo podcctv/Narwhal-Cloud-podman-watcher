@@ -3688,6 +3688,19 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 }
             )
             alerts.append(panel_alert)
+        standalone = panel_pairing.get('standalone_panels', [])
+        if panel_detection_enabled and isinstance(standalone, list) and standalone:
+            observations = []
+            for item in standalone[:20]:
+                ports = sorted({l['port'] for l in item.get('service_listeners', []) if isinstance(l.get('port'), int)})
+                observations.append(f"{item['panel']}（进程 {item['process']}，PID {item['pid']}，监听端口 {','.join(map(str, ports)) or '未取得'}）")
+            notice = _security_alert('standalone_proxy_panel', 'warning', '检测到独立代理管理面板（仅提醒）',
+                '；'.join(observations) + '。安装本身不等于空/弱密码、机场对接或异常行为；本条仅提醒，不自动停止业务。',
+                len(standalone), 0, container)
+            notice.update(standalone_panels=standalone[:20], panel_auth_status='not_assessed',
+                service_listeners=[l for item in standalone[:20] for l in item.get('service_listeners', [])][:40],
+                auto_stop_eligible=False)
+            alerts.append(notice)
         container_access = security.get("access_log")
         if isinstance(container_access, dict):
             summary["access_sources"].append({
@@ -4599,6 +4612,7 @@ def collect_panel_pairing_indicators(
     process_output = run(
         _runtime_exec_cmd(runtime, name, "ps -eo pid=,stat=,comm=,args= 2>/dev/null", project)
     )
+    result['standalone_panels'] = socks_detector.standalone_panels(process_output)
     combined_identity = f"{name} {image}".lower()
     socks_process = _socks_process_evidence(process_output, combined_identity)
     socks_config = _collect_socks_config_evidence(
@@ -5695,7 +5709,7 @@ def collect_container(
             if isinstance(socket_security.get("listening_ports"), list)
             else [],
         )
-        if has_remote_connections or socks_proxy.get('detected') or panel_pairing.get('detected')
+        if has_remote_connections or socks_proxy.get('detected') or panel_pairing.get('detected') or panel_pairing.get('standalone_panels')
         else {
             "communication_detail_available": True,
             "communication_snapshot_count": 0,
@@ -5711,6 +5725,8 @@ def collect_container(
         else [],
     )
     owned_listeners = communication.get('service_listeners', [])
+    for panel in panel_pairing.get('standalone_panels', []):
+        panel['service_listeners'] = [l for l in owned_listeners if l.get('pid') == panel.get('pid')][:20]
     for indicators in (socks_proxy, panel_pairing):
         matches = indicators.get('process_matches', [])
         pids = {int(item.get('pid') or 0) for item in matches if isinstance(item,dict)}
@@ -7192,6 +7208,9 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             return False, f"runtime {runtime_kind} is unavailable"
         if params.get('metric_schema') != 1:
             return False, 'legacy automatic stop lacks validated socket evidence; fresh samples required'
+        if params.get('notice_required') and (not re.fullmatch(r'[0-9a-f]{32}',str(params.get('notice_id','')))
+                or type(params.get('notification_accepted_at')) is not int or params['notification_accepted_at']<=0):
+            return False, 'user notification acknowledgement is missing; no stop executed'
         try:
             threshold = int(params['threshold'])
             expires = int(params['expires_at'])

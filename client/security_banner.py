@@ -499,7 +499,7 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
             'first_seen_epoch':s.get('created_at',now), 'title':safe(s.get('title')),
             'detail':safe(str(s.get('message','')).replace('\n','；'),1600), 'severity':'warning','state':'active','clean_samples':0,
             'action':'用户通知；请检查设置', 'expires_at':s['expires_at']})
-    relevant=[a for a in alerts if a.get("severity") in {"warning", "critical"} or a.get("type") in threat_types]
+    relevant=[a for a in alerts if a.get('type') != 'standalone_proxy_panel' and (a.get("severity") in {"warning", "critical"} or a.get("type") in threat_types)]
     for a in relevant:
         e=next((e for e in entries if e.get("type")==a.get("type") and not e.get('historical') and e.get('state') != 'verified'),None)
         if e is None:

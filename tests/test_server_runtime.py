@@ -1222,7 +1222,7 @@ class ServerRuntimeTests(unittest.TestCase):
         critical = json.loads(server.latest().body)["items"][0]
         self.assertEqual(critical["alerts"]["conn_severity"], "critical")
 
-    def test_sustained_connection_overload_queues_one_automatic_stop(self):
+    def test_sustained_connection_overload_without_buyer_mapping_does_not_stop(self):
         container = {
             "name": "node1",
             "runtime": "incus",
@@ -1241,14 +1241,13 @@ class ServerRuntimeTests(unittest.TestCase):
         container["conn_count"] += 1
         for ts in (1000, 1300, 1600):
             self.assertEqual(observe(ts), 0)
-        self.assertEqual(observe(1900), 1)
+        self.assertEqual(observe(1900), 0)
         self.assertEqual(observe(2200), 0)
         action = conn.execute("SELECT * FROM security_actions").fetchone()
         state = conn.execute("SELECT sample_count, stop_action_id FROM connection_overloads").fetchone()
         conn.close()
-        self.assertEqual(action["action_type"], "stop_container")
-        self.assertEqual(action["requested_by"], "system:connection-guard")
-        self.assertEqual(tuple(state), (5, action["id"]))
+        self.assertIsNone(action)
+        self.assertEqual(tuple(state), (5, None))
 
     def test_connection_overload_gap_resets_continuous_timer(self):
         container = {

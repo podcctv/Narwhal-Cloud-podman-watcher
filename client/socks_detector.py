@@ -35,6 +35,28 @@ def password_profile(value):
             'max_digit_frequency': max(digits.values(), default=0), 'longest_identical_run': longest}
 
 
+def standalone_panels(output):
+    """Inventory only: an installed management UI is not an airport connector."""
+    aliases = {'sui':'S-ui', 's-ui':'S-ui', 'x-ui':'X-ui', '3x-ui':'X-ui'}
+    found = []
+    for line in output.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) != 4 or not parts[0].isdigit() or int(parts[0]) <= 1 or 'z' in parts[1].lower():
+            continue
+        try:
+            tokens = shlex.split(parts[3])
+        except ValueError:
+            continue
+        comm = parts[2].lower()
+        executable = posixpath.basename(tokens[0]).lower() if tokens else ''
+        if comm in aliases and executable in aliases and aliases[comm] == aliases[executable]:
+            found.append({'pid':int(parts[0]), 'process':comm, 'panel':aliases[comm],
+                          'auth_assessment':'not_assessed', 'auto_stop_eligible':False})
+        if len(found) >= 20:
+            break
+    return found
+
+
 def profiles(users, key):
     if not isinstance(users, list) or not users:
         return [{'available': False, 'reason': '未找到内联入站认证账号；可能使用外部认证'}]

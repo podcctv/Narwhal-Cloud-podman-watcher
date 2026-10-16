@@ -98,6 +98,10 @@ def issue(alert, details):
         reason = "没有密码保护" if mode == "no_auth" else "密码过于简单" if mode == "weak_password" else "认证设置尚未确认"
         facts = listener_text(details)
         return f"发现 {service} 代理{reason}，存在被未经授权使用的风险", facts, "请检查代理设置，设置安全密码，或关闭不需要的代理。"
+    if kind == 'standalone_proxy_panel':
+        panels = details.get('standalone_panels', [])
+        services = names([p.get('panel') for p in panels if isinstance(p, dict)]) or '独立代理管理面板'
+        return f"检测到 {services}，需要核对使用设置", listener_text(details), "这条提醒仅表示面板已安装，不代表已确认弱密码或异常行为，系统没有因此停止业务。请检查登录认证和代理配置，关闭不需要的服务。"
     if kind == "unauthorized_panel_pairing":
         service = names(details.get("process_patterns")) or "第三方面板对接组件"
         domains = names(details.get("unapproved_domains"))

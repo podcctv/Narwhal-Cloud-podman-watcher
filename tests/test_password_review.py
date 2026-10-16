@@ -125,6 +125,7 @@ class UserNoticeTests(unittest.TestCase):
             self.assertNotIn('password_profiles',preview['message'])
             payload={'confirm':True,'request_id':request_id,'preview_token':preview['preview_token']}
             result=buyer.queue_user_notice(conn,a,payload,'admin')
+            self.now=max(self.now,int(time.time()))
             return a, payload, result
 
     def test_queue_no_send_idempotent_and_channel_receipts(self):

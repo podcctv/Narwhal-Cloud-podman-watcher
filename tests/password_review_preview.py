@@ -15,7 +15,7 @@ def main():
         server.DASHBOARD_USERNAME = 'preview'
         server.DASHBOARD_PASSWORD = 'local-preview-only'
         server.PUBLIC_BASE_URL = ''
-        server.APP_VERSION = '1.7.39'
+        server.APP_VERSION = '1.7.40'
         server.init_db()
         now = int(time.time())
         with closing(server.db()) as conn:
@@ -38,6 +38,13 @@ def main():
                     'mem_percent':1,'net_rx_bps':0,'net_tx_bps':0,'conn_count':2,'security':{'socks_proxy':{'detected':True,'auth_mode':'unknown'}}}
                 conn.execute("INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,ts,payload_json,podman_network_ok_v4,podman_network_ok_v6) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1)",
                     ('合成香港节点',name,'incus','default',1,1024,1,0,0,2,now,json.dumps(container)))
+            panel_alert={'type':'standalone_proxy_panel','severity':'warning','title':'检测到独立代理管理面板（仅提醒）',
+                'message':'检测到 S-ui（PID 210，监听端口 9443）。安装本身不等于弱密码或异常行为；仅提醒，不自动停止业务。',
+                'runtime':'incus','project':'default','container_name':'synthetic-panel-instance',
+                'standalone_panels':[{'panel':'S-ui','process':'sui','pid':210}],'panel_auth_status':'not_assessed','auto_stop_eligible':False}
+            server.process_security_alerts(conn,'合成香港节点',now,[panel_alert],partial=True)
+            conn.execute("INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,ts,payload_json,podman_network_ok_v4,podman_network_ok_v6) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1)",
+                ('合成香港节点','synthetic-panel-instance','incus','default',0,0,0,0,0,0,now,json.dumps({'name':'synthetic-panel-instance','runtime':'incus','project':'default'})))
             conn.commit()
         uvicorn.run(server.app,host='127.0.0.1',port=8793,log_level='warning',lifespan='off')
 

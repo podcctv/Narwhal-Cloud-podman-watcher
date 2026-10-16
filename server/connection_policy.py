@@ -32,7 +32,7 @@ def metrics(container, now, stale_seconds=900):
     return m
 
 
-def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=None, auto_stop=True):
+def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=None, auto_stop=True, before_stop=None):
     now = int(time.time()) if now is None else now
     queued = 0
     active = set()
@@ -71,12 +71,16 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                 policy['escalated'] = True
                 if m['total'] <= stop:
                     policy['reason'] = '严重超标已持续至少15分钟：刷新取证并升级提醒，尚未达到停机门槛'
-            pending = conn.execute("SELECT id,status,updated_at,attempts FROM security_actions WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND action_type='stop_container' ORDER BY id DESC LIMIT 1", key).fetchone()
+            pending = conn.execute("SELECT id,status,updated_at,attempts,params_json FROM security_actions WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND action_type='stop_container' ORDER BY id DESC LIMIT 1", key).fetchone()
+            if pending:
+                previous = json.loads(pending['params_json'])
+                if previous.get('threshold') != stop or previous.get('required_duration_seconds') != duration:
+                    pending = None  # A different policy cannot lend a pending action/retry history.
             if pending and pending['status'] == 'succeeded' and pending['updated_at'] >= state['stop_since'] and state['stop_since']:
                 state['stop_since'], state['stop_samples'] = stamp, 1
                 policy['stop_duration_seconds'] = 0
             ready = (m['total'] > stop and policy['stop_duration_seconds'] >= duration
-                     and state['stop_samples'] >= 3 and key[1] in ('podman', 'docker', 'incus'))
+                     and state['stop_samples'] >= (2 if duration <= 300 else 3) and key[1] in ('podman', 'incus'))
             if not auto_stop:
                 ready = False
                 policy.update(status='disabled', reason='自动停机保护已暂停；继续采集和提醒')
@@ -90,12 +94,19 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                 params = {'reason': 'sustained_connection_overload', 'connection_count': m['total'],
                           'threshold': stop, 'duration_seconds': policy['stop_duration_seconds'],
                           'required_duration_seconds': duration, 'metric_schema': 1,
-                          'metric_epoch': m['epoch'], 'observed_at': stamp, 'expires_at': now + max_gap}
-                action = conn.execute("""INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at)
-                    VALUES(0,?,?,?,?,'stop_container',?,'queued','system:connection-guard',?,?)""", (*key, json.dumps(params), now, now)).lastrowid
-                policy.update(status='queued', action_id=action, reason='连续超标已确认，已下发停机保护；不会删除实例')
-                state['retries'] += 1
-                queued += 1
+                          'metric_epoch': m['epoch'], 'observed_at': stamp, 'expires_at': now + max_gap,
+                          'stop_since':state['stop_since']}
+                gate = before_stop(conn, key, params, now) if before_stop else {'ready': True}
+                if not gate.get('ready'):
+                    policy.update(status='awaiting_notification', notification_status=gate.get('status','blocked'),
+                                  notification_id=gate.get('notice_id',''), reason=gate.get('reason','等待用户通知确认，尚未停机'))
+                else:
+                    params.update(gate.get('params', {}))
+                    action = conn.execute("""INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at)
+                        VALUES(0,?,?,?,?,'stop_container',?,'queued','system:connection-guard',?,?)""", (*key, json.dumps(params), now, now)).lastrowid
+                    policy.update(status='queued', action_id=action, reason='用户通知已确认，已下发停机保护；不会删除实例')
+                    state['retries'] += 1
+                    queued += 1
             if m['total'] > stop:
                 conn.execute('INSERT OR REPLACE INTO connection_overloads VALUES(?,?,?,?,?,?,?,?)', (*key, state['stop_since'], stamp, state['stop_samples'], policy.get('action_id')))
         if not m or m['total'] <= stop:
@@ -135,7 +146,7 @@ def text(policy):
     covered = f"{policy.get('critical_duration_seconds', 0)//60} 分钟（有效采样覆盖）" if policy.get('valid') else '尚未验证'
     return (f"统计口径：{policy['metric']}\n"
             f"连续严重超标：{covered}\n"
-            f"自动停机：超过 {policy['stop_threshold']}，持续 {policy['required_duration_seconds']//60} 分钟；"
+            f"自动停机：超过 {policy['stop_threshold']}，持续 {policy['required_duration_seconds']//60} 分钟，先通知用户再停机；"
             f"当前停机门槛覆盖 {policy.get('stop_duration_seconds', 0)//60} 分钟\n"
             f"处理状态：{policy['reason']}\n"
             '无法准确归属的服务不会自动限流或停止。')

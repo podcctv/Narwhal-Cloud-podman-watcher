@@ -71,7 +71,7 @@ def _key(host_key, identity, container=None):
 def category(kind):
     if kind in {"socks_weak_auth", "unauthorized_panel_pairing", "malicious_process", "container_security_risk"}:
         return "security"
-    if kind in {'socks_auth_unknown', 'socks_password_review'}:
+    if kind in {'socks_auth_unknown', 'socks_password_review', 'standalone_proxy_panel'}:
         return 'security_attention'
     if kind.startswith('outbound_') or kind in {'udp_outbound_flood', 'process_fanout_abuse'}:
         return 'network_signal'
