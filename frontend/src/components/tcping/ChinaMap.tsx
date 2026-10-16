@@ -5,7 +5,7 @@ import { TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import china from '../../china-map.json';
 import { carriers, latencyColor, median, Target } from './types';
-import { provinceSummary } from './model';
+import { connectionSummary, provinceSummary, summaryState } from './model';
 
 echarts.use([MapChart, TooltipComponent, CanvasRenderer]);
 const fullName = (name: string) => ({ 内蒙古: '内蒙古自治区', 广西: '广西壮族自治区', 西藏: '西藏自治区', 宁夏: '宁夏回族自治区', 新疆: '新疆维吾尔自治区', 北京: '北京市', 天津: '天津市', 上海: '上海市', 重庆: '重庆市' }[name] || name + '省');
@@ -34,13 +34,15 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
   const mapName = mapForProvince(province);
   const data = useMemo(() => [...[...new Set(nodes.map(n => n.province))].map(p => {
     const { rows, completed, good, value, filteredOut } = provinceSummary(nodes, p, { province, carrier, status });
+    const summary = connectionSummary(rows);
     return { name: fullName(p), short: p, value, completed, total: rows.length, good, filteredOut,
       label: { show: false },
       itemStyle: { areaColor: filteredOut ? '#172033' : value === null ? (completed === rows.length && completed ? '#7f1d1d' : '#1e293b') : latencyColor(value),
-        borderColor: province === p ? '#f8fafc' : '#08101f', borderWidth: province === p ? 2 : 1 },
+        borderColor: province === p ? '#f8fafc' : summary.failed || summary.partial ? '#facc15' : '#08101f', borderWidth: province === p || summary.failed || summary.partial ? 2 : 1 },
       carriers: Object.entries(carriers).filter(([key]) => !carrier || carrier === key).map(([key, label]) => {
         const list = rows.filter(n => n.carrier === key), v = median(list.flatMap(n => n.result?.median_ms != null ? [n.result.median_ms] : []));
-        return `${label}：${v === null ? '未获得有效连接' : v.toFixed(1) + ' ms'} · ${list.filter(n => n.result?.success).length}/${list.length} 可达`;
+        const s = connectionSummary(list);
+        return `${label}：${v === null ? '无有效时延' : v.toFixed(1) + ' ms'} · ${s.success}/${s.attempts} 建连成功<br/>${escape(summaryState(s))}`;
       }),
     };
   }), ...['台湾省', '香港特别行政区', '澳门特别行政区'].filter(name => !nodes.some(n => fullName(n.province) === name)).map(name => ({
@@ -71,5 +73,5 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
         label: { show: false }, itemStyle: { areaColor: '#172033', borderColor: '#08101f', borderWidth: 1 },
         emphasis: { label: { show: false }, itemStyle: { borderColor: '#e2e8f0', borderWidth: 2 } }, data }] }, { notMerge: true });
   }, [data, mapName]);
-  return <div className="tcp-map" ref={el} role="img" aria-label={`${province ? province + '省级区域聚焦图' : '全国省级'} TCP 地图，当前显示${carriers[carrier] || '全部运营商'}。台湾含指定 TCP 目标（端口 36901）；地图与右侧筛选同步。`} />;
+  return <div className="tcp-map" ref={el} role="img" aria-label={`${province ? province + '省级区域聚焦图' : '全国省级'} TCP 地图，当前显示${carriers[carrier] || '全部运营商'}。可通过省份表格或筛选器选择区域；台湾指定目标独立统计。`} />;
 };
