@@ -15,7 +15,7 @@ def main():
         server.DASHBOARD_USERNAME = 'preview'
         server.DASHBOARD_PASSWORD = 'local-preview-only'
         server.PUBLIC_BASE_URL = ''
-        server.APP_VERSION = '1.7.40'
+        server.APP_VERSION = '1.7.41'
         server.init_db()
         now = int(time.time())
         with closing(server.db()) as conn:
@@ -45,6 +45,14 @@ def main():
             server.process_security_alerts(conn,'合成香港节点',now,[panel_alert],partial=True)
             conn.execute("INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,ts,payload_json,podman_network_ok_v4,podman_network_ok_v6) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1)",
                 ('合成香港节点','synthetic-panel-instance','incus','default',0,0,0,0,0,0,now,json.dumps({'name':'synthetic-panel-instance','runtime':'incus','project':'default'})))
+            recovered = {'type':'container_connection_count','severity':'critical','title':'历史连接数告警',
+                'message':'合成历史恢复记录','runtime':'incus','project':'default','container_name':'synthetic-recovered',
+                'value':3251,'threshold':1000}
+            first = now-6*3600-34*60
+            server.process_security_alerts(conn,'合成香港节点',first,[recovered],partial=True)
+            row = conn.execute("SELECT id FROM security_alerts WHERE container_name='synthetic-recovered'").fetchone()
+            conn.execute("UPDATE security_alerts SET status='resolved',last_seen=? WHERE id=?", (now-60,row['id']))
+            conn.execute('INSERT INTO buyer_checks(alert_id,episode,clean_samples,last_sample,state,verified_at) VALUES(?,?,2,?,?,?)', (row['id'],first,now,'verified',now))
             conn.commit()
         uvicorn.run(server.app,host='127.0.0.1',port=8793,log_level='warning',lifespan='off')
 

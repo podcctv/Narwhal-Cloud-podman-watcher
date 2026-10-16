@@ -13,7 +13,7 @@ const fs=require('node:fs');
   await page.getByLabel('用户名',{exact:true}).fill('preview');await page.getByLabel('密码',{exact:true}).fill('local-preview-only');
   await page.getByRole('button',{name:'登录控制台'}).click();await page.waitForURL('http://127.0.0.1:8793/');
   await page.getByText('账号 #1：8 位字符',{exact:true}).waitFor();
-  await page.getByText('检测到独立代理管理面板（仅提醒）',{exact:true}).waitFor();
+  await page.getByText('检测到独立代理管理面板（仅提醒）',{exact:true}).first().waitFor();
   const panelCard=page.locator('div.p-5').filter({has:page.getByText('检测到独立代理管理面板（仅提醒）',{exact:true})});
   assert.equal(await panelCard.getByRole('button',{name:'人工决定停止',exact:true}).count(),0);
   assert.equal(await panelCard.getByRole('button',{name:'定向处置',exact:true}).count(),0);
@@ -50,7 +50,15 @@ const fs=require('node:fs');
   await page.getByRole('button',{name:'查看全部告警记录',exact:true}).click();
   await page.getByText('安全告警与处置审计历史',{exact:true}).waitFor();
   await page.getByText('账号 #1：8 位字符',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:'通知用户',exact:true}).count(),3);
+  await page.getByText(/告警持续 6 小时 34 分钟 后确认恢复/).waitFor();
+  for(const width of [375,768,1440]){
+   await page.setViewportSize({width,height:1100});
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`history overflow at ${width}`);
+   const recoveredCard=page.locator('div.p-5').filter({has:page.getByText('历史连接数告警',{exact:true})});
+   await recoveredCard.scrollIntoViewIfNeeded();
+   await recoveredCard.screenshot({path:`${output}/recovery-history-${width}.png`});
+  }
+  assert.equal(await page.getByRole('button',{name:'通知用户',exact:true}).count(),4);
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({passed:true,widths:[375,768,1440],preview_cancel_no_posts:true,notification_posts:1,manual_stop_posts:1,history:true,screenshots:output}));
  } finally {await browser.close()}

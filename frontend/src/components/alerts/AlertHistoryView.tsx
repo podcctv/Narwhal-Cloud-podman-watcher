@@ -15,6 +15,24 @@ import { StatusBadge } from '../common/StatusBadge';
 import { SocksPasswordReview } from './SocksPasswordReview';
 import { UserNoticeAction } from './UserNoticeAction';
 
+const elapsed = (seconds: number): string => {
+  const units: [number, string][] = [[86400, '天'], [3600, '小时'], [60, '分钟'], [1, '秒']];
+  let remaining = Math.max(0, Math.floor(seconds));
+  const parts = units.flatMap(([size, label]) => {
+    const count = Math.floor(remaining / size);
+    remaining %= size;
+    return count ? [`${count} ${label}`] : [];
+  });
+  return parts.join(' ') || '0 秒';
+};
+
+const recoveryLabel = (alert: SecurityAlert): string => {
+  if (alert.recovery?.verified) return '已确认恢复';
+  if (alert.recovery?.state === 'manual_closed') return '人工关闭 · 未验证恢复';
+  if (alert.recovery?.state === 'legacy_verified') return '已恢复 · 历史时间未留存';
+  return alert.status === 'resolved' ? '已关闭 · 待验证恢复' : '';
+};
+
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
   const details = alert.details || {};
@@ -124,7 +142,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
     suppressed: '已放行',
     dismissed: '本次忽略',
     remediated: '已处理',
-    resolved: '已恢复',
+    resolved: '已恢复 / 已关闭',
   };
 
   return (
@@ -288,7 +306,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                         </span>
                       )}
                       <span className="rounded-full bg-slate-800 px-2 py-0.2 text-[10px] text-slate-400 font-mono">
-                        {statusLabels[alert.status] || alert.status}
+                        {recoveryLabel(alert) || statusLabels[alert.status] || alert.status}
                       </span>
                     </div>
 
@@ -371,9 +389,15 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                 )}
 
                 {/* Footnotes & Actions */}
-                <div className="flex items-center justify-between border-t border-slate-800/80 pt-3 text-xs">
-                  <div className="text-slate-500 text-[11px] font-mono">
-                    首次 {alert.first_seen_utc8} · 最近 {alert.last_seen_utc8}
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3 text-xs">
+                  <div className="min-w-0 break-words text-slate-500 text-[11px] font-mono">
+                    <div>首次 {alert.first_seen_utc8} · 最近 {alert.last_seen_utc8}</div>
+                    {alert.recovery?.verified && alert.recovery.duration_seconds != null && (
+                      <div className="mt-1 text-emerald-300">告警持续 {elapsed(alert.recovery.duration_seconds)} 后确认恢复 · 恢复 {alert.recovery.recovered_at_utc8}</div>
+                    )}
+                    {!alert.recovery?.verified && alert.recovery?.closed_duration_seconds != null && (
+                      <div className="mt-1 text-amber-300">关闭前持续 {elapsed(alert.recovery.closed_duration_seconds)} · 关闭 {alert.recovery.closed_at_utc8} · {alert.recovery.state === 'legacy_verified' ? '历史恢复时刻未留存，不能计算准确恢复时长' : '不代表已确认恢复'}</div>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2">

@@ -96,17 +96,23 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                           'required_duration_seconds': duration, 'metric_schema': 1,
                           'metric_epoch': m['epoch'], 'observed_at': stamp, 'expires_at': now + max_gap,
                           'stop_since':state['stop_since']}
-                gate = before_stop(conn, key, params, now) if before_stop else {'ready': True}
-                if not gate.get('ready'):
-                    policy.update(status='awaiting_notification', notification_status=gate.get('status','blocked'),
-                                  notification_id=gate.get('notice_id',''), reason=gate.get('reason','等待用户通知确认，尚未停机'))
-                else:
-                    params.update(gate.get('params', {}))
-                    action = conn.execute("""INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at)
-                        VALUES(0,?,?,?,?,'stop_container',?,'queued','system:connection-guard',?,?)""", (*key, json.dumps(params), now, now)).lastrowid
-                    policy.update(status='queued', action_id=action, reason='用户通知已确认，已下发停机保护；不会删除实例')
-                    state['retries'] += 1
-                    queued += 1
+                # Protection is independent of delivery/mapping/API availability.
+                params['notice_best_effort'] = True
+                action = conn.execute("""INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at)
+                    VALUES(0,?,?,?,?,'stop_container',?,'queued','system:connection-guard',?,?)""", (*key, json.dumps(params), now, now)).lastrowid
+                policy.update(status='queued', action_id=action, reason='已立即下发停机保护；通知尽力发送，不阻塞处置；不会删除实例')
+                state['retries'] += 1
+                queued += 1
+                if before_stop:
+                    conn.execute('SAVEPOINT connection_notice')
+                    try:
+                        notice = before_stop(conn, key, params, now)
+                        policy.update(notification_status=notice.get('status', 'queued'), notification_id=notice.get('notice_id', ''))
+                        conn.execute('RELEASE connection_notice')
+                    except Exception:
+                        conn.execute('ROLLBACK TO connection_notice')
+                        conn.execute('RELEASE connection_notice')
+                        policy['notification_status'] = 'failed'
             if m['total'] > stop:
                 conn.execute('INSERT OR REPLACE INTO connection_overloads VALUES(?,?,?,?,?,?,?,?)', (*key, state['stop_since'], stamp, state['stop_samples'], policy.get('action_id')))
         if not m or m['total'] <= stop:
@@ -146,7 +152,7 @@ def text(policy):
     covered = f"{policy.get('critical_duration_seconds', 0)//60} 分钟（有效采样覆盖）" if policy.get('valid') else '尚未验证'
     return (f"统计口径：{policy['metric']}\n"
             f"连续严重超标：{covered}\n"
-            f"自动停机：超过 {policy['stop_threshold']}，持续 {policy['required_duration_seconds']//60} 分钟，先通知用户再停机；"
+            f"自动停机：超过 {policy['stop_threshold']}，持续 {policy['required_duration_seconds']//60} 分钟，立即停机保护，通知失败不阻塞；"
             f"当前停机门槛覆盖 {policy.get('stop_duration_seconds', 0)//60} 分钟\n"
             f"处理状态：{policy['reason']}\n"
             '无法准确归属的服务不会自动限流或停止。')

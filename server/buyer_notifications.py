@@ -59,6 +59,8 @@ def initialize(conn):
         conn.execute("ALTER TABLE buyer_user_notices ADD COLUMN container_id TEXT DEFAULT ''")
     if 'connection_stop_json' not in {r[1] for r in conn.execute('PRAGMA table_info(buyer_user_notices)')}:
         conn.execute("ALTER TABLE buyer_user_notices ADD COLUMN connection_stop_json TEXT DEFAULT ''")
+    if 'verified_at' not in {r[1] for r in conn.execute('PRAGMA table_info(buyer_checks)')}:
+        conn.execute('ALTER TABLE buyer_checks ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0')
     buyer_mapping.initialize(conn)
 
 
@@ -145,7 +147,12 @@ def observe(conn, host, ts, containers, alerts):
         # Only verify events with an existing observation/remediation history.
         clean_samples=0 if present or unknown else (old["clean_samples"] if old and old["episode"]==a["first_seen"] else 0)+1
         state="awaiting_report" if present and a["status"]=="remediated" else "active" if present else "unverified" if unknown else "verified" if clean_samples>=2 else "awaiting_report"
-        conn.execute("INSERT INTO buyer_checks VALUES(?,?,?,?,?) ON CONFLICT(alert_id) DO UPDATE SET episode=excluded.episode,clean_samples=excluded.clean_samples,last_sample=excluded.last_sample,state=excluded.state",(a["id"],a["first_seen"],clean_samples,ts,state))
+        # Freeze the first verified time for this episode; never backfill old
+        # verified records using a later report as an invented recovery time.
+        verified_at = old['verified_at'] if old and old['episode'] == a['first_seen'] else 0
+        if state == 'verified' and not verified_at and not (old and old['episode'] == a['first_seen'] and old['state'] == 'verified'):
+            verified_at = ts
+        conn.execute("INSERT INTO buyer_checks(alert_id,episode,clean_samples,last_sample,state,verified_at) VALUES(?,?,?,?,?,?) ON CONFLICT(alert_id) DO UPDATE SET episode=excluded.episode,clean_samples=excluded.clean_samples,last_sample=excluded.last_sample,state=excluded.state,verified_at=excluded.verified_at",(a["id"],a["first_seen"],clean_samples,ts,state,verified_at))
 
 
 def render(alert, state, node="", conn=None):
@@ -159,6 +166,30 @@ def render(alert, state, node="", conn=None):
         receipt = conn.execute('SELECT payload FROM security_action_receipts WHERE action_id=?',(action['id'],)).fetchone()
         action['items'] = json.loads(receipt[0]) if receipt else []
     return buyer_content.render(alert, state, node, action)
+
+
+def recovery(conn, alert):
+    """Episode-scoped duration, with explicit legacy/unverified closure states."""
+    first = int(alert['first_seen'])
+    result = {'state': 'ongoing', 'verified': False, 'recovered_at': None,
+              'duration_seconds': None, 'closed_at': None, 'closed_duration_seconds': None}
+    if alert['status'] not in {'resolved', 'remediated'}:
+        return result
+    state = current_state(conn, alert)
+    check = conn.execute('SELECT verified_at FROM buyer_checks WHERE alert_id=? AND episode=?', (alert['id'], first)).fetchone()
+    verified_at = int(check[0] or 0) if check else 0
+    if state == 'verified' and not verified_at:
+        old = conn.execute("SELECT r.ts FROM ops_rechecks r JOIN security_actions a ON a.id=r.action_id WHERE a.alert_id=? AND a.created_at>=? AND r.status='verified' AND r.ts>=? ORDER BY r.ts LIMIT 1", (alert['id'], first, first)).fetchone()
+        verified_at = int(old[0]) if old else 0
+    if state == 'verified' and verified_at >= first and verified_at:
+        result.update(state='verified', verified=True, recovered_at=verified_at, duration_seconds=verified_at-first)
+        return result
+    decision = conn.execute("SELECT created_at FROM security_alert_decisions WHERE alert_id=? AND decision='resolve' AND created_at>=? ORDER BY id DESC LIMIT 1", (alert['id'], first)).fetchone()
+    closed = int(decision[0]) if decision else int(alert['last_seen']) if alert['status'] == 'resolved' else 0
+    result.update(state='legacy_verified' if state == 'verified' else 'manual_closed' if decision else 'unverified')
+    if closed >= first and closed:
+        result.update(closed_at=closed, closed_duration_seconds=closed-first)
+    return result
 
 
 def reconcile(conn, host, now):
@@ -279,62 +310,26 @@ def queue_user_notice(conn, alert_id, payload, requested_by):
 
 
 def connection_stop_gate(conn, identity, params, now):
+    """Schedule best-effort delivery only; this function never authorizes a stop."""
     row=dict(zip(buyer_mapping.IDENTITY, identity))
     notice_id=hashlib.sha256(json.dumps([identity,params['metric_epoch'],params['threshold'],params['required_duration_seconds'],params['stop_since']]).encode()).hexdigest()[:32]
     notice=conn.execute('SELECT * FROM buyer_user_notices WHERE id=?',(notice_id,)).fetchone()
     t=target(conn,row,now)
     mapped=bool(t and t['scope']=='user' and t['user_id'])
     if notice:
-        same=mapped and (notice['machine_id'],notice['user_id'])==(t['machine_id'],t['user_id'])
-        context=buyer_content.loads(notice['connection_stop_json'])
-        if same and notice['telegram_status']=='succeeded' and context.get('accepted_at'):
-            return {'ready':True,'params':{'notice_required':True,'notice_id':notice_id,'notification_accepted_at':context['accepted_at']}}
-        if same and (notice['telegram_status'] in {'queued','retrying'} or (notice['telegram_status']=='expired' and notice['attempts']==0)):
-            # Refresh proof, not the network outcome; uncertain sends are never replayed.
-            conn.execute("UPDATE buyer_user_notices SET connection_stop_json=?,telegram_status=CASE WHEN telegram_status='expired' THEN 'queued' ELSE telegram_status END WHERE id=?",(json.dumps(params),notice_id))
-        return {'ready':False,'notice_id':notice_id,'status':notice['telegram_status'] if same else 'blocked',
-            'reason':'等待用户通知投递确认；未执行停机。收件变化或结果不确定时需管理员核查。'}
+        return {'notice_id':notice_id,'status':notice['telegram_status']}
     cfg=config(conn)
     if not mapped or not cfg['enabled'] or not cfg['api_key']:
-        return {'ready':False,'status':'blocked','reason':'用户收件映射或通知配置缺失；为保证先通知后停机，暂未停止容器'}
+        return {'status':'blocked','reason':'通知配置或定向收件映射缺失；不影响停机保护'}
     if conn.execute('SELECT COUNT(*) FROM buyer_user_notices').fetchone()[0]>=10000:
-        return {'ready':False,'status':'blocked','reason':'通知队列已满，未执行停机'}
+        return {'status':'blocked','reason':'通知队列已满；不影响停机保护'}
     existing=conn.execute("SELECT id,first_seen FROM security_alerts WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND alert_type='container_connection_count' ORDER BY last_seen DESC LIMIT 1",identity).fetchone()
     title='服务器连接数过高提醒'
-    message=clean(f"您的 {t['node_name'] or identity[0]} 服务器（实例 {identity[3]}）检测时连接数 {params['connection_count']}，有效采样已连续 {params['duration_seconds']//60} 分钟超过 {params['threshold']} 个。\n为保护服务，通知投递确认后系统将重新核验连接数；若仍超标，将关闭该容器，不删除数据。请检查代理账号和后台任务。如有疑问，请发工单。",1600)
+    message=clean(f"您的 {t['node_name'] or identity[0]} 服务器（实例 {identity[3]}）检测时连接数 {params['connection_count']}，有效采样已连续 {params['duration_seconds']//60} 分钟超过 {params['threshold']} 个。\n为保护宿主机稳定，系统已下发关闭容器指令，不删除数据。节点将复核当前状态后执行，实际结果以执行回执为准；通知是否成功不影响保护措施。请检查代理账号和后台任务。如有疑问，请发工单。",1600)
     conn.execute('INSERT INTO buyer_user_notices(id,alert_id,episode,host_id,runtime,project,container_name,subject,message,machine_id,user_id,requested_by,created_at,expires_at,telegram_status,banner_status,updated_at,due_at,container_id,connection_stop_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (notice_id,existing['id'] if existing else 0,existing['first_seen'] if existing else now,*identity,title,message,
          t['machine_id'],t['user_id'],'system:connection-guard',now,now+86400,'queued','queued',now,now,container_id(conn,row),json.dumps(params)))
-    return {'ready':False,'notice_id':notice_id,'status':'queued','reason':'连续超标已确认；先向用户发送停机前提醒，投递确认前不下发停止指令'}
-
-
-def activate_notified_stop(conn, notice, context, now):
-    """Called only after buyer API acknowledgement, never before network acceptance."""
-    if os.getenv('CONNECTION_AUTO_STOP_ENABLED','true').lower() not in {'1','true','yes','on'}:
-        return
-    identity=tuple(notice[k] for k in buyer_mapping.IDENTITY)
-    t=target(conn,notice,now)
-    if not t or t['scope']!='user' or (t['machine_id'],t['user_id'])!=(notice['machine_id'],notice['user_id']):
-        return
-    window=conn.execute('SELECT payload FROM connection_windows WHERE host_id=? AND runtime=? AND project=? AND container_name=?',identity).fetchone()
-    current=buyer_content.loads(window[0]) if window else {}
-    policy=current.get('policy',{})
-    if (not policy.get('valid') or current.get('stop_since')!=context.get('stop_since')
-        or not str(current.get('epoch','')).startswith(str(context.get('metric_epoch'))+':')
-        or now>context.get('expires_at',0) or now-current.get('last',0)>policy.get('max_gap_seconds',0)
-        or policy.get('stop_threshold')!=context.get('threshold') or policy.get('required_duration_seconds')!=context.get('required_duration_seconds')
-        or policy.get('stop_duration_seconds',0)<context.get('required_duration_seconds',1)
-        or policy.get('status')=='disabled'):
-        return
-    if conn.execute("SELECT 1 FROM security_actions WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND action_type='stop_container' AND status IN ('queued','dispatched','running')",identity).fetchone():
-        return
-    params={**context,'notice_required':True,'notice_id':notice['id'],'notification_accepted_at':now}
-    params.pop('accepted_at',None)
-    action=conn.execute("INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,?,?,?,'stop_container',?,'queued','system:connection-guard',?,?)",(*identity,json.dumps(params),now,now)).lastrowid
-    current['retries']=current.get('retries',0)+1
-    current['policy'].update(status='queued',action_id=action,reason='用户通知已获上游确认，已下发停机保护；不删除实例')
-    conn.execute('UPDATE connection_windows SET payload=? WHERE host_id=? AND runtime=? AND project=? AND container_name=?',(json.dumps(current),*identity))
-    conn.execute('UPDATE connection_overloads SET stop_action_id=? WHERE host_id=? AND runtime=? AND project=? AND container_name=?',(action,*identity))
+    return {'notice_id':notice_id,'status':'queued'}
 
 
 def work_user_notices(db, now, sender):
@@ -353,7 +348,7 @@ def work_user_notices(db, now, sender):
             return
         for n in conn.execute("SELECT * FROM buyer_user_notices WHERE telegram_status IN ('queued','blocked','retrying') AND due_at<=? AND expires_at>? ORDER BY (requested_by='system:connection-guard') DESC,created_at LIMIT 100", (now, now)).fetchall():
             guard=buyer_content.loads(n['connection_stop_json'])
-            if guard and now>guard.get('expires_at',0):
+            if guard and not guard.get('notice_best_effort') and now>guard.get('expires_at',0):
                 conn.execute("UPDATE buyer_user_notices SET telegram_status='expired',last_error='超标证据过期，等待新的连续采样' WHERE id=?",(n['id'],))
                 continue
             if n['container_id'] and container_id(conn,n) != n['container_id']:
@@ -395,7 +390,8 @@ def work_user_notices(db, now, sender):
         if status=='succeeded' and context:
             context['accepted_at']=now
             conn.execute('UPDATE buyer_user_notices SET connection_stop_json=? WHERE id=?',(json.dumps(context),notice['id']))
-            activate_notified_stop(conn,notice,context,now)
+            # Delivery receipts cannot enqueue protection actions. Only fresh
+            # validated connection observations own that decision.
         conn.commit()
     finally:
         conn.close()

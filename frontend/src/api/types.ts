@@ -167,6 +167,14 @@ export interface SecurityAlert {
   occurrence_count?: number;
   first_seen_utc8?: string;
   last_seen_utc8?: string;
+  recovery?: {
+    state: string;
+    verified: boolean;
+    recovered_at_utc8?: string | null;
+    duration_seconds?: number | null;
+    closed_at_utc8?: string | null;
+    closed_duration_seconds?: number | null;
+  };
   latest_action?: {
     id?: number;
     action_type?: string;

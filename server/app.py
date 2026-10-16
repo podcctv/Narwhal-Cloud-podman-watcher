@@ -2527,6 +2527,9 @@ def _decision_item(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 def _security_alert_item(conn: sqlite3.Connection, row: sqlite3.Row) -> Dict[str, Any]:
+    recovery = buyer_notifications.recovery(conn, row)
+    for field in ('recovered_at', 'closed_at'):
+        recovery[field + '_utc8'] = format_utc8(recovery[field]) if recovery[field] else None
     latest_action = _latest_action_for_alert(conn, row)
     latest_decision = conn.execute(
         "SELECT * FROM security_alert_decisions WHERE alert_id=? ORDER BY id DESC LIMIT 1",
@@ -2559,6 +2562,7 @@ def _security_alert_item(conn: sqlite3.Connection, row: sqlite3.Row) -> Dict[str
         "last_seen_utc8": format_utc8(int(row["last_seen"])),
         "occurrence_count": int(row["occurrence_count"]),
         "status": row["status"],
+        "recovery": recovery,
         "details": _alert_action_evidence(row),
         "deep_evidence": deep_evidence,
         "latest_action": _action_item(latest_action) if latest_action is not None else None,
