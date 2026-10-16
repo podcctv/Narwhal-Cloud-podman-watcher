@@ -54,7 +54,7 @@ const fs=require('node:fs');
   for(const width of [375,768,1440]){
    await page.setViewportSize({width,height:1100});
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`history overflow at ${width}`);
-   const recoveredCard=page.locator('div.p-5').filter({has:page.getByText('历史连接数告警',{exact:true})});
+   const recoveredCard=page.locator('div.p-4').filter({has:page.getByText('历史连接数告警',{exact:true})});
    await recoveredCard.scrollIntoViewIfNeeded();
    await recoveredCard.screenshot({path:`${output}/recovery-history-${width}.png`});
   }
