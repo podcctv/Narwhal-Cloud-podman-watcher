@@ -151,11 +151,12 @@ export const api = {
 
   dispositionAlert: (
     alertId: number,
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve' | 'release_udp_throttle' | 'apply_udp_throttle' | string
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve' | 'release_udp_throttle' | 'apply_udp_throttle' | string,
+    options: Record<string, number> = {},
   ) =>
     request<{ queued?: boolean; detail?: string }>(`/api/v1/security/alerts/${alertId}/disposition`, {
       method: 'POST',
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({ decision, ...options }),
     }),
 
   stopReviewedSocks: (alertId: number, reviewToken: string) =>

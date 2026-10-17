@@ -2,6 +2,7 @@ import argparse
 import glob
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import os
@@ -6413,6 +6414,95 @@ def _run_action_command(cmd: List[str]) -> Tuple[bool, str]:
     return result.returncode == 0, message
 
 
+def _runman_connlimit_request(payload: Dict[str, object]) -> Tuple[bool, str]:
+    connection = network_quarantine._UnixHTTP('/run/narwhal-agent/connlimit.sock')
+    try:
+        connection.request(
+            'POST', '/v1/connlimit', body=json.dumps(payload, separators=(',', ':')),
+            headers={'Content-Type': 'application/json', 'Connection': 'close'},
+        )
+        response = connection.getresponse()
+        raw = response.read(8193)
+        if len(raw) > 8192:
+            return False, 'Runman local firewall response was oversized'
+        try:
+            body = json.loads(raw.decode('utf-8')) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            body = {}
+        if response.status != 200 or not isinstance(body, dict) or body.get('ok') is not True:
+            message = str(body.get('message') or 'Runman local firewall rejected the request') if isinstance(body, dict) else 'Runman local firewall rejected the request'
+            return False, message[:500]
+        return True, str(body.get('message') or 'Runman firewall policy updated')[:500]
+    except (OSError, ValueError, http.client.HTTPException):
+        return False, 'Runman local firewall socket unavailable; no firewall change was confirmed'
+    finally:
+        connection.close()
+
+
+def _execute_container_connlimit(action: Dict) -> Tuple[bool, str]:
+    runtime = str(action.get('runtime') or '').strip().lower()
+    project = str(action.get('project') or '').strip()
+    name = str(action.get('container_name') or '').strip()
+    params = action.get('params') if isinstance(action.get('params'), dict) else {}
+    action_type = str(action.get('action_type') or '')
+    if runtime != 'incus' or project != 'default':
+        return False, 'TCP connection limits are restricted to the default Incus project'
+    if not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name):
+        return False, 'invalid Incus instance name'
+    instance_id = str(params.get('instance_id') or '')
+    if not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', instance_id):
+        return False, 'a stable Incus instance UUID is required'
+    policy_id = str(params.get('policy_id') or '')
+    if not re.fullmatch(r'[0-9a-f]{32}', policy_id):
+        return False, 'invalid temporary policy identity'
+    try:
+        if type(params.get('action_expires_at')) is not int or int(time.time()) > params['action_expires_at']:
+            return False, 'connection-limit action expired; no firewall change was made'
+    except (KeyError, TypeError, ValueError):
+        return False, 'connection-limit action expiry is missing'
+
+    payload: Dict[str, object] = {
+        'action': 'release' if action_type == 'release_container_connlimit' else 'apply',
+        'policy_id': policy_id,
+        'container_name': name,
+        'project': project,
+        'instance_id': instance_id.lower(),
+    }
+    if action_type == 'apply_container_connlimit':
+        try:
+            limit = params.get('max_connections')
+            lease_expires_at = params.get('lease_expires_at')
+            metric_epoch = params.get('metric_epoch')
+            evidence_threshold = int(limit)
+            if type(limit) is not int or not 100 <= evidence_threshold <= 10000:
+                return False, 'invalid TCP connection limit'
+            if type(lease_expires_at) is not int or not int(time.time()) + 60 <= lease_expires_at <= int(time.time()) + 3600:
+                return False, 'connection-limit lease is expired or exceeds one hour'
+            if not isinstance(metric_epoch, str) or not metric_epoch or len(metric_epoch) > 200:
+                return False, 'validated TCP connection evidence is missing'
+            if type(params.get('observed_tcp_connections')) is not int or params['observed_tcp_connections'] <= evidence_threshold:
+                return False, 'reported TCP connection count did not exceed the requested limit'
+            if type(params.get('observed_at')) is not int or int(time.time()) - params['observed_at'] > 900:
+                return False, 'reported TCP connection evidence is stale'
+            runtime_bin = get_runtime_bins().get('incus', 'incus')
+            pid = _incus_instance_pid(runtime_bin, name, project)
+            fresh = _collect_socket_security(pid).get('connection_metrics') or {}
+            if (
+                fresh.get('valid') is not True
+                or fresh.get('epoch') != metric_epoch
+                or type(fresh.get('tcp_established')) is not int
+                or type(fresh.get('tcp_pending')) is not int
+                or fresh['tcp_established'] + fresh['tcp_pending'] <= evidence_threshold
+            ):
+                return False, 'fresh TCP evidence no longer matches this instance or exceeds the limit; no rule applied'
+            payload.update({'max_connections': evidence_threshold, 'expires_at': lease_expires_at})
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+            return False, 'could not verify current Incus TCP evidence; no rule applied'
+    elif action_type != 'release_container_connlimit':
+        return False, 'unsupported connection-limit operation'
+    return _runman_connlimit_request(payload)
+
+
 def _cleanup_receipt_shell() -> str:
     # Only operation metadata, never configuration contents or command arguments.
     return ("nw_items=0; nw_receipt() { "
@@ -7098,6 +7188,8 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
 
 def execute_security_action(action: Dict) -> Tuple[bool, str]:
     action_type = str(action.get("action_type") or "")
+    if action_type in {"apply_container_connlimit", "release_container_connlimit"}:
+        return _execute_container_connlimit(action)
     if action_type == 'release_network_quarantine':
         params = action.get('params') if isinstance(action.get('params'), dict) else {}
         target = {'runtime': str(action.get('runtime') or ''), 'project': str(action.get('project') or ''),
@@ -7415,6 +7507,8 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
                 print(f"diagnostic action {action_id} accepted: {message}")
                 changed = True
                 continue
+        elif action_type in {"apply_container_connlimit", "release_container_connlimit"} and (action.get("params") or {}).get("expected_node_id") != node_id:
+            ok, message = False, "action belongs to another watcher node; no local firewall request sent"
         elif action_type == "discover_access_logs":
             params = action.get("params", {})
             ok = bool(node_id) and params.get("expected_node_id") == node_id

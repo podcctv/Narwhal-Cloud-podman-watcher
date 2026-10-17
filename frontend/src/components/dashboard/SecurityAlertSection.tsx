@@ -47,16 +47,20 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   const [submittingId, setSubmittingId] = useState<number | null>(null);
   const [pendingDecision, setPendingDecision] = useState<{
     id: number;
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve';
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve' | 'apply_container_connlimit' | 'release_container_connlimit';
   } | null>(null);
 
   const handleDecision = async (
     alertId: number,
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve'
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve' | 'apply_container_connlimit' | 'release_container_connlimit'
   ) => {
     setSubmittingId(alertId);
     try {
-      const res = await api.dispositionAlert(alertId, decision);
+      const res = await api.dispositionAlert(
+        alertId,
+        decision,
+        decision === 'apply_container_connlimit' ? { max_connections: 500, duration_seconds: 1800 } : {},
+      );
       onToast(
         'success',
         decision === 'resolve'
@@ -75,6 +79,10 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
   const confirmationCopy = pendingDecision?.decision === 'deny'
     ? { title: '确认执行定向处置？', description: '仅处理本告警已识别的进程、服务或配置；不会停止整个容器。节点将在下一轮上报时执行并回传结果。', confirmLabel: '确认定向处置', tone: 'danger' as const }
+    : pendingDecision?.decision === 'apply_container_connlimit'
+    ? { title: '确认临时限制 TCP 新连接？', description: '仅对已核验的 Runman 托管 Incus 实例生效：入站和出站方向各限制为最多 500 条并发 TCP 连接，持续 30 分钟；达到上限后拒绝新的 TCP SYN。已有会话不会被断开，UDP 不受影响。可能影响合法高并发业务；规则可手动撤销并会自动过期。', confirmLabel: '应用 30 分钟限额', tone: 'danger' as const }
+    : pendingDecision?.decision === 'release_container_connlimit'
+    ? { title: '解除临时 TCP 限额？', description: '只删除本系统为该 Incus 实例创建并带有专属标记的连接限制规则，不改动其他防火墙规则。', confirmLabel: '解除限额', tone: 'primary' as const }
     : pendingDecision?.decision === 'allow_silent'
     ? { title: '确认建立放行策略？', description: '该告警对象将被持续放行且不再提醒。你可在告警历史中随时撤销该策略。', confirmLabel: '确认放行', tone: 'primary' as const }
     : pendingDecision?.decision === 'resolve'
@@ -146,6 +154,14 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
             : alert.runtime;
           const isActionFailed = alert.latest_action?.status === 'failed';
           const canRemediate = hasActionEvidence(alert);
+          const connlimitAction = alert.latest_action;
+          const connlimitExpiresAt = Number(connlimitAction?.params?.lease_expires_at || 0);
+          const connlimitActive = connlimitAction?.action_type === 'apply_container_connlimit'
+            && connlimitAction.status === 'succeeded' && connlimitExpiresAt > Math.floor(Date.now() / 1000);
+          const connlimitPending = ['apply_container_connlimit', 'release_container_connlimit'].includes(connlimitAction?.action_type || '')
+            && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
+          const canUseConnlimit = alert.type === 'container_connection_count'
+            && alert.runtime === 'incus' && (alert.project || '') === 'default';
 
           return (
             <div
@@ -202,6 +218,29 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
               {/* Action Buttons */}
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
                 <UserNoticeAction alertId={alert.id} onToast={onToast} />
+                {canUseConnlimit && (connlimitActive ? (
+                  <button
+                    type="button"
+                    disabled={isProcessing || connlimitPending}
+                    onClick={() => setPendingDecision({ id: alert.id, decision: 'release_container_connlimit' })}
+                    className="flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-900/70 transition-all disabled:opacity-50"
+                    title="移除本系统创建的临时 TCP 限额"
+                  >
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                    <span>解除 TCP 限额</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={isProcessing || connlimitPending}
+                    onClick={() => setPendingDecision({ id: alert.id, decision: 'apply_container_connlimit' })}
+                    className="flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-900/70 transition-all disabled:opacity-50"
+                    title="每方向临时限制并发 TCP 新连接；不影响 UDP 和既有连接"
+                  >
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                    <span>{connlimitPending ? 'TCP 限额处理中...' : '临时 TCP 限额'}</span>
+                  </button>
+                ))}
                 {canRemediate && <button
                   type="button"
                   disabled={isProcessing}

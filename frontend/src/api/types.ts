@@ -181,6 +181,7 @@ export interface SecurityAlert {
     status?: string;
     result_message?: string;
     updated_at_utc8?: string;
+    params?: { max_connections?: number; lease_expires_at?: number; [key: string]: any };
   };
   latest_decision?: {
     decision?: string;

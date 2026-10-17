@@ -2495,6 +2495,14 @@ def _action_item(row: sqlite3.Row) -> Dict[str, Any]:
         params = json.loads(row["params_json"] or "{}")
     except (TypeError, ValueError):
         params = {}
+    if row["action_type"] in {"apply_container_connlimit", "release_container_connlimit"}:
+        # Stable IDs, node identities, metric epochs and release capabilities
+        # are sent only through the signed agent channel, never to browsers.
+        params = {
+            key: params[key]
+            for key in ("max_connections", "lease_expires_at")
+            if key in params
+        }
     return {
         "id": int(row["id"]),
         "alert_id": int(row["alert_id"]),
@@ -2809,6 +2817,53 @@ def _queue_security_action_row(
     return row, True
 
 
+def _fresh_connlimit_identity(
+    conn: sqlite3.Connection, alert: sqlite3.Row, now: int, max_connections: int
+) -> tuple[str, str, Dict[str, Any]]:
+    host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (alert["host_id"],)).fetchone()
+    if host is None or not str(host["node_id"] or "") or now - int(host["last_seen"] or 0) > STALE_SECONDS:
+        raise HTTPException(status_code=409, detail="该节点尚未注册可校验的 Client 身份")
+    latest = conn.execute(
+        "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='incus' AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
+        (alert["host_id"], alert["project"], alert["container_name"]),
+    ).fetchone()
+    if latest is None or now - int(latest["ts"] or 0) > STALE_SECONDS:
+        raise HTTPException(status_code=409, detail="节点或容器采样已过期；为避免对错误实例执行防火墙操作，未下发")
+    try:
+        payload = json.loads(latest["payload_json"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    stable_id = str(payload.get("stable_id") or "") if isinstance(payload, dict) else ""
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", stable_id):
+        raise HTTPException(status_code=409, detail="最新采样没有有效的 Incus 实例 UUID；未下发")
+    metrics = connection_policy.metrics(payload, now) if isinstance(payload, dict) else None
+    if not isinstance(metrics, dict):
+        raise HTTPException(status_code=409, detail="最新连接证据未通过完整性校验；未下发")
+    sampled_at = metrics.get("sampled_at")
+    epoch = metrics.get("epoch")
+    tcp_established = metrics.get("tcp_established")
+    tcp_pending = metrics.get("tcp_pending")
+    if (
+        type(sampled_at) is not int or sampled_at > now + 30 or now - sampled_at > STALE_SECONDS
+        or not isinstance(epoch, str) or not epoch or len(epoch) > 200
+        or type(tcp_established) is not int or type(tcp_pending) is not int
+        or tcp_established < 0 or tcp_pending < 0
+    ):
+        raise HTTPException(status_code=409, detail="TCP 连接证据缺失或过期；未下发")
+    observed_tcp = tcp_established + tcp_pending
+    if observed_tcp <= max_connections:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前已建立/待建立 TCP 连接为 {observed_tcp}，未超过限额 {max_connections}；该规则不限制 UDP，未下发",
+        )
+    return str(host["node_id"]), stable_id.lower(), {
+        "metric_epoch": epoch,
+        "observed_tcp_connections": observed_tcp,
+        "observed_at": sampled_at,
+        "action_expires_at": now + 300,
+    }
+
+
 def _latest_action_for_alert(
     conn: sqlite3.Connection, alert: sqlite3.Row
 ) -> sqlite3.Row | None:
@@ -2951,10 +3006,10 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     decision = str(payload.get("decision") or "").strip().lower()
     if decision == "allow_silent" and getattr(request.state,"dashboard_role","admin") != "admin":
         raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略")
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "stop_reviewed_socks"):
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "stop_reviewed_socks", "apply_container_connlimit", "release_container_connlimit"):
         raise HTTPException(
             status_code=400,
-            detail="decision must be deny, allow_silent, dismiss_once, reopen, resolve, release_udp_throttle, or apply_udp_throttle",
+            detail="unsupported alert disposition",
         )
 
     conn = db()
@@ -2966,7 +3021,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     if alert['alert_type'] == 'prohibited_activity' and decision != 'reopen':
         conn.close()
         raise HTTPException(status_code=409, detail='隔离事件必须由管理员复核后，通过解除隔离入口处理；不能用忽略、静默或标记恢复替代。')
-    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve", "release_udp_throttle", "apply_udp_throttle"):
+    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve", "release_udp_throttle", "apply_udp_throttle", "release_container_connlimit"):
         conn.close()
         raise HTTPException(status_code=409, detail="alert is no longer active")
 
@@ -3112,6 +3167,96 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
         action, queued = _queue_security_action_row(
             conn, alert, "apply_udp_throttle", {"rate_mbps": 10, "duration": 3600}, requested_by
         )
+    elif decision in ("apply_container_connlimit", "release_container_connlimit"):
+        if getattr(request.state, "dashboard_role", "admin") != "admin":
+            conn.close()
+            raise HTTPException(status_code=403, detail="只有管理员可以修改容器连接限制")
+        if (
+            alert["alert_type"] != "container_connection_count"
+            or alert["runtime"] != "incus"
+            or alert["project"] != "default"
+            or not alert["container_name"]
+        ):
+            conn.close()
+            raise HTTPException(status_code=400, detail="临时 TCP 限额仅适用于 default 项目内的 Incus 连接数告警")
+        if decision == "apply_container_connlimit":
+            raw_limit = payload.get("max_connections", 500)
+            raw_duration = payload.get("duration_seconds", 1800)
+            if type(raw_limit) is not int or not 100 <= raw_limit <= 10000:
+                conn.close()
+                raise HTTPException(status_code=400, detail="TCP 连接限额必须在 100–10000 之间")
+            if type(raw_duration) is not int or not 300 <= raw_duration <= 3600:
+                conn.close()
+                raise HTTPException(status_code=400, detail="限额有效期必须在 300–3600 秒之间")
+            try:
+                node_id, instance_id, evidence = _fresh_connlimit_identity(conn, alert, now, raw_limit)
+            except HTTPException:
+                conn.close()
+                raise
+            active = conn.execute(
+                "SELECT params_json,status FROM security_actions WHERE host_id=? AND runtime='incus' AND project='default' AND container_name=? AND action_type='apply_container_connlimit' AND status='succeeded' ORDER BY id DESC LIMIT 1",
+                (alert["host_id"], alert["container_name"]),
+            ).fetchone()
+            if active is not None:
+                try:
+                    active_params = json.loads(active["params_json"] or "{}")
+                except (TypeError, ValueError):
+                    active_params = {}
+                if not isinstance(active_params, dict) or not active_params.get("instance_id"):
+                    conn.close()
+                    raise HTTPException(status_code=409, detail="已有连接限制记录无法核实；为避免重复应用，请等待其自动过期")
+                active_lease = active_params.get("lease_expires_at")
+                if active_params.get("instance_id") == instance_id and type(active_lease) is not int:
+                    conn.close()
+                    raise HTTPException(status_code=409, detail="已有连接限制的过期时间无法核实；请等待节点自动清理")
+                if active_params.get("instance_id") == instance_id and active_lease > now:
+                    conn.close()
+                    raise HTTPException(status_code=409, detail="该实例已有未过期的连接限制；请先解除或等待自动过期")
+            params = {
+                **evidence,
+                "expected_node_id": node_id,
+                "instance_id": instance_id,
+                "policy_id": secrets.token_hex(16),
+                "max_connections": raw_limit,
+                "lease_expires_at": now + raw_duration,
+                "reason": "admin_requested_connection_limit",
+            }
+            action, queued = _queue_security_action_row(
+                conn, alert, "apply_container_connlimit", params, requested_by
+            )
+        else:
+            latest = conn.execute(
+                "SELECT * FROM security_actions WHERE alert_id=? AND action_type IN ('apply_container_connlimit','release_container_connlimit') ORDER BY id DESC LIMIT 1",
+                (alert_id,),
+            ).fetchone()
+            if latest is None or latest["action_type"] != "apply_container_connlimit" or latest["status"] != "succeeded":
+                conn.close()
+                raise HTTPException(status_code=409, detail="没有可解除的已生效 TCP 限额")
+            try:
+                applied = json.loads(latest["params_json"] or "{}")
+            except (TypeError, ValueError):
+                applied = {}
+            applied_lease = applied.get("lease_expires_at") if isinstance(applied, dict) else None
+            if type(applied_lease) is not int or applied_lease <= now:
+                conn.close()
+                raise HTTPException(status_code=409, detail="该 TCP 限额已自动过期")
+            host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (alert["host_id"],)).fetchone()
+            if host is None or not host["node_id"] or now - int(host["last_seen"] or 0) > STALE_SECONDS:
+                conn.close()
+                raise HTTPException(status_code=409, detail="节点离线或身份不可校验；现有限额仍会由节点自动过期")
+            params = {
+                "expected_node_id": str(host["node_id"]),
+                "instance_id": str(applied.get("instance_id") or ""),
+                "policy_id": str(applied.get("policy_id") or ""),
+                "action_expires_at": now + 300,
+                "lease_expires_at": applied_lease,
+            }
+            if not re.fullmatch(r"[0-9a-f]{32}", params["policy_id"]) or not params["instance_id"]:
+                conn.close()
+                raise HTTPException(status_code=409, detail="已生效限额缺少安全撤销标识；等待自动过期")
+            action, queued = _queue_security_action_row(
+                conn, alert, "release_container_connlimit", params, requested_by
+            )
     else:
         conn.execute(
             "DELETE FROM security_alert_policies WHERE fingerprint=?",
@@ -3387,7 +3532,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute'} or row['action_type'] == 'release_network_quarantine') and stored.get("expected_node_id") != node_id:
+            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -3445,7 +3590,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute'} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit'} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"
