@@ -225,6 +225,42 @@ export interface SecurityStatusItem {
   today_peak_outbound_ips: number;
 }
 
+export interface HostFirewallRule {
+  key: string;
+  priority: number;
+  direction: 'in' | 'out';
+  protocol: 'all' | 'tcp' | 'udp' | 'http' | 'tls' | 'socks' | 'ssh' | 'fet' | 'wireguard' | 'openvpn' | 'quic';
+  action: 'block' | 'pass';
+  enabled: boolean;
+  port_start: number;
+  port_end?: number;
+  ip_type: 'any' | 'cidr' | 'geoip';
+  ip?: string;
+  countries?: string[];
+}
+
+export interface HostFirewallAbusePolicy {
+  speedtest: boolean;
+  mining: boolean;
+  bt: boolean;
+  interfaces: string[];
+}
+
+export interface HostFirewallPolicyResponse {
+  host_id: string;
+  agent_ready: boolean;
+  revision: number;
+  policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy };
+  updated_by: string;
+  updated_at_utc8: string;
+  latest_action: null | {
+    id: number;
+    status: string;
+    message: string;
+    updated_at_utc8: string;
+  };
+}
+
 export interface HistoryPoint {
   timestamp_iso_utc8: string;
   cpu_percent: number;

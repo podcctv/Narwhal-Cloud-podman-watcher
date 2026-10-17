@@ -22,11 +22,12 @@ import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { SettingsView } from './components/settings/SettingsView';
 import { OperationsView } from './components/operations/OperationsView';
 import { CommerceView } from './components/commerce/CommerceView';
+import { FirewallView } from './components/firewall/FirewallView';
 
 export const Dashboard: React.FC = () => {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations' | 'commerce'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations' | 'commerce' | 'firewall'>('dashboard');
 
   // Selected container for slide-over drawer
   const [selectedContainer, setSelectedContainer] = useState<ContainerIdentity | null>(null);
@@ -262,6 +263,7 @@ export const Dashboard: React.FC = () => {
 
           {activeTab === 'investigation' && <UserInvestigationView />}
           {activeTab === 'commerce' && <CommerceView />}
+          {activeTab === 'firewall' && <FirewallView containers={containers} telemetry={securityStatus} onToast={addToast} />}
 
           {activeTab === 'stats' && (
             <StatsAnalyticsView

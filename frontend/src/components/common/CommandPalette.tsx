@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Server, Box, AlertTriangle, BarChart3, Settings, X, ArrowRight } from 'lucide-react';
+import { Search, Server, Box, AlertTriangle, BarChart3, Settings, X, ArrowRight, ShieldCheck } from 'lucide-react';
 import { ContainerItem, ContainerIdentity } from '../../api/types';
 
 interface CommandPaletteProps {
@@ -7,7 +7,7 @@ interface CommandPaletteProps {
   onClose: () => void;
   containers: ContainerItem[];
   onSelectContainer: (id: ContainerIdentity) => void;
-  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations') => void;
+  onSelectTab: (tab: 'dashboard' | 'alerts' | 'stats' | 'settings' | 'notifications' | 'operations' | 'firewall') => void;
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -53,6 +53,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { id: 'stats', label: '统计分析与排行榜', hint: 'Telemetry & Stats', icon: BarChart3, color: 'text-emerald-400', run: () => onSelectTab('stats') },
     { id: 'settings', label: '系统设置与推送配置', hint: 'Settings & Push', icon: Settings, color: 'text-sky-300', run: () => onSelectTab('settings') },
     { id: 'operations', label: '运维中心', hint: 'Operations', icon: Server, color: 'text-sky-300', run: () => onSelectTab('operations') },
+    { id: 'firewall', label: '母机防火墙策略', hint: 'Host Firewall', icon: ShieldCheck, color: 'text-rose-300', run: () => onSelectTab('firewall') },
   ] : [];
   const resultCount = quickActions.length + filteredContainers.length;
 

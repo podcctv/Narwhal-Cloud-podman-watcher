@@ -6439,6 +6439,45 @@ def _runman_connlimit_request(payload: Dict[str, object]) -> Tuple[bool, str]:
         connection.close()
 
 
+def _runman_host_firewall_request(policy: Dict[str, object]) -> Tuple[bool, str]:
+    connection = network_quarantine._UnixHTTP('/run/narwhal-agent/firewall.sock')
+    try:
+        connection.request(
+            'POST', '/v1/firewall/policy', body=json.dumps(policy, separators=(',', ':')),
+            headers={'Content-Type': 'application/json', 'Connection': 'close'},
+        )
+        response = connection.getresponse()
+        raw = response.read(8193)
+        if len(raw) > 8192:
+            return False, 'Runman local firewall response was oversized'
+        try:
+            body = json.loads(raw.decode('utf-8')) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            body = {}
+        if response.status != 200 or not isinstance(body, dict) or body.get('ok') is not True:
+            message = str(body.get('message') or 'Runman rejected the host firewall policy') if isinstance(body, dict) else 'Runman rejected the host firewall policy'
+            return False, message[:500]
+        return True, str(body.get('message') or 'Runman host firewall policy updated')[:500]
+    except (OSError, ValueError, http.client.HTTPException):
+        return False, 'Runman firewall socket unavailable; no host firewall change was confirmed'
+    finally:
+        connection.close()
+
+
+def _execute_host_firewall_policy(action: Dict, node_id: str) -> Tuple[bool, str]:
+    params = action.get('params') if isinstance(action.get('params'), dict) else {}
+    policy = params.get('policy')
+    if str(action.get('runtime') or '') != 'host' or str(action.get('container_name') or '') != '__host__':
+        return False, 'host firewall policy action has an invalid scope'
+    if not node_id or str(params.get('expected_node_id') or '') != node_id:
+        return False, 'host firewall policy belongs to another Watcher node'
+    if not isinstance(policy, dict) or type(policy.get('revision')) is not int or policy['revision'] < 1:
+        return False, 'host firewall policy revision is missing or invalid'
+    if not isinstance(policy.get('rules'), list) or not isinstance(policy.get('abuse'), dict):
+        return False, 'host firewall policy data is invalid'
+    return _runman_host_firewall_request(policy)
+
+
 def _execute_container_connlimit(action: Dict) -> Tuple[bool, str]:
     runtime = str(action.get('runtime') or '').strip().lower()
     project = str(action.get('project') or '').strip()
@@ -7509,6 +7548,8 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
                 continue
         elif action_type in {"apply_container_connlimit", "release_container_connlimit"} and (action.get("params") or {}).get("expected_node_id") != node_id:
             ok, message = False, "action belongs to another watcher node; no local firewall request sent"
+        elif action_type == "apply_host_firewall_policy":
+            ok, message = _execute_host_firewall_policy(action, node_id)
         elif action_type == "discover_access_logs":
             params = action.get("params", {})
             ok = bool(node_id) and params.get("expected_node_id") == node_id

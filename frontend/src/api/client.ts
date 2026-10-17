@@ -10,6 +10,9 @@ import {
   PushSettingsResponse,
   PushSettingsPayload,
   InvestigationResponse,
+  HostFirewallPolicyResponse,
+  HostFirewallRule,
+  HostFirewallAbusePolicy,
 } from './types';
 
 export class ApiError extends Error {
@@ -131,6 +134,14 @@ export const api = {
   updateHostConfig: (hostId: string, config: Record<string, any>) =>
     request<{ ok: boolean; action_id: number }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/config`, {
       method: 'POST', body: JSON.stringify(config),
+    }),
+
+  getHostFirewallPolicy: (hostId: string) =>
+    request<HostFirewallPolicyResponse>(`/api/v1/hosts/${encodeURIComponent(hostId)}/firewall-policy`),
+
+  updateHostFirewallPolicy: (hostId: string, policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy }) =>
+    request<{ ok: boolean; revision: number; action_id: number; queued: boolean }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/firewall-policy`, {
+      method: 'POST', body: JSON.stringify(policy),
     }),
 
   deleteHost: (hostId: string, mode: 'uninstall' | 'records_only') =>

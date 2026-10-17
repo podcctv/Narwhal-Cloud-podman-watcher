@@ -1,9 +1,9 @@
 import React from 'react';
-import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings, Users, LogOut, BriefcaseBusiness, Wrench, Globe2 } from 'lucide-react';
+import { ShieldAlert, BarChart3, LayoutDashboard, Search, Settings, Users, LogOut, BriefcaseBusiness, Wrench, Globe2, ShieldCheck } from 'lucide-react';
 import { CountdownTimer } from '../common/CountdownTimer';
 import './app-header.css';
 
-type Tab = 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations' | 'commerce';
+type Tab = 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations' | 'commerce' | 'firewall';
 interface AppHeaderProps {
   activeTab: Tab; onSelectTab: (tab: Tab) => void; serverVersion: string;
   activeAlertCount: number; countdown: number; totalSeconds?: number; isPaused: boolean;
@@ -17,6 +17,7 @@ const navigation = [
   { tab: 'stats', label: '数据统计', icon: BarChart3 },
   { tab: 'commerce', label: '经营分析', icon: BriefcaseBusiness },
   { tab: 'operations', label: '运维中心', icon: Wrench },
+  { tab: 'firewall', label: '母机防火墙', icon: ShieldCheck },
   { tab: 'settings', label: '系统设置', icon: Settings },
 ] as const;
 

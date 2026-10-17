@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import html
 import http.client
+import ipaddress
 import json
 import logging
 import os
@@ -282,6 +283,13 @@ def init_db() -> None:
             ON security_actions(host_id, status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_security_actions_alert_created
             ON security_actions(alert_id, created_at);
+        CREATE TABLE IF NOT EXISTS host_firewall_policies (
+            host_id TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL,
+            policy_json TEXT NOT NULL,
+            updated_by TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS security_alert_policies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             fingerprint TEXT NOT NULL UNIQUE,
@@ -1882,7 +1890,7 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
-    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices"):
+    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices", "host_firewall_policies"):
         conn.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
     conn.execute("DELETE FROM hosts WHERE host_id=?", (host_id,))
 
@@ -1930,6 +1938,101 @@ def _validate_host_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"rules", "abuse"}:
+        raise HTTPException(status_code=400, detail="防火墙配置只允许 rules 和 abuse 字段")
+    raw_rules = payload.get("rules", [])
+    if not isinstance(raw_rules, list) or len(raw_rules) > 100:
+        raise HTTPException(status_code=400, detail="RFW 规则必须是最多 100 条的列表")
+    protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic"}
+    rules = []
+    seen_keys = set()
+    for index, raw in enumerate(raw_rules):
+        allowed = {"key", "priority", "direction", "protocol", "action", "enabled", "port_start", "port_end", "ip_type", "ip", "countries"}
+        if not isinstance(raw, dict) or set(raw) - allowed:
+            raise HTTPException(status_code=400, detail=f"第 {index + 1} 条 RFW 规则字段无效")
+        key = str(raw.get("key") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", key) or key in seen_keys:
+            raise HTTPException(status_code=400, detail=f"第 {index + 1} 条 RFW 规则标识无效或重复")
+        seen_keys.add(key)
+        direction = str(raw.get("direction") or "").lower()
+        protocol = str(raw.get("protocol") or "").lower()
+        action = str(raw.get("action") or "").lower()
+        ip_type = str(raw.get("ip_type") or "").lower()
+        if direction not in {"in", "out"} or protocol not in protocols or action not in {"block", "pass"}:
+            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的方向、协议或动作不支持")
+        if direction == "out" and protocol not in {"all", "tcp", "udp"}:
+            raise HTTPException(status_code=400, detail=f"RFW 协议 {protocol} 仅支持入站方向")
+        priority = raw.get("priority")
+        port_start = raw.get("port_start")
+        port_end = raw.get("port_end")
+        if type(priority) is not int or not 0 <= priority <= 100000:
+            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的优先级无效")
+        if type(port_start) is not int or not 0 <= port_start <= 65535:
+            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的起始端口无效")
+        if port_end is not None and (type(port_end) is not int or not port_start <= port_end <= 65535):
+            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的结束端口无效")
+        if type(raw.get("enabled")) is not bool:
+            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的 enabled 必须是布尔值")
+        if ip_type not in {"any", "cidr", "geoip"}:
+            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的 IP 匹配类型无效")
+        rule = {
+            "key": key,
+            "priority": priority,
+            "direction": direction,
+            "protocol": protocol,
+            "action": action,
+            "enabled": raw["enabled"],
+            "port_start": port_start,
+            "ip_type": ip_type,
+        }
+        if port_end is not None:
+            rule["port_end"] = port_end
+        if ip_type == "cidr":
+            try:
+                rule["ip"] = str(ipaddress.ip_network(str(raw.get("ip") or "").strip(), strict=False))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 需要有效的 IPv4/IPv6 CIDR") from None
+        elif ip_type == "geoip":
+            countries = raw.get("countries")
+            if not isinstance(countries, list) or not 1 <= len(countries) <= 30:
+                raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 需要 1 到 30 个国家代码")
+            normalized = []
+            for country in countries:
+                code = str(country).strip().upper()
+                if not re.fullmatch(r"[A-Z]{2}", code):
+                    raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 包含无效国家代码")
+                if code not in normalized:
+                    normalized.append(code)
+            rule["countries"] = sorted(normalized)
+        rules.append(rule)
+
+    raw_abuse = payload.get("abuse", {})
+    categories = {"speedtest", "mining", "bt"}
+    if not isinstance(raw_abuse, dict) or set(raw_abuse) - (categories | {"interfaces"}):
+        raise HTTPException(status_code=400, detail="防滥用策略只支持固定端口规则及明确的容器桥接网卡")
+    abuse = {}
+    for category in sorted(categories):
+        value = raw_abuse.get(category, False)
+        if type(value) is not bool:
+            raise HTTPException(status_code=400, detail=f"防滥用策略 {category} 必须是布尔值")
+        abuse[category] = value
+    raw_interfaces = raw_abuse.get("interfaces", [])
+    if not isinstance(raw_interfaces, list) or len(raw_interfaces) > 16:
+        raise HTTPException(status_code=400, detail="容器桥接网卡必须是最多 16 项的列表")
+    interfaces = []
+    for interface in raw_interfaces:
+        name = str(interface).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", name):
+            raise HTTPException(status_code=400, detail="容器桥接网卡名称无效")
+        if name not in interfaces:
+            interfaces.append(name)
+    if any(abuse.values()) and not interfaces:
+        raise HTTPException(status_code=400, detail="启用容器防滥用前必须填写实际的容器桥接网卡")
+    abuse["interfaces"] = interfaces
+    return {"rules": rules, "abuse": abuse}
+
+
 def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any]) -> str:
     host_id = host_id[:200] or "unknown"
     node_id = node_id[:128]
@@ -1964,7 +2067,7 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
                 conn.execute("UPDATE OR IGNORE security_alert_policies SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
                 conn.execute("DELETE FROM security_alert_policies WHERE fingerprint=?", (old_fingerprint,))
                 conn.execute("UPDATE security_alert_decisions SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
-            for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads"):
+            for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "host_firewall_policies"):
                 conn.execute(f"UPDATE {table} SET host_id=? WHERE host_id=?", (host_id, old))
             investigation.rename_host(conn, old, host_id)
             conn.execute("DELETE FROM hosts WHERE host_id=?", (old,))
@@ -2502,6 +2605,12 @@ def _action_item(row: sqlite3.Row) -> Dict[str, Any]:
             key: params[key]
             for key in ("max_connections", "lease_expires_at")
             if key in params
+        }
+    elif row["action_type"] == "apply_host_firewall_policy":
+        policy = params.get("policy") if isinstance(params.get("policy"), dict) else {}
+        params = {
+            "revision": int(policy.get("revision") or 0),
+            "rule_count": len(policy.get("rules") or []) if isinstance(policy.get("rules"), list) else 0,
         }
     return {
         "id": int(row["id"]),
@@ -3439,6 +3548,99 @@ async def set_container_disposition(request: Request) -> JSONResponse:
     return await set_security_alert_disposition(selected_alert_id, request)
 
 
+@app.get("/api/v1/hosts/{host_id}/firewall-policy")
+def get_host_firewall_policy(host_id: str) -> JSONResponse:
+    if not host_id or len(host_id) > 200:
+        raise HTTPException(status_code=400, detail="主机标识无效")
+    conn = db()
+    try:
+        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if host is None:
+            raise HTTPException(status_code=404, detail="主机不存在")
+        row = conn.execute("SELECT revision,policy_json,updated_by,updated_at FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
+        if row is None:
+            revision, policy, updated_by, updated_at = 0, {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": []}}, "", 0
+        else:
+            try:
+                policy = json.loads(row["policy_json"] or "{}")
+            except (TypeError, ValueError):
+                policy = {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": []}}
+            revision, updated_by, updated_at = int(row["revision"]), str(row["updated_by"] or ""), int(row["updated_at"] or 0)
+        action = conn.execute(
+            "SELECT id,status,result_message,updated_at FROM security_actions WHERE host_id=? AND action_type='apply_host_firewall_policy' ORDER BY id DESC LIMIT 1",
+            (host_id,),
+        ).fetchone()
+        latest = None if action is None else {
+            "id": int(action["id"]), "status": str(action["status"]),
+            "message": str(action["result_message"] or ""),
+            "updated_at_utc8": format_utc8(int(action["updated_at"] or 0)),
+        }
+        return JSONResponse({
+            "host_id": host_id,
+            "agent_ready": bool(str(host["node_id"] or "")),
+            "revision": revision,
+            "policy": policy,
+            "updated_by": updated_by,
+            "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
+            "latest_action": latest,
+        })
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/hosts/{host_id}/firewall-policy")
+async def update_host_firewall_policy(host_id: str, request: Request) -> JSONResponse:
+    if getattr(request.state, "dashboard_role", "admin") != "admin":
+        raise HTTPException(status_code=403, detail="只有管理员可以修改母机防火墙策略")
+    if not host_id or len(host_id) > 200:
+        raise HTTPException(status_code=400, detail="主机标识无效")
+    raw_body = await request.body()
+    if len(raw_body) > 128 * 1024:
+        raise HTTPException(status_code=413, detail="防火墙配置超过 128 KiB")
+    try:
+        payload = json.loads(raw_body)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="防火墙配置必须是有效 JSON") from None
+    policy = _validate_host_firewall_policy(payload)
+    now = int(time.time())
+    requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
+    conn = db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if host is None:
+            raise HTTPException(status_code=404, detail="主机不存在")
+        node_id = str(host["node_id"] or "")
+        if not node_id:
+            raise HTTPException(status_code=409, detail="该主机尚未注册可校验身份的 Watcher Agent")
+        existing = conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
+        revision = (int(existing["revision"]) if existing else 0) + 1
+        policy_with_revision = {"revision": revision, **policy}
+        policy_json = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
+        conn.execute(
+            "INSERT INTO host_firewall_policies(host_id,revision,policy_json,updated_by,updated_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(host_id) DO UPDATE SET revision=excluded.revision,policy_json=excluded.policy_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at",
+            (host_id, revision, policy_json, requested_by, now),
+        )
+        conn.execute(
+            "UPDATE security_actions SET status='cancelled',result_message='已被更新的母机防火墙策略取代',updated_at=? "
+            "WHERE host_id=? AND action_type='apply_host_firewall_policy' AND status IN ('queued','dispatched')",
+            (now, host_id),
+        )
+        cur = conn.execute(
+            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
+            "VALUES(0,?,'host','','__host__','apply_host_firewall_policy',?,'queued',?,?,?)",
+            (host_id, json.dumps({"expected_node_id": node_id, "policy": policy_with_revision}, ensure_ascii=False), requested_by, now, now),
+        )
+        conn.commit()
+        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "action_id": int(cur.lastrowid), "queued": True})
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/hosts/{host_id}/config")
 async def update_host_config(host_id: str, request: Request) -> JSONResponse:
     payload = await request.json()
@@ -3532,7 +3734,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
+            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -3590,7 +3792,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit'} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy'} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"
