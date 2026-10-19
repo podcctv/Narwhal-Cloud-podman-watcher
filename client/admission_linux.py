@@ -5,6 +5,7 @@ changes are atomic. A queue without its worker rejects unknown/new traffic.
 """
 import ctypes as C
 import ctypes.util
+import hashlib
 import ipaddress
 import json
 import os
@@ -105,6 +106,7 @@ def rules(table, ips, queue, sources, limited=False, management_ports=(), interf
 class NFT:
     def __init__(self, runner=command):
         self.run=runner
+        self.digests={}
 
     def apply(self, table, ips, queue, sources, limited=False, management_ports=(), interfaces=()):
         text=rules(table,ips,queue,sources,limited,management_ports,interfaces)
@@ -123,6 +125,17 @@ class NFT:
 
     def live(self, table):
         value=json.loads(self.run(['nft','-j','list','table','inet',table]))
+        def stable(item):
+            if isinstance(item,list):return [stable(x) for x in item]
+            if not isinstance(item,dict):return item
+            return {k:({} if k=='counter' else stable(v)) for k,v in item.items() if k not in {'handle','index'}}
+        definition=[]
+        for item in value.get('nftables',[]):
+            if 'metainfo' in item:continue
+            item=stable(item)
+            if 'set' in item:item['set'].pop('elem',None)
+            definition.append(item)
+        self.digests[table]=hashlib.sha256(json.dumps(definition,sort_keys=True).encode()).hexdigest()
         result=set()
         for item in value.get('nftables',[]):
             entry=item.get('set',{})
@@ -137,7 +150,10 @@ class NFT:
     def remove(self, table):
         if not re.fullmatch(r'nwguard_[a-f0-9]{16}',table):
             raise ValueError('invalid table')
-        self.run(['nft','delete','table','inet',table])
+        try:self.run(['nft','delete','table','inet',table])
+        except RuntimeError:
+            tables=json.loads(self.run(['nft','-j','list','tables']))
+            if any(x.get('table',{}).get('family')=='inet' and x['table'].get('name')==table for x in tables.get('nftables',[])):raise
 
 
 class Queues:

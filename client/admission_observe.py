@@ -16,6 +16,12 @@ except ImportError:
     import network_quarantine as isolation
 
 
+class UnsupportedNetwork(ValueError):
+    def __init__(self,identity):
+        super().__init__('verified instance no longer has a supported private forwarding network')
+        self.instance_id=identity
+
+
 def decode(value):
     raw=bytes.fromhex(value)
     raw=b''.join(raw[i:i+4][::-1] for i in range(0,len(raw),4))
@@ -91,13 +97,13 @@ def snapshot(container, runtime_bins, run, require_forward=True):
             raise ValueError('Podman instance identity changed')
         mode=str(item.get('HostConfig',{}).get('NetworkMode') or '')
         if mode in {'host','none'} or mode.startswith(('container:','ns:','slirp','pasta')) or item.get('Pod'):
-            raise ValueError('shared or non-forwarded Podman network')
+            raise UnsupportedNetwork(identity)
         pid=int(item.get('State',{}).get('Pid') or 0)
         ips=[v.get(k) for v in item.get('NetworkSettings',{}).get('Networks',{}).values() for k in ('IPAddress','GlobalIPv6Address') if v.get(k)]
     else:raise ValueError('unsupported runtime')
     isolation.target(runtime,project,name,identity)
     ips=sorted(set(policy.address(x) for x in ips))
-    if not ips:raise ValueError('private instance addresses unavailable')
+    if not ips:raise UnsupportedNetwork(identity)
     epoch,flows,inbound=sockets(pid)
     if not require_forward:
         return {'instance_id':identity,'ips':ips,'epoch':epoch,'flows':flows,'inbound':inbound,'pid':pid,'observed_at':int(time.time())}
@@ -126,15 +132,15 @@ def snapshot(container, runtime_bins, run, require_forward=True):
         # namespaces need a different driver, never an address-only fallback.
         detail=links(['ip','-d','-j','link','show','dev',name]) if name else []
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',name) or not detail or detail[0].get('linkinfo',{}).get('info_kind')!='veth':
-            raise ValueError('private veth ownership unavailable')
+            raise UnsupportedNetwork(identity)
         master=peer.get('master')
         if master:
             bridge=next((x for x in host if x['ifindex']==master or x.get('ifname')==master),{})
             name=str(bridge.get('ifname') or '')
             detail=links(['ip','-d','-j','link','show','dev',name]) if name else []
             if not detail or detail[0].get('linkinfo',{}).get('info_kind')!='bridge':
-                raise ValueError('unverified forwarding bridge')
+                raise UnsupportedNetwork(identity)
         interfaces.add(name);proven.update(addresses.intersection(ips))
-    if not proven or proven|internal!=set(ips) or epoch!=incarnation(pid):
-        raise ValueError('incomplete or changed interface identity')
+    if epoch!=incarnation(pid):raise ValueError('container incarnation changed')
+    if not proven or proven|internal!=set(ips):raise UnsupportedNetwork(identity)
     return {'instance_id':identity,'ips':sorted(proven),'interfaces':sorted(interfaces),'epoch':epoch,'flows':flows,'inbound':inbound,'pid':pid,'observed_at':int(time.time())}

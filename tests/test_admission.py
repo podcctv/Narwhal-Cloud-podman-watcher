@@ -93,6 +93,30 @@ class PolicyTests(unittest.TestCase):
 
 
 class LinuxTests(unittest.TestCase):
+    def test_failed_write_then_restart_retries_desired_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal=guard.isolation.Journal(str(Path(tmp)/'state.json'))
+            nft=mock.Mock();nft.digests={}
+            table=''
+            def live(name):
+                nft.digests[name]='unchanged-kernel-definition'
+                return {'192.0.2.1'}
+            nft.live.side_effect=live
+            g=guard.Guard(journal=journal,nft=nft,queues=mock.Mock())
+            c={'runtime':'incus','project':'default','name':'test'}
+            snap={'instance_id':'a'*36,'ips':['10.9.0.2'],'interfaces':['br-test'],'epoch':'boot:net:pid','flows':{flow(i) for i in range(1001)},'inbound':['192.0.2.1']}
+            g.update(c,snap,1000)
+            next(iter(g.states.values())).data['above_since']=890
+            nft.apply.side_effect=RuntimeError('simulated atomic write failure')
+            with self.assertRaises(RuntimeError):g.update(c,snap,1010)
+            g.failed(c,1010)
+            nft.apply.side_effect=None
+            restored=guard.Guard(journal=journal,nft=nft,queues=mock.Mock())
+            result=restored.update(c,snap,1020)
+            self.assertTrue(result['limited'])
+            self.assertEqual(result['state'],'enforced')
+            self.assertTrue(nft.apply.call_args.args[4])
+
     def test_rules_forward_scope_and_no_bypass(self):
         text=linux.rules('nwguard_'+'a'*16,['10.9.0.2','2001:db8::2'],20000,[],True,interfaces=['br-test'])
         self.assertIn('oifname { "br-test" } ip daddr',text)

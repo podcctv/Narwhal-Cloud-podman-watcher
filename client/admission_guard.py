@@ -15,11 +15,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
-    from client import admission_policy as policy, admission_linux as linux, network_quarantine as isolation
+    from client import admission_policy as policy, admission_linux as linux, network_quarantine as isolation, admission_observe as observation
 except ImportError:
     import admission_policy as policy
     import admission_linux as linux
     import network_quarantine as isolation
+    import admission_observe as observation
 
 
 class Guard:
@@ -64,7 +65,10 @@ class Guard:
                 return False
             if changed:
                 # Persist the five-slot decision before acknowledging its packet.
-                self.save()
+                try:self.save()
+                except Exception:
+                    state.data['sources']=[s for s in state.data['sources'] if s['ip']!=policy.address(src)]
+                    raise
                 self.nft.admit(record['table'],policy.address(src))
             return True
 
@@ -106,7 +110,7 @@ class Guard:
                         if target==old:self.by_queue[number]=(key,direction)
             # A different target may not claim an address already enforced here.
             for other,record in self.records.items():
-                if other!=key and set(record['ips']) & set(ips) and set(record.get('interfaces',[])) & set(interfaces):
+                if other!=key and not record.get('disabled') and set(record['ips']) & set(ips) and set(record.get('interfaces',[])) & set(interfaces):
                     raise ValueError('ambiguous container address; manual review required')
             record=self.records.get(key)
             fresh=record is None
@@ -131,7 +135,10 @@ class Guard:
             except RuntimeError:
                 fresh=True;live=set(snapshot['inbound'])
             changed=state.observe(snapshot['flows'],snapshot['inbound'],live,now,epoch=epoch)
-            changed=changed or fresh or record['ips']!=ips or record['epoch']!=epoch or record.get('interfaces')!=interfaces
+            digest=self.nft.digests.get(record['table'])
+            digest=digest if isinstance(digest,str) else ''
+            desired=hashlib.sha256(json.dumps([ips,interfaces,epoch,bool(state.data.get('limited'))],sort_keys=True).encode()).hexdigest()
+            changed=changed or fresh or record.get('dirty') or record.get('disabled') or not digest or record.get('fingerprint')!=digest or record.get('applied_config')!=desired
             record.update(ips=ips,epoch=epoch,verified_at=now,interfaces=interfaces,pid=snapshot.get('pid'))
             self.save()
             if changed:
@@ -142,10 +149,26 @@ class Guard:
                         self.nft.admit(record['table'],source['ip'])
             # Readback is required; a missing/overwritten table is never green.
             self.nft.live(record['table'])
+            digest=self.nft.digests.get(record['table'])
+            record['fingerprint']=digest if isinstance(digest,str) else ''
+            record['applied_config']=desired
+            record.pop('dirty',None);record.pop('disabled',None)
+            self.save()
             result={**state.status(),'instance_id':identity,'state':'enforced','source_limit':5,
                     'tcp_limit':500 if state.data.get('limited') else None,'observed_at':now}
             self.results[(runtime,project,name)]=result
             return result
+
+    def withdraw_unsupported(self,container,identity):
+        # A complete runtime response proving a network change authorizes
+        # removal of *our* old rules. A timeout/missing sample never does.
+        with self.lock:
+            for key,record in self.records.items():
+                runtime,project,_,stable=json.loads(key)
+                if runtime==container['runtime'] and project==(container.get('project') or '') and stable==identity:
+                    self.nft.remove(record['table'])
+                    record.update(disabled=True,dirty=True,verified_at=0)
+            self.save()
 
     def retire_exited(self):
         """Absence from inventory is not proof; an exited init incarnation is."""
@@ -181,6 +204,10 @@ class Guard:
                 c=record['container']
                 if (c['runtime'],c.get('project') or '',c['name'])==key:
                     self.states[target].observe([],[],[],now,valid=False)
+                    record['dirty']=True
+                    record['verified_at']=0
+            try:self.save()
+            except Exception:pass
 
     def status(self, container):
         with self.lock:
@@ -285,6 +312,10 @@ def start(inventory, provider, emit, emit_status=None):
                 for future in as_completed(futures):
                     container=futures[future]
                     try:snapshots.append((container,future.result()))
+                    except observation.UnsupportedNetwork as error:
+                        try:_guard.withdraw_unsupported(container,error.instance_id)
+                        except Exception:pass
+                        _guard.failed(container,int(time.time()),'已核实网络结构不受支持；旧的专属规则已撤回或待核实，未修改其他规则')
                     except Exception:_guard.failed(container,int(time.time()))
             conflicts=set()
             ownership={}
@@ -298,7 +329,9 @@ def start(inventory, provider, emit, emit_status=None):
                 now=int(time.time())
                 latest_targets[(container['runtime'],container.get('project') or '',container['name'])]=dict(container)
                 try:
-                    if index in conflicts:raise ValueError('ambiguous network ownership')
+                    if index in conflicts:
+                        _guard.withdraw_unsupported(container,snapshot['instance_id'])
+                        raise ValueError('ambiguous network ownership')
                     _guard.update(container,snapshot,now)
                 except Exception:
                     _guard.failed(container,now)
