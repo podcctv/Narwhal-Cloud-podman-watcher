@@ -56,6 +56,10 @@ class Guard:
             flow=(dst,dport,src,sport) if direction=='in' else (src,sport,dst,dport)
             reserved=flow in state.pending
             if proto==6 and not state.admit_tcp(flow,now):
+                if direction=='in' and len(state.data['sources'])>=5 and not any(s['ip']==policy.address(src) for s in state.data['sources']):
+                    # A simultaneous TCP cap must not hide the sixth-source
+                    # rejection or omit its IP from the operator's warning.
+                    state.admit_source(src,now)
                 return False
             if direction=='out':
                 return True

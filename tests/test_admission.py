@@ -144,6 +144,23 @@ class LinuxTests(unittest.TestCase):
             self.assertEqual(next(iter(g.states.values())).data['above_since'],0)
             self.assertEqual(g.status(c)['state'],'unverified')
 
+    def test_tcp_cap_does_not_hide_sixth_source_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nft=mock.Mock();nft.digests={}
+            g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=nft,queues=mock.Mock())
+            c={'runtime':'incus','project':'default','name':'test'}
+            now=int(time.time());sources=[f'192.0.2.{n}' for n in range(1,6)]
+            nft.live.return_value=set(sources)
+            snap={'instance_id':'a'*36,'ips':['10.9.0.2'],'interfaces':['br-test'],'epoch':'boot:net:pid','flows':{flow(i) for i in range(500)},'inbound':sources}
+            g.update(c,snap,now)
+            state=next(iter(g.states.values()));state.data['limited']=True
+            raw=bytearray(24);raw[0]=0x45;raw[9]=6
+            raw[12:16]=socket.inet_aton('198.51.100.6');raw[16:20]=socket.inet_aton('10.9.0.2');raw[20:24]=struct.pack('!HH',123,443)
+            queue=next(iter(g.records.values()))['queue']
+            self.assertFalse(g.decision(queue,raw))
+            self.assertIn('198.51.100.6',state.data['blocked'])
+            self.assertEqual(len(state.data['sources']),5)
+
 
 class PasarTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('go'),'Go ELF identity integration')
