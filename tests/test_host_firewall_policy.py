@@ -104,6 +104,42 @@ class HostFirewallPolicyTests(unittest.TestCase):
         self.assertEqual(state["latest_action"]["status"], "queued")
         self.assertTrue(state["agent_ready"])
 
+    def test_host_firewall_api_includes_sanitized_interface_inventory(self):
+        payload = {
+            "host_firewall": {
+                "interface_inventory": {
+                    "status": "ready",
+                    "observed_at": self.now,
+                    "interfaces": [
+                        {
+                            "name": "incusbr0", "kind": "bridge", "state": "up", "mtu": 1500,
+                            "addresses": ["10.90.0.1/24", "not-an-ip"],
+                            "is_default_route": False, "runtimes": ["incus", "unknown"],
+                            "network_names": ["incusbr0"], "firewall_eligible": True,
+                        },
+                        {
+                            "name": "eth0;drop", "kind": "bridge", "state": "up",
+                            "runtimes": ["incus"], "firewall_eligible": True,
+                        },
+                    ],
+                },
+            },
+        }
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO host_security(host_id,ts,payload_json) VALUES('host-a',?,?)",
+            (self.now, json.dumps(payload)),
+        )
+        inventory = server._host_firewall_interface_inventory(conn, "host-a", self.now)
+        conn.close()
+
+        self.assertEqual(inventory["status"], "ready")
+        self.assertFalse(inventory["stale"])
+        self.assertEqual([item["name"] for item in inventory["interfaces"]], ["incusbr0"])
+        self.assertEqual(inventory["interfaces"][0]["addresses"], ["10.90.0.1/24"])
+        self.assertEqual(inventory["interfaces"][0]["runtimes"], ["incus"])
+        self.assertTrue(inventory["interfaces"][0]["firewall_eligible"])
+
     def test_live_rfw_readback_is_latest_only_and_preserves_last_good_snapshot(self):
         rule = {
             "id": 7, "priority": 100, "direction": "out", "protocol": "wireguard",

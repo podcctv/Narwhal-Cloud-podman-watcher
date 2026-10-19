@@ -68,6 +68,7 @@ _access_log_states: Dict[str, Dict[str, object]] = {}
 _security_last_sample_ts = 0.0
 _firewall_event_cursor = ""
 _pending_firewall_event_cursor = ""
+_host_firewall_interface_inventory_cache: Dict[str, object] = {"ts": 0.0, "value": None}
 _pending_deep_samples: Dict[int, Dict[str, object]] = {}
 _abuse_targets: List[Dict[str, object]] = []
 _socks_probe_cache = {}
@@ -3253,7 +3254,10 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         "access_log": access,
         "access_sources": [{"label": "宿主机日志", **access}],
         "alerts": [],
-        "host_firewall": _runman_firewall_control_status(),
+        "host_firewall": {
+            **_runman_firewall_control_status(),
+            "interface_inventory": _collect_host_firewall_interface_inventory(),
+        },
     }
     if not enabled:
         return summary
@@ -7007,6 +7011,164 @@ def _runman_host_firewall_request(policy: Dict[str, object]) -> Tuple[bool, str]
         return False, 'Runman firewall socket unavailable; no host firewall change was confirmed'
     finally:
         connection.close()
+
+
+def _host_firewall_json_list(raw: str) -> List[Dict[str, object]]:
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)][:128]
+
+
+def _collect_host_firewall_interface_inventory(force: bool = False) -> Dict[str, object]:
+    """Collect host links and runtime-owned bridge interfaces for the firewall UI.
+
+    Only bridge links explicitly reported by Incus/Podman are marked eligible for
+    container-forward rules. Physical, macvlan/ipvlan, and host-only interfaces
+    remain visible as inventory but are never offered as container bridges.
+    """
+    now = time.time()
+    cached = _host_firewall_interface_inventory_cache.get("value")
+    cached_at = float(_host_firewall_interface_inventory_cache.get("ts") or 0)
+    if not force and isinstance(cached, dict) and now - cached_at < 60:
+        return dict(cached)
+
+    observed_at = int(now)
+    unavailable: Dict[str, object] = {"status": "unavailable", "observed_at": observed_at, "interfaces": []}
+    if os.name != "posix":
+        _host_firewall_interface_inventory_cache.update({"ts": now, "value": unavailable})
+        return dict(unavailable)
+
+    links_raw = run(["ip", "-j", "address", "show"], timeout=5)
+    try:
+        parsed_links = json.loads(links_raw)
+    except (TypeError, ValueError):
+        parsed_links = None
+    if not isinstance(parsed_links, list):
+        _host_firewall_interface_inventory_cache.update({"ts": now, "value": unavailable})
+        return dict(unavailable)
+    links = [item for item in parsed_links if isinstance(item, dict)][:128]
+
+    link_names = {
+        str(link.get("ifname") or "")
+        for link in links
+        if re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", str(link.get("ifname") or ""))
+    }
+    default_route_names = set()
+    for route_command in (
+        ["ip", "-j", "route", "show", "default"],
+        ["ip", "-j", "-6", "route", "show", "default"],
+    ):
+        for route in _host_firewall_json_list(run(route_command, timeout=5)):
+            dev = str(route.get("dev") or "")
+            if dev in link_names:
+                default_route_names.add(dev)
+
+    runtime_networks: Dict[str, Dict[str, set]] = {}
+
+    def register_network(runtime_name: str, interface_name: object, network_name: object) -> None:
+        interface = str(interface_name or "")
+        network = str(network_name or "")
+        # Keep discovery aligned with the interface-name allowlist accepted by
+        # Watcher and Runman's RFW policy API. Unsupported Linux aliases remain
+        # visible in the inventory but cannot be selected for firewall rules.
+        if interface not in link_names or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface):
+            return
+        entry = runtime_networks.setdefault(interface, {"runtimes": set(), "networks": set()})
+        entry["runtimes"].add(runtime_name)
+        if network and len(network) <= 100:
+            entry["networks"].add(network)
+
+    runtimes = get_runtime_bins()
+    incus = runtimes.get("incus")
+    if incus:
+        incus_networks = _host_firewall_json_list(
+            run(_runtime_base(incus) + ["network", "list", "--format=json"], timeout=5)
+        )
+        for network in incus_networks:
+            if str(network.get("type") or "").lower() != "bridge":
+                continue
+            name = network.get("name")
+            config = network.get("config") if isinstance(network.get("config"), dict) else {}
+            register_network("incus", config.get("bridge.name") or name, name)
+
+    podman = runtimes.get("podman")
+    if podman:
+        podman_prefix = _runtime_base(podman)
+        listed_raw = run(podman_prefix + ["network", "ls", "--format", "json"], timeout=5)
+        try:
+            parsed_networks = json.loads(listed_raw)
+        except (TypeError, ValueError):
+            parsed_networks = None
+        podman_networks = [item for item in parsed_networks if isinstance(item, dict)] if isinstance(parsed_networks, list) else []
+        network_names = []
+        for network in podman_networks:
+            name = str(network.get("name") or network.get("Name") or "")
+            if re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,100}", name) and name not in network_names:
+                network_names.append(name)
+        if not isinstance(parsed_networks, list):
+            listed_names = run(podman_prefix + ["network", "ls", "-q"], timeout=5)
+            network_names = [
+                name for name in dict.fromkeys(listed_names.splitlines())
+                if re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,100}", name.strip())
+            ][:64]
+        if network_names:
+            inspected = _host_firewall_json_list(
+                run(podman_prefix + ["network", "inspect"] + network_names[:64], timeout=5)
+            )
+            for network in inspected:
+                if str(network.get("driver") or network.get("Driver") or "").lower() != "bridge":
+                    continue
+                interface = network.get("network_interface") or network.get("NetworkInterface")
+                name = network.get("name") or network.get("Name")
+                register_network("podman", interface, name)
+
+    inventory = []
+    for link in links:
+        name = str(link.get("ifname") or "")
+        if name not in link_names:
+            continue
+        linkinfo = link.get("linkinfo") if isinstance(link.get("linkinfo"), dict) else {}
+        kind = str(linkinfo.get("info_kind") or link.get("link_type") or "unknown")[:32]
+        addresses = []
+        raw_addresses = link.get("addr_info") if isinstance(link.get("addr_info"), list) else []
+        for address in raw_addresses[:16]:
+            if not isinstance(address, dict):
+                continue
+            local = str(address.get("local") or "")
+            prefix = address.get("prefixlen")
+            try:
+                parsed_address = ipaddress.ip_address(local)
+                max_prefix = 32 if parsed_address.version == 4 else 128
+                if type(prefix) is not int or not 0 <= prefix <= max_prefix:
+                    continue
+                value = f"{parsed_address}/{prefix}"
+                if value not in addresses:
+                    addresses.append(value)
+            except ValueError:
+                continue
+        runtime_info = runtime_networks.get(name, {"runtimes": set(), "networks": set()})
+        runtime_labels = sorted(runtime_info["runtimes"])
+        inventory.append({
+            "name": name,
+            "kind": kind,
+            "state": str(link.get("operstate") or "unknown")[:16].lower(),
+            "mtu": link.get("mtu") if type(link.get("mtu")) is int and 0 < link.get("mtu") <= 65535 else None,
+            "addresses": addresses,
+            "is_default_route": name in default_route_names,
+            "runtimes": runtime_labels,
+            "network_names": sorted(runtime_info["networks"])[:16],
+            "firewall_eligible": bool(runtime_labels and kind == "bridge"),
+        })
+        if len(inventory) >= 64:
+            break
+
+    result: Dict[str, object] = {"status": "ready", "observed_at": observed_at, "interfaces": inventory}
+    _host_firewall_interface_inventory_cache.update({"ts": now, "value": result})
+    return dict(result)
 
 
 def _runman_firewall_control_status() -> Dict[str, object]:

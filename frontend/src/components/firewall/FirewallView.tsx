@@ -11,6 +11,23 @@ interface FirewallViewProps {
 }
 
 type HostOption = { host_id: string; node_id: string; stale: boolean };
+type HostInterfaceOption = {
+  name: string;
+  kind: string;
+  state: string;
+  mtu: number | null;
+  addresses: string[];
+  is_default_route: boolean;
+  runtimes: Array<'incus' | 'podman'>;
+  network_names: string[];
+  firewall_eligible: boolean;
+};
+type HostInterfaceInventory = {
+  status: 'ready' | 'unavailable' | 'unknown';
+  observed_at: number;
+  stale: boolean;
+  interfaces: HostInterfaceOption[];
+};
 type RuleDraft = {
   priority: number;
   direction: 'in' | 'out';
@@ -75,11 +92,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   }, [containers, telemetry]);
 
   const [hostId, setHostId] = useState('');
+  const [hostSearch, setHostSearch] = useState('');
+  const [fleetHostSearch, setFleetHostSearch] = useState('');
+  const [fleetHostFilter, setFleetHostFilter] = useState<'all' | 'attention' | 'online' | 'offline'>('attention');
   const [snapshot, setSnapshot] = useState<HostFirewallPolicyResponse | null>(null);
   const [fleetSnapshot, setFleetSnapshot] = useState<FleetFirewallPolicyResponse | null>(null);
   const [rules, setRules] = useState<HostFirewallRule[]>([]);
   const [abuse, setAbuse] = useState<HostFirewallAbusePolicy>(emptyAbuse);
-  const [interfaceText, setInterfaceText] = useState('');
   const [ruleDraft, setRuleDraft] = useState<RuleDraft>(defaultDraft);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -94,6 +113,32 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [cnRiskProtocols, setCnRiskProtocols] = useState<CnRiskProtocol[]>(['socks', 'wireguard', 'fet', 'mtproto']);
 
   const selectedHost = hosts.find((host) => host.host_id === hostId);
+  const interfaceInventory = (snapshot as (HostFirewallPolicyResponse & { interface_inventory?: HostInterfaceInventory }) | null)?.interface_inventory;
+  const eligibleInterfaces = useMemo(
+    () => (interfaceInventory?.interfaces || []).filter((item) => item.firewall_eligible && item.runtimes.length > 0),
+    [interfaceInventory],
+  );
+  const hostSearchMatches = useMemo(() => {
+    const query = hostSearch.trim().toLocaleLowerCase();
+    return query ? hosts.filter((host) => host.host_id.toLocaleLowerCase().includes(query)) : hosts;
+  }, [hostSearch, hosts]);
+  const fleetHosts = fleetSnapshot?.hosts || [];
+  const fleetAttentionCount = fleetHosts.filter((host) => !['last_apply_succeeded', 'ready'].includes(host.state)).length;
+  const filteredFleetHosts = useMemo(() => {
+    const query = fleetHostSearch.trim().toLocaleLowerCase();
+    return fleetHosts.filter((host) => {
+      if (query && !host.host_id.toLocaleLowerCase().includes(query)) return false;
+      if (fleetHostFilter === 'attention' && ['last_apply_succeeded', 'ready'].includes(host.state)) return false;
+      if (fleetHostFilter === 'online' && !host.online) return false;
+      if (fleetHostFilter === 'offline' && host.online) return false;
+      return true;
+    });
+  }, [fleetHostFilter, fleetHostSearch, fleetHosts]);
+  const hostSelectOptions = useMemo(() => {
+    const result = [...hostSearchMatches];
+    if (selectedHost && !result.some((host) => host.host_id === selectedHost.host_id)) result.unshift(selectedHost);
+    return result;
+  }, [hostSearchMatches, selectedHost]);
   const activeAction = snapshot?.latest_action;
   const pending = Boolean(activeAction && ['queued', 'dispatched', 'running'].includes(activeAction.status));
 
@@ -114,7 +159,6 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       if (replaceDraft) {
         setRules(result.policy?.rules || []);
         setAbuse({ ...emptyAbuse, ...(result.policy?.abuse || {}) });
-        setInterfaceText((result.policy?.abuse?.interfaces || []).join(', '));
         setDirty(false);
       }
     } catch (error: any) {
@@ -145,14 +189,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     if (!fleetSnapshot || fleetSnapshot.revision < 1 || dirty) return;
     setRules(fleetSnapshot.policy.rules || []);
     setAbuse({ ...emptyAbuse, ...(fleetSnapshot.policy.abuse || {}) });
-    setInterfaceText((fleetSnapshot.policy.abuse?.interfaces || []).join(', '));
   }, [fleetSnapshot, dirty, hostId]);
 
   useEffect(() => {
     setSnapshot(null);
     setRules([]);
     setAbuse(emptyAbuse);
-    setInterfaceText('');
     setDirty(false);
     if (hostId) loadPolicy(true);
   }, [hostId, loadPolicy]);
@@ -196,9 +238,30 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     setDirty(true);
   };
 
-  const setAbuseInterfaces = (value: string) => {
-    setInterfaceText(value);
+  const setAbuseInterfaces = (interfaces: string[]) => {
+    setAbuse((current) => ({ ...current, interfaces: [...new Set(interfaces)] }));
     setDirty(true);
+  };
+
+  const toggleAbuseInterface = (name: string, checked: boolean) => {
+    const current = abuse.interfaces || [];
+    setAbuseInterfaces(checked ? [...current, name] : current.filter((item) => item !== name));
+  };
+
+  const toggleRuntimeInterfaces = (runtime: 'incus' | 'podman') => {
+    const runtimeNames = eligibleInterfaces.filter((item) => item.runtimes.includes(runtime)).map((item) => item.name);
+    if (!runtimeNames.length) return;
+    const current = abuse.interfaces || [];
+    const allSelected = runtimeNames.every((name) => current.includes(name));
+    if (allSelected) {
+      setAbuseInterfaces(current.filter((name) => {
+        if (!runtimeNames.includes(name)) return true;
+        const selected = eligibleInterfaces.find((item) => item.name === name);
+        return Boolean(selected?.runtimes.some((other) => other !== runtime && current.includes(name)));
+      }));
+      return;
+    }
+    setAbuseInterfaces([...current, ...runtimeNames]);
   };
 
   const removeRule = (key: string) => {
@@ -264,11 +327,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
   const confirmApply = useCallback(async () => {
     if (!hostId || saving) return;
-    const interfaces = [...new Set(interfaceText.split(/[\s,，]+/).map((item) => item.trim()).filter(Boolean))];
     const anyAbuseEnabled = abuse.speedtest || abuse.mining || abuse.bt;
-    if (interfaces.length > 16 || interfaces.some((name) => !/^[A-Za-z0-9_.-]{1,15}$/.test(name)) || (anyAbuseEnabled && !interfaces.length)) {
+    const interfaces = anyAbuseEnabled ? [...new Set((abuse.interfaces || []).map((item) => item.trim()).filter(Boolean))] : [];
+    const knownInterfaces = new Set(eligibleInterfaces.map((item) => item.name));
+    const unknownInterfaces = interfaces.filter((name) => !knownInterfaces.has(name));
+    if (interfaces.length > 16 || (anyAbuseEnabled && (!interfaces.length || interfaceInventory?.status !== 'ready' || interfaceInventory.stale || unknownInterfaces.length > 0))) {
       setConfirmOpen(false);
-      onToast('error', '防滥用规则启用时必须填写 1–16 个有效 Linux 容器桥接网卡名（例如 incusbr0、podman0）。');
+      onToast('error', interfaceInventory?.stale ? '网卡清单已过期，请刷新并等待母机重新上报后再应用。' : unknownInterfaces.length ? `以下网卡已不在当前采集清单中，请先从草稿移除：${unknownInterfaces.join(', ')}` : '启用防滥用规则前，请从最新采集到的 Incus / Podman 网桥中至少选择一个。');
       return;
     }
     const policyAbuse = { ...abuse, interfaces };
@@ -282,7 +347,6 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         latest_action: { id: result.action_id, status: 'queued', message: '', updated_at_utc8: '' },
       } : current);
       setAbuse(policyAbuse);
-      setInterfaceText(interfaces.join(', '));
       setDirty(false);
       setConfirmOpen(false);
       onToast('success', `策略版本 #${result.revision} 已保存，等待母机 Agent 执行。`);
@@ -291,15 +355,17 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     } finally {
       setSaving(false);
     }
-  }, [abuse, hostId, interfaceText, onToast, rules, saving]);
+  }, [abuse, eligibleInterfaces, hostId, interfaceInventory, onToast, rules, saving]);
 
   const confirmFleetApply = useCallback(async () => {
     if (fleetSaving) return;
-    const interfaces = [...new Set(interfaceText.split(/[\s,，]+/).map((item) => item.trim()).filter(Boolean))];
     const anyAbuseEnabled = abuse.speedtest || abuse.mining || abuse.bt;
-    if (interfaces.length > 16 || interfaces.some((name) => !/^[A-Za-z0-9_.-]{1,15}$/.test(name)) || (anyAbuseEnabled && !interfaces.length)) {
+    const interfaces = anyAbuseEnabled ? [...new Set((abuse.interfaces || []).map((item) => item.trim()).filter(Boolean))] : [];
+    const knownInterfaces = new Set(eligibleInterfaces.map((item) => item.name));
+    const unknownInterfaces = interfaces.filter((name) => !knownInterfaces.has(name));
+    if (interfaces.length > 16 || (anyAbuseEnabled && (!interfaces.length || interfaceInventory?.status !== 'ready' || interfaceInventory.stale || unknownInterfaces.length > 0))) {
       setFleetConfirmOpen(false);
-      onToast('error', '全局防滥用规则启用时必须填写 1–16 个有效 Linux 容器桥接网卡名。');
+      onToast('error', interfaceInventory?.stale ? '所选母机的网卡清单已过期，请刷新后再同步全局策略。' : unknownInterfaces.length ? `所选母机已不再报告这些网卡：${unknownInterfaces.join(', ')}` : '启用全局防滥用规则前，请从所选母机最新采集的 Incus / Podman 网桥中至少选择一个。');
       return;
     }
     setFleetSaving(true);
@@ -307,7 +373,6 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       const result = await api.updateFleetFirewallPolicy({ rules, abuse: { ...abuse, interfaces } });
       setFleetConfirmOpen(false);
       setAbuse({ ...abuse, interfaces });
-      setInterfaceText(interfaces.join(', '));
       setDirty(false);
       await loadFleetPolicy();
       onToast('success', `全局策略版本 #${result.revision} 已保存：${result.queued_hosts} 台已排队，${result.deferred_hosts} 台待节点能力上线后同步。`);
@@ -316,13 +381,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     } finally {
       setFleetSaving(false);
     }
-  }, [abuse, fleetSaving, interfaceText, loadFleetPolicy, onToast, rules]);
+  }, [abuse, eligibleInterfaces, fleetSaving, interfaceInventory, loadFleetPolicy, onToast, rules]);
 
   const loadFleetDraft = () => {
     if (!fleetSnapshot) return;
     setRules(fleetSnapshot.policy.rules || []);
     setAbuse({ ...emptyAbuse, ...(fleetSnapshot.policy.abuse || {}) });
-    setInterfaceText((fleetSnapshot.policy.abuse?.interfaces || []).join(', '));
     setDirty(false);
     onToast('info', `已载入全局策略版本 #${fleetSnapshot.revision} 到编辑器。`);
   };
@@ -360,8 +424,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     <section className="grid gap-4 lg:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.2fr)]">
       <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
         <label htmlFor="firewall-host" className="mb-2 block text-sm font-semibold text-slate-200">选择母机</label>
+        <input id="firewall-host-search" type="search" value={hostSearch} onChange={(event) => setHostSearch(event.target.value)} placeholder="输入主机名称筛选…" className="mb-2 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400" aria-label="筛选母机列表" />
         <select id="firewall-host" value={hostId} onChange={(event) => setHostId(event.target.value)} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-400">
-          {hosts.map((host) => <option key={host.host_id} value={host.host_id}>{host.host_id}</option>)}
+          {hostSelectOptions.map((host) => <option key={host.host_id} value={host.host_id}>{host.host_id}{host.host_id === hostId && !hostSearchMatches.some((item) => item.host_id === hostId) ? '（当前选择）' : ''}</option>)}
         </select>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
           <span className={`rounded-full border px-2.5 py-1 ${selectedHost?.stale ? 'border-amber-700 bg-amber-950/50 text-amber-200' : 'border-emerald-700 bg-emerald-950/50 text-emerald-200'}`}>{selectedHost?.stale ? '心跳过期' : '心跳正常'}</span>
@@ -405,39 +470,55 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       </div>
       {fleetSnapshot && <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
         {[
-          ['登记主机', fleetSnapshot.counts.total], ['Watcher 已注册', fleetSnapshot.counts.registered],
-          ['当前在线', fleetSnapshot.counts.online], ['Runman 接口可用', fleetSnapshot.counts.control_ready],
-          ['最近应用回执成功', fleetSnapshot.counts.last_apply_succeeded], ['待处理 / 延迟', fleetSnapshot.counts.deferred],
-          ['实时读回正常', fleetSnapshot.counts.live_readback_current], ['发现策略偏差', fleetSnapshot.counts.drifted_hosts], ['读回不可用 / 过期', fleetSnapshot.counts.readback_unavailable],
-          ['策略协议能力已确认', fleetSnapshot.counts.required_protocols_supported_hosts], ['策略协议需升级', fleetSnapshot.counts.required_protocols_unsupported_hosts], ['策略协议待核验', fleetSnapshot.counts.required_protocols_unknown_hosts],
+          ['登记母机', fleetSnapshot.counts.total], ['在线母机', fleetSnapshot.counts.online],
+          ['Runman 可用', fleetSnapshot.counts.control_ready], ['最近应用成功', fleetSnapshot.counts.last_apply_succeeded],
+          ['待处理 / 延迟', fleetSnapshot.counts.deferred], ['策略偏差', fleetSnapshot.counts.drifted_hosts],
         ].map(([label, value]) => <div key={String(label)} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
           <div className="text-[10px] text-slate-500">{label}</div><div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">{value}</div>
         </div>)}
       </div>}
-      {fleetSnapshot?.hosts?.length ? <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-        {fleetSnapshot.hosts.map((host) => <article key={host.host_id} className="min-w-0 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-          <div className="flex items-start justify-between gap-2">
-            <strong className="min-w-0 break-words text-xs text-slate-200">{host.host_id}</strong>
-            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${host.state === 'last_apply_succeeded' || host.state === 'ready' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : host.state === 'apply_failed' || host.state === 'runman_update_required' || host.state === 'rfw_protocol_update_required' || host.state === 'drifted' ? 'border-rose-800 bg-rose-950/40 text-rose-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>{fleetStateLabel[host.state] || host.state}</span>
+      {fleetSnapshot && <details className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+        <summary className="cursor-pointer select-none text-xs font-medium text-slate-300">高级能力统计 <span className="ml-1 text-slate-500">读回正常 {fleetSnapshot.counts.live_readback_current} · 读回异常/过期 {fleetSnapshot.counts.readback_unavailable} · 协议支持/需升级/待核验 {fleetSnapshot.counts.required_protocols_supported_hosts}/{fleetSnapshot.counts.required_protocols_unsupported_hosts}/{fleetSnapshot.counts.required_protocols_unknown_hosts}</span></summary>
+      </details>}
+      <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h4 className="text-xs font-semibold text-slate-200">母机同步状态</h4>
+            <p className="mt-1 text-[10px] text-slate-500">{filteredFleetHosts.length} / {fleetHosts.length} 台 · 待处理 {fleetAttentionCount}</p>
           </div>
-          <div className="mt-2 text-[10px] text-slate-500">Watcher {host.agent_version} · 本地修订 #{host.local_revision} · 全局修订 #{host.fleet_revision}</div>
-          <div className={`mt-1 break-words text-[10px] ${host.unsupported_protocols?.length ? 'text-rose-300' : host.unknown_protocols?.length ? 'text-amber-300' : 'text-emerald-300'}`}>
-            {host.required_protocols?.length
-              ? host.unsupported_protocols?.length
-                ? `需升级：${host.unsupported_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
-                : host.unknown_protocols?.length
-                  ? `待核验：${host.unknown_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
-                  : `能力已确认：${host.required_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
-              : '当前策略无需应用层协议能力'}{host.live_readback.rfw_api_version ? ` · RFW API ${host.live_readback.rfw_api_version}` : ''}
-          </div>
-          <div className={`mt-2 text-[10px] ${host.live_readback.sync_status === 'drifted' && !host.live_readback.stale ? 'text-rose-300' : host.live_readback.status === 'ready' && !host.live_readback.stale ? 'text-emerald-300' : 'text-amber-300'}`}>
-            {readbackStatusLabel[host.live_readback.status] || '等待读回'} · <span className="tabular-nums">{host.live_readback.rule_count ?? 0}</span> 条实际规则（平台管理 <span className="tabular-nums">{host.live_readback.managed_rule_count ?? 0}</span>）
-            {(host.live_readback.drift_count || host.live_readback.missing_count) ? ` · 偏差 ${host.live_readback.drift_count || 0} / 缺失 ${host.live_readback.missing_count || 0}` : ''}
-            {host.live_readback.stale ? ' · 数据过期' : ''}
-          </div>
-          {host.last_action?.message && <p className="mt-1 line-clamp-2 break-words text-[10px] leading-4 text-slate-400">{host.last_action.message}</p>}
-        </article>)}
-      </div> : <p className="mt-4 text-xs text-slate-500">暂时没有已登记主机。</p>}
+          <input type="search" value={fleetHostSearch} onChange={(event) => setFleetHostSearch(event.target.value)} placeholder="搜索母机…" className="min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400 sm:max-w-xs" aria-label="搜索全局策略母机" />
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="按状态筛选母机">
+          {([
+            ['attention', `需关注 ${fleetAttentionCount}`], ['all', `全部 ${fleetHosts.length}`],
+            ['online', `在线 ${fleetSnapshot?.counts.online ?? 0}`], ['offline', `离线 ${Math.max(0, fleetHosts.length - (fleetSnapshot?.counts.online ?? 0))}`],
+          ] as const).map(([key, label]) => <button key={key} type="button" onClick={() => setFleetHostFilter(key)} aria-pressed={fleetHostFilter === key} className={`min-h-9 rounded-lg border px-3 text-[11px] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 ${fleetHostFilter === key ? 'border-sky-700 bg-sky-950/60 text-sky-100' : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'}`}>{label}</button>)}
+        </div>
+        {filteredFleetHosts.length ? <div className="mt-3 space-y-1.5">
+          {filteredFleetHosts.map((host) => <details key={host.host_id} className="rounded-lg border border-slate-800 bg-slate-950/70">
+            <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5">
+              <strong className="min-w-0 flex-1 break-all text-[11px] text-slate-200">{host.host_id}</strong>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] ${host.state === 'last_apply_succeeded' || host.state === 'ready' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : host.state === 'apply_failed' || host.state === 'runman_update_required' || host.state === 'rfw_protocol_update_required' || host.state === 'drifted' ? 'border-rose-800 bg-rose-950/40 text-rose-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>{fleetStateLabel[host.state] || host.state}</span>
+              <span className="text-[10px] text-slate-500">Watcher {host.agent_version}</span>
+              <span className={`text-[10px] ${host.live_readback.sync_status === 'drifted' && !host.live_readback.stale ? 'text-rose-300' : host.live_readback.status === 'ready' && !host.live_readback.stale ? 'text-emerald-300' : 'text-amber-300'}`}>{readbackStatusLabel[host.live_readback.status] || '等待读回'}{host.live_readback.stale ? ' · 过期' : ''}</span>
+            </summary>
+            <div className="grid gap-2 border-t border-slate-800 px-3 py-3 text-[10px] sm:grid-cols-2">
+              <div className="text-slate-400">本地修订 <span className="font-mono tabular-nums text-slate-200">#{host.local_revision}</span> · 全局修订 <span className="font-mono tabular-nums text-slate-200">#{host.fleet_revision}</span></div>
+              <div className={host.unsupported_protocols?.length ? 'text-rose-300' : host.unknown_protocols?.length ? 'text-amber-300' : 'text-emerald-300'}>
+                {host.required_protocols?.length
+                  ? host.unsupported_protocols?.length
+                    ? `需升级：${host.unsupported_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
+                    : host.unknown_protocols?.length
+                      ? `待核验：${host.unknown_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
+                      : `能力已确认：${host.required_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
+                  : '当前策略无需应用层协议能力'}{host.live_readback.rfw_api_version ? ` · RFW API ${host.live_readback.rfw_api_version}` : ''}
+              </div>
+              <div className="text-slate-400">实际规则 <span className="font-mono tabular-nums text-slate-200">{host.live_readback.rule_count ?? 0}</span> 条 · 平台管理 <span className="font-mono tabular-nums text-slate-200">{host.live_readback.managed_rule_count ?? 0}</span> 条{(host.live_readback.drift_count || host.live_readback.missing_count) ? ` · 偏差 ${host.live_readback.drift_count || 0} / 缺失 ${host.live_readback.missing_count || 0}` : ''}</div>
+              {host.last_action?.message && <p className="break-words leading-4 text-slate-400 sm:col-span-2">{host.last_action.message}</p>}
+            </div>
+          </details>)}
+        </div> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950 px-3 py-4 text-center text-xs text-slate-500">没有符合当前筛选条件的母机。</p>}
+      </div>
       <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">实时读回来自节点运行中 RFW 的规则 API，并与平台管理的期望规则逐项比对；它不是直接读取 eBPF 内核 map。未登记为平台所有的手工规则只显示、不删除。MTProto 策略仅下发给新鲜能力读回明确支持的节点；未知或旧版节点会延后显示，不会先下发再失败。</p>
     </section>
 
@@ -537,9 +618,51 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         </label>)}
       </div>
       <div className="px-4 pb-4 sm:px-5">
-        <label htmlFor="fw-bridge-interfaces" className="mb-1 block text-xs font-medium text-slate-300">容器桥接网卡（启用上方规则时必填）</label>
-        <input id="fw-bridge-interfaces" value={interfaceText} onChange={(event) => setAbuseInterfaces(event.target.value)} placeholder="例如 incusbr0, podman0" className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400" aria-describedby="fw-bridge-help" />
-        <p id="fw-bridge-help" className="mt-1 text-xs leading-5 text-slate-400">只匹配从这里进入宿主机 FORWARD 链的容器出站流量；Runman 会确认网卡实际存在且为 Linux bridge。不填或网卡无效则拒绝应用。Host 网络、macvlan/ipvlan 等不经过该路径的容器不受影响。</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h4 className="text-xs font-semibold text-slate-200">选择容器网络接口</h4>
+            <p className="mt-1 text-[10px] leading-4 text-slate-400">接口由母机 Agent 自动发现。选择 Incus / Podman 可快速全选该运行时的受支持桥接网卡，也可在下方逐个勾选。</p>
+          </div>
+          <span className={`rounded-full border px-2.5 py-1 text-[10px] ${interfaceInventory?.status === 'ready' && !interfaceInventory.stale ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>
+            {interfaceInventory?.status === 'ready' ? interfaceInventory.stale ? '网卡清单已过期' : `已采集 ${interfaceInventory.interfaces.length} 张` : '等待网卡采集'}
+          </span>
+        </div>
+        {(['incus', 'podman'] as const).map((runtime) => {
+          const runtimeInterfaces = eligibleInterfaces.filter((item) => item.runtimes.includes(runtime));
+          const selectedCount = runtimeInterfaces.filter((item) => abuse.interfaces.includes(item.name)).length;
+          const checked = runtimeInterfaces.length > 0 && selectedCount === runtimeInterfaces.length;
+          return <label key={runtime} className={`mt-3 flex min-h-14 items-center gap-3 rounded-lg border p-3 ${runtimeInterfaces.length && !interfaceInventory?.stale ? 'cursor-pointer border-slate-700 bg-slate-950/60 hover:border-slate-600' : 'border-slate-800 bg-slate-950/30 opacity-55'}`}>
+            <input type="checkbox" checked={checked} disabled={!runtimeInterfaces.length || interfaceInventory?.stale} onChange={() => toggleRuntimeInterfaces(runtime)} className="h-4 w-4 shrink-0 accent-sky-500" aria-label={`选择全部 ${runtime} 桥接接口`} />
+            <span className="min-w-0 flex-1"><span className="block text-xs font-semibold capitalize text-slate-100">{runtime === 'incus' ? 'Incus' : 'Podman'}</span><span className="mt-0.5 block text-[10px] text-slate-400">{runtimeInterfaces.length ? `发现 ${runtimeInterfaces.length} 张可用于转发规则的 bridge · 已选 ${selectedCount}` : '未发现可操作的 bridge 网络'}</span></span>
+            {runtimeInterfaces.length > 0 && <span className="max-w-[45%] truncate font-mono text-[10px] text-slate-500">{runtimeInterfaces.map((item) => item.name).join(', ')}</span>}
+          </label>;
+        })}
+        {eligibleInterfaces.length > 0 ? <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {eligibleInterfaces.map((item) => <label key={item.name} className={`flex min-h-20 items-start gap-3 rounded-lg border p-3 ${interfaceInventory?.stale ? 'border-slate-800 bg-slate-950/30 opacity-60' : 'cursor-pointer border-slate-800 bg-slate-950/50 hover:border-slate-600'}`}>
+            <input type="checkbox" checked={abuse.interfaces.includes(item.name)} disabled={interfaceInventory?.stale} onChange={(event) => toggleAbuseInterface(item.name, event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500" aria-label={`在防滥用规则中使用 ${item.name}`} />
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-center gap-1.5"><code className="text-xs font-semibold text-slate-100">{item.name}</code>{item.runtimes.map((runtime) => <span key={runtime} className="rounded border border-sky-900/70 bg-sky-950/50 px-1.5 py-0.5 text-[9px] uppercase text-sky-200">{runtime}</span>)}<span className={`rounded border px-1.5 py-0.5 text-[9px] ${item.state === 'up' ? 'border-emerald-900 bg-emerald-950/40 text-emerald-200' : 'border-amber-900 bg-amber-950/40 text-amber-200'}`}>{item.state}</span></span>
+              <span className="mt-1 block break-all text-[10px] leading-4 text-slate-500">{item.network_names.length ? item.network_names.join(', ') : item.kind}{item.mtu ? ` · MTU ${item.mtu}` : ''}{item.addresses.length ? ` · ${item.addresses.slice(0, 2).join(', ')}` : ''}</span>
+            </span>
+          </label>)}
+        </div> : <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">当前没有已确认的 Incus / Podman bridge。可能是 Agent 尚未更新、运行时未安装，或该容器使用 host、pasta、macvlan/ipvlan 等非桥接网络；请勿填写猜测的接口名。</p>}
+        {(abuse.interfaces || []).some((name) => !eligibleInterfaces.some((item) => item.name === name)) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] text-amber-100/80">
+          <span>旧策略包含未被当前清单确认的接口：{abuse.interfaces.filter((name) => !eligibleInterfaces.some((item) => item.name === name)).join(', ')}</span>
+          <button type="button" onClick={() => setAbuseInterfaces(abuse.interfaces.filter((name) => eligibleInterfaces.some((item) => item.name === name)))} className="min-h-8 rounded border border-amber-800 px-2.5 text-amber-100 hover:bg-amber-900/40">从草稿移除</button>
+        </div>}
+        <details className="mt-3 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+          <summary className="cursor-pointer select-none text-[11px] font-medium text-slate-300">查看母机完整网卡清单（{interfaceInventory?.interfaces.length || 0}）</summary>
+          {interfaceInventory?.interfaces?.length ? <div className="mt-2 divide-y divide-slate-800">
+            {interfaceInventory.interfaces.map((item) => <div key={item.name} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-[10px]">
+              <code className="text-slate-200">{item.name}</code><span className="text-slate-500">{item.kind} · {item.state}{item.mtu ? ` · MTU ${item.mtu}` : ''}</span>
+              {item.is_default_route && <span className="rounded border border-sky-900 bg-sky-950/50 px-1.5 py-0.5 text-sky-200">默认路由</span>}
+              {!!item.addresses.length && <span className="break-all font-mono text-slate-500">{item.addresses.join(', ')}</span>}
+              {!!item.runtimes.length && <span className="text-sky-300">{item.runtimes.join(' / ')}</span>}
+            </div>)}
+          </div> : <p className="mt-2 text-[10px] text-slate-500">Agent 上报新鲜网卡清单后会显示接口地址、状态及 MTU。</p>}
+        </details>
+        <p className="mt-2 text-[10px] leading-4 text-slate-400">固定端口规则只匹配选中桥接接口进入宿主机 FORWARD 链的容器转发流量，不处理宿主机 INPUT/OUTPUT；Host、pasta、macvlan/ipvlan 网络不在该规则路径内。应用前 Runman 仍会再次验证接口。</p>
+        {fleetSnapshot && fleetSnapshot.revision > 0 && <p className="mt-2 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">全局模板会把所选的网卡名原样同步到所有节点。请确认各节点同名接口代表相同的容器桥接网络；命名不一致的节点建议按单机策略分别配置。</p>}
       </div>
       <p className="mx-4 mb-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-xs leading-5 text-slate-400 sm:mx-5 sm:mb-5">此处管理主机 RFW 网络规则，不负责识别服务安装来源或代理配置文件；面板安装、空/弱口令和进程级证据仍由主机安全检测器处理。全局策略仅同步到能力兼容的节点。</p>
     </section>

@@ -2397,6 +2397,80 @@ def _host_firewall_runtime_status(conn: sqlite3.Connection, host_id: str) -> Dic
     }
 
 
+def _host_firewall_interface_inventory(
+    conn: sqlite3.Connection, host_id: str, now: int | None = None
+) -> Dict[str, Any]:
+    now = int(time.time()) if now is None else int(now)
+    row = conn.execute(
+        "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1",
+        (host_id,),
+    ).fetchone()
+    empty = {"status": "unknown", "observed_at": 0, "stale": True, "interfaces": []}
+    if row is None:
+        return empty
+    try:
+        security = json.loads(row["payload_json"] or "{}")
+    except (TypeError, ValueError):
+        return {**empty, "status": "unavailable", "observed_at": int(row["ts"] or 0)}
+    host_firewall = security.get("host_firewall") if isinstance(security, dict) else None
+    source = host_firewall.get("interface_inventory") if isinstance(host_firewall, dict) else None
+    if not isinstance(source, dict):
+        return {**empty, "observed_at": int(row["ts"] or 0)}
+    observed_at = int(row["ts"] or 0)
+    stale = observed_at <= 0 or now - observed_at > STALE_SECONDS
+    if source.get("status") != "ready" or not isinstance(source.get("interfaces"), list):
+        return {
+            "status": "unavailable" if source.get("status") == "unavailable" else "unknown",
+            "observed_at": observed_at,
+            "stale": stale,
+            "interfaces": [],
+        }
+
+    interfaces = []
+    seen = set()
+    for raw in source["interfaces"][:64]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name) or name in seen:
+            continue
+        seen.add(name)
+        raw_addresses = raw.get("addresses") if isinstance(raw.get("addresses"), list) else []
+        addresses = []
+        for value in raw_addresses[:16]:
+            try:
+                address = str(ipaddress.ip_interface(str(value).strip()))
+            except ValueError:
+                continue
+            if address not in addresses:
+                addresses.append(address)
+        raw_runtimes = raw.get("runtimes") if isinstance(raw.get("runtimes"), list) else []
+        runtimes = sorted({str(value).lower() for value in raw_runtimes if str(value).lower() in {"incus", "podman"}})
+        raw_networks = raw.get("network_names") if isinstance(raw.get("network_names"), list) else []
+        networks = list(dict.fromkeys(
+            str(value)[:100] for value in raw_networks[:16]
+            if isinstance(value, str) and value.strip()
+        ))
+        mtu = raw.get("mtu")
+        interfaces.append({
+            "name": name,
+            "kind": str(raw.get("kind") or "unknown")[:32],
+            "state": str(raw.get("state") or "unknown")[:16].lower(),
+            "mtu": mtu if type(mtu) is int and 0 < mtu <= 65535 else None,
+            "addresses": addresses,
+            "is_default_route": raw.get("is_default_route") is True,
+            "runtimes": runtimes,
+            "network_names": networks,
+            "firewall_eligible": raw.get("firewall_eligible") is True and bool(runtimes) and str(raw.get("kind") or "").lower() == "bridge",
+        })
+    return {
+        "status": "ready",
+        "observed_at": observed_at,
+        "stale": stale,
+        "interfaces": interfaces,
+    }
+
+
 def _latest_host_firewall_action(conn: sqlite3.Connection, host_id: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT id,status,result_message,updated_at,params_json FROM security_actions "
@@ -4348,6 +4422,7 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
             "source_fleet_revision": source_fleet_revision,
             "policy": policy,
             "runtime_status": _host_firewall_runtime_status(conn, host_id),
+            "interface_inventory": _host_firewall_interface_inventory(conn, host_id, now),
             "live_readback": _host_firewall_live_readback(conn, host_id, now),
             "updated_by": updated_by,
             "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
