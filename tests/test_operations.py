@@ -45,12 +45,18 @@ class OperationsTests(unittest.TestCase):
         return self.conn.execute("SELECT SUM(rx),SUM(tx),SUM(covered),SUM(gaps) FROM ops_rollups WHERE period=?",(period,)).fetchone()
 
     def test_counter_deltas_and_duplicates(self):
-        self.ingest(self.now)
-        self.ingest(self.now+300,self.data(1100,2100))
-        self.ingest(self.now+300,self.data(999999,999999))
-        self.ingest(self.now+200,self.data(999999,999999))
-        self.assertEqual(tuple(self.usage()),(1000,2000,300,0))
-        self.assertEqual(tuple(self.usage("hour")),(1000,2000,300,0))
+        # Always cross a non-even hour split rather than failing only when CI
+        # happens to run near xx:59. SQLite REAL prorating has binary rounding.
+        start=(self.now//3600)*3600+3599
+        self.ingest(start)
+        self.ingest(start+300,self.data(1100,2100))
+        self.ingest(start+300,self.data(999999,999999))
+        self.ingest(start+200,self.data(999999,999999))
+        for period in ('day','hour'):
+            actual=tuple(self.usage(period))
+            for value,expected in zip(actual[:3],(1000,2000,300)):
+                self.assertAlmostEqual(value,expected,places=6)
+            self.assertEqual(actual[3],0)
 
     def test_gap_and_reset_are_not_billed(self):
         self.ingest(self.now)
