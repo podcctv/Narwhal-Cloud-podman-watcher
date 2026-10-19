@@ -11,8 +11,11 @@ import {
   PushSettingsPayload,
   InvestigationResponse,
   HostFirewallPolicyResponse,
+  FleetFirewallPolicyResponse,
   HostFirewallRule,
   HostFirewallAbusePolicy,
+  IPReputationSettings,
+  IPReputationResult,
 } from './types';
 
 export class ApiError extends Error {
@@ -61,6 +64,14 @@ export const api = {
     return request<InvestigationResponse>(`/api/v1/security/investigation?${query}`, { signal });
   },
   getPushSettings: () => request<PushSettingsResponse>('/api/v1/settings/push'),
+  getIPReputationSettings: () => request<IPReputationSettings>('/api/v1/ip-reputation/settings'),
+  saveIPReputationKey: (api_key: string) => request<{ ok: boolean; configured: boolean; message: string }>('/api/v1/ip-reputation/settings', {
+    method: 'POST', body: JSON.stringify({ api_key }),
+  }),
+  deleteIPReputationKey: () => request<{ ok: boolean; configured: boolean }>('/api/v1/ip-reputation/settings', { method: 'DELETE' }),
+  checkIPReputation: (ip: string) => request<IPReputationResult>('/api/v1/ip-reputation/check', {
+    method: 'POST', body: JSON.stringify({ ip }),
+  }),
   updatePushSettings: (data: PushSettingsPayload) =>
     request<{ ok: boolean; message: string }>('/api/v1/settings/push', {
       method: 'POST',
@@ -141,6 +152,14 @@ export const api = {
 
   updateHostFirewallPolicy: (hostId: string, policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy }) =>
     request<{ ok: boolean; revision: number; action_id: number; queued: boolean }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/firewall-policy`, {
+      method: 'POST', body: JSON.stringify(policy),
+    }),
+
+  getFleetFirewallPolicy: () =>
+    request<FleetFirewallPolicyResponse>('/api/v1/firewall/fleet-policy'),
+
+  updateFleetFirewallPolicy: (policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy }) =>
+    request<{ ok: boolean; revision: number; queued_hosts: number; deferred_hosts: number; total_hosts: number }>('/api/v1/firewall/fleet-policy', {
       method: 'POST', body: JSON.stringify(policy),
     }),
 

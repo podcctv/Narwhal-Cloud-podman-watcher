@@ -33,6 +33,21 @@ const recoveryLabel = (alert: SecurityAlert): string => {
   return alert.status === 'resolved' ? '已关闭 · 待验证恢复' : '';
 };
 
+const evidenceConfidenceLabel = (value?: string): string => ({
+  confirmed: '已确认',
+  probable: '推定',
+  mixed: '证据冲突',
+  unknown: '未知',
+} as Record<string, string>)[value || 'unknown'] || '未知';
+
+const inboundSignalLabel = (value?: string): string => ({
+  possible_multiport_probe: '多端口探测迹象',
+  bidirectional_tcp_observed: '已观察到双向 TCP 通信',
+  mixed_connection_evidence: '已建连与未应答连接并存',
+  unreplied_tcp_observed: '存在未应答 TCP 连接',
+  insufficient_transport_evidence: '传输层证据不足',
+} as Record<string, string>)[value || ''] || '行为线索不足';
+
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
   const details = alert.details || {};
@@ -281,6 +296,9 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           items.map((alert) => {
             const isHistorical = alert.status !== 'active';
             const canRemediate = hasActionEvidence(alert);
+            const attribution = alert.deep_evidence?.connection_attribution;
+            const inboundEvidence = alert.deep_evidence?.inbound_ips ||
+              (alert.deep_evidence?.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0);
 
             return (
               <div
@@ -335,9 +353,26 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                       </span>
                     </summary>
                     <div className="mt-3 border-t border-sky-900/50 pt-3">
+                      {attribution && (
+                        <section className="mb-3 rounded-lg border border-sky-900/70 bg-slate-950/60 p-3">
+                          <h4 className="text-xs font-semibold text-sky-200">连接发起方核验</h4>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] tabular-nums sm:grid-cols-4">
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 已确认</span><strong className="text-sky-300">{attribution.confirmed_local_initiated || 0}</strong></div>
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 推定</span><strong className="text-amber-300">{attribution.probable_local_initiated || 0}</strong></div>
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">外部远端发起 · 已确认</span><strong className="text-emerald-300">{attribution.confirmed_remote_initiated || 0}</strong></div>
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">方向未知</span><strong className="text-slate-300">{attribution.unknown_direction || 0}</strong></div>
+                          </div>
+                          <p className="mt-2 text-[10px] leading-4 text-slate-500">
+                            PID/进程归属 {attribution.process_attributed_sockets || 0}/{attribution.captured_sockets || 0} 条 · conntrack 五元组确认 {attribution.conntrack_confirmed_sockets || 0} 条。
+                            {!attribution.conntrack_available && ' conntrack 不可用，部分方向只能推定。'}
+                            {(attribution.conntrack_snapshot_truncated || attribution.socket_snapshot_truncated) && ' 快照达到采集上限，结果非全量。'}
+                            {' '}方向和进程只能说明连接路径，不能单独判断客户意图。
+                          </p>
+                        </section>
+                      )}
                       <h4 className="mb-2 text-xs font-semibold text-slate-200">接入容器的公网客户端</h4>
                       <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
-                      {(alert.deep_evidence.inbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0)).slice(0, 100).map((entry, index) => (
+                      {inboundEvidence.slice(0, 100).map((entry, index) => (
                         <div key={`${entry.ip}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-[11px] text-slate-300">
                           <div className="flex items-center justify-between gap-2">
                             <code className="text-sky-300 break-all">{entry.ip || '-'}</code>
@@ -346,15 +381,23 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                           <div className="mt-1 text-slate-400 tabular-nums">
                             接入连接 {entry.inbound || 0}
                           </div>
+                          <div className="mt-1 break-words text-slate-400">
+                            发起方向：外部远端 · {evidenceConfidenceLabel(entry.inbound_origin_confidence)}
+                          </div>
+                          {entry.network_evidence && (
+                            <div className="mt-1 break-words text-amber-200/90">
+                              {inboundSignalLabel(entry.network_evidence.classification)} · 已建连 {entry.network_evidence.tcp_established_flows || 0} / 未应答 {entry.network_evidence.tcp_unreplied_flows || 0} / 握手待完成 {entry.network_evidence.tcp_handshake_pending_flows || 0} · 回包 {entry.network_evidence.reply_packets || 0}
+                            </div>
+                          )}
                           <div className="mt-1 break-words text-slate-500">
                             归属：{[entry.region, entry.city].filter(Boolean).join(' · ') || '暂未识别'} · 运营商：{entry.isp || '暂未识别'}{entry.asn ? ` · AS${entry.asn}` : ''}
                           </div>
                           <div className="mt-1 break-words text-slate-500">
-                            关联进程：{(entry.processes || []).join('、') || 'unknown'}
+                            接入端进程：{(entry.inbound_processes || []).map((item) => item.process).filter(Boolean).join('、') || (entry.processes || []).join('、') || '未归属'}
                           </div>
                         </div>
                       ))}
-                      {(alert.deep_evidence.inbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0)).length === 0 && (
+                      {inboundEvidence.length === 0 && (
                         <div className="text-xs text-slate-500">采样瞬间未发现可见的公网连接 IP。</div>
                       )}
                       </div>
@@ -372,7 +415,8 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                           <div className="mt-1 break-words text-slate-500">
                             归属：{[entry.region, entry.city].filter(Boolean).join(' · ') || '暂未识别'} · 运营商：{entry.isp || '暂未识别'}{entry.asn ? ` · AS${entry.asn}` : ''}
                           </div>
-                          <div className="mt-1 break-words text-slate-500">关联进程：{(entry.processes || []).join('、') || 'unknown'}</div>
+                          <div className="mt-1 break-words text-slate-400">发起方向：本机进程 · {evidenceConfidenceLabel(entry.outbound_origin_confidence)}</div>
+                          <div className="mt-1 break-words text-slate-500">发起进程：{(entry.outbound_processes || []).map((item) => item.process).filter(Boolean).join('、') || (entry.processes || []).join('、') || '未归属'}</div>
                         </div>
                       ))}
                       {(alert.deep_evidence.outbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0)).length === 0 && (
@@ -380,6 +424,9 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                       )}
                       </div>
                     </div>
+                    <p className="mt-2 text-[10px] leading-4 text-slate-500">
+                      多端口探测或未应答只代表单次采样中的传输层迹象，可能由扫描、丢包或服务拒绝造成；不能仅凭这些数据判定恶意，需结合应用访问日志和连续样本。
+                    </p>
                     {(alert.deep_evidence.errors || []).length > 0 && (
                       <p className="mt-2 text-[11px] text-amber-300">
                         部分证据不可用：{alert.deep_evidence.errors?.join('；')}

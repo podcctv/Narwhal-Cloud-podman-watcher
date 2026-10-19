@@ -34,6 +34,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   const [testingPush, setTestingPush] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [pushSettings, setPushSettings] = useState<PushSettingsResponse | null>(null);
+  const [ipReputationConfigured, setIpReputationConfigured] = useState(false);
+  const [ipReputationKey, setIpReputationKey] = useState('');
+  const [savingIpReputationKey, setSavingIpReputationKey] = useState(false);
 
   const [apiForm, setApiForm] = useState<PushSettingsPayload>({
     narwhal_api_url: 'https://api.fuckip.me/api/v1',
@@ -65,9 +68,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   const loadSettings = useCallback(async () => {
     try {
       setLoadingPush(true);
-      const [pushData, botData] = await Promise.all([
+      const [pushData, botData, ipReputationData] = await Promise.all([
         api.getPushSettings(),
         api.getNotificationBots(),
+        api.getIPReputationSettings(),
       ]);
 
       setPushSettings(pushData);
@@ -85,6 +89,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       setCallbackReady(botData.callback_ready);
       setProxyConfigured(Boolean(botData.proxy_configured));
       setProxyScheme(botData.proxy_scheme || '');
+      setIpReputationConfigured(Boolean(ipReputationData.configured));
     } catch (err: any) {
       onToast('error', `加载设置失败：${err.message || err}`);
     } finally {
@@ -147,6 +152,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       onToast('error', `测试失败：${err.message || err}`);
     } finally {
       setTestingPush(false);
+    }
+  };
+
+  const handleSaveIpReputationKey = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!ipReputationKey.trim() || savingIpReputationKey) return;
+    setSavingIpReputationKey(true);
+    try {
+      const result = await api.saveIPReputationKey(ipReputationKey.trim());
+      setIpReputationKey('');
+      setIpReputationConfigured(true);
+      onToast('success', result.message || 'AbuseIPDB API Key 已安全保存');
+    } catch (err: any) {
+      onToast('error', `保存 AbuseIPDB Key 失败：${err.message || err}`);
+    } finally {
+      setSavingIpReputationKey(false);
     }
   };
 
@@ -238,6 +259,47 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
 
       {/* Grid: Card 1 (Narwhal Cloud Buyer API) & Card 2 (Telegram Bots) */}
       <BuyerNotificationsView onToast={onToast} />
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 sm:p-6 shadow-lg" aria-labelledby="ip-reputation-heading">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-2xl">
+            <div className="flex flex-wrap items-center gap-2">
+              <Globe className="h-5 w-5 text-sky-400" />
+              <h3 id="ip-reputation-heading" className="font-semibold text-slate-100">入站 IP 信誉查询</h3>
+              <span className={ipReputationConfigured ? 'rounded-full border border-emerald-500/30 bg-emerald-950/30 px-2 py-1 text-xs text-emerald-300' : 'rounded-full border border-amber-500/30 bg-amber-950/30 px-2 py-1 text-xs text-amber-300'}>
+                {ipReputationConfigured ? 'AbuseIPDB 已配置' : '尚未配置'}
+              </span>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-slate-400">
+              仅在容器深度诊断中点击“查询滥用记录”时，才会将选中的公网来源 IP 发给 AbuseIPDB；结果缓存 24 小时并设有每日查询保护上限。
+            </p>
+            <p className="mt-2 text-xs leading-5 text-amber-200/90">
+              信誉分和公开举报数不能证明该来源正在攻击本容器，也不能证明是客户本人操作；单凭 IP 数量或信誉分不会自动封禁来源、停容器或处罚客户。
+            </p>
+          </div>
+          <form onSubmit={handleSaveIpReputationKey} className="flex w-full flex-col gap-3 sm:flex-row lg:max-w-xl lg:items-end">
+            <label htmlFor="abuseipdb-key" className="min-w-0 flex-1 text-xs text-slate-300">
+              {ipReputationConfigured ? '输入新的 AbuseIPDB API Key 以替换' : 'AbuseIPDB API Key'}
+              <input
+                id="abuseipdb-key"
+                type="password"
+                autoComplete="new-password"
+                spellCheck={false}
+                maxLength={256}
+                value={ipReputationKey}
+                onChange={event => setIpReputationKey(event.target.value)}
+                placeholder={ipReputationConfigured ? '已配置的密钥不会显示' : '粘贴新签发的 API Key'}
+                className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 outline-none focus:border-sky-500"
+              />
+            </label>
+            <button type="submit" disabled={savingIpReputationKey || !ipReputationKey.trim()} className="min-h-11 shrink-0 rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
+              {savingIpReputationKey ? '加密保存中…' : ipReputationConfigured ? '替换密钥' : '加密保存'}
+            </button>
+          </form>
+        </div>
+        <p className="mt-4 border-t border-slate-800 pt-3 text-xs leading-5 text-slate-500">
+          密钥加密保存在主控端数据库，不会返回前端、不下发到节点；查询失败或额度耗尽时显示“无法查询”，不会当作 IP 安全或恶意结论。
+        </p>
+      </section>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 items-start">
         {/* =========================================================================
             CARD A: Narwhal Cloud 买家告警推送配置

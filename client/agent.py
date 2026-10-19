@@ -66,6 +66,8 @@ _packet_counters: Dict[str, Dict[str, float]] = {}
 _protocol_counters: Dict[str, Dict[str, float]] = {}
 _access_log_states: Dict[str, Dict[str, object]] = {}
 _security_last_sample_ts = 0.0
+_firewall_event_cursor = ""
+_pending_firewall_event_cursor = ""
 _pending_deep_samples: Dict[int, Dict[str, object]] = {}
 _abuse_targets: List[Dict[str, object]] = []
 _socks_probe_cache = {}
@@ -960,6 +962,199 @@ def _parse_socket_endpoint(endpoint: str) -> Tuple[str, int]:
     return host, port
 
 
+def _classify_socket_origin(
+    proto: str, state: str, local_port: int, listening_ports: set[int]
+) -> Tuple[str, str, str]:
+    """Classify connection direction from socket state and listener evidence.
+
+    SYN-SENT/SYN-RECV expose the handshake direction directly. An established
+    socket on a TCP listener is an accepted inbound connection. An established
+    TCP socket on a non-listening local port is only a probable locally-created
+    connection because a point-in-time snapshot does not retain the initial SYN.
+    UDP has no handshake, so both directions remain probable unless conntrack
+    provides the original tuple.
+    """
+    protocol = str(proto or "").lower()
+    socket_state = str(state or "").upper().replace("_", "-")
+    if socket_state == "SYN-RECV":
+        return "inbound", "remote_peer", "confirmed_syn_recv"
+    if protocol.startswith("tcp") and socket_state == "SYN-SENT":
+        return "outbound", "local_process", "confirmed_syn_sent"
+    if protocol.startswith("tcp") and local_port in listening_ports:
+        return "inbound", "remote_peer", "probable_local_listener_match"
+    if protocol.startswith("tcp") and socket_state in ("ESTAB", "ESTABLISHED"):
+        return "outbound", "local_process", "probable_established_non_listener"
+    if protocol.startswith("udp"):
+        if local_port in listening_ports:
+            return "inbound", "remote_peer", "probable_connected_udp_listener_match"
+        return "outbound", "local_process", "probable_connected_udp_non_listener"
+    return "unknown", "unknown", "direction_not_determined"
+
+
+def _communication_socket_owner_count(communication: Dict[str, object]) -> int:
+    sockets = communication.get("communication_sockets")
+    if not isinstance(sockets, list):
+        return 0
+    return sum(1 for item in sockets if isinstance(item, dict) and int(item.get("pid") or 0) > 0)
+
+
+def _communication_process_totals(sockets: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    totals: Dict[Tuple[int, str], Dict[str, object]] = {}
+    for item in sockets:
+        pid = int(item.get("pid") or 0)
+        process = str(item.get("process") or "unknown")[:120]
+        key = (pid, process)
+        aggregate = totals.setdefault(key, {
+            "pid": pid, "process": process, "inbound_connections": 0,
+            "outbound_connections": 0, "unknown_connections": 0, "remote_ips": set(),
+        })
+        direction = item.get("direction") if item.get("direction") in ("inbound", "outbound") else "unknown"
+        aggregate[f"{direction}_connections"] = int(aggregate[f"{direction}_connections"]) + 1
+        remote_ips = aggregate.get("remote_ips")
+        if isinstance(remote_ips, set) and item.get("remote_ip"):
+            remote_ips.add(str(item["remote_ip"]))
+    result = []
+    for aggregate in totals.values():
+        remote_ips = aggregate.pop("remote_ips", set())
+        aggregate["unique_remote_ips"] = len(remote_ips) if isinstance(remote_ips, set) else 0
+        result.append(aggregate)
+    return sorted(
+        result,
+        key=lambda item: int(item.get("inbound_connections") or 0) + int(item.get("outbound_connections") or 0),
+        reverse=True,
+    )[:50]
+
+
+def _merge_socket_process_attribution(
+    communication: Dict[str, object], fallback: Dict[str, object]
+) -> None:
+    """Fill missing socket owners from host /proc without replacing richer ss rows."""
+    primary_sockets = communication.get("communication_sockets")
+    fallback_sockets = fallback.get("communication_sockets")
+    if not isinstance(primary_sockets, list) or not isinstance(fallback_sockets, list):
+        return
+
+    def socket_key(item: Dict[str, object]) -> Tuple[str, str, int, str, int, str]:
+        local_ip, local_port = _parse_socket_endpoint(str(item.get("local") or ""))
+        remote_ip, remote_port = _parse_socket_endpoint(str(item.get("remote") or ""))
+        proto = str(item.get("proto") or "").lower()
+        proto = "tcp" if proto.startswith("tcp") else "udp" if proto.startswith("udp") else proto
+        state = str(item.get("state") or "").lower().replace("_", "-")
+        state = {"estab": "established", "syn-sent": "syn-sent", "syn-recv": "syn-recv"}.get(state, state)
+        return (
+            proto, local_ip, local_port, remote_ip, remote_port, state,
+        )
+
+    fallback_by_key = {
+        socket_key(item): item for item in fallback_sockets
+        if isinstance(item, dict) and int(item.get("pid") or 0) > 0
+    }
+    merged = False
+    for item in primary_sockets:
+        if not isinstance(item, dict) or int(item.get("pid") or 0) > 0:
+            continue
+        owner = fallback_by_key.get(socket_key(item))
+        if owner is None:
+            continue
+        item["pid"] = int(owner.get("pid") or 0)
+        item["process"] = str(owner.get("process") or "unknown")[:120]
+        item["process_attribution"] = "attributed"
+        item["process_attribution_source"] = "host_proc_fd_inode"
+        merged = True
+    if merged:
+        communication["communication_processes"] = _communication_process_totals(
+            [item for item in primary_sockets if isinstance(item, dict)]
+        )
+    communication["process_attribution_available"] = _communication_socket_owner_count(communication) > 0
+    communication["communication_owner_attributed_count"] = _communication_socket_owner_count(communication)
+
+
+def _enrich_communication_with_conntrack_origins(
+    communication: Dict[str, object], entries: List[Dict[str, object]]
+) -> Dict[str, int]:
+    """Confirm local-vs-remote initiation by matching socket tuples to conntrack."""
+    sockets = communication.get("communication_sockets")
+    if not isinstance(sockets, list):
+        return {"matched_outbound": 0, "matched_inbound": 0, "ambiguous": 0}
+
+    def normalized_ip(value: str) -> str:
+        try:
+            parsed = ipaddress.ip_address(value)
+            return str(parsed.ipv4_mapped) if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped else str(parsed)
+        except ValueError:
+            return value.strip().lower()
+
+    tuple_matches: Dict[Tuple[str, str, int, str, int], set[str]] = {}
+    inbound_sources: Dict[Tuple[str, str, int, str, int], set[str]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        # Only kernel conntrack's original/reply tuples confirm an individual
+        # socket. Host proxy sockets are useful for port-level NAT attribution,
+        # but they are a separate connection leg and must not masquerade as an
+        # exact match for a socket inside the container.
+        if entry.get("evidence_source") not in (None, "host_conntrack"):
+            continue
+        entry_proto = str(entry.get("proto") or "").lower()
+        original_src = normalized_ip(str(entry.get("original_src") or ""))
+        original_dst = normalized_ip(str(entry.get("original_dst") or ""))
+        reply_src = normalized_ip(str(entry.get("reply_src") or ""))
+        reply_dst = normalized_ip(str(entry.get("reply_dst") or ""))
+        original_key = (
+            entry_proto, original_src, int(entry.get("original_sport") or 0),
+            original_dst, int(entry.get("original_dport") or 0),
+        )
+        reply_key = (
+            entry_proto, reply_src, int(entry.get("reply_sport") or 0),
+            reply_dst, int(entry.get("reply_dport") or 0),
+        )
+        tuple_matches.setdefault(original_key, set()).add("outbound")
+        tuple_matches.setdefault(reply_key, set()).add("inbound")
+        inbound_sources.setdefault(reply_key, set()).add(str(entry.get("original_src") or ""))
+    counts = {"matched_outbound": 0, "matched_inbound": 0, "ambiguous": 0}
+    for item in sockets:
+        if not isinstance(item, dict):
+            continue
+        local_ip, local_port = _parse_socket_endpoint(str(item.get("local") or ""))
+        remote_ip, remote_port = _parse_socket_endpoint(str(item.get("remote") or ""))
+        proto = str(item.get("proto") or "").lower()
+        if not local_ip or not remote_ip or local_port <= 0 or remote_port <= 0:
+            continue
+        local_key = (normalized_ip(local_ip), local_port)
+        remote_key = (normalized_ip(remote_ip), remote_port)
+        tuple_key = (proto, local_key[0], local_key[1], remote_key[0], remote_key[1])
+        matches = tuple_matches.get(tuple_key, set())
+        if len(matches) > 1:
+            item["direction"] = "unknown"
+            item["origin"] = "unknown"
+            item["origin_confidence"] = "mixed"
+            item["direction_evidence"] = "ambiguous_conntrack_tuple_match"
+            item["process_role"] = "unknown"
+            counts["ambiguous"] += 1
+            continue
+        if not matches:
+            continue
+        direction = next(iter(matches))
+        item["direction"] = direction
+        item["origin"] = "local_process" if direction == "outbound" else "remote_peer"
+        item["origin_confidence"] = "confirmed"
+        item["direction_evidence"] = "confirmed_conntrack_original_initiator" if direction == "outbound" else "confirmed_conntrack_reply_acceptor"
+        item["process_role"] = "initiator" if direction == "outbound" else "acceptor"
+        item["conntrack_match"] = "original_tuple" if direction == "outbound" else "reply_tuple"
+        item["process_attribution_source"] = item.get("process_attribution_source") or "socket_owner"
+        if direction == "inbound":
+            inbound_original_sources = inbound_sources.get(tuple_key, set())
+            public_sources = sorted({ip for ip in inbound_original_sources if _is_public_source_ip(ip)})
+            if public_sources:
+                item["original_remote_ips"] = public_sources[:5]
+        counts[f"matched_{direction}"] += 1
+    communication["communication_processes"] = _communication_process_totals(
+        [item for item in sockets if isinstance(item, dict)]
+    )
+    communication["conntrack_match_counts"] = counts
+    return counts
+
+
 def _collect_socket_process_details(
     runtime: str,
     name: str,
@@ -992,7 +1187,20 @@ def _collect_socket_process_details(
         for line in output.splitlines()
         if line.strip() and line.strip() != "@@SS_AVAILABLE@@"
     ]
-    listening = {int(port) for port in listening_ports if int(port) > 0}
+    tcp_listening = {int(port) for port in listening_ports if int(port) > 0}
+    udp_listening: set[int] = set()
+    # Use the current socket namespace's listener table too. The caller's
+    # security snapshot can be stale or omit a listener discovered by ss.
+    for line in lines:
+        parts = line.split(None, 6)
+        if len(parts) < 6:
+            continue
+        _, observed_port = _parse_socket_endpoint(parts[4])
+        proto = parts[0].lower()
+        if observed_port > 0 and proto.startswith("tcp") and parts[1].upper() == "LISTEN":
+            tcp_listening.add(observed_port)
+        elif observed_port > 0 and proto.startswith("udp") and _parse_socket_endpoint(parts[5])[1] == 0:
+            udp_listening.add(observed_port)
     sockets: List[Dict[str, object]] = []
     process_totals: Dict[Tuple[int, str], Dict[str, object]] = {}
     service_listeners: List[Dict[str, object]] = []
@@ -1022,7 +1230,9 @@ def _collect_socket_process_details(
             continue
         if proto.startswith("udp") and remote_port <= 0:
             continue
-        direction = "inbound" if local_port in listening or state == "SYN-RECV" else "outbound"
+        direction, origin, direction_evidence = _classify_socket_origin(
+            proto, state, local_port, tcp_listening if proto.startswith("tcp") else udp_listening
+        )
         owners = re.findall(r'\("([^"\\]{1,120})",pid=(\d+)', process_text)
         process_name = owners[0][0] if owners else "unknown"
         process_pid = int(owners[0][1]) if owners else 0
@@ -1035,6 +1245,11 @@ def _collect_socket_process_details(
             "remote_ip": remote_ip,
             "process": process_name,
             "pid": process_pid,
+            "origin": origin,
+            "origin_confidence": "confirmed" if direction_evidence.startswith("confirmed_") else "probable" if direction != "unknown" else "unknown",
+            "direction_evidence": direction_evidence,
+            "process_role": "acceptor" if direction == "inbound" else "initiator" if direction == "outbound" else "unknown",
+            "process_attribution": "attributed" if process_pid > 0 else "unavailable",
         }
         if len(sockets) < detail_limit:
             sockets.append(item)
@@ -1046,6 +1261,7 @@ def _collect_socket_process_details(
                 "process": process_name,
                 "inbound_connections": 0,
                 "outbound_connections": 0,
+                "unknown_connections": 0,
                 "remote_ips": set(),
             },
         )
@@ -1069,6 +1285,9 @@ def _collect_socket_process_details(
         "communication_snapshot_truncated": len(lines) >= snapshot_limit,
         "communication_processes": processes[:50],
         "communication_sockets": sockets,
+        "communication_owner_attributed_count": _communication_socket_owner_count({"communication_sockets": sockets}),
+        "process_attribution_available": _communication_socket_owner_count({"communication_sockets": sockets}) > 0,
+        "communication_source": "container_ss",
         "service_listeners": service_listeners,
     }
 
@@ -1612,8 +1831,20 @@ def _parse_conntrack_line(line: str) -> Dict[str, object] | None:
         reply_dport = int(dport_values[1]) if len(dport_values) > 1 else 0
     except ValueError:
         return None
+    tcp_state_match = re.search(r"\btcp\s+\d+\s+\d+\s+([A-Z_]+)\b", line, re.IGNORECASE)
+    packet_values = []
+    for value in re.findall(r"\bpackets=(\d+)", line)[:2]:
+        try:
+            packet_values.append(int(value))
+        except ValueError:
+            packet_values.append(0)
     return {
         "proto": proto,
+        "evidence_source": "host_conntrack",
+        "tcp_state": tcp_state_match.group(1).upper() if tcp_state_match else "",
+        "unreplied": "[UNREPLIED]" in line,
+        "original_packets": packet_values[0] if packet_values else 0,
+        "reply_packets": packet_values[1] if len(packet_values) > 1 else 0,
         "original_src": src_values[0],
         "original_dst": dst_values[0],
         "original_sport": original_sport,
@@ -1819,6 +2050,11 @@ def _augment_conntrack_with_host_proxy_sockets(
             entries.append(
                 {
                     "proto": proto,
+                    "evidence_source": "host_proxy_socket",
+                    "tcp_state": "ESTABLISHED" if proto == "tcp" else "",
+                    "unreplied": False,
+                    "original_packets": 1,
+                    "reply_packets": 1,
                     "original_src": remote_ip,
                     "original_dst": local_ip,
                     "original_sport": remote_port,
@@ -1919,6 +2155,7 @@ def _apply_host_conntrack_security(
 
     source_connections: Dict[str, int] = {}
     flow_connections: Dict[Tuple[str, str, int, int], int] = {}
+    source_signals: Dict[str, Dict[str, object]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -1951,6 +2188,38 @@ def _apply_host_conntrack_security(
         source_connections[source_ip] = source_connections.get(source_ip, 0) + 1
         flow_key = (source_ip, proto, original_dport, container_port)
         flow_connections[flow_key] = flow_connections.get(flow_key, 0) + 1
+        signal = source_signals.setdefault(source_ip, {
+            "flow_count": 0,
+            "tcp_established_flows": 0,
+            "tcp_unreplied_flows": 0,
+            "tcp_handshake_pending_flows": 0,
+            "source_packets": 0,
+            "reply_packets": 0,
+            "public_ports": set(),
+            "container_ports": set(),
+            "protocols": set(),
+            "evidence_sources": set(),
+        })
+        signal["flow_count"] = int(signal["flow_count"]) + 1
+        signal["source_packets"] = int(signal["source_packets"]) + int(entry.get("original_packets") or 0)
+        signal["reply_packets"] = int(signal["reply_packets"]) + int(entry.get("reply_packets") or 0)
+        if original_dport > 0:
+            signal["public_ports"].add(original_dport)
+        if container_port > 0:
+            signal["container_ports"].add(container_port)
+        if proto:
+            signal["protocols"].add(proto)
+        evidence_sources = signal.get("evidence_sources")
+        if isinstance(evidence_sources, set):
+            evidence_sources.add(str(entry.get("evidence_source") or "host_conntrack"))
+        tcp_state = str(entry.get("tcp_state") or "").upper()
+        reply_packets = int(entry.get("reply_packets") or 0)
+        if proto == "tcp" and tcp_state == "ESTABLISHED" and not bool(entry.get("unreplied")):
+            signal["tcp_established_flows"] = int(signal["tcp_established_flows"]) + 1
+        elif proto == "tcp" and tcp_state == "SYN_RECV":
+            signal["tcp_handshake_pending_flows"] = int(signal["tcp_handshake_pending_flows"]) + 1
+        elif proto == "tcp" and (bool(entry.get("unreplied")) or (reply_packets == 0 and tcp_state != "ESTABLISHED")):
+            signal["tcp_unreplied_flows"] = int(signal["tcp_unreplied_flows"]) + 1
 
     security["host_conntrack_available"] = bool(conntrack.get("available"))
     security["host_conntrack_snapshot_count"] = int(conntrack.get("snapshot_count") or 0)
@@ -1967,6 +2236,46 @@ def _apply_host_conntrack_security(
         {"ip": ip, "connections": count}
         for ip, count in sorted(source_connections.items(), key=lambda item: item[1], reverse=True)[:20]
     ]
+    normalized_signals = []
+    for ip, signal in source_signals.items():
+        public_ports = sorted(signal["public_ports"])
+        container_ports = sorted(signal["container_ports"])
+        established = int(signal["tcp_established_flows"])
+        unreplied = int(signal["tcp_unreplied_flows"])
+        pending = int(signal["tcp_handshake_pending_flows"])
+        incomplete = unreplied + pending
+        if len(public_ports) >= 3 and incomplete >= 3 and incomplete >= max(1, established * 2):
+            classification = "possible_multiport_probe"
+        elif established and unreplied:
+            classification = "mixed_connection_evidence"
+        elif established:
+            classification = "bidirectional_tcp_observed"
+        elif unreplied:
+            classification = "unreplied_tcp_observed"
+        else:
+            classification = "insufficient_transport_evidence"
+        normalized_signals.append({
+            "ip": ip,
+            "flow_count": int(signal["flow_count"]),
+            "tcp_established_flows": established,
+            "tcp_unreplied_flows": unreplied,
+            "tcp_handshake_pending_flows": pending,
+            "source_packets": int(signal["source_packets"]),
+            "reply_packets": int(signal["reply_packets"]),
+            "public_ports": public_ports[:32],
+            "container_ports": container_ports[:32],
+            "protocols": sorted(signal["protocols"]),
+            "evidence_sources": sorted(signal["evidence_sources"]),
+            "classification": classification,
+            "scope": "single_conntrack_snapshot"
+            if signal["evidence_sources"] == {"host_conntrack"}
+            else "single_host_network_snapshot",
+        })
+    security["inbound_source_signals"] = sorted(
+        normalized_signals,
+        key=lambda item: (item["classification"] == "possible_multiport_probe", item["flow_count"]),
+        reverse=True,
+    )[:20]
     security["inbound_public_flows"] = [
         {
             "remote_ip": key[0],
@@ -1982,6 +2291,13 @@ def _apply_host_conntrack_security(
 def _enrich_communication_with_original_sources(
     communication: Dict[str, object], public_flows: List[Dict[str, object]]
 ) -> None:
+    """Keep NAT-derived sources at port scope unless an exact socket tuple matched.
+
+    Host conntrack can restore the public client IP hidden by a container proxy,
+    but grouping those flows by container port cannot prove which individual
+    accepted socket or PID handled each source. Do not copy aggregate IPs onto
+    every socket on that port or label the correlation as confirmed.
+    """
     flows_by_port: Dict[int, List[Dict[str, object]]] = {}
     for flow in public_flows:
         if not isinstance(flow, dict):
@@ -1989,31 +2305,50 @@ def _enrich_communication_with_original_sources(
         port = int(flow.get("container_port") or 0)
         if port > 0:
             flows_by_port.setdefault(port, []).append(flow)
-    process_sources: Dict[Tuple[int, str], set] = {}
-    sockets = communication.get("communication_sockets")
-    if not isinstance(sockets, list):
-        sockets = []
-    for item in sockets:
-        if not isinstance(item, dict) or item.get("direction") != "inbound":
+    listener_owners: Dict[int, set[Tuple[int, str]]] = {}
+    listeners = communication.get("service_listeners")
+    for listener in listeners if isinstance(listeners, list) else []:
+        if not isinstance(listener, dict):
             continue
-        _, local_port = _parse_socket_endpoint(str(item.get("local") or ""))
-        matched_flows = flows_by_port.get(local_port, [])
-        original_ips = sorted({str(flow.get("remote_ip") or "") for flow in matched_flows if flow.get("remote_ip")})
-        if not original_ips:
+        try:
+            port = int(listener.get("port") or 0)
+            pid = int(listener.get("pid") or 0)
+        except (TypeError, ValueError):
             continue
-        item["original_remote_ips"] = original_ips[:20]
-        key = (int(item.get("pid") or 0), str(item.get("process") or "unknown"))
-        process_sources.setdefault(key, set()).update(original_ips)
-    processes = communication.get("communication_processes")
-    if not isinstance(processes, list):
-        return
-    for process in processes:
-        if not isinstance(process, dict):
+        if port > 0 and pid > 0:
+            listener_owners.setdefault(port, set()).add(
+                (pid, str(listener.get("process") or "unknown")[:120])
+            )
+
+    port_evidence = []
+    for port, matched_flows in sorted(flows_by_port.items()):
+        source_ips = sorted({
+            str(flow.get("remote_ip") or "")
+            for flow in matched_flows
+            if flow.get("remote_ip") and _is_public_source_ip(str(flow.get("remote_ip")))
+        })
+        if not source_ips:
             continue
-        key = (int(process.get("pid") or 0), str(process.get("process") or "unknown"))
-        sources = sorted(process_sources.get(key, set()))
-        process["original_inbound_unique_ips"] = len(sources)
-        process["original_inbound_top_ips"] = sources[:20]
+        connections = 0
+        for flow in matched_flows:
+            try:
+                connections += max(0, int(flow.get("connections") or 0))
+            except (TypeError, ValueError):
+                continue
+        port_evidence.append({
+            "container_port": port,
+            "source_ips": source_ips[:20],
+            "source_ip_count": len(source_ips),
+            "connections": connections,
+            "process_listeners": [
+                {"pid": pid, "process": process}
+                for pid, process in sorted(listener_owners.get(port, set()))[:20]
+            ],
+            "correlation_scope": "container_port_aggregate",
+            "confidence": "port_correlated",
+            "exact_socket_match": False,
+        })
+    communication["inbound_port_evidence"] = port_evidence[:50]
 
 
 _NGINX_ACCESS_RE = re.compile(r'^([^ ]+)\s+.*?"([A-Z]+)\s+([^ ]+)\s+[^\"]+"\s+(\d{3})\b')
@@ -2904,6 +3239,7 @@ def notify_buyers_of_critical_alert(
 
 
 def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float) -> Dict[str, object]:
+    global _pending_firewall_event_cursor
     enabled = os.getenv("SECURITY_MONITOR_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
     access = _collect_access_log_stats(interval_seconds) if enabled else {"enabled": False, "readable_files": 0}
     summary: Dict[str, object] = {
@@ -2917,9 +3253,24 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         "access_log": access,
         "access_sources": [{"label": "宿主机日志", **access}],
         "alerts": [],
+        "host_firewall": _runman_firewall_control_status(),
     }
     if not enabled:
         return summary
+
+    if isinstance(summary.get("host_firewall"), dict):
+        summary["host_firewall"] = {
+            **summary["host_firewall"],
+            "readback": _runman_firewall_readback(),
+        }
+    firewall_events = _runman_firewall_events(_firewall_event_cursor)
+    if isinstance(summary.get("host_firewall"), dict):
+        summary["host_firewall"] = {**summary["host_firewall"], **firewall_events}
+    _pending_firewall_event_cursor = (
+        str(firewall_events.get("next_cursor") or _firewall_event_cursor)
+        if firewall_events.get("events_api") == "ready"
+        else _firewall_event_cursor
+    )
 
     ddos_rx_bps = _env_float("ALERT_DDOS_RX_BPS", 100_000_000)
     ddos_rx_pps = _env_float("ALERT_DDOS_RX_PPS", 50_000)
@@ -6021,14 +6372,34 @@ def _collect_host_proc_socket_details(
         "05": "fin-wait-2", "06": "time-wait", "07": "close", "08": "close-wait",
         "09": "last-ack", "0A": "listen", "0B": "closing",
     }
-    listening = {int(port) for port in listening_ports if int(port) > 0}
+    tcp_listening = {int(port) for port in listening_ports if int(port) > 0}
+    udp_listening: set[int] = set()
+    socket_tables: Dict[str, str] = {}
+    table_specs = (
+        ("tcp", "tcp", False), ("tcp6", "tcp", True), ("udp", "udp", False), ("udp6", "udp", True)
+    )
+    for filename, proto, _is_v6 in table_specs:
+        table = _read_host_proc_text(f"/proc/{init_pid}/net/{filename}", 2_000_000)
+        socket_tables[filename] = table
+        for line in table.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 4 or ":" not in parts[1] or ":" not in parts[2]:
+                continue
+            _, local_port_hex = parts[1].rsplit(":", 1)
+            observed_port = _parse_port(local_port_hex)
+            _, remote_port_hex = parts[2].rsplit(":", 1)
+            remote_port = _parse_port(remote_port_hex)
+            if proto == "tcp" and parts[3].upper() == "0A" and observed_port > 0:
+                tcp_listening.add(observed_port)
+            elif proto == "udp" and remote_port == 0 and observed_port > 0:
+                udp_listening.add(observed_port)
     sockets: List[Dict[str, object]] = []
+    service_listeners: List[Dict[str, object]] = []
+    listener_keys = set()
     snapshot_count = 0
     snapshot_cap = max(500, min(2000, socket_limit * 2))
-    for filename, proto, is_v6 in (
-        ("tcp", "tcp", False), ("tcp6", "tcp", True), ("udp", "udp", False), ("udp6", "udp", True)
-    ):
-        table = _read_host_proc_text(f"/proc/{init_pid}/net/{filename}", 2_000_000)
+    for filename, proto, is_v6 in table_specs:
+        table = socket_tables[filename]
         for line in table.splitlines()[1:]:
             if snapshot_count >= snapshot_cap:
                 break
@@ -6043,6 +6414,21 @@ def _collect_host_proc_socket_details(
             local_port = _parse_port(local_port_hex)
             remote_port = _parse_port(remote_port_hex)
             state = parts[3].upper()
+            is_listener = (proto == "tcp" and state == "0A") or (proto == "udp" and remote_port == 0)
+            if is_listener and local_port > 0:
+                owner_pid, owner_name = inode_owners.get(parts[9], (0, "unknown"))
+                listener_key = (proto, local_ip, local_port, owner_pid)
+                if owner_pid > 0 and listener_key not in listener_keys and len(service_listeners) < 100:
+                    listener_keys.add(listener_key)
+                    local_endpoint = f"[{local_ip}]:{local_port}" if ":" in local_ip else f"{local_ip}:{local_port}"
+                    service_listeners.append({
+                        "process": owner_name,
+                        "pid": owner_pid,
+                        "proto": proto,
+                        "local": local_endpoint,
+                        "port": local_port,
+                        "source": "host_proc_fd_inode",
+                    })
             if proto == "tcp" and state not in ("01", "02", "03"):
                 continue
             if proto == "udp" and remote_port <= 0:
@@ -6050,20 +6436,28 @@ def _collect_host_proc_socket_details(
             if not _is_trackable_ip(remote_ip):
                 continue
             owner_pid, owner_name = inode_owners.get(parts[9], (0, "unknown"))
-            direction = "inbound" if local_port in listening or state == "03" else "outbound"
+            state_name = state_names.get(state, state.lower())
+            direction, origin, direction_evidence = _classify_socket_origin(
+                proto, state_name, local_port, tcp_listening if proto == "tcp" else udp_listening
+            )
             local_text = f"[{local_ip}]:{local_port}" if ":" in local_ip else f"{local_ip}:{local_port}"
             remote_text = f"[{remote_ip}]:{remote_port}" if ":" in remote_ip else f"{remote_ip}:{remote_port}"
             if len(sockets) < socket_limit:
                 sockets.append(
                     {
                         "proto": proto,
-                        "state": state_names.get(state, state.lower()),
+                        "state": state_name,
                         "direction": direction,
                         "local": local_text,
                         "remote": remote_text,
                         "remote_ip": remote_ip,
                         "process": owner_name,
                         "pid": owner_pid,
+                        "origin": origin,
+                        "origin_confidence": "confirmed" if direction_evidence.startswith("confirmed_") else "probable" if direction != "unknown" else "unknown",
+                        "direction_evidence": direction_evidence,
+                        "process_role": "acceptor" if direction == "inbound" else "initiator" if direction == "outbound" else "unknown",
+                        "process_attribution": "attributed" if owner_pid > 0 else "unavailable",
                     }
                 )
         if snapshot_count >= snapshot_cap:
@@ -6073,9 +6467,9 @@ def _collect_host_proc_socket_details(
         key = (int(item.get("pid") or 0), str(item.get("process") or "unknown"))
         aggregate = totals.setdefault(
             key,
-            {"pid": key[0], "process": key[1], "inbound_connections": 0, "outbound_connections": 0, "remote_ips": set()},
+            {"pid": key[0], "process": key[1], "inbound_connections": 0, "outbound_connections": 0, "unknown_connections": 0, "remote_ips": set()},
         )
-        direction = "inbound" if item.get("direction") == "inbound" else "outbound"
+        direction = item.get("direction") if item.get("direction") in ("inbound", "outbound") else "unknown"
         aggregate[f"{direction}_connections"] = int(aggregate[f"{direction}_connections"]) + 1
         remote_ips = aggregate.get("remote_ips")
         if isinstance(remote_ips, set):
@@ -6096,6 +6490,9 @@ def _collect_host_proc_socket_details(
         "communication_snapshot_truncated": snapshot_count >= snapshot_cap,
         "communication_processes": process_totals[:50],
         "communication_sockets": sockets,
+        "service_listeners": service_listeners,
+        "communication_owner_attributed_count": _communication_socket_owner_count({"communication_sockets": sockets}),
+        "process_attribution_available": _communication_socket_owner_count({"communication_sockets": sockets}) > 0,
     }
 
 
@@ -6107,6 +6504,7 @@ def collect_container_deep_sample(
     pid: int,
     action: Dict[str, object],
     base_report: Dict[str, object],
+    host_conntrack: Dict[str, object] | None = None,
 ) -> Dict[str, object]:
     """Collect a single bounded diagnostic snapshot for an explicitly requested container."""
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
@@ -6146,16 +6544,28 @@ def collect_container_deep_sample(
         snapshot_limit_override=max(500, socket_limit * 2),
         detail_limit_override=socket_limit,
     )
-    if not communication.get("communication_detail_available"):
+    socket_rows = communication.get("communication_sockets")
+    primary_owner_count = _communication_socket_owner_count(communication)
+    if not communication.get("communication_detail_available") or (isinstance(socket_rows, list) and socket_rows and primary_owner_count < len(socket_rows)):
         if not host_processes:
             _, host_processes = _collect_host_proc_process_snapshot(pid, process_limit)
         host_communication = _collect_host_proc_socket_details(
             pid, host_processes, listening_ports, socket_limit
         )
         if host_communication.get("communication_detail_available"):
-            communication = host_communication
-        else:
+            if communication.get("communication_detail_available") and isinstance(socket_rows, list) and socket_rows:
+                _merge_socket_process_attribution(communication, host_communication)
+                if _communication_socket_owner_count(communication) == 0 and _communication_socket_owner_count(host_communication) > 0:
+                    communication = host_communication
+            else:
+                communication = host_communication
+        elif not communication.get("communication_detail_available"):
             errors.append("socket ownership is unavailable from both container ss and host /proc")
+    if isinstance(communication.get("communication_sockets"), list) and communication.get("communication_sockets") and not communication.get("process_attribution_available"):
+        errors.append("socket rows were collected, but process/PID ownership could not be read; connection direction may still be available")
+    conntrack_snapshot = host_conntrack if isinstance(host_conntrack, dict) else {}
+    conntrack_entries = conntrack_snapshot.get("entries") if isinstance(conntrack_snapshot.get("entries"), list) else []
+    conntrack_matches = _enrich_communication_with_conntrack_origins(communication, conntrack_entries)
     _enrich_communication_with_original_sources(
         communication,
         security.get("inbound_public_flows", [])
@@ -6179,18 +6589,52 @@ def collect_container_deep_sample(
                 continue
             entry = ip_totals.setdefault(
                 normalized,
-                {"ip": normalized, "connections": 0, "inbound": 0, "outbound": 0, "processes": set()},
+                {
+                    "ip": normalized, "connections": 0, "inbound": 0, "outbound": 0,
+                    "unknown": 0, "processes": set(), "inbound_processes": set(),
+                    "outbound_processes": set(), "inbound_evidence": set(),
+                    "outbound_evidence": set(), "inbound_confidences": set(),
+                    "outbound_confidences": set(),
+                },
             )
             entry["connections"] = int(entry["connections"]) + 1
-            direction = "inbound" if item.get("direction") == "inbound" else "outbound"
+            direction = item.get("direction") if item.get("direction") in ("inbound", "outbound") else "unknown"
             entry[direction] = int(entry[direction]) + 1
             processes = entry.get("processes")
-            if isinstance(processes, set):
-                processes.add(str(item.get("process") or "unknown")[:120])
+            process_name = str(item.get("process") or "unknown")[:120]
+            process_pid = int(item.get("pid") or 0)
+            if isinstance(processes, set) and process_name != "unknown":
+                processes.add(process_name)
+            if direction in ("inbound", "outbound"):
+                directional_processes = entry.get(f"{direction}_processes")
+                if isinstance(directional_processes, set) and process_name != "unknown":
+                    directional_processes.add((process_name, process_pid))
+                evidence = entry.get(f"{direction}_evidence")
+                if isinstance(evidence, set):
+                    evidence.add(str(item.get("direction_evidence") or "socket_direction_snapshot"))
+                confidences = entry.get(f"{direction}_confidences")
+                if isinstance(confidences, set):
+                    confidences.add(str(item.get("origin_confidence") or "probable"))
     connection_ips = []
     for entry in ip_totals.values():
-        processes = entry.pop("processes", set())
-        entry["processes"] = sorted(processes)[:20] if isinstance(processes, set) else []
+        for field in ("processes",):
+            processes = entry.pop(field, set())
+            entry[field] = sorted(processes)[:20] if isinstance(processes, set) else []
+        for direction in ("inbound", "outbound"):
+            process_set = entry.pop(f"{direction}_processes", set())
+            entry[f"{direction}_processes"] = [
+                {"process": process_name, **({"pid": pid} if pid > 0 else {})}
+                for process_name, pid in sorted(process_set)[:20]
+            ] if isinstance(process_set, set) else []
+            evidence_set = entry.pop(f"{direction}_evidence", set())
+            entry[f"{direction}_direction_evidence"] = sorted(evidence_set)[:8] if isinstance(evidence_set, set) else []
+            confidences = entry.pop(f"{direction}_confidences", set())
+            entry[f"{direction}_origin_confidence"] = (
+                "confirmed" if confidences == {"confirmed"}
+                else "probable" if confidences and "unknown" not in confidences
+                else "unknown" if not confidences else "mixed"
+            )
+            entry[f"{direction}_origin"] = "remote_peer" if direction == "inbound" else "local_process"
         connection_ips.append(entry)
     connection_ips.sort(key=lambda item: int(item.get("connections") or 0), reverse=True)
     detail_by_ip = _geoip_detail_map([str(item.get("ip") or "") for item in connection_ips])
@@ -6207,6 +6651,37 @@ def collect_container_deep_sample(
     }
     inbound_ips = [item for item in connection_ips if int(item.get("inbound") or 0) > 0]
     outbound_ips = [item for item in connection_ips if int(item.get("outbound") or 0) > 0]
+    source_signals = security.get("inbound_source_signals") if isinstance(security.get("inbound_source_signals"), list) else []
+    source_signals_by_ip = {
+        str(item.get("ip") or ""): item
+        for item in source_signals
+        if isinstance(item, dict) and item.get("ip")
+    }
+    inbound_ip_items = {str(item.get("ip") or ""): item for item in inbound_ips if item.get("ip")}
+    for source_ip, signal in source_signals_by_ip.items():
+        item = inbound_ip_items.get(source_ip)
+        if item is None:
+            item = {
+                "ip": source_ip,
+                "connections": int(signal.get("flow_count") or 0),
+                "inbound": int(signal.get("flow_count") or 0),
+                "outbound": 0,
+                "processes": [],
+                "source_observation": "host_conntrack",
+                "inbound_processes": [],
+                "inbound_direction_evidence": ["host_conntrack_original_tuple"],
+                "inbound_origin_confidence": "confirmed",
+                "inbound_origin": "remote_peer",
+            }
+            inbound_ips.append(item)
+            inbound_ip_items[source_ip] = item
+        item["network_evidence"] = signal
+        evidence_items = item.setdefault("inbound_direction_evidence", [])
+        if isinstance(evidence_items, list) and "host_conntrack_original_tuple" not in evidence_items:
+            evidence_items.append("host_conntrack_original_tuple")
+        item["inbound_origin_confidence"] = "confirmed"
+    inbound_ips.sort(key=lambda item: int(item.get("inbound") or 0), reverse=True)
+    unclassified_ips = [item for item in connection_ips if int(item.get("unknown") or 0) > 0]
     communication_processes = communication.get("communication_processes")
     communication_processes = communication_processes if isinstance(communication_processes, list) else []
     inbound_process_count = sum(
@@ -6217,6 +6692,41 @@ def collect_container_deep_sample(
         1 for item in communication_processes
         if isinstance(item, dict) and int(item.get("outbound_connections") or 0) > 0
     )
+    confirmed_local_initiated = sum(
+        1 for item in sockets if isinstance(item, dict)
+        and item.get("direction") == "outbound" and item.get("origin_confidence") == "confirmed"
+    )
+    probable_local_initiated = sum(
+        1 for item in sockets if isinstance(item, dict)
+        and item.get("direction") == "outbound" and item.get("origin_confidence") == "probable"
+    )
+    confirmed_remote_initiated = sum(
+        1 for item in sockets if isinstance(item, dict)
+        and item.get("direction") == "inbound" and item.get("origin_confidence") == "confirmed"
+    )
+    probable_remote_initiated = sum(
+        1 for item in sockets if isinstance(item, dict)
+        and item.get("direction") == "inbound" and item.get("origin_confidence") == "probable"
+    )
+    unknown_direction = sum(
+        1 for item in sockets if isinstance(item, dict) and item.get("direction") == "unknown"
+    )
+    owner_attributed = _communication_socket_owner_count(communication)
+    connection_attribution = {
+        "captured_sockets": len(sockets),
+        "confirmed_local_initiated": confirmed_local_initiated,
+        "probable_local_initiated": probable_local_initiated,
+        "confirmed_remote_initiated": confirmed_remote_initiated,
+        "probable_remote_initiated": probable_remote_initiated,
+        "unknown_direction": unknown_direction,
+        "process_attributed_sockets": owner_attributed,
+        "conntrack_confirmed_sockets": int(conntrack_matches.get("matched_outbound") or 0) + int(conntrack_matches.get("matched_inbound") or 0),
+        "conntrack_available": bool(conntrack_snapshot.get("available")),
+        "conntrack_entries_examined": len(conntrack_entries),
+        "conntrack_snapshot_truncated": bool(conntrack_snapshot.get("snapshot_truncated")),
+        "socket_snapshot_truncated": bool(communication.get("communication_snapshot_truncated")),
+        "process_attribution_available": owner_attributed > 0,
+    }
 
     return {
         "action_id": int(action.get("id") or 0),
@@ -6229,21 +6739,24 @@ def collect_container_deep_sample(
         "processes": process_snapshot,
         "connection_count": max(int(base_report.get("conn_count") or 0), len(sockets)),
         "unique_connection_ips": len(connection_ips),
-        "inbound_unique_ips": len(inbound_ip_counts),
+        "inbound_unique_ips": max(len(inbound_ip_counts), len(inbound_ips)),
         "outbound_unique_ips": len(outbound_ip_counts),
         "observed_inbound_unique_ips": int(security.get('inbound_unique_ips') or 0),
         "observed_outbound_unique_ips": int(security.get('outbound_unique_ips') or 0),
         "connection_metrics": security.get('connection_metrics', {}),
-        "evidence_schema": 3,
+        "evidence_schema": 5,
         "inbound_process_count": inbound_process_count,
         "outbound_process_count": outbound_process_count,
         "inbound_country_stats": _geoip_country_batch(inbound_ip_counts),
         "outbound_country_stats": _geoip_country_batch(outbound_ip_counts),
         "inbound_ips": inbound_ips,
         "outbound_ips": outbound_ips,
+        "unclassified_ips": unclassified_ips,
         "connection_ips": connection_ips[:100],
         "communication_processes": communication_processes,
         "communication_sockets": sockets,
+        "inbound_port_evidence": communication.get("inbound_port_evidence", []),
+        "connection_attribution": connection_attribution,
         "socket_snapshot_count": int(communication.get("communication_snapshot_count") or 0),
         "socket_snapshot_truncated": bool(communication.get("communication_snapshot_truncated")),
         "errors": errors,
@@ -6492,6 +7005,282 @@ def _runman_host_firewall_request(policy: Dict[str, object]) -> Tuple[bool, str]
         return True, str(body.get('message') or 'Runman host firewall policy updated')[:500]
     except (OSError, ValueError, http.client.HTTPException):
         return False, 'Runman firewall socket unavailable; no host firewall change was confirmed'
+    finally:
+        connection.close()
+
+
+def _runman_firewall_control_status() -> Dict[str, object]:
+    observed_at = int(time.time())
+    if os.name != "posix":
+        return {"control_api": "unsupported", "observed_at": observed_at}
+    connection = network_quarantine._UnixHTTP("/run/narwhal-agent/firewall.sock")
+    connection.timeout = 2
+    try:
+        # Runman exposes only a POST policy endpoint. A method probe is read-only:
+        # supported builds return 405 for this known path; older builds return 404.
+        connection.request("GET", "/v1/firewall/policy", headers={"Connection": "close"})
+        response = connection.getresponse()
+        response.read(1025)
+        if response.status == 405:
+            control_api = "ready"
+        elif response.status == 404:
+            control_api = "unsupported"
+        elif response.status == 200:
+            control_api = "ready"
+        else:
+            control_api = "unavailable"
+    except (OSError, ValueError, http.client.HTTPException):
+        control_api = "unavailable"
+    finally:
+        connection.close()
+    return {"control_api": control_api, "observed_at": observed_at}
+
+
+def _runman_firewall_readback() -> Dict[str, object]:
+    """Fetch a bounded, read-only snapshot of actual RFW rules through Runman."""
+    observed_at = int(time.time())
+    result: Dict[str, object] = {
+        "status": "unsupported" if os.name != "posix" else "unavailable",
+        "observed_at": observed_at,
+        "snapshot": None,
+    }
+    if os.name != "posix":
+        return result
+    connection = network_quarantine._UnixHTTP("/run/narwhal-agent/firewall.sock")
+    connection.timeout = 7
+    try:
+        connection.request("GET", "/v1/firewall/readback", headers={"Connection": "close"})
+        response = connection.getresponse()
+        raw = response.read(131073)
+        if len(raw) > 131072:
+            return result
+        if response.status == 404:
+            result["status"] = "unsupported"
+            return result
+        if response.status != 200:
+            return result
+        try:
+            snapshot = json.loads(raw.decode("utf-8")) if raw else None
+        except (UnicodeDecodeError, ValueError):
+            return result
+        if not isinstance(snapshot, dict):
+            return result
+        status = snapshot.get("status")
+        policy_revision = snapshot.get("policy_revision")
+        rule_count = snapshot.get("rule_count")
+        managed_count = snapshot.get("managed_rule_count")
+        drift_count = snapshot.get("drift_count")
+        missing_count = snapshot.get("missing_count")
+        rules = snapshot.get("rules")
+        expected_rules = snapshot.get("expected_rules")
+        rfw_api_version = snapshot.get("rfw_api_version", "")
+        capabilities_known = snapshot.get("capabilities_known", False)
+        raw_supported_protocols = snapshot.get("supported_protocols", [])
+        if (
+            status not in {"in_sync", "drifted"}
+            or type(policy_revision) is not int or not 0 <= policy_revision <= 2**63 - 1
+            or type(rule_count) is not int or not 0 <= rule_count <= 256
+            or type(managed_count) is not int or not 0 <= managed_count <= rule_count
+            or type(drift_count) is not int or not 0 <= drift_count <= 320
+            or type(missing_count) is not int or not 0 <= missing_count <= 64
+            or not isinstance(rules, list) or len(rules) != rule_count
+            or not isinstance(expected_rules, list) or len(expected_rules) > 64
+            or not isinstance(rfw_api_version, str) or len(rfw_api_version) > 64
+            or type(capabilities_known) is not bool
+            or not isinstance(raw_supported_protocols, list) or len(raw_supported_protocols) > 32
+        ):
+            return result
+        protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto"}
+        supported_protocols = [str(protocol).strip().lower() for protocol in raw_supported_protocols]
+        if (len(set(supported_protocols)) != len(supported_protocols)
+                or any(protocol not in protocols for protocol in supported_protocols)
+                or (capabilities_known and not supported_protocols)):
+            return result
+        normalized_rules = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                return result
+            if (
+                type(rule.get("id")) is not int or not 1 <= rule["id"] <= 2**63 - 1
+                or type(rule.get("priority")) is not int or not 0 <= rule["priority"] <= 100000
+                or rule.get("direction") not in {"in", "out"}
+                or rule.get("protocol") not in protocols
+                or rule.get("action") not in {"block", "pass"}
+                or type(rule.get("enabled")) is not bool
+                or type(rule.get("port_start")) is not int or not 0 <= rule["port_start"] <= 65535
+                or type(rule.get("port_end")) is not int or not rule["port_start"] <= rule["port_end"] <= 65535
+                or rule.get("ip_type") not in {"any", "cidr", "geoip"}
+                or rule.get("origin") not in {"platform", "manual"}
+                or rule.get("sync_state") not in {"manual", "in_sync", "drifted", "orphaned"}
+            ):
+                return result
+            item: Dict[str, object] = {
+                "id": rule["id"], "priority": rule["priority"], "direction": rule["direction"],
+                "protocol": rule["protocol"], "action": rule["action"], "enabled": rule["enabled"],
+                "port_start": rule["port_start"], "port_end": rule["port_end"], "ip_type": rule["ip_type"],
+                "origin": rule["origin"], "sync_state": rule["sync_state"],
+            }
+            managed_key = rule.get("managed_key")
+            if rule["origin"] == "platform":
+                if not isinstance(managed_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", managed_key):
+                    return result
+                item["managed_key"] = managed_key
+            if rule["ip_type"] == "cidr":
+                try:
+                    item["ip"] = str(ipaddress.ip_network(str(rule.get("ip") or "").strip(), strict=False))
+                except ValueError:
+                    return result
+            elif rule["ip_type"] == "geoip":
+                countries = rule.get("countries")
+                if not isinstance(countries, list) or not 1 <= len(countries) <= 30:
+                    return result
+                codes = sorted({str(country).strip().upper() for country in countries})
+                if any(not re.fullmatch(r"[A-Z]{2}", code) for code in codes):
+                    return result
+                item["countries"] = codes
+            normalized_rules.append(item)
+        normalized_expected = []
+        for expected in expected_rules:
+            if not isinstance(expected, dict) or not isinstance(expected.get("key"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", expected["key"]):
+                return result
+            if expected.get("sync_state") not in {"in_sync", "drifted", "missing"}:
+                return result
+            expected_item = {"key": expected["key"], "sync_state": expected["sync_state"]}
+            if "id" in expected:
+                if type(expected["id"]) is not int or not 1 <= expected["id"] <= 2**63 - 1:
+                    return result
+                expected_item["id"] = expected["id"]
+            normalized_expected.append(expected_item)
+        normalized_snapshot = {
+            "status": status,
+            "observed_at": observed_at,
+            "policy_revision": policy_revision,
+            "rule_count": rule_count,
+            "managed_rule_count": managed_count,
+            "drift_count": drift_count,
+            "missing_count": missing_count,
+            "rfw_api_version": rfw_api_version,
+            "capabilities_known": capabilities_known,
+            "supported_protocols": sorted(supported_protocols),
+            "rules": normalized_rules,
+            "expected_rules": normalized_expected,
+        }
+        result.update({"status": "ready", "snapshot": normalized_snapshot})
+        return result
+    except (OSError, ValueError, http.client.HTTPException):
+        return result
+    finally:
+        connection.close()
+
+
+def _runman_firewall_events(cursor: str = "") -> Dict[str, object]:
+    observed_at = int(time.time())
+    result: Dict[str, object] = {
+        "events_api": "unavailable",
+        "observed_at": observed_at,
+        "instance_id": "",
+        "next_cursor": cursor if isinstance(cursor, str) else "",
+        "cursor_reset": False,
+        "dropped": 0,
+        "dropped_total": 0,
+        "events": [],
+    }
+    if os.name != "posix":
+        result["events_api"] = "unsupported"
+        return result
+    if not isinstance(cursor, str) or len(cursor) > 160 or (
+        cursor and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}:\d{1,20}", cursor)
+    ):
+        cursor = ""
+    connection = network_quarantine._UnixHTTP("/run/narwhal-agent/firewall.sock")
+    connection.timeout = 3
+    try:
+        path = "/v1/firewall/events?cursor=" + quote(cursor, safe=":-_") + "&limit=100"
+        connection.request("GET", path, headers={"Connection": "close"})
+        response = connection.getresponse()
+        raw = response.read(65537)
+        if len(raw) > 65536:
+            return result
+        if response.status == 404:
+            result["events_api"] = "unsupported"
+            return result
+        if response.status != 200:
+            return result
+        try:
+            page = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            return result
+        if not isinstance(page, dict):
+            return result
+        instance_id = str(page.get("instance_id") or "")
+        next_cursor = str(page.get("next_cursor") or "")
+        events = page.get("events")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", instance_id) or len(next_cursor) > 160:
+            return result
+        if next_cursor and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}:\d{1,20}", next_cursor):
+            return result
+        if not isinstance(events, list) or len(events) > 100:
+            return result
+        allowed_app_protocols = {"http", "tls", "socks", "fet", "wireguard", "ssh", "openvpn", "quic", "mtproto", "unknown"}
+        sanitized_events = []
+        for event in events:
+            if not isinstance(event, dict):
+                return result
+            if type(event.get("sequence")) is not int or event["sequence"] < 1:
+                return result
+            if type(event.get("observed_at")) is not int or event["observed_at"] <= 0:
+                return result
+            try:
+                source_ip = str(ipaddress.ip_address(str(event.get("source_ip") or "")))
+                destination_ip = str(ipaddress.ip_address(str(event.get("destination_ip") or "")))
+            except ValueError:
+                return result
+            source_port = event.get("source_port")
+            destination_port = event.get("destination_port")
+            if (type(source_port) is not int or not 0 <= source_port <= 65535 or
+                    type(destination_port) is not int or not 0 <= destination_port <= 65535):
+                return result
+            transport = str(event.get("transport") or "")
+            app_protocol = str(event.get("app_protocol") or "")
+            direction = str(event.get("direction") or "")
+            action = str(event.get("action") or "")
+            event_cursor = str(event.get("cursor") or "")
+            if (transport not in {"tcp", "udp", "unknown"} or app_protocol not in allowed_app_protocols or
+                    direction not in {"in", "out"} or action not in {"pass", "block"} or
+                    not re.fullmatch(r"[A-Za-z0-9_-]{1,80}:\d{1,20}", event_cursor)):
+                return result
+            countries = event.get("rule_countries")
+            if not isinstance(countries, list) or len(countries) > 30:
+                return result
+            normalized_countries = [str(code).strip().upper() for code in countries]
+            if any(not re.fullmatch(r"[A-Z]{2}", code) for code in normalized_countries):
+                return result
+            rule_id = event.get("rule_id")
+            if rule_id is not None and (type(rule_id) is not int or rule_id < 1):
+                return result
+            sanitized_events.append({
+                "sequence": event["sequence"], "cursor": event_cursor,
+                "observed_at": event["observed_at"], "source_ip": source_ip,
+                "source_port": source_port, "destination_ip": destination_ip,
+                "destination_port": destination_port, "transport": transport,
+                "app_protocol": app_protocol, "direction": direction, "action": action,
+                "rule_index": int(event.get("rule_index") or 0), "rule_id": rule_id,
+                "rule_protocol": str(event.get("rule_protocol") or "")[:32],
+                "rule_action": str(event.get("rule_action") or "")[:16],
+                "rule_countries": normalized_countries,
+            })
+        result.update({
+            "events_api": "ready",
+            "instance_id": instance_id,
+            "next_cursor": next_cursor,
+            "cursor_reset": page.get("cursor_reset") is True,
+            "dropped": max(0, min(int(page.get("dropped") or 0), 1_000_000)),
+            "dropped_total": max(0, min(int(page.get("dropped_total") or 0), 1_000_000_000)),
+            "events": sanitized_events,
+        })
+        return result
+    except (OSError, ValueError, http.client.HTTPException):
+        return result
     finally:
         connection.close()
 
@@ -7626,7 +8415,8 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
     return changed
 
 
-def push(server: str, secret: str, payload: Dict) -> None:
+def push(server: str, secret: str, payload: Dict) -> Dict[str, object]:
+    global _synced_buyer_push_config, _server_motd_states, _firewall_event_cursor
     server = normalize_server_url(server)
     body = json.dumps(payload, ensure_ascii=False).encode()
     ts = int(time.time())
@@ -7644,13 +8434,17 @@ def push(server: str, secret: str, payload: Dict) -> None:
         if isinstance(data, dict) and "narwhal_buyer_push" in data:
             push_cfg = data["narwhal_buyer_push"]
             if isinstance(push_cfg, dict):
-                global _synced_buyer_push_config
                 _synced_buyer_push_config = {"owner": push_cfg.get("owner", "server"), "enabled": False}
         if isinstance(data, dict) and isinstance(data.get("motd_states"), list):
-            global _server_motd_states
             _server_motd_states = data["motd_states"][:1000]
+        if isinstance(data, dict):
+            acknowledged_cursor = data.get("firewall_event_cursor")
+            if isinstance(acknowledged_cursor, str) and acknowledged_cursor and acknowledged_cursor == _pending_firewall_event_cursor:
+                _firewall_event_cursor = acknowledged_cursor
+            return data if isinstance(data, dict) else {}
     except Exception:
         pass
+    return {}
 
 
 def main() -> None:
@@ -7734,6 +8528,7 @@ def main() -> None:
                         pid_hint,
                         pending_deep_sample,
                         container_report,
+                        host_conntrack,
                     )
                     included_deep_sample_ids.append(int(pending_deep_sample.get("id") or 0))
                 except Exception as deep_error:

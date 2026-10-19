@@ -317,8 +317,84 @@ class SecurityTelemetryTests(unittest.TestCase):
             [item["direction"] for item in result["communication_sockets"]],
             ["inbound", "outbound"],
         )
+        inbound, outbound = result["communication_sockets"]
+        self.assertEqual(inbound["origin"], "remote_peer")
+        self.assertEqual(inbound["origin_confidence"], "probable")
+        self.assertEqual(inbound["process_role"], "acceptor")
+        self.assertEqual(inbound["direction_evidence"], "probable_local_listener_match")
+        self.assertEqual(outbound["origin"], "local_process")
+        self.assertEqual(outbound["origin_confidence"], "probable")
+        self.assertEqual(outbound["process_role"], "initiator")
+        self.assertEqual(outbound["direction_evidence"], "probable_established_non_listener")
         self.assertEqual(result["communication_processes"][0]["process"], "nginx")
         self.assertEqual(result["communication_processes"][0]["inbound_connections"], 1)
+
+    def test_socket_origin_uses_tcp_handshake_state_and_listener_evidence(self):
+        listeners = {443}
+        self.assertEqual(
+            agent._classify_socket_origin("tcp", "SYN-SENT", 53000, listeners),
+            ("outbound", "local_process", "confirmed_syn_sent"),
+        )
+        self.assertEqual(
+            agent._classify_socket_origin("tcp", "SYN-RECV", 443, listeners),
+            ("inbound", "remote_peer", "confirmed_syn_recv"),
+        )
+        self.assertEqual(
+            agent._classify_socket_origin("tcp", "ESTAB", 443, listeners),
+            ("inbound", "remote_peer", "probable_local_listener_match"),
+        )
+        self.assertEqual(
+            agent._classify_socket_origin("tcp", "ESTAB", 53000, listeners),
+            ("outbound", "local_process", "probable_established_non_listener"),
+        )
+        self.assertEqual(
+            agent._classify_socket_origin("udp", "ESTAB", 5353, {5353}),
+            ("inbound", "remote_peer", "probable_connected_udp_listener_match"),
+        )
+        self.assertEqual(
+            agent._classify_socket_origin("udp", "ESTAB", 53000, set()),
+            ("outbound", "local_process", "probable_connected_udp_non_listener"),
+        )
+
+    def test_host_proc_socket_snapshot_discovers_listener_and_attributes_pid(self):
+        tcp_table = """sl local_address rem_address st tx_queue tr tm->when retrnsmt uid timeout inode
+0: 0200000A:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 99
+1: 0200000A:01BB 08080808:C350 01 00000000:00000000 00:00000000 00000000 1000 0 100
+2: 0200000A:C350 01010101:01BB 01 00000000:00000000 00:00000000 00000000 1000 0 101
+"""
+
+        def read_table(path, _limit):
+            if path.endswith("/tcp"):
+                return tcp_table
+            return "sl local_address rem_address st tx_queue tr tm->when retrnsmt uid timeout inode\n"
+
+        def readlink(path):
+            if path.endswith("/5"):
+                return "socket:[99]"
+            if path.endswith("/3"):
+                return "socket:[100]"
+            if path.endswith("/4"):
+                return "socket:[101]"
+            raise OSError("not a socket")
+
+        with mock.patch.object(agent, "_read_host_proc_text", side_effect=read_table), \
+             mock.patch.object(agent.os, "listdir", return_value=["3", "4", "5"]), \
+             mock.patch.object(agent.os, "readlink", side_effect=readlink):
+            result = agent._collect_host_proc_socket_details(
+                123, [{"host_pid": 123, "pid": 1, "process": "worker"}], [], 20
+            )
+
+        self.assertEqual(
+            [item["direction"] for item in result["communication_sockets"]],
+            ["inbound", "outbound"],
+        )
+        self.assertEqual(result["communication_sockets"][0]["direction_evidence"], "probable_local_listener_match")
+        self.assertEqual(result["communication_sockets"][1]["direction_evidence"], "probable_established_non_listener")
+        self.assertEqual([item["pid"] for item in result["communication_sockets"]], [1, 1])
+        self.assertEqual(result["service_listeners"], [{
+            "process": "worker", "pid": 1, "proto": "tcp", "local": "10.0.0.2:443",
+            "port": 443, "source": "host_proc_fd_inode",
+        }])
 
     def test_conntrack_restores_original_sources_hidden_by_incus_proxy(self):
         entries = []
@@ -351,17 +427,84 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(security["inbound_unique_ips"], 11)
         self.assertEqual(security["inbound_public_flows"][0]["container_port"], 443)
 
-    def test_original_conntrack_sources_are_attributed_to_listening_process(self):
+    def test_conntrack_source_signals_distinguish_probe_clues_without_claiming_attack(self):
+        lines = [
+            "ipv4 2 tcp 6 431999 ESTABLISHED src=8.8.8.8 dst=10.91.0.2 sport=50000 dport=443 "
+            "src=10.91.0.2 dst=8.8.8.8 sport=443 dport=50000 packets=8 bytes=900 packets=6 bytes=700 [ASSURED]",
+            "ipv4 2 tcp 6 20 SYN_SENT src=8.8.8.8 dst=10.91.0.2 sport=50001 dport=22 "
+            "src=10.91.0.2 dst=8.8.8.8 sport=22 dport=50001 [UNREPLIED] packets=1 bytes=60 packets=0 bytes=0",
+            "ipv4 2 tcp 6 20 SYN_SENT src=8.8.8.8 dst=10.91.0.2 sport=50002 dport=80 "
+            "src=10.91.0.2 dst=8.8.8.8 sport=80 dport=50002 [UNREPLIED] packets=1 bytes=60 packets=0 bytes=0",
+            "ipv4 2 tcp 6 20 SYN_SENT src=8.8.8.8 dst=10.91.0.2 sport=50003 dport=8080 "
+            "src=10.91.0.2 dst=8.8.8.8 sport=8080 dport=50003 [UNREPLIED] packets=1 bytes=60 packets=0 bytes=0",
+            "ipv4 2 tcp 6 20 SYN_RECV src=8.8.8.8 dst=10.91.0.2 sport=50004 dport=8443 "
+            "src=10.91.0.2 dst=8.8.8.8 sport=8443 dport=50004 packets=1 bytes=60 packets=1 bytes=60",
+        ]
+        entries = [agent._parse_conntrack_line(line) for line in lines]
+        self.assertEqual(entries[0]["tcp_state"], "ESTABLISHED")
+        self.assertEqual(entries[0]["original_packets"], 8)
+        self.assertEqual(entries[0]["reply_packets"], 6)
+        self.assertTrue(entries[1]["unreplied"])
+        security = {"container_ips": ["10.91.0.2"]}
+        agent._apply_host_conntrack_security(
+            security,
+            {"entries": entries},
+            ["10.91.0.2"],
+            [{"listen": "tcp:0.0.0.0:18443", "target": "tcp:10.91.0.2:443"}],
+        )
+        signal = security["inbound_source_signals"][0]
+        self.assertEqual(signal["ip"], "8.8.8.8")
+        self.assertEqual(signal["tcp_established_flows"], 1)
+        self.assertEqual(signal["tcp_unreplied_flows"], 3)
+        self.assertEqual(signal["tcp_handshake_pending_flows"], 1)
+        self.assertEqual(signal["classification"], "possible_multiport_probe")
+        self.assertEqual(signal["scope"], "single_conntrack_snapshot")
+        self.assertEqual(signal["evidence_sources"], ["host_conntrack"])
+
+    def test_proxy_socket_source_is_marked_as_host_snapshot_not_conntrack(self):
+        security = {"container_ips": ["10.91.0.2"]}
+        agent._apply_host_conntrack_security(
+            security,
+            {
+                "available": False,
+                "entries": [{
+                    "proto": "tcp", "evidence_source": "host_proxy_socket",
+                    "tcp_state": "ESTABLISHED", "unreplied": False,
+                    "original_packets": 1, "reply_packets": 1,
+                    "original_src": "8.8.8.8", "original_dst": "9.9.9.9",
+                    "original_sport": 51000, "original_dport": 18443,
+                    "reply_src": "9.9.9.9", "reply_dst": "8.8.8.8",
+                    "reply_sport": 18443, "reply_dport": 51000,
+                }],
+                "nat_mappings": [{
+                    "proto": "tcp", "host": "9.9.9.9", "public_port": 18443,
+                    "target_host": "10.91.0.2", "container_port": 443,
+                }],
+            },
+            ["10.91.0.2"],
+            [],
+        )
+
+        signal = security["inbound_source_signals"][0]
+        self.assertEqual(signal["ip"], "8.8.8.8")
+        self.assertEqual(signal["evidence_sources"], ["host_proxy_socket"])
+        self.assertEqual(signal["scope"], "single_host_network_snapshot")
+
+    def test_port_aggregate_sources_are_not_mislabeled_as_exact_socket_attribution(self):
         communication = {
             "communication_sockets": [
                 {
                     "direction": "inbound",
                     "local": "10.91.0.2:443",
+                    "remote": "10.91.0.1:50000",
                     "process": "nginx",
                     "pid": 42,
+                    "direction_evidence": "probable_local_listener_match",
+                    "origin_confidence": "probable",
                 }
             ],
             "communication_processes": [{"process": "nginx", "pid": 42}],
+            "service_listeners": [{"process": "nginx", "pid": 42, "port": 443}],
         }
         agent._enrich_communication_with_original_sources(
             communication,
@@ -374,11 +517,128 @@ class SecurityTelemetryTests(unittest.TestCase):
             ],
         )
         process = communication["communication_processes"][0]
-        self.assertEqual(process["original_inbound_unique_ips"], 1)
-        self.assertEqual(
-            communication["communication_sockets"][0]["original_remote_ips"],
-            ["8.8.8.8"],
-        )
+        socket = communication["communication_sockets"][0]
+        self.assertNotIn("original_inbound_unique_ips", process)
+        self.assertNotIn("original_remote_ips", socket)
+        self.assertEqual(socket["direction_evidence"], "probable_local_listener_match")
+        self.assertEqual(socket["origin_confidence"], "probable")
+        self.assertEqual(communication["inbound_port_evidence"][0]["source_ips"], ["8.8.8.8"])
+        self.assertEqual(communication["inbound_port_evidence"][0]["connections"], 3)
+        self.assertEqual(communication["inbound_port_evidence"][0]["process_listeners"], [{"pid": 42, "process": "nginx"}])
+        self.assertEqual(communication["inbound_port_evidence"][0]["correlation_scope"], "container_port_aggregate")
+        self.assertEqual(communication["inbound_port_evidence"][0]["confidence"], "port_correlated")
+        self.assertFalse(communication["inbound_port_evidence"][0]["exact_socket_match"])
+
+    def test_conntrack_five_tuple_confirms_local_initiator_and_remote_acceptor(self):
+        communication = {
+            "communication_sockets": [
+                {
+                    "proto": "tcp", "state": "established", "direction": "outbound",
+                    "local": "10.91.0.2:53000", "remote": "8.8.8.8:443",
+                    "remote_ip": "8.8.8.8", "process": "curl", "pid": 88,
+                    "origin_confidence": "probable", "direction_evidence": "probable_established_non_listener",
+                },
+                {
+                    "proto": "tcp", "state": "established", "direction": "inbound",
+                    "local": "10.91.0.2:443", "remote": "1.1.1.1:50123",
+                    "remote_ip": "1.1.1.1", "process": "nginx", "pid": 42,
+                    "origin_confidence": "probable", "direction_evidence": "probable_local_listener_match",
+                },
+            ]
+        }
+        entries = [
+            {
+                "proto": "tcp", "original_src": "10.91.0.2", "original_sport": 53000,
+                "original_dst": "8.8.8.8", "original_dport": 443,
+                "reply_src": "8.8.8.8", "reply_sport": 443,
+                "reply_dst": "10.91.0.2", "reply_dport": 53000,
+            },
+            {
+                "proto": "tcp", "original_src": "1.1.1.1", "original_sport": 50123,
+                "original_dst": "203.0.113.9", "original_dport": 18443,
+                "reply_src": "10.91.0.2", "reply_sport": 443,
+                "reply_dst": "1.1.1.1", "reply_dport": 50123,
+            },
+        ]
+
+        counts = agent._enrich_communication_with_conntrack_origins(communication, entries)
+        outbound, inbound = communication["communication_sockets"]
+        self.assertEqual(counts, {"matched_outbound": 1, "matched_inbound": 1, "ambiguous": 0})
+        self.assertEqual((outbound["direction"], outbound["origin_confidence"], outbound["process_role"]), ("outbound", "confirmed", "initiator"))
+        self.assertEqual(outbound["direction_evidence"], "confirmed_conntrack_original_initiator")
+        self.assertEqual((inbound["direction"], inbound["origin_confidence"], inbound["process_role"]), ("inbound", "confirmed", "acceptor"))
+        self.assertEqual(inbound["original_remote_ips"], ["1.1.1.1"])
+
+    def test_conntrack_attribution_requires_matching_protocol_and_both_ports(self):
+        communication = {
+            "communication_sockets": [
+                {
+                    "proto": "tcp", "state": "established", "direction": "outbound",
+                    "local": "10.91.0.2:53000", "remote": "8.8.8.8:444",
+                    "remote_ip": "8.8.8.8", "pid": 88,
+                    "origin_confidence": "probable", "direction_evidence": "probable_established_non_listener",
+                }
+            ]
+        }
+        entry = {
+            "proto": "tcp", "original_src": "10.91.0.2", "original_sport": 53000,
+            "original_dst": "8.8.8.8", "original_dport": 443,
+            "reply_src": "8.8.8.8", "reply_sport": 443,
+            "reply_dst": "10.91.0.2", "reply_dport": 53000,
+        }
+
+        counts = agent._enrich_communication_with_conntrack_origins(communication, [entry])
+        item = communication["communication_sockets"][0]
+        self.assertEqual(counts["matched_outbound"], 0)
+        self.assertEqual(item["origin_confidence"], "probable")
+        self.assertEqual(item["direction_evidence"], "probable_established_non_listener")
+
+    def test_host_proxy_socket_leg_cannot_claim_exact_container_socket_origin(self):
+        communication = {
+            "communication_sockets": [{
+                "proto": "tcp", "state": "established", "direction": "inbound",
+                "local": "10.91.0.2:443", "remote": "10.91.0.1:52000",
+                "remote_ip": "10.91.0.1", "pid": 42,
+                "origin_confidence": "probable", "direction_evidence": "probable_local_listener_match",
+            }]
+        }
+        synthetic_proxy_leg = {
+            "proto": "tcp", "evidence_source": "host_proxy_socket",
+            "original_src": "8.8.8.8", "original_sport": 51000,
+            "original_dst": "203.0.113.9", "original_dport": 18443,
+            "reply_src": "9.9.9.9", "reply_sport": 18443,
+            "reply_dst": "8.8.8.8", "reply_dport": 51000,
+        }
+
+        counts = agent._enrich_communication_with_conntrack_origins(communication, [synthetic_proxy_leg])
+        item = communication["communication_sockets"][0]
+        self.assertEqual(counts, {"matched_outbound": 0, "matched_inbound": 0, "ambiguous": 0})
+        self.assertEqual(item["origin_confidence"], "probable")
+        self.assertEqual(item["direction_evidence"], "probable_local_listener_match")
+
+    def test_host_proc_fallback_fills_missing_socket_process_owner(self):
+        communication = {
+            "communication_sockets": [{
+                "proto": "tcp", "state": "ESTAB", "direction": "outbound",
+                "local": "10.91.0.2:53000", "remote": "8.8.8.8:443",
+                "remote_ip": "8.8.8.8", "process": "unknown", "pid": 0,
+                "process_attribution": "unavailable",
+            }],
+            "communication_processes": [],
+        }
+        fallback = {
+            "communication_sockets": [{
+                "proto": "tcp", "state": "established", "direction": "outbound",
+                "local": "10.91.0.2:53000", "remote": "8.8.8.8:443",
+                "remote_ip": "8.8.8.8", "process": "curl", "pid": 88,
+            }]
+        }
+
+        agent._merge_socket_process_attribution(communication, fallback)
+        self.assertEqual(communication["communication_sockets"][0]["process"], "curl")
+        self.assertEqual(communication["communication_sockets"][0]["pid"], 88)
+        self.assertEqual(communication["communication_sockets"][0]["process_attribution_source"], "host_proc_fd_inode")
+        self.assertTrue(communication["process_attribution_available"])
 
     def test_private_proxy_gateway_is_not_counted_as_public_source(self):
         entry = agent._parse_conntrack_line(
@@ -943,8 +1203,8 @@ class SecurityTelemetryTests(unittest.TestCase):
                 {"pid": 20, "process": "client", "inbound_connections": 0, "outbound_connections": 1},
             ],
             "communication_sockets": [
-                {"remote_ip": "1.1.1.1", "direction": "inbound", "process": "server"},
-                {"remote_ip": "8.8.8.8", "direction": "outbound", "process": "client"},
+                {"proto": "tcp", "state": "established", "local": "10.91.0.2:443", "remote": "1.1.1.1:50123", "remote_ip": "1.1.1.1", "direction": "inbound", "process": "server", "pid": 10, "origin_confidence": "probable", "direction_evidence": "probable_local_listener_match"},
+                {"proto": "tcp", "state": "established", "local": "10.91.0.2:53000", "remote": "8.8.8.8:443", "remote_ip": "8.8.8.8", "direction": "outbound", "process": "client", "pid": 20, "origin_confidence": "probable", "direction_evidence": "probable_established_non_listener"},
             ],
         }
         with mock.patch.object(agent, "_read_net_stats_from_pid", return_value=(0, 0, 0, 0)), \
@@ -961,12 +1221,29 @@ class SecurityTelemetryTests(unittest.TestCase):
                 "node1", "incus", "incus", "default", 123,
                 {"id": 7, "params": {}},
                 {"conn_count": 2, "security": {"process_count": 2, "listening_ports": [443]}},
+                {
+                    "available": True,
+                    "snapshot_count": 1,
+                    "entries": [{
+                        "proto": "tcp", "original_src": "10.91.0.2", "original_sport": 53000,
+                        "original_dst": "8.8.8.8", "original_dport": 443,
+                        "reply_src": "8.8.8.8", "reply_sport": 443,
+                        "reply_dst": "10.91.0.2", "reply_dport": 53000,
+                    }],
+                },
             )
         self.assertEqual(result["inbound_process_count"], 1)
         self.assertEqual(result["outbound_process_count"], 1)
         self.assertEqual({item["country"] for item in result["connection_ips"]}, {"AU", "US"})
         self.assertEqual(result["inbound_ips"][0]["isp"], "Cloudflare")
         self.assertEqual(result["outbound_ips"][0]["city"], "Mountain View")
+        self.assertEqual(result["inbound_ips"][0]["inbound_origin"], "remote_peer")
+        self.assertEqual(result["inbound_ips"][0]["inbound_processes"], [{"process": "server", "pid": 10}])
+        self.assertEqual(result["outbound_ips"][0]["outbound_origin"], "local_process")
+        self.assertEqual(result["outbound_ips"][0]["outbound_processes"], [{"process": "client", "pid": 20}])
+        self.assertEqual(result["outbound_ips"][0]["outbound_origin_confidence"], "confirmed")
+        self.assertEqual(result["connection_attribution"]["confirmed_local_initiated"], 1)
+        self.assertEqual(result["connection_attribution"]["conntrack_confirmed_sockets"], 1)
 
     def test_deep_sample_excludes_private_bridge_addresses(self):
         communication = {

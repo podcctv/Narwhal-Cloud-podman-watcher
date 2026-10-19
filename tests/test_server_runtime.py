@@ -129,6 +129,7 @@ class ServerRuntimeTests(unittest.TestCase):
                 "new_alerts": 0,
                 "automatic_deep_samples_queued": 0,
                 "automatic_stops_queued": 0,
+                "firewall_event_cursor": "",
                 "narwhal_buyer_push": {"owner": "server", "enabled": False},
                 "motd_states": [],
             },
@@ -1506,6 +1507,61 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.execute("UPDATE security_actions SET status='succeeded'")
         server.process_security_alerts(conn,'host1',now+1200,[alert])
         self.assertEqual(server.queue_connection_alert_deep_samples(conn,'host1',now+1200),1)
+        conn.close()
+
+    def test_inbound_ip_fanout_alerts_queue_deep_direction_attribution(self):
+        for index, alert_type in enumerate(('inbound_ip_fanout', 'socks_inbound_fanout')):
+            now = int(time.time()) + index
+            conn = server.db()
+            alert = {
+                'type': alert_type, 'severity': 'warning', 'runtime': 'podman',
+                'project': '', 'container_name': f'fanout-{index}',
+                'value': 12, 'threshold': 10,
+            }
+            server.process_security_alerts(conn, f'host-{index}', now, [alert])
+            self.assertEqual(server.queue_connection_alert_deep_samples(conn, f'host-{index}', now), 1)
+            action = conn.execute(
+                "SELECT params_json FROM security_actions WHERE action_type='request_deep_sample'"
+            ).fetchone()
+            self.assertIsNotNone(action)
+            params = json.loads(action['params_json'])
+            self.assertEqual(params['stage'], f'{alert_type}:warning')
+            self.assertEqual(params['evidence_schema'], 5)
+            conn.close()
+
+    def test_telegram_deep_evidence_explains_connection_direction_and_probe_clues(self):
+        now = int(time.time())
+        conn = server.db()
+        server.process_security_alerts(conn, 'host', now, [{
+            'type': 'inbound_ip_fanout', 'severity': 'warning', 'runtime': 'incus',
+            'project': 'default', 'container_name': 'node1', 'value': 12, 'threshold': 10,
+        }])
+        row = conn.execute('SELECT * FROM security_alerts').fetchone()
+        evidence = {
+            'sampled_at': now,
+            'inbound_ips': [{
+                'ip': '198.51.100.12', 'inbound': 4,
+                'network_evidence': {'classification': 'possible_multiport_probe'},
+            }],
+            'outbound_ips': [],
+            'connection_attribution': {
+                'captured_sockets': 8,
+                'confirmed_local_initiated': 2,
+                'probable_local_initiated': 1,
+                'confirmed_remote_initiated': 4,
+                'probable_remote_initiated': 0,
+                'unknown_direction': 1,
+                'process_attributed_sockets': 7,
+                'conntrack_confirmed_sockets': 6,
+                'conntrack_available': True,
+            },
+        }
+        text, _ = server._telegram_alert_status_card(row, now, evidence)
+        self.assertIn('本机进程发起：已确认 2 / 推定 1', text)
+        self.assertIn('外部远端发起：已确认 4 / 推定 0', text)
+        self.assertIn('conntrack 五元组匹配 6 条', text)
+        self.assertIn('多端口探测迹象 1 IP', text)
+        self.assertIn('非恶意定论', text)
         conn.close()
 
     def test_old_truncated_evidence_never_looks_current_or_complete(self):

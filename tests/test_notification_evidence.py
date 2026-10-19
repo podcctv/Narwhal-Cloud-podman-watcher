@@ -52,6 +52,21 @@ class NotificationEvidenceTests(unittest.TestCase):
         self.assertNotIn('没有密码', text)
         self.assertNotIn('执行处理', text)
 
+    def test_inbound_ip_fanout_does_not_blame_customer_or_claim_attack(self):
+        _, text = content.render(self.alert('inbound_ip_fanout'), 'active')
+        self.assertIn('不能证明客户本人操作或存在恶意行为', text)
+        self.assertIn('不会自动停容器或处罚客户', text)
+        self.assertNotIn('已确认攻击', text)
+
+    def test_inbound_source_limit_explains_that_blocking_is_not_malicious_verdict(self):
+        alert = self.alert('inbound_source_blocked')
+        alert['details_json'] = json.dumps({'admission': {
+            'sources': [{'ip': '198.51.100.1'}], 'blocked': {'203.0.113.2': {'packets': 5}},
+        }})
+        _, text = content.render(alert, 'active')
+        self.assertIn('这不代表来源恶意或客户违规', text)
+        self.assertIn('仅影响该容器网络入口', text)
+
     def test_service_listeners_do_not_use_instance_all_ports(self):
         details = {'listening_ports':[22,80,1080], 'service_listeners':[
             {'process':'danted','pid':21,'local':'0.0.0.0:1080','port':1080}]}

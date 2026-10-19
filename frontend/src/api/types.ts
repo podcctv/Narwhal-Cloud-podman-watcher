@@ -129,11 +129,33 @@ export interface ContainerSecurity {
     pid?: number;
     proto?: string;
     direction?: 'inbound' | 'outbound' | string;
+    origin?: 'remote_peer' | 'local_process' | 'unknown' | string;
+    origin_confidence?: 'confirmed' | 'probable' | 'unknown' | string;
+    direction_evidence?: string;
+    process_role?: 'acceptor' | 'initiator' | 'unknown' | string;
+    process_attribution?: 'attributed' | 'unavailable' | string;
+    process_attribution_source?: string;
+    conntrack_match?: 'original_tuple' | 'reply_tuple' | string;
     local?: string;
     remote?: string;
     state?: string;
     original_remote_ips?: string[];
   }[];
+  connection_attribution?: {
+    captured_sockets?: number;
+    confirmed_local_initiated?: number;
+    probable_local_initiated?: number;
+    confirmed_remote_initiated?: number;
+    probable_remote_initiated?: number;
+    unknown_direction?: number;
+    process_attributed_sockets?: number;
+    conntrack_confirmed_sockets?: number;
+    conntrack_available?: boolean;
+    conntrack_entries_examined?: number;
+    conntrack_snapshot_truncated?: boolean;
+    socket_snapshot_truncated?: boolean;
+    process_attribution_available?: boolean;
+  };
   host_conntrack_snapshot_count?: number;
   host_conntrack_snapshot_truncated?: boolean;
   communication_snapshot_count?: number;
@@ -175,6 +197,19 @@ export interface SecurityAlert {
     inbound_ips?: DeepEvidenceIp[];
     outbound_ips?: DeepEvidenceIp[];
     connection_ips?: DeepEvidenceIp[];
+    connection_attribution?: {
+      captured_sockets?: number;
+      confirmed_local_initiated?: number;
+      probable_local_initiated?: number;
+      confirmed_remote_initiated?: number;
+      probable_remote_initiated?: number;
+      unknown_direction?: number;
+      process_attributed_sockets?: number;
+      conntrack_confirmed_sockets?: number;
+      conntrack_available?: boolean;
+      conntrack_snapshot_truncated?: boolean;
+      socket_snapshot_truncated?: boolean;
+    };
     errors?: string[];
   } | null;
   occurrence_count?: number;
@@ -242,7 +277,7 @@ export interface HostFirewallRule {
   key: string;
   priority: number;
   direction: 'in' | 'out';
-  protocol: 'all' | 'tcp' | 'udp' | 'http' | 'tls' | 'socks' | 'ssh' | 'fet' | 'wireguard' | 'openvpn' | 'quic';
+  protocol: 'all' | 'tcp' | 'udp' | 'http' | 'tls' | 'socks' | 'ssh' | 'fet' | 'wireguard' | 'openvpn' | 'quic' | 'mtproto';
   action: 'block' | 'pass';
   enabled: boolean;
   port_start: number;
@@ -259,11 +294,68 @@ export interface HostFirewallAbusePolicy {
   interfaces: string[];
 }
 
+export interface HostFirewallRuntimeStatus {
+  control_api: 'ready' | 'unsupported' | 'unavailable' | 'unknown';
+  observed_at: number;
+}
+
+export interface HostFirewallLiveRule {
+  id: number;
+  priority: number;
+  direction: 'in' | 'out';
+  protocol: HostFirewallRule['protocol'];
+  action: 'block' | 'pass';
+  enabled: boolean;
+  port_start: number;
+  port_end: number;
+  ip_type: HostFirewallRule['ip_type'];
+  ip?: string;
+  countries?: string[];
+  origin: 'platform' | 'manual';
+  managed_key?: string;
+  sync_state: 'manual' | 'in_sync' | 'drifted' | 'orphaned';
+}
+
+export interface HostFirewallLiveReadback {
+  status: 'ready' | 'unavailable' | 'unsupported' | 'unknown';
+  observed_at: number;
+  last_success_at: number;
+  age_seconds?: number | null;
+  stale: boolean;
+  sync_status?: 'in_sync' | 'drifted' | 'unknown';
+  rule_count?: number;
+  managed_rule_count?: number;
+  drift_count?: number;
+  missing_count?: number;
+  rfw_api_version?: string;
+  capabilities_known?: boolean;
+  supported_protocols?: string[];
+  protocol_capabilities?: Record<string, 'supported' | 'unsupported' | 'unknown'>;
+  mtproto_support?: 'supported' | 'unsupported' | 'unknown';
+  snapshot: null | {
+    status: 'in_sync' | 'drifted';
+    observed_at: number;
+    policy_revision: number;
+    rule_count: number;
+    managed_rule_count: number;
+    drift_count: number;
+    missing_count: number;
+    rfw_api_version?: string;
+    capabilities_known?: boolean;
+    supported_protocols?: string[];
+    rules: HostFirewallLiveRule[];
+    expected_rules: Array<{ key: string; id?: number; sync_state: 'in_sync' | 'drifted' | 'missing' }>;
+  };
+}
+
 export interface HostFirewallPolicyResponse {
   host_id: string;
   agent_ready: boolean;
   revision: number;
+  source_fleet_revision: number;
   policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy };
+  runtime_status: HostFirewallRuntimeStatus;
+  live_readback: HostFirewallLiveReadback;
   updated_by: string;
   updated_at_utc8: string;
   latest_action: null | {
@@ -272,6 +364,33 @@ export interface HostFirewallPolicyResponse {
     message: string;
     updated_at_utc8: string;
   };
+}
+
+export interface FleetFirewallHostStatus {
+  host_id: string;
+  registered: boolean;
+  online: boolean;
+  agent_version: string;
+  control_api: HostFirewallRuntimeStatus['control_api'];
+  observed_at: number;
+  local_revision: number;
+  fleet_revision: number;
+  state: 'unregistered' | 'offline' | 'awaiting_capability' | 'awaiting_rfw_capability' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
+  required_protocols: string[];
+  unsupported_protocols: string[];
+  unknown_protocols: string[];
+  live_readback: Omit<HostFirewallLiveReadback, 'snapshot'>;
+  last_action: null | { id: number; status: string; message: string; updated_at_utc8: string };
+}
+
+export interface FleetFirewallPolicyResponse {
+  revision: number;
+  policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy };
+  updated_by: string;
+  updated_at_utc8: string;
+  hosts: FleetFirewallHostStatus[];
+  counts: { total: number; registered: number; online: number; control_ready: number; last_apply_succeeded: number; deferred: number; live_readback_current: number; drifted_hosts: number; readback_unavailable: number; mtproto_supported_hosts: number; mtproto_unsupported_hosts: number; mtproto_capability_unknown_hosts: number; required_protocols_supported_hosts: number; required_protocols_unsupported_hosts: number; required_protocols_unknown_hosts: number };
+  live_rule_readback_supported: boolean;
 }
 
 export interface HistoryPoint {
@@ -298,7 +417,66 @@ export interface DeepEvidenceIp {
   connections?: number;
   inbound?: number;
   outbound?: number;
+  unknown?: number;
   processes?: string[];
+  inbound_origin?: 'remote_peer' | 'local_process' | 'unknown' | string;
+  inbound_origin_confidence?: 'confirmed' | 'probable' | 'mixed' | 'unknown' | string;
+  inbound_direction_evidence?: string[];
+  inbound_processes?: { process?: string; pid?: number }[];
+  outbound_origin?: 'remote_peer' | 'local_process' | 'unknown' | string;
+  outbound_origin_confidence?: 'confirmed' | 'probable' | 'mixed' | 'unknown' | string;
+  outbound_direction_evidence?: string[];
+  outbound_processes?: { process?: string; pid?: number }[];
+  source_observation?: string;
+  network_evidence?: {
+    flow_count?: number;
+    tcp_established_flows?: number;
+    tcp_unreplied_flows?: number;
+    tcp_handshake_pending_flows?: number;
+    source_packets?: number;
+    reply_packets?: number;
+    public_ports?: number[];
+    container_ports?: number[];
+    protocols?: string[];
+    evidence_sources?: string[];
+    classification?: string;
+    scope?: string;
+  };
+}
+
+export interface InboundPortEvidence {
+  container_port?: number;
+  source_ips?: string[];
+  source_ip_count?: number;
+  connections?: number;
+  process_listeners?: { process?: string; pid?: number }[];
+  correlation_scope?: 'container_port_aggregate' | string;
+  confidence?: 'port_correlated' | string;
+  exact_socket_match?: boolean;
+}
+
+export interface IPReputationSettings {
+  provider: 'AbuseIPDB' | string;
+  configured: boolean;
+  updated_at: number;
+}
+
+export interface IPReputationResult {
+  status: 'checked' | 'error' | 'not_configured' | 'local_limit' | string;
+  provider?: string;
+  ip: string;
+  classification?: 'many_recent_reports' | 'reported' | 'few_reports' | 'no_recent_reports' | string;
+  abuse_confidence_score?: number;
+  total_reports?: number;
+  distinct_reporters?: number;
+  last_reported_at?: string;
+  usage_type?: string;
+  isp?: string;
+  country_code?: string;
+  is_whitelisted?: boolean | null;
+  checked_at?: number;
+  cached?: boolean;
+  message?: string;
 }
 
 export interface AccessSource {
@@ -349,16 +527,42 @@ export interface DiagnosticData {
     unique_connection_ips?: number;
     inbound_ips?: DeepEvidenceIp[];
     outbound_ips?: DeepEvidenceIp[];
+    unclassified_ips?: DeepEvidenceIp[];
     connection_ips?: DeepEvidenceIp[];
+    inbound_port_evidence?: InboundPortEvidence[];
     connection_count?: number;
     communication_sockets?: {
       process?: string;
       pid?: number;
       proto?: string;
       direction?: string;
+      origin?: string;
+      origin_confidence?: string;
+      direction_evidence?: string;
+      process_role?: string;
+      process_attribution?: string;
+      process_attribution_source?: string;
+      conntrack_match?: string;
       local?: string;
       remote?: string;
+      state?: string;
+      original_remote_ips?: string[];
     }[];
+    connection_attribution?: {
+      captured_sockets?: number;
+      confirmed_local_initiated?: number;
+      probable_local_initiated?: number;
+      confirmed_remote_initiated?: number;
+      probable_remote_initiated?: number;
+      unknown_direction?: number;
+      process_attributed_sockets?: number;
+      conntrack_confirmed_sockets?: number;
+      conntrack_available?: boolean;
+      conntrack_entries_examined?: number;
+      conntrack_snapshot_truncated?: boolean;
+      socket_snapshot_truncated?: boolean;
+      process_attribution_available?: boolean;
+    };
     errors?: string[];
   } | null;
 }

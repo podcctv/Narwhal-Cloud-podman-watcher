@@ -20,7 +20,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 try:
     import socks
@@ -47,6 +47,8 @@ CONNECTION_AUTO_STOP_ENABLED = os.getenv('CONNECTION_AUTO_STOP_ENABLED', 'true')
 CONNECTION_STOP_DURATION_SECONDS = max(60, int(os.getenv("CONNECTION_STOP_DURATION_SECONDS", "300")))
 CONNECTION_STOP_MAX_GAP_SECONDS = max(1, min(600, int(os.getenv("CONNECTION_STOP_MAX_GAP_SECONDS", "360"))))
 STALE_SECONDS = int(os.getenv("STALE_SECONDS", "900"))
+RFW_APPLICATION_PROTOCOLS = ("http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto")
+RFW_CN_ALERT_PROTOCOLS = {"socks", "fet", "wireguard", "mtproto", "openvpn"}
 OFFLINE_HIDE_SECONDS = int(os.getenv("OFFLINE_HIDE_SECONDS", str(24 * 3600)))
 OFFLINE_HOST_PURGE_SECONDS = int(os.getenv("OFFLINE_HOST_PURGE_SECONDS", str(24 * 3600)))
 PURGE_SECONDS = int(os.getenv("PURGE_SECONDS", str(30 * 24 * 3600)))
@@ -128,7 +130,7 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy, ip_reputation
 except ImportError:
     import operations
     import connection_policy
@@ -139,6 +141,7 @@ except ImportError:
     import dashboard_auth
     import commerce
     import tcping
+    import ip_reputation
 
 try:
     from server import abuse_api, admission_api
@@ -266,6 +269,20 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_host_security_host_ts ON host_security(host_id, ts);
         CREATE INDEX IF NOT EXISTS idx_host_security_ts ON host_security(ts);
+        CREATE TABLE IF NOT EXISTS host_firewall_event_state (
+            host_id TEXT PRIMARY KEY,
+            instance_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            cursor TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS host_firewall_readbacks (
+            host_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'unknown',
+            observed_at INTEGER NOT NULL DEFAULT 0,
+            last_success_at INTEGER NOT NULL DEFAULT 0,
+            snapshot_json TEXT NOT NULL DEFAULT '{}'
+        );
         CREATE TABLE IF NOT EXISTS security_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             alert_id INTEGER NOT NULL,
@@ -288,6 +305,14 @@ def init_db() -> None:
             ON security_actions(alert_id, created_at);
         CREATE TABLE IF NOT EXISTS host_firewall_policies (
             host_id TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL,
+            policy_json TEXT NOT NULL,
+            updated_by TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            source_fleet_revision INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS fleet_firewall_policy (
+            id INTEGER PRIMARY KEY CHECK(id=1),
             revision INTEGER NOT NULL,
             policy_json TEXT NOT NULL,
             updated_by TEXT NOT NULL,
@@ -379,6 +404,13 @@ def init_db() -> None:
         conn.execute("ALTER TABLE hosts ADD COLUMN node_id TEXT NOT NULL DEFAULT ''")
     if "config_json" not in host_cols:
         conn.execute("ALTER TABLE hosts ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'")
+    firewall_policy_cols = {
+        str(c["name"]) for c in conn.execute("PRAGMA table_info(host_firewall_policies)").fetchall()
+    }
+    if "source_fleet_revision" not in firewall_policy_cols:
+        conn.execute(
+            "ALTER TABLE host_firewall_policies ADD COLUMN source_fleet_revision INTEGER NOT NULL DEFAULT 0"
+        )
     bot_cols = {str(c["name"]) for c in conn.execute("PRAGMA table_info(notification_bots)").fetchall()}
     if "last_delivery_status" not in bot_cols:
         conn.execute("ALTER TABLE notification_bots ADD COLUMN last_delivery_status TEXT NOT NULL DEFAULT 'never'")
@@ -410,6 +442,7 @@ def init_db() -> None:
     tcping.initialize(conn)
     abuse_api.initialize(conn)
     admission_api.initialize(conn)
+    ip_reputation.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -573,7 +606,7 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
             # Drain offline hosts in batches before removing their identity.
             offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.host_id=hosts.host_id AND q.status<>'released') LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
             for host in offline:
-                for table in ("reports", "host_security", "security_actions", "security_alerts", "connection_overloads"):
+                for table in ("reports", "host_security", "security_actions", "security_alerts", "connection_overloads", "host_firewall_readbacks"):
                     progress += prune(table, "host_id=?", (host[0],))
                 remains = any(conn.execute(f"SELECT 1 FROM {table} WHERE host_id=? LIMIT 1", (host[0],)).fetchone()
                               for table in ("reports", "host_security", "security_actions", "security_alerts"))
@@ -854,12 +887,14 @@ def process_security_alerts(
 def queue_connection_alert_deep_samples(
     conn: sqlite3.Connection, host_id: str, now: int
 ) -> int:
-    """Refresh bounded evidence every 15 minutes and on critical escalation."""
+    """Refresh bounded connection evidence for connection and inbound-fanout alerts."""
     queued = 0
     alerts = conn.execute(
         """
         SELECT * FROM security_alerts
-        WHERE host_id=? AND alert_type='container_connection_count'
+        WHERE host_id=? AND alert_type IN (
+              'container_connection_count','inbound_ip_fanout','socks_inbound_fanout'
+          )
           AND status='active' AND last_seen=?
         """,
         (host_id, now),
@@ -878,7 +913,11 @@ def queue_connection_alert_deep_samples(
             """,
             (alert_id, int(alert["first_seen"])),
         ).fetchone()
-        stage = str(alert['severity']) + (':escalated' if _alert_details(alert['details_json']).get('connection_policy', {}).get('escalated') else '')
+        stage = str(alert['alert_type']) + ':' + str(alert['severity']) + (
+            ':escalated'
+            if _alert_details(alert['details_json']).get('connection_policy', {}).get('escalated')
+            else ''
+        )
         if existing is not None:
             previous_params = _alert_details(existing['params_json'])
             if existing['status'] in ('queued', 'dispatched', 'running'):
@@ -897,7 +936,7 @@ def queue_connection_alert_deep_samples(
             (
                 alert_id, str(alert["host_id"]), str(alert["runtime"]),
                 str(alert["project"]), str(alert["container_name"]), "request_deep_sample",
-                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 3, 'stage': stage}),
+                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 5, 'stage': stage}),
                 now, now,
             ),
         )
@@ -1450,11 +1489,53 @@ def _telegram_alert_status_card(
                     f"<code>{html.escape(str(item['ip'])[:45])}</code> ｜归属地：{html.escape(location[:50])} ｜运营商：{html.escape(carrier[:50])} ｜{label}：{count}"
                 )
             return "\n".join(lines) or "-"
+        attribution = deep_evidence.get("connection_attribution")
+        attribution_text = ""
+        if isinstance(attribution, dict):
+            attribution_text = (
+                "\n<b>连接发起方核验（单次快照）</b>\n"
+                f"本机进程发起：已确认 {int(attribution.get('confirmed_local_initiated') or 0)} / 推定 {int(attribution.get('probable_local_initiated') or 0)}；"
+                f"外部远端发起：已确认 {int(attribution.get('confirmed_remote_initiated') or 0)} / 推定 {int(attribution.get('probable_remote_initiated') or 0)}；"
+                f"方向未知 {int(attribution.get('unknown_direction') or 0)}。"
+                f"PID 归属 {int(attribution.get('process_attributed_sockets') or 0)}/{int(attribution.get('captured_sockets') or 0)} 条，"
+                f"conntrack 五元组匹配 {int(attribution.get('conntrack_confirmed_sockets') or 0)} 条。"
+            )
+            if not attribution.get("conntrack_available"):
+                attribution_text += "\nconntrack 不可用；推定方向不能视为已确认。"
+        signal_counts = {
+            "possible_multiport_probe": 0,
+            "bidirectional_tcp_observed": 0,
+            "mixed_connection_evidence": 0,
+            "unreplied_tcp_observed": 0,
+        }
+        probe_ips: List[str] = []
+        for item in inbound_items:
+            if not isinstance(item, dict):
+                continue
+            signal = item.get("network_evidence")
+            if not isinstance(signal, dict):
+                continue
+            classification = str(signal.get("classification") or "")
+            if classification in signal_counts:
+                signal_counts[classification] += 1
+                if classification == "possible_multiport_probe" and item.get("ip"):
+                    probe_ips.append(str(item["ip"])[:45])
+        signal_text = ""
+        if any(signal_counts.values()):
+            signal_text = (
+                "\n<b>入站行为线索（非恶意定论）</b>："
+                f"多端口探测迹象 {signal_counts['possible_multiport_probe']} IP"
+                + (f"（{html.escape('、'.join(probe_ips[:3]))}）" if probe_ips else "")
+                + f"；双向 TCP {signal_counts['bidirectional_tcp_observed']} IP；"
+                + f"混合/未应答 {signal_counts['mixed_connection_evidence'] + signal_counts['unreplied_tcp_observed']} IP。"
+                "这些只是单次 conntrack 传输线索，需结合应用访问日志判断是否为正常用户请求。"
+            )
         evidence_text = (
             f"\n<b>自动深度取证</b>\n"
             f"{html.escape(evidence_note)}\n"
             f"入站：{inbound_ips} IP / {inbound_processes} 进程\n"
             f"出站：{outbound_ips} IP / {outbound_processes} 进程\n"
+            f"{attribution_text}{signal_text}\n"
             f"<b>入站 IP（每行一个）</b>\n{ip_lines(inbound_items, 'inbound')}\n"
             f"<b>出站 IP（每行一个）</b>\n{ip_lines(outbound_items, 'outbound')}\n"
         )
@@ -1899,7 +1980,7 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
-    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices", "host_firewall_policies"):
+    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices", "host_firewall_policies", "host_firewall_readbacks"):
         conn.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
     conn.execute("DELETE FROM hosts WHERE host_id=?", (host_id,))
 
@@ -1951,9 +2032,9 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) - {"rules", "abuse"}:
         raise HTTPException(status_code=400, detail="防火墙配置只允许 rules 和 abuse 字段")
     raw_rules = payload.get("rules", [])
-    if not isinstance(raw_rules, list) or len(raw_rules) > 100:
-        raise HTTPException(status_code=400, detail="RFW 规则必须是最多 100 条的列表")
-    protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic"}
+    if not isinstance(raw_rules, list) or len(raw_rules) > 64:
+        raise HTTPException(status_code=400, detail="RFW 规则最多支持 64 条（受 eBPF 规则表容量限制）")
+    protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto"}
     rules = []
     seen_keys = set()
     for index, raw in enumerate(raw_rules):
@@ -1970,8 +2051,8 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
         ip_type = str(raw.get("ip_type") or "").lower()
         if direction not in {"in", "out"} or protocol not in protocols or action not in {"block", "pass"}:
             raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的方向、协议或动作不支持")
-        if direction == "out" and protocol not in {"all", "tcp", "udp"}:
-            raise HTTPException(status_code=400, detail=f"RFW 协议 {protocol} 仅支持入站方向")
+        if direction == "out" and protocol not in {"all", "tcp", "udp", "socks", "fet", "wireguard", "mtproto"}:
+            raise HTTPException(status_code=400, detail=f"RFW 协议 {protocol} 暂不支持出站匹配")
         priority = raw.get("priority")
         port_start = raw.get("port_start")
         port_end = raw.get("port_end")
@@ -2042,6 +2123,662 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
     return {"rules": rules, "abuse": abuse}
 
 
+def _empty_host_firewall_policy() -> Dict[str, Any]:
+    return {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": []}}
+
+
+def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    status = str(payload.get("status") or "")
+    if status not in {"ready", "unavailable", "unsupported"}:
+        return None
+    clean: Dict[str, Any] = {"status": status, "observed_at": report_ts, "snapshot": None}
+    if status != "ready":
+        return clean
+    snapshot = payload.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+    sync_status = snapshot.get("status")
+    policy_revision = snapshot.get("policy_revision")
+    rule_count = snapshot.get("rule_count")
+    managed_count = snapshot.get("managed_rule_count")
+    drift_count = snapshot.get("drift_count")
+    missing_count = snapshot.get("missing_count")
+    raw_rules = snapshot.get("rules")
+    raw_expected = snapshot.get("expected_rules")
+    rfw_api_version = snapshot.get("rfw_api_version", "")
+    capabilities_known = snapshot.get("capabilities_known", False)
+    raw_supported_protocols = snapshot.get("supported_protocols", [])
+    if (
+        sync_status not in {"in_sync", "drifted"}
+        or type(policy_revision) is not int or not 0 <= policy_revision <= 2**63 - 1
+        or type(rule_count) is not int or not 0 <= rule_count <= 256
+        or type(managed_count) is not int or not 0 <= managed_count <= rule_count
+        or type(drift_count) is not int or not 0 <= drift_count <= 320
+        or type(missing_count) is not int or not 0 <= missing_count <= 64
+        or not isinstance(raw_rules, list) or len(raw_rules) != rule_count
+        or not isinstance(raw_expected, list) or len(raw_expected) > 64
+        or not isinstance(rfw_api_version, str) or len(rfw_api_version) > 64
+        or type(capabilities_known) is not bool
+        or not isinstance(raw_supported_protocols, list) or len(raw_supported_protocols) > 32
+    ):
+        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+    protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto"}
+    supported_protocols = [str(protocol).strip().lower() for protocol in raw_supported_protocols]
+    if (len(set(supported_protocols)) != len(supported_protocols)
+            or any(protocol not in protocols for protocol in supported_protocols)
+            or (capabilities_known and not supported_protocols)):
+        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+    rules: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for raw in raw_rules:
+        if not isinstance(raw, dict):
+            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+        rule_id = raw.get("id")
+        priority = raw.get("priority")
+        port_start = raw.get("port_start")
+        port_end = raw.get("port_end")
+        if (
+            type(rule_id) is not int or not 1 <= rule_id <= 2**63 - 1 or rule_id in seen_ids
+            or type(priority) is not int or not 0 <= priority <= 100000
+            or raw.get("direction") not in {"in", "out"}
+            or raw.get("protocol") not in protocols or raw.get("action") not in {"block", "pass"}
+            or type(raw.get("enabled")) is not bool
+            or type(port_start) is not int or not 0 <= port_start <= 65535
+            or type(port_end) is not int or not port_start <= port_end <= 65535
+            or raw.get("ip_type") not in {"any", "cidr", "geoip"}
+            or raw.get("origin") not in {"platform", "manual"}
+            or raw.get("sync_state") not in {"manual", "in_sync", "drifted", "orphaned"}
+        ):
+            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+        seen_ids.add(rule_id)
+        item: Dict[str, Any] = {
+            "id": rule_id, "priority": priority, "direction": raw["direction"],
+            "protocol": raw["protocol"], "action": raw["action"], "enabled": raw["enabled"],
+            "port_start": port_start, "port_end": port_end, "ip_type": raw["ip_type"],
+            "origin": raw["origin"], "sync_state": raw["sync_state"],
+        }
+        managed_key = raw.get("managed_key")
+        if raw["origin"] == "platform":
+            if not isinstance(managed_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", managed_key):
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+            item["managed_key"] = managed_key
+        if raw["ip_type"] == "cidr":
+            try:
+                item["ip"] = str(ipaddress.ip_network(str(raw.get("ip") or "").strip(), strict=False))
+            except ValueError:
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+        elif raw["ip_type"] == "geoip":
+            countries = raw.get("countries")
+            if not isinstance(countries, list) or not 1 <= len(countries) <= 30:
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+            codes = sorted({str(code).strip().upper() for code in countries})
+            if any(not re.fullmatch(r"[A-Z]{2}", code) for code in codes):
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+            item["countries"] = codes
+        rules.append(item)
+    expected_rules: List[Dict[str, Any]] = []
+    expected_keys = set()
+    for raw in raw_expected:
+        if (
+            not isinstance(raw, dict)
+            or not isinstance(raw.get("key"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", raw["key"])
+            or raw["key"] in expected_keys
+            or raw.get("sync_state") not in {"in_sync", "drifted", "missing"}
+        ):
+            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+        expected_keys.add(raw["key"])
+        item = {"key": raw["key"], "sync_state": raw["sync_state"]}
+        if "id" in raw:
+            if type(raw["id"]) is not int or not 1 <= raw["id"] <= 2**63 - 1:
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+            item["id"] = raw["id"]
+        expected_rules.append(item)
+    clean["snapshot"] = {
+        "status": sync_status,
+        "observed_at": report_ts,
+        "policy_revision": policy_revision,
+        "rule_count": rule_count,
+        "managed_rule_count": managed_count,
+        "drift_count": drift_count,
+        "missing_count": missing_count,
+        "rfw_api_version": rfw_api_version,
+        "capabilities_known": capabilities_known,
+        "supported_protocols": sorted(supported_protocols),
+        "rules": rules,
+        "expected_rules": expected_rules,
+    }
+    return clean
+
+
+def _store_host_firewall_readback(
+    conn: sqlite3.Connection, host_id: str, security: Dict[str, Any], report_ts: int
+) -> None:
+    host_firewall = security.get("host_firewall") if isinstance(security, dict) else None
+    if not isinstance(host_firewall, dict) or not isinstance(host_firewall.get("readback"), dict):
+        return
+    readback = _validate_host_firewall_readback(host_firewall["readback"], report_ts)
+    if readback is None:
+        return
+    if readback["status"] == "ready":
+        snapshot_json = json.dumps(readback["snapshot"], ensure_ascii=False, separators=(",", ":"))
+        conn.execute(
+            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(host_id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at,"
+            "last_success_at=excluded.last_success_at,snapshot_json=excluded.snapshot_json",
+            (host_id, "ready", report_ts, report_ts, snapshot_json),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json) VALUES(?,?,?,0,'{}') "
+            "ON CONFLICT(host_id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at",
+            (host_id, readback["status"], report_ts),
+        )
+
+
+def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: int | None = None) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT status,observed_at,last_success_at,snapshot_json FROM host_firewall_readbacks WHERE host_id=?",
+        (host_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "status": "unknown", "observed_at": 0, "last_success_at": 0, "stale": True,
+            "sync_status": "unknown", "rule_count": 0, "managed_rule_count": 0,
+            "drift_count": 0, "missing_count": 0, "rfw_api_version": "",
+            "capabilities_known": False, "supported_protocols": [],
+            "protocol_capabilities": {protocol: "unknown" for protocol in RFW_APPLICATION_PROTOCOLS},
+            "mtproto_support": "unknown", "snapshot": None,
+        }
+    try:
+        snapshot = json.loads(row["snapshot_json"] or "{}")
+    except (TypeError, ValueError):
+        snapshot = None
+    if not isinstance(snapshot, dict) or not snapshot:
+        snapshot = None
+    observed_at = int(row["observed_at"] or 0)
+    last_success_at = int(row["last_success_at"] or 0)
+    now = int(time.time()) if now is None else int(now)
+    status = str(row["status"] or "unknown")
+    if status not in {"ready", "unavailable", "unsupported"}:
+        status = "unknown"
+    fresh = status == "ready" and observed_at > 0 and 0 <= now - observed_at <= STALE_SECONDS
+    capabilities_known = bool(snapshot and snapshot.get("capabilities_known")) and fresh
+    supported_protocols = list(snapshot.get("supported_protocols") or []) if capabilities_known else []
+    protocol_capabilities = {
+        protocol: _protocol_capability_state(
+            {"status": status, "stale": not fresh, "capabilities_known": capabilities_known,
+             "supported_protocols": supported_protocols},
+            protocol,
+        )
+        for protocol in RFW_APPLICATION_PROTOCOLS
+    }
+    mtproto_support = "unknown"
+    if capabilities_known:
+        mtproto_support = "supported" if "mtproto" in supported_protocols else "unsupported"
+    return {
+        "status": status,
+        "observed_at": observed_at,
+        "last_success_at": last_success_at,
+        "age_seconds": max(0, now - observed_at) if observed_at else None,
+        "stale": not fresh,
+        "sync_status": str(snapshot.get("status") or "unknown") if snapshot else "unknown",
+        "rule_count": int(snapshot.get("rule_count") or 0) if snapshot else 0,
+        "managed_rule_count": int(snapshot.get("managed_rule_count") or 0) if snapshot else 0,
+        "drift_count": int(snapshot.get("drift_count") or 0) if snapshot else 0,
+        "missing_count": int(snapshot.get("missing_count") or 0) if snapshot else 0,
+        "rfw_api_version": str(snapshot.get("rfw_api_version") or "") if capabilities_known else "",
+        "capabilities_known": capabilities_known,
+        "supported_protocols": supported_protocols,
+        "protocol_capabilities": protocol_capabilities,
+        "mtproto_support": mtproto_support,
+        "snapshot": snapshot,
+    }
+
+
+def _policy_required_protocols(policy: Dict[str, Any]) -> List[str]:
+    rules = policy.get("rules") if isinstance(policy, dict) else None
+    return sorted({
+        str(rule.get("protocol"))
+        for rule in (rules if isinstance(rules, list) else [])
+        if isinstance(rule, dict) and rule.get("protocol") in RFW_APPLICATION_PROTOCOLS
+    })
+
+
+def _policy_protocol_compatibility(
+    policy: Dict[str, Any], live_readback: Dict[str, Any]
+) -> Dict[str, List[str]]:
+    required = _policy_required_protocols(policy)
+    states = {protocol: _protocol_capability_state(live_readback, protocol) for protocol in required}
+    return {
+        "required_protocols": required,
+        "unsupported_protocols": sorted(protocol for protocol, state in states.items() if state == "unsupported"),
+        "unknown_protocols": sorted(protocol for protocol, state in states.items() if state == "unknown"),
+    }
+
+
+def _protocol_capability_state(live_readback: Dict[str, Any], protocol: str) -> str:
+    """Return support only from a fresh, explicit RFW capability report."""
+    if (
+        not isinstance(live_readback, dict)
+        or live_readback.get("status") != "ready"
+        or live_readback.get("stale") is not False
+        or live_readback.get("capabilities_known") is not True
+    ):
+        return "unknown"
+    supported = live_readback.get("supported_protocols")
+    if not isinstance(supported, list):
+        return "unknown"
+    return "supported" if protocol in supported else "unsupported"
+
+
+def _host_firewall_runtime_status(conn: sqlite3.Connection, host_id: str) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1",
+        (host_id,),
+    ).fetchone()
+    if row is None:
+        return {"control_api": "unknown", "observed_at": 0}
+    try:
+        security = json.loads(row["payload_json"] or "{}")
+    except (TypeError, ValueError):
+        security = {}
+    runtime = security.get("host_firewall") if isinstance(security, dict) else None
+    if not isinstance(runtime, dict):
+        return {"control_api": "unknown", "observed_at": int(row["ts"] or 0)}
+    control_api = str(runtime.get("control_api") or "unknown")
+    if control_api not in {"ready", "unsupported", "unavailable", "unknown"}:
+        control_api = "unknown"
+    return {
+        "control_api": control_api,
+        "observed_at": int(runtime.get("observed_at") or row["ts"] or 0),
+    }
+
+
+def _latest_host_firewall_action(conn: sqlite3.Connection, host_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT id,status,result_message,updated_at,params_json FROM security_actions "
+        "WHERE host_id=? AND action_type='apply_host_firewall_policy' ORDER BY id DESC LIMIT 1",
+        (host_id,),
+    ).fetchone()
+
+
+def _enqueue_host_firewall_policy(
+    conn: sqlite3.Connection,
+    host_id: str,
+    node_id: str,
+    policy: Dict[str, Any],
+    requested_by: str,
+    now: int,
+    fleet_revision: int,
+) -> int:
+    existing = conn.execute(
+        "SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
+    ).fetchone()
+    revision = (int(existing["revision"]) if existing else 0) + 1
+    policy_with_revision = {"revision": revision, **policy}
+    policy_json = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
+    conn.execute(
+        "INSERT INTO host_firewall_policies(host_id,revision,policy_json,updated_by,updated_at,source_fleet_revision) "
+        "VALUES(?,?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET revision=excluded.revision,"
+        "policy_json=excluded.policy_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at,"
+        "source_fleet_revision=excluded.source_fleet_revision",
+        (host_id, revision, policy_json, requested_by, now, fleet_revision),
+    )
+    conn.execute(
+        "UPDATE security_actions SET status='cancelled',result_message='已被更新的母机防火墙策略取代',updated_at=? "
+        "WHERE host_id=? AND action_type='apply_host_firewall_policy' AND status IN ('queued','dispatched')",
+        (now, host_id),
+    )
+    action_params = {"expected_node_id": node_id, "policy": policy_with_revision}
+    if fleet_revision > 0:
+        action_params["fleet_revision"] = int(fleet_revision)
+    cur = conn.execute(
+        "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
+        "VALUES(0,?,'host','','__host__','apply_host_firewall_policy',?,'queued',?,?,?)",
+        (
+            host_id,
+            json.dumps(action_params, ensure_ascii=False),
+            requested_by,
+            now,
+            now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _maybe_queue_fleet_firewall_policy(
+    conn: sqlite3.Connection,
+    host_id: str,
+    node_id: str,
+    ts: int,
+    security: Dict[str, Any],
+) -> bool:
+    runtime = security.get("host_firewall") if isinstance(security, dict) else None
+    if not node_id or not isinstance(runtime, dict) or runtime.get("control_api") != "ready":
+        return False
+    fleet = conn.execute("SELECT revision,policy_json FROM fleet_firewall_policy WHERE id=1").fetchone()
+    if fleet is None or int(fleet["revision"] or 0) < 1:
+        return False
+    fleet_revision = int(fleet["revision"])
+    state = conn.execute(
+        "SELECT source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
+    ).fetchone()
+    already_on_fleet_revision = (
+        state is not None and int(state["source_fleet_revision"] or 0) >= fleet_revision
+    )
+    live_readback = _host_firewall_live_readback(conn, host_id, ts)
+    drift_repair_needed = (
+        already_on_fleet_revision
+        and live_readback.get("status") == "ready"
+        and live_readback.get("stale") is False
+        and live_readback.get("sync_status") == "drifted"
+    )
+    if already_on_fleet_revision and not drift_repair_needed:
+        return False
+    latest = _latest_host_firewall_action(conn, host_id)
+    if latest is not None:
+        try:
+            latest_params = json.loads(latest["params_json"] or "{}")
+        except (TypeError, ValueError):
+            latest_params = {}
+        same_fleet_revision = int(latest_params.get("fleet_revision") or 0) == fleet_revision
+        if same_fleet_revision and latest["status"] in {"queued", "dispatched", "running"}:
+            return False
+        if same_fleet_revision and latest["status"] == "failed" and ts - int(latest["updated_at"] or 0) < 900:
+            return False
+        # A fresh drift readback must have been observed after the previous
+        # successful apply before scheduling another repair. This prevents the
+        # same pre-apply snapshot from causing an action loop.
+        if (
+            same_fleet_revision
+            and latest["status"] == "succeeded"
+            and drift_repair_needed
+            and int(live_readback.get("observed_at") or 0) <= int(latest["updated_at"] or 0)
+        ):
+            return False
+    try:
+        policy = _validate_host_firewall_policy(json.loads(fleet["policy_json"] or "{}"))
+    except (HTTPException, TypeError, ValueError):
+        return False
+    if _policy_required_protocols(policy):
+        compatibility = _policy_protocol_compatibility(policy, live_readback)
+        if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
+            return False
+    _enqueue_host_firewall_policy(
+        conn, host_id, node_id, policy, "fleet-policy-reconcile", ts, fleet_revision
+    )
+    return True
+
+
+def _ingest_host_firewall_events(
+    conn: sqlite3.Connection, host_id: str, security: Dict[str, Any], ts: int
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Validate, deduplicate, and turn bounded RFW event pages into grouped alerts."""
+    host_firewall = security.get("host_firewall") if isinstance(security, dict) else None
+    if not isinstance(host_firewall, dict) or host_firewall.get("events_api") != "ready":
+        return [], ""
+    instance_id = str(host_firewall.get("instance_id") or "")
+    next_cursor = str(host_firewall.get("next_cursor") or "")
+    events = host_firewall.get("events")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", instance_id):
+        return [], ""
+    cursor_match = re.fullmatch(r"([A-Za-z0-9_-]{1,80}):(\d{1,20})", next_cursor)
+    if not cursor_match or cursor_match.group(1) != instance_id or not isinstance(events, list) or len(events) > 100:
+        return [], ""
+    try:
+        page_sequence = int(cursor_match.group(2))
+    except ValueError:
+        return [], ""
+
+    normalized_events: List[Dict[str, Any]] = []
+    last_page_sequence = 0
+    for event in events:
+        if not isinstance(event, dict):
+            return [], ""
+        sequence = event.get("sequence")
+        observed_at = event.get("observed_at")
+        if type(sequence) is not int or sequence < 1 or type(observed_at) is not int or observed_at <= 0:
+            return [], ""
+        if event.get("cursor") != f"{instance_id}:{sequence}" or sequence <= last_page_sequence:
+            return [], ""
+        last_page_sequence = sequence
+        try:
+            source_ip = str(ipaddress.ip_address(str(event.get("source_ip") or "")))
+            destination_ip = str(ipaddress.ip_address(str(event.get("destination_ip") or "")))
+        except ValueError:
+            return [], ""
+        source_port = event.get("source_port")
+        destination_port = event.get("destination_port")
+        if type(source_port) is not int or not 0 <= source_port <= 65535 or type(destination_port) is not int or not 0 <= destination_port <= 65535:
+            return [], ""
+        transport = str(event.get("transport") or "")
+        app_protocol = str(event.get("app_protocol") or "")
+        direction = str(event.get("direction") or "")
+        action = str(event.get("action") or "")
+        if transport not in {"tcp", "udp", "unknown"} or app_protocol not in {"http", "tls", "socks", "fet", "wireguard", "ssh", "openvpn", "quic", "mtproto", "unknown"} or direction not in {"in", "out"} or action not in {"pass", "block"}:
+            return [], ""
+        countries = event.get("rule_countries")
+        if not isinstance(countries, list) or len(countries) > 30:
+            return [], ""
+        normalized_countries = sorted({str(code).strip().upper() for code in countries})
+        if any(not re.fullmatch(r"[A-Z]{2}", code) for code in normalized_countries):
+            return [], ""
+        normalized_events.append({
+            "sequence": sequence,
+            "observed_at": observed_at,
+            "source_ip": source_ip,
+            "source_port": source_port,
+            "destination_ip": destination_ip,
+            "destination_port": destination_port,
+            "transport": transport,
+            "app_protocol": app_protocol,
+            "direction": direction,
+            "action": action,
+            "rule_id": event.get("rule_id") if type(event.get("rule_id")) is int else None,
+            "rule_countries": normalized_countries,
+        })
+    if page_sequence < last_page_sequence:
+        return [], ""
+
+    previous = conn.execute(
+        "SELECT instance_id,sequence FROM host_firewall_event_state WHERE host_id=?", (host_id,)
+    ).fetchone()
+    previous_instance = str(previous["instance_id"]) if previous is not None else ""
+    previous_sequence = int(previous["sequence"]) if previous is not None else 0
+    same_instance = previous_instance == instance_id
+    last_sequence = previous_sequence if same_instance else 0
+    gap_reasons: List[str] = []
+    dropped = max(0, min(int(host_firewall.get("dropped") or 0), 1_000_000))
+    if previous_instance and not same_instance:
+        gap_reasons.append("RFW 实例已重启或替换")
+    if host_firewall.get("cursor_reset") is True:
+        gap_reasons.append("事件游标被重置")
+    if dropped > 0:
+        gap_reasons.append(f"RFW 环形缓冲区丢弃 {dropped} 条")
+
+    fresh_events = []
+    for event in normalized_events:
+        sequence = int(event["sequence"])
+        if same_instance and sequence <= previous_sequence:
+            continue
+        if same_instance and last_sequence > 0 and sequence > last_sequence + 1:
+            gap_reasons.append(f"事件序号从 {last_sequence} 跳至 {sequence}")
+        fresh_events.append(event)
+        last_sequence = max(last_sequence, sequence)
+
+    grouped: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = {}
+    for event in fresh_events:
+        if event["app_protocol"] not in RFW_CN_ALERT_PROTOCOLS or "CN" not in event["rule_countries"]:
+            continue
+        # RFW currently reports the matched rule's country scope, not the
+        # individual GeoIP country. A CN-only rule is exact; a mixed-country
+        # rule is deliberately marked as scope-only rather than asserted as CN.
+        country_confidence = "exact_cn_rule" if event["rule_countries"] == ["CN"] else "rule_scope_includes_cn"
+        key = (event["app_protocol"], event["direction"], event["action"], country_confidence)
+        grouped.setdefault(key, []).append(event)
+
+    alerts: List[Dict[str, Any]] = []
+    for (app_protocol, direction, action, country_confidence), group in grouped.items():
+        is_pass = action == "pass"
+        protocol_label = {
+            "wireguard": "WireGuard",
+            "socks": "SOCKS",
+            "fet": "FET（高熵加密特征，可能含 SS 类）",
+            "mtproto": "MTProto（混淆传输特征）",
+            "openvpn": "OpenVPN",
+        }.get(app_protocol, app_protocol)
+        if country_confidence == "exact_cn_rule":
+            direction_label = "出站到 CN" if direction == "out" else "来自 CN 的入站"
+        else:
+            direction_label = (
+                "出站命中包含 CN 的 GeoIP 范围（实际国家未知）"
+                if direction == "out"
+                else "入站命中包含 CN 的 GeoIP 范围（实际国家未知）"
+            )
+        action_label = "被放行" if is_pass else "已阻断"
+        scope_note = "规则仅包含 CN，国家范围精确。" if country_confidence == "exact_cn_rule" else "规则国家范围包含 CN，但 RFW 事件未携带实际命中国家，需人工复核。"
+        protocol_note = {
+            "fet": "FET 依首包高熵特征识别，不能确证 Shadowsocks；其他非 TLS 加密流量也可能命中，存在误报。",
+            "mtproto": "MTProto 仅依据已知混淆初始化标记识别，覆盖不完整，不代表确认了完整会话。",
+            "wireguard": "WireGuard 识别主要基于可见的初始握手；协议命中不代表恶意或未授权。",
+            "socks": "SOCKS 协议命中不代表服务未授权或存在滥用。",
+            "openvpn": "OpenVPN 是常见 VPN 协议；协议命中不代表服务未授权或存在滥用。",
+        }.get(app_protocol, "")
+        samples = [
+            f"{event['source_ip']}:{event['source_port']} → {event['destination_ip']}:{event['destination_port']}"
+            for event in group[:10]
+        ]
+        rule_ids = sorted({int(event["rule_id"]) for event in group if event.get("rule_id") is not None})
+        alert_type = f"rfw_cn_{app_protocol}_{direction}_{action}"
+        title = f"RFW {protocol_label} 连接{action_label}"
+        message = (
+            f"RFW 检测到 {direction_label} 的 {protocol_label} 流量，共 {len(group)} 条事件，已{action_label}。"
+            f"样例：{'；'.join(samples) if samples else '无端点样例'}。{scope_note}{protocol_note}"
+        )
+        alerts.append({
+            "type": alert_type,
+            "severity": "critical" if is_pass else "warning",
+            "runtime": "host",
+            "project": "",
+            "container_name": "__host__",
+            "title": title,
+            "message": message[:2000],
+            "value": float(len(group)),
+            "threshold": 1.0,
+            "instance_id": instance_id,
+            "rfw_evidence": {
+                "event_count": len(group),
+                "app_protocol": app_protocol,
+                "direction": direction,
+                "packet_action": action,
+                "country_confidence": country_confidence,
+                "rule_ids": rule_ids[:20],
+                "samples": samples,
+                "first_observed_at": min(int(event["observed_at"]) for event in group),
+                "last_observed_at": max(int(event["observed_at"]) for event in group),
+            },
+        })
+
+    if gap_reasons:
+        alerts.append({
+            "type": "rfw_event_gap",
+            "severity": "warning",
+            "runtime": "host",
+            "project": "",
+            "container_name": "__host__",
+            "title": "RFW 连接事件存在采集缺口",
+            "message": "；".join(sorted(set(gap_reasons))) + "。事件统计可能不完整，不能据此推断未发生连接。",
+            "value": float(dropped),
+            "threshold": 0.0,
+            "instance_id": instance_id,
+            "rfw_evidence": {"dropped": dropped, "cursor_reset": host_firewall.get("cursor_reset") is True},
+        })
+
+    last_sequence = max(last_sequence, page_sequence)
+    conn.execute(
+        "INSERT INTO host_firewall_event_state(host_id,instance_id,sequence,cursor,updated_at) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(host_id) DO UPDATE SET instance_id=excluded.instance_id,sequence=excluded.sequence,cursor=excluded.cursor,updated_at=excluded.updated_at",
+        (host_id, instance_id, last_sequence, next_cursor, ts),
+    )
+    return alerts, next_cursor
+
+
+def _fleet_firewall_node_state(
+    conn: sqlite3.Connection,
+    host: sqlite3.Row,
+    fleet_revision: int,
+    now: int,
+    required_protocols: List[str] | None = None,
+) -> Dict[str, Any]:
+    host_id = str(host["host_id"])
+    node_id = str(host["node_id"] or "")
+    last_seen = int(host["last_seen"] or 0)
+    online = bool(node_id) and now - last_seen <= STALE_SECONDS
+    runtime = _host_firewall_runtime_status(conn, host_id)
+    live_readback = _host_firewall_live_readback(conn, host_id, now)
+    protocol_status = _policy_protocol_compatibility(
+        {"rules": [{"protocol": protocol} for protocol in (required_protocols or [])]}, live_readback
+    )
+    policy_row = conn.execute(
+        "SELECT revision,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
+    ).fetchone()
+    local_revision = int(policy_row["revision"] or 0) if policy_row is not None else 0
+    applied_fleet_revision = int(policy_row["source_fleet_revision"] or 0) if policy_row is not None else 0
+    action = _latest_host_firewall_action(conn, host_id)
+    status = "unregistered"
+    if node_id:
+        status = "offline" if not online else "awaiting_capability"
+        if online and runtime["control_api"] == "unsupported":
+            status = "runman_update_required"
+        elif online and runtime["control_api"] == "unavailable":
+            status = "runman_unavailable"
+        elif runtime["control_api"] == "ready":
+            if protocol_status["unsupported_protocols"]:
+                status = "rfw_protocol_update_required"
+            elif protocol_status["unknown_protocols"]:
+                status = "awaiting_rfw_capability"
+            elif action is not None and action["status"] in {"queued", "dispatched", "running"}:
+                status = "queued"
+            elif action is not None and action["status"] == "failed":
+                status = "apply_failed"
+            elif (
+                live_readback["status"] == "ready"
+                and not live_readback["stale"]
+                and live_readback["sync_status"] == "drifted"
+            ):
+                status = "drifted"
+            elif fleet_revision > 0 and applied_fleet_revision == fleet_revision and action is not None and action["status"] == "succeeded":
+                status = "last_apply_succeeded"
+            elif fleet_revision > 0:
+                status = "not_synced"
+            else:
+                status = "ready"
+    return {
+        "host_id": host_id,
+        "registered": bool(node_id),
+        "online": online,
+        "agent_version": str(host["agent_version"] or "unknown"),
+        "control_api": runtime["control_api"],
+        "observed_at": runtime["observed_at"],
+        "live_readback": {key: value for key, value in live_readback.items() if key != "snapshot"},
+        "local_revision": local_revision,
+        "fleet_revision": applied_fleet_revision,
+        "state": status,
+        "required_protocols": protocol_status["required_protocols"],
+        "unsupported_protocols": protocol_status["unsupported_protocols"],
+        "unknown_protocols": protocol_status["unknown_protocols"],
+        "last_action": None if action is None else {
+            "id": int(action["id"]),
+            "status": str(action["status"]),
+            "message": str(action["result_message"] or ""),
+            "updated_at_utc8": format_utc8(int(action["updated_at"] or 0)),
+        },
+    }
+
+
 def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any]) -> str:
     host_id = host_id[:200] or "unknown"
     node_id = node_id[:128]
@@ -2076,7 +2813,7 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
                 conn.execute("UPDATE OR IGNORE security_alert_policies SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
                 conn.execute("DELETE FROM security_alert_policies WHERE fingerprint=?", (old_fingerprint,))
                 conn.execute("UPDATE security_alert_decisions SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
-            for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "host_firewall_policies"):
+            for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "host_firewall_policies", "host_firewall_readbacks"):
                 conn.execute(f"UPDATE {table} SET host_id=? WHERE host_id=?", (host_id, old))
             investigation.rename_host(conn, old, host_id)
             conn.execute("DELETE FROM hosts WHERE host_id=?", (old,))
@@ -2122,6 +2859,7 @@ async def report(
     containers: List[Dict[str, Any]] = data.get("containers", [])
     conn = db()
     notifications: List[Dict[str, Any]] = []
+    firewall_event_cursor = ""
     automatic_stops_queued = 0
     automatic_deep_samples_queued = 0
     try:
@@ -2203,16 +2941,25 @@ async def report(
         security = data.get("security")
         if isinstance(security, dict):
             security_alerts = security.get("alerts") if isinstance(security.get("alerts"), list) else []
-            combined_alerts = connection_policy.enrich_alerts(security_alerts + operations_alerts, containers)
+            firewall_event_alerts, firewall_event_cursor = _ingest_host_firewall_events(conn, host_id, security, ts)
+            combined_alerts = connection_policy.enrich_alerts(security_alerts + firewall_event_alerts + operations_alerts, containers)
             previous_sample = conn.execute("SELECT MAX(ts) FROM host_security WHERE host_id=?", (host_id,)).fetchone()[0] or 0
             if security.get("enabled", True) and ts > previous_sample:
                 notifications = process_security_alerts(conn, host_id, ts, combined_alerts)
                 buyer_notifications.observe(conn, host_id, ts, containers, combined_alerts)
             automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, host_id, ts)
+            _store_host_firewall_readback(conn, host_id, security, ts)
+            historical_security = dict(security)
+            host_firewall_history = security.get("host_firewall")
+            if isinstance(host_firewall_history, dict) and "readback" in host_firewall_history:
+                historical_firewall = dict(host_firewall_history)
+                historical_firewall.pop("readback", None)
+                historical_security["host_firewall"] = historical_firewall
             conn.execute(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
-                (host_id, ts, json.dumps(security, ensure_ascii=False)),
+                (host_id, ts, json.dumps(historical_security, ensure_ascii=False)),
             )
+            _maybe_queue_fleet_firewall_policy(conn, host_id, node_id, ts, security)
         fingerprints = None
         if isinstance(security, dict) and security.get("enabled", True) and ts > previous_sample:
             fingerprints = {r[0] for r in conn.execute("SELECT fingerprint FROM security_alerts WHERE host_id=? AND last_seen=? AND status<>'resolved'", (host_id, ts))}
@@ -2235,6 +2982,7 @@ async def report(
         "server_version": APP_VERSION,
         "records": len(containers),
         "new_alerts": len(notifications),
+        "firewall_event_cursor": firewall_event_cursor,
         "automatic_deep_samples_queued": automatic_deep_samples_queued,
         "automatic_stops_queued": automatic_stops_queued,
         "narwhal_buyer_push": {"owner": "server", "enabled": False},
@@ -2578,7 +3326,7 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
                 project,
                 container_name,
                 "request_deep_sample",
-                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 2}),
+                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 5}),
                 str(getattr(request.state, "dashboard_user", "dashboard"))[:100],
                 now,
                 now,
@@ -2625,10 +3373,13 @@ def _action_item(row: sqlite3.Row) -> Dict[str, Any]:
         }
     elif row["action_type"] == "apply_host_firewall_policy":
         policy = params.get("policy") if isinstance(params.get("policy"), dict) else {}
+        fleet_revision = params.get("fleet_revision")
         params = {
             "revision": int(policy.get("revision") or 0),
             "rule_count": len(policy.get("rules") or []) if isinstance(policy.get("rules"), list) else 0,
         }
+        if type(fleet_revision) is int:
+            params["fleet_revision"] = fleet_revision
     return {
         "id": int(row["id"]),
         "alert_id": int(row["alert_id"]),
@@ -3571,22 +4322,20 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail="主机标识无效")
     conn = db()
     try:
+        now = int(time.time())
         host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
         if host is None:
             raise HTTPException(status_code=404, detail="主机不存在")
-        row = conn.execute("SELECT revision,policy_json,updated_by,updated_at FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
+        row = conn.execute("SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
         if row is None:
-            revision, policy, updated_by, updated_at = 0, {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": []}}, "", 0
+            revision, policy, updated_by, updated_at, source_fleet_revision = 0, _empty_host_firewall_policy(), "", 0, 0
         else:
             try:
                 policy = json.loads(row["policy_json"] or "{}")
             except (TypeError, ValueError):
-                policy = {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": []}}
-            revision, updated_by, updated_at = int(row["revision"]), str(row["updated_by"] or ""), int(row["updated_at"] or 0)
-        action = conn.execute(
-            "SELECT id,status,result_message,updated_at FROM security_actions WHERE host_id=? AND action_type='apply_host_firewall_policy' ORDER BY id DESC LIMIT 1",
-            (host_id,),
-        ).fetchone()
+                policy = _empty_host_firewall_policy()
+            revision, updated_by, updated_at, source_fleet_revision = int(row["revision"]), str(row["updated_by"] or ""), int(row["updated_at"] or 0), int(row["source_fleet_revision"] or 0)
+        action = _latest_host_firewall_action(conn, host_id)
         latest = None if action is None else {
             "id": int(action["id"]), "status": str(action["status"]),
             "message": str(action["result_message"] or ""),
@@ -3596,7 +4345,10 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
             "host_id": host_id,
             "agent_ready": bool(str(host["node_id"] or "")),
             "revision": revision,
+            "source_fleet_revision": source_fleet_revision,
             "policy": policy,
+            "runtime_status": _host_firewall_runtime_status(conn, host_id),
+            "live_readback": _host_firewall_live_readback(conn, host_id, now),
             "updated_by": updated_by,
             "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
             "latest_action": latest,
@@ -3624,33 +4376,149 @@ async def update_host_firewall_policy(host_id: str, request: Request) -> JSONRes
     conn = db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        fleet_template = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
+        if fleet_template is not None and int(fleet_template["revision"] or 0) > 0:
+            raise HTTPException(status_code=409, detail="全局防火墙模板已启用；请编辑全局模板，避免单机配置与统一期望策略冲突")
         host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
         if host is None:
             raise HTTPException(status_code=404, detail="主机不存在")
         node_id = str(host["node_id"] or "")
         if not node_id:
             raise HTTPException(status_code=409, detail="该主机尚未注册可校验身份的 Watcher Agent")
-        existing = conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
-        revision = (int(existing["revision"]) if existing else 0) + 1
-        policy_with_revision = {"revision": revision, **policy}
-        policy_json = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
-        conn.execute(
-            "INSERT INTO host_firewall_policies(host_id,revision,policy_json,updated_by,updated_at) VALUES(?,?,?,?,?) "
-            "ON CONFLICT(host_id) DO UPDATE SET revision=excluded.revision,policy_json=excluded.policy_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at",
-            (host_id, revision, policy_json, requested_by, now),
-        )
-        conn.execute(
-            "UPDATE security_actions SET status='cancelled',result_message='已被更新的母机防火墙策略取代',updated_at=? "
-            "WHERE host_id=? AND action_type='apply_host_firewall_policy' AND status IN ('queued','dispatched')",
-            (now, host_id),
-        )
-        cur = conn.execute(
-            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
-            "VALUES(0,?,'host','','__host__','apply_host_firewall_policy',?,'queued',?,?,?)",
-            (host_id, json.dumps({"expected_node_id": node_id, "policy": policy_with_revision}, ensure_ascii=False), requested_by, now, now),
-        )
+        if _policy_required_protocols(policy):
+            live_readback = _host_firewall_live_readback(conn, host_id, now)
+            compatibility = _policy_protocol_compatibility(policy, live_readback)
+            if compatibility["unsupported_protocols"]:
+                names = ", ".join(compatibility["unsupported_protocols"])
+                raise HTTPException(status_code=409, detail=f"该节点当前 RFW 不支持所选应用协议：{names}；请先升级 RFW 并等待能力读回")
+            if compatibility["unknown_protocols"]:
+                names = ", ".join(compatibility["unknown_protocols"])
+                raise HTTPException(status_code=409, detail=f"该节点尚无所选应用协议的新鲜 RFW 能力读回：{names}；请等待节点上报或升级 RFW")
+        action_id = _enqueue_host_firewall_policy(conn, host_id, node_id, policy, requested_by, now, 0)
+        revision_row = conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
+        revision = int(revision_row["revision"])
         conn.commit()
-        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "action_id": int(cur.lastrowid), "queued": True})
+        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "action_id": action_id, "queued": True})
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/firewall/fleet-policy")
+def get_fleet_firewall_policy() -> JSONResponse:
+    now = int(time.time())
+    conn = db()
+    try:
+        template = conn.execute(
+            "SELECT revision,policy_json,updated_by,updated_at FROM fleet_firewall_policy WHERE id=1"
+        ).fetchone()
+        if template is None:
+            revision, policy, updated_by, updated_at = 0, _empty_host_firewall_policy(), "", 0
+        else:
+            try:
+                policy = _validate_host_firewall_policy(json.loads(template["policy_json"] or "{}"))
+            except (HTTPException, TypeError, ValueError):
+                policy = _empty_host_firewall_policy()
+            revision = int(template["revision"] or 0)
+            updated_by = str(template["updated_by"] or "")
+            updated_at = int(template["updated_at"] or 0)
+        hosts = conn.execute(
+            "SELECT host_id,node_id,last_seen,agent_version FROM hosts ORDER BY host_id"
+        ).fetchall()
+        required_protocols = _policy_required_protocols(policy)
+        nodes = [_fleet_firewall_node_state(conn, host, revision, now, required_protocols) for host in hosts]
+        readback_current = sum(1 for item in nodes if item["live_readback"]["status"] == "ready" and not item["live_readback"]["stale"])
+        readback_drifted = sum(
+            1 for item in nodes
+            if item["live_readback"]["status"] == "ready"
+            and not item["live_readback"]["stale"]
+            and item["live_readback"]["sync_status"] == "drifted"
+        )
+        readback_unavailable = sum(1 for item in nodes if item["live_readback"]["status"] in {"unavailable", "unsupported", "unknown"} or item["live_readback"]["stale"])
+        return JSONResponse({
+            "revision": revision,
+            "policy": policy,
+            "updated_by": updated_by,
+            "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
+            "hosts": nodes,
+            "counts": {
+                "total": len(nodes),
+                "registered": sum(1 for item in nodes if item["registered"]),
+                "online": sum(1 for item in nodes if item["online"]),
+                "control_ready": sum(1 for item in nodes if item["control_api"] == "ready"),
+                "last_apply_succeeded": sum(1 for item in nodes if item["state"] == "last_apply_succeeded"),
+                "deferred": sum(1 for item in nodes if item["state"] not in {"last_apply_succeeded", "ready"}),
+                "live_readback_current": readback_current,
+                "drifted_hosts": readback_drifted,
+                "readback_unavailable": readback_unavailable,
+                "mtproto_supported_hosts": sum(1 for item in nodes if item["live_readback"]["mtproto_support"] == "supported"),
+                "mtproto_unsupported_hosts": sum(1 for item in nodes if item["live_readback"]["mtproto_support"] == "unsupported"),
+                "mtproto_capability_unknown_hosts": sum(1 for item in nodes if item["live_readback"]["mtproto_support"] == "unknown"),
+                "required_protocols_supported_hosts": sum(1 for item in nodes if item["required_protocols"] and not item["unsupported_protocols"] and not item["unknown_protocols"]),
+                "required_protocols_unsupported_hosts": sum(1 for item in nodes if item["unsupported_protocols"]),
+                "required_protocols_unknown_hosts": sum(1 for item in nodes if item["unknown_protocols"]),
+            },
+            # Rules are read from the running RFW userspace API and compared
+            # with Runman's ownership map; this is not a direct eBPF map dump.
+            "live_rule_readback_supported": True,
+        })
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/firewall/fleet-policy")
+async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
+    if getattr(request.state, "dashboard_role", "admin") != "admin":
+        raise HTTPException(status_code=403, detail="只有管理员可以修改全局母机防火墙策略")
+    raw_body = await request.body()
+    if len(raw_body) > 128 * 1024:
+        raise HTTPException(status_code=413, detail="防火墙配置超过 128 KiB")
+    try:
+        payload = json.loads(raw_body)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="防火墙配置必须是有效 JSON") from None
+    policy = _validate_host_firewall_policy(payload)
+    now = int(time.time())
+    requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
+    conn = db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
+        revision = (int(existing["revision"]) if existing else 0) + 1
+        conn.execute(
+            "INSERT INTO fleet_firewall_policy(id,revision,policy_json,updated_by,updated_at) VALUES(1,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,policy_json=excluded.policy_json,"
+            "updated_by=excluded.updated_by,updated_at=excluded.updated_at",
+            (revision, json.dumps(policy, ensure_ascii=False, separators=(",", ":")), requested_by, now),
+        )
+        hosts = conn.execute("SELECT host_id,node_id FROM hosts ORDER BY host_id").fetchall()
+        queued = 0
+        deferred = 0
+        for host in hosts:
+            host_id = str(host["host_id"])
+            node_id = str(host["node_id"] or "")
+            runtime = _host_firewall_runtime_status(conn, host_id)
+            if node_id and runtime["control_api"] == "ready":
+                if _policy_required_protocols(policy):
+                    live_readback = _host_firewall_live_readback(conn, host_id, now)
+                    compatibility = _policy_protocol_compatibility(policy, live_readback)
+                    if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
+                        deferred += 1
+                        continue
+                _enqueue_host_firewall_policy(conn, host_id, node_id, policy, requested_by, now, revision)
+                queued += 1
+            else:
+                deferred += 1
+        conn.commit()
+        return JSONResponse(status_code=202, content={
+            "ok": True,
+            "revision": revision,
+            "queued_hosts": queued,
+            "deferred_hosts": deferred,
+            "total_hosts": len(hosts),
+        })
     except Exception:
         conn.rollback()
         raise
@@ -3860,6 +4728,7 @@ commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD
 tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)
 admission_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, buyer_notifications.reconcile)
+ip_reputation.attach(app, db, lambda: DB_PATH, commerce.cipher)
 
 
 @app.get("/api/v1/security/actions")
@@ -4969,12 +5838,18 @@ function drawChart(id,series){const svg=document.getElementById(id);const values
      else if(action?.status==='failed'){state.className='diagnostic-state bad';state.innerText=`任务 #${action.id} 失败：${action.result_message||'节点未返回报告，可重试。'}`}
      else{state.className='diagnostic-state';state.innerText='尚未请求深度上报。'}
      const target=document.getElementById('diagnostic-report');if(!sample){target.innerHTML=`<div class='comm-note'>收到报告后将在这里显示瞬时流量、详细进程、连接 IP 和进程归属。</div>`;return}
-     const rates=sample.network_rates||{},processes=sample.processes?.items||[],ips=sample.connection_ips||[],sockets=sample.communication_sockets||[],errors=sample.errors||[];
+      const rates=sample.network_rates||{},processes=sample.processes?.items||[],sockets=sample.communication_sockets||[],errors=sample.errors||[];
+      const ipMap=new Map();for(const item of [...(sample.connection_ips||[]),...(sample.inbound_ips||[]),...(sample.outbound_ips||[])]){if(!item?.ip)continue;ipMap.set(item.ip,{...(ipMap.get(item.ip)||{}),...item})}const ips=[...ipMap.values()].sort((a,b)=>Math.max(Number(b.connections||0),Number(b.inbound||0),Number(b.outbound||0))-Math.max(Number(a.connections||0),Number(a.inbound||0),Number(a.outbound||0)));
      const metrics=[['报告时间',sample.report_timestamp_utc8||'-'],['瞬时 RX',`${num(mbps(rates.rx_bps))} Mbps`],['瞬时 TX',`${num(mbps(rates.tx_bps))} Mbps`],['RX / TX pps',`${num(rates.rx_pps,1)} / ${num(rates.tx_pps,1)}`],['进程数',Number(sample.process_count||0)],['连接 IP',Number(sample.unique_connection_ips||0)],['连接明细',Number(sample.connection_count||0)],['采样窗口',`${num(rates.sample_seconds,2)} 秒`]];
-     const processRows=processes.length?processes.map(x=>`<div class='deep-row'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)}</strong><br/>用户 ${esc(x.user||'-')} · CPU ${num(x.cpu_percent)}% · RSS ${fmtBytes(x.rss_bytes)} · 状态 ${esc(x.state||'-')}<br/>${esc(x.command||'-')}</div>`).join(''):`<div class='deep-row'>未采集到进程明细。</div>`;
-     const ipRows=ips.length?ips.map(x=>`<div class='deep-row'><strong>${esc(x.ip||'-')}</strong> · 连接 ${Number(x.connections||0)} · 入站 ${Number(x.inbound||0)} · 出站 ${Number(x.outbound||0)}<br/>进程：${esc((x.processes||[]).join('、')||'unknown')}</div>`).join(''):`<div class='deep-row'>采样瞬间没有可见的公网连接 IP。</div>`;
-     const socketRows=sockets.length?sockets.slice(0,250).map(x=>`<div class='deep-row'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)||'-'}</strong> · ${esc(String(x.proto||'').toUpperCase())} · ${x.direction==='inbound'?'入站':'出站'}<br/>本地 ${esc(x.local||'-')} → 远端 ${esc(x.remote||'-')}</div>`).join(''):`<div class='deep-row'>采样瞬间没有活动连接明细。</div>`;
-     target.innerHTML=`<div class='deep-metrics'>${metrics.map(x=>`<div class='deep-metric'><span>${esc(x[0])}</span><strong>${esc(x[1])}</strong></div>`).join('')}</div><div class='deep-grid'><section class='deep-section'><h3>进程快照（${processes.length}）</h3><div class='deep-list'>${processRows}</div></section><section class='deep-section'><h3>连接 IP（${ips.length}）</h3><div class='deep-list'>${ipRows}</div></section></div><section class='deep-section'><h3>连接与进程归属（${sockets.length}）</h3><div class='deep-list'>${socketRows}</div></section>${errors.length?`<div class='deep-errors'>部分数据不可用：${esc(errors.join('；'))}</div>`:''}<p class='comm-note'>报告为单次有界元数据快照，进程最多 100 条、连接最多 250 条；命令行中的常见凭据字段已脱敏。</p>`;
+     const attribution=sample.connection_attribution||{};const attributionSummary=Object.keys(attribution).length?`<section class='deep-section'><h3>连接发起方深度核验</h3><div class='comm-note'>本机发起已确认 ${Number(attribution.confirmed_local_initiated||0)} 条 / 推定 ${Number(attribution.probable_local_initiated||0)} 条；外部发起已确认 ${Number(attribution.confirmed_remote_initiated||0)} 条；方向未知 ${Number(attribution.unknown_direction||0)} 条。进程/PID 已归属 ${Number(attribution.process_attributed_sockets||0)}/${Number(attribution.captured_sockets||0)} 条；conntrack 五元组确认 ${Number(attribution.conntrack_confirmed_sockets||0)} 条。${attribution.conntrack_available?'':'本次没有 conntrack 数据，确认数可能较少。'}${attribution.conntrack_snapshot_truncated||attribution.socket_snapshot_truncated?'采样达到上限，非全量结果。':''}</div></section>`:'';
+      const processRows=processes.length?processes.map(x=>`<div class='deep-row'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)}</strong><br/>用户 ${esc(x.user||'-')} · CPU ${num(x.cpu_percent)}% · RSS ${fmtBytes(x.rss_bytes)} · 状态 ${esc(x.state||'-')}<br/>${esc(x.command||'-')}</div>`).join(''):`<div class='deep-row'>未采集到进程明细。</div>`;
+      const evidenceLabel=value=>({confirmed_conntrack_original_initiator:'conntrack 原始方向：本机进程发起',confirmed_conntrack_reply_acceptor:'conntrack 回复方向：远端发起',confirmed_syn_sent:'TCP SYN-SENT：本机发起',confirmed_syn_recv:'TCP SYN-RECV：远端发起',probable_local_listener_match:'匹配本地监听端口：推定远端入站',probable_established_non_listener:'已建立且本地非监听：推定本机发起',probable_connected_udp_listener_match:'匹配 UDP 监听端口：推定远端到达',probable_connected_udp_non_listener:'UDP 非监听 socket：推定本机发起'})[value]||value||'方向证据不足';
+      const signalLabel=value=>({possible_multiport_probe:'疑似多端口探测（仅行为线索）',mixed_connection_evidence:'已建立与未应答连接并存',bidirectional_tcp_observed:'观察到 TCP 双向数据',unreplied_tcp_observed:'存在未应答 TCP 尝试',insufficient_transport_evidence:'传输层证据不足'})[value]||value||'';
+      const confidenceLabel=value=>({confirmed:'方向已确认',probable:'方向推定',mixed:'证据冲突',unknown:'方向未知'})[value]||'方向未知';
+      const ipRows=ips.length?ips.map(x=>{const network=x.network_evidence||{},proofs=[...(x.inbound_direction_evidence||[]),...(x.outbound_direction_evidence||[])],owners=(x.inbound_processes||[]).map(p=>`${p.process||'unknown'}${Number(p.pid||0)?` (PID ${Number(p.pid)})`:''}`);const signal=network.classification?`${signalLabel(network.classification)} · 已建立 ${Number(network.tcp_established_flows||0)} / 未应答 ${Number(network.tcp_unreplied_flows||0)} / 握手待完成 ${Number(network.tcp_handshake_pending_flows||0)} · 目标端口 ${(network.public_ports||[]).slice(0,12).join(', ')||'-'} · 回包 ${Number(network.reply_packets||0)}`:'';const evidenceSources=(network.evidence_sources||[]).join('、');return `<div class='deep-row'><strong>${esc(x.ip||'-')}</strong> · 连接 ${Number(x.connections||0)} · 入站 ${Number(x.inbound||0)} · 出站 ${Number(x.outbound||0)}<br/>入站发起方：${Number(x.inbound||0)?confidenceLabel(x.inbound_origin_confidence):'无入站 socket 记录'} · 接收进程：${esc(owners.join('、')||(x.processes||[]).join('、')||'未归属')}<br/>方向证据：${esc([...new Set(proofs)].map(evidenceLabel).join('；')||'未取得逐连接证据')}${signal?`<br/>扫描/握手线索：${esc(signal)} · 来源 ${esc(evidenceSources||'conntrack')}`:''}</div>`}).join(''):`<div class='deep-row'>采样瞬间没有可见的公网连接 IP。</div>`;
+      const socketRows=sockets.length?sockets.slice(0,250).map(x=>{const origin=x.origin==='local_process'?'本机进程发起':x.origin==='remote_peer'?'远端发起':'发起方未知';const confidence=confidenceLabel(x.origin_confidence);const role=x.process_role==='initiator'?'本机进程角色：发起连接':x.process_role==='acceptor'?'本机进程角色：接受连接':'本机进程角色未知';return `<div class='deep-row'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)||'-'}</strong> · ${esc(String(x.proto||'').toUpperCase())} · ${esc(x.state||'-')} · ${origin}（${confidence}）<br/>本地 ${esc(x.local||'-')} → 远端 ${esc(x.remote||'-')}<br/>${role} · 判定证据：${esc(evidenceLabel(x.direction_evidence))} · 进程归属：${Number(x.pid||0)>0?'已获得 PID':'不可用'}</div>`}).join(''):`<div class='deep-row'>采样瞬间没有活动连接明细。</div>`;
+      const portEvidence=sample.inbound_port_evidence||[];const portRows=portEvidence.length?portEvidence.slice(0,50).map(x=>`<div class='deep-row'><strong>容器端口 ${Number(x.container_port||0)}</strong> · ${Number(x.connections||0)} 条聚合连接 · ${Number(x.source_ip_count||0)} 个来源 IP<br/>来源：${esc((x.source_ips||[]).join('、')||'-')}<br/>监听进程：${esc((x.process_listeners||[]).map(p=>`${p.process||'unknown'} (PID ${Number(p.pid||0)})`).join('、')||'未归属')} · 证据范围：同端口聚合，非逐连接匹配</div>`).join(''):`<div class='deep-row'>没有可用的 NAT/代理端口级来源关联。</div>`;
+      target.innerHTML=`<div class='deep-metrics'>${metrics.map(x=>`<div class='deep-metric'><span>${esc(x[0])}</span><strong>${esc(x[1])}</strong></div>`).join('')}</div>${attributionSummary}<div class='comm-note'>本机 PID 说明容器内哪个进程持有 socket；conntrack 原始/回复五元组用于确认发起方向。发起方不等于善恶判断；“疑似探测”不会自动处罚客户。</div><div class='deep-grid'><section class='deep-section'><h3>进程快照（${processes.length}）</h3><div class='deep-list'>${processRows}</div></section><section class='deep-section'><h3>连接 IP 与网络行为（${ips.length}）</h3><div class='deep-list'>${ipRows}</div></section></div><section class='deep-section'><h3>逐连接方向与进程归属（${sockets.length}）</h3><div class='deep-list'>${socketRows}</div></section><section class='deep-section'><h3>端口级公网来源关联（${portEvidence.length}）</h3><p class='comm-note'>NAT/代理会隐藏原始来源时，按宿主机连接与容器目标端口聚合；这不是单条 socket 的精确对应。</p><div class='deep-list'>${portRows}</div></section>${errors.length?`<div class='deep-errors'>部分数据不可用：${esc(errors.join('；'))}</div>`:''}<p class='comm-note'>报告为单次有界元数据快照，进程最多 100 条、连接最多 250 条；命令行中的常见凭据字段已脱敏。</p>`;
     }
     async function requestDeepSample(){
      if(diagnosticSubmitting)return;const identity=detailIdentity(),button=document.getElementById('request-diagnostic'),state=document.getElementById('diagnostic-state');diagnosticSubmitting=true;button.disabled=true;button.innerText='正在提交…';state.className='diagnostic-state warn';state.innerText='正在提交一次性采样任务，请稍候…';
@@ -5006,10 +5881,15 @@ function drawChart(id,series){const svg=document.getElementById(id);const values
   const countries=(arr)=>(Array.isArray(arr)&&arr.length?arr.slice(0,5).map(x=>`${x.country||'UN'} (${Number(x.connections||0)})`).join('、'):'-');const exposure=Array.isArray(sec.network_exposure)?sec.network_exposure:[];const inboundMode=sec.inbound_ip_observation==='host_conntrack'?'宿主机 NAT/conntrack 还原':'容器 socket 观察';const inboundTop=Array.isArray(sec.inbound_top_ips)?sec.inbound_top_ips:[];document.getElementById('network').innerHTML=`<dt>监听端口</dt><dd>${esc((sec.listening_ports||[]).join(', ')||'-')}</dd><dt>NAT/代理</dt><dd>${esc(exposure.map(x=>`${x.listen||'?'} → ${x.target||'?'}`).join(', ')||'-')}</dd><dt>入站去重 IP</dt><dd class='${inboundAlert?'bad-text':''}'>${inboundUniqueIps} / 阈值 ${inboundThreshold}</dd><dt>入站来源口径</dt><dd>${esc(inboundMode)}</dd><dt>主要入站来源</dt><dd>${esc(inboundTop.slice(0,10).map(x=>`${x.ip||'?'} (${Number(x.connections||0)})`).join('、')||'-')}</dd><dt>入站连接</dt><dd>${Number(sec.incoming_established||0)}</dd><dt>出站去重 IP</dt><dd>${Number(sec.outbound_unique_ips||0)}</dd><dt>TCP 来源</dt><dd>${esc(countries(current?.tcp_country_stats))}</dd><dt>UDP 来源</dt><dd>${esc(countries(current?.udp_country_stats))}</dd><dt>RX pps</dt><dd>${num(sec.net_rx_pps,1)}</dd><dt>SYN_RECV</dt><dd>${Number(sec.syn_recv_count||0)}</dd>`;
   const risks=Array.isArray(sec.configuration_risks)?sec.configuration_risks:[],pair=sec.panel_pairing||{},socks=sec.socks_proxy||{};const socksAuth={no_auth:'无认证',weak_password:'弱密码',configured:'已配置认证',unknown:'认证未知'}[socks.auth_mode||'unknown'];document.getElementById('security').innerHTML=`<div>面板对接：<strong class='${pair.detected&&!pair.approved?'bad-text':'ok'}'>${pair.detected?(pair.approved?'已放行':'检测到特征'):'未发现'}</strong></div><div>SOCKS 代理：<strong class='${socks.detected&&['no_auth','weak_password'].includes(socks.auth_mode)?'bad-text':'ok'}'>${socks.detected?`已识别 · ${esc(socksAuth)}${socks.public_exposure?' · 公网/NAT 暴露':''}`:'未发现'}</strong></div>`+listHtml(risks,'未发现配置风险',x=>`<li>${esc(x.message||x.code||'配置风险')}</li>`);
   document.getElementById('filesystem').innerHTML=`<dt>根盘 已用/总量</dt><dd>${fmtBytes(Math.max(0,rootTotal-rootAvail))} / ${fmtBytes(rootTotal)}</dd><dt>根盘可用</dt><dd>${fmtBytes(rootAvail)}</dd><dt>镜像可写层</dt><dd>${fmtBytes(current?.container_disk_rw_bytes)}</dd>`;
-  const communicationProcesses=Array.isArray(sec.communication_processes)?sec.communication_processes:[],communicationSockets=Array.isArray(sec.communication_sockets)?sec.communication_sockets:[];
-  const processCards=communicationProcesses.length?`<div class='comm-process-grid'>${communicationProcesses.map(x=>`<article class='comm-process'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)||'-'}</strong><div class='comm-meta'>入站 ${Number(x.inbound_connections||0)} · 出站 ${Number(x.outbound_connections||0)} · 远端 IP ${Number(x.unique_remote_ips||0)}${Number(x.original_inbound_unique_ips||0)?` · 公网来源 ${Number(x.original_inbound_unique_ips||0)}`:''}</div>${Number(x.original_inbound_unique_ips||0)?`<div class='comm-meta'>${esc((x.original_inbound_top_ips||[]).slice(0,10).join('、'))}</div>`:''}</article>`).join('')}</div>`:`<div class='ok'>${sec.communication_detail_available?'当前没有可归属的活动通信':'容器内缺少 ss，暂时无法归属到具体进程'}</div>`;
-  const socketCards=communicationSockets.length?`<h3>活动连接（最多展示 ${communicationSockets.length} 条）</h3><div class='socket-grid'>${communicationSockets.slice(0,100).map(x=>`<article class='socket-card'><div class='socket-head'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)||'-'}</strong><span class='direction ${x.direction==='inbound'?'inbound':'outbound'}'>${x.direction==='inbound'?'入站':'出站'}</span></div><div class='socket-meta'>${esc(String(x.proto||'').toUpperCase())} · ${esc(x.state||'-')}<br/>本地 ${esc(x.local||'-')}<br/>远端 ${esc(x.remote||'-')}${Array.isArray(x.original_remote_ips)&&x.original_remote_ips.length?`<br/>原始公网来源 ${esc(x.original_remote_ips.slice(0,10).join('、'))}`:''}</div></article>`).join('')}</div>`:'';
-  document.getElementById('communications').innerHTML=`<p class='comm-note'>宿主机 conntrack 读取 ${Number(sec.host_conntrack_snapshot_count||0)} 条${sec.host_conntrack_snapshot_truncated?'（已达到安全上限）':''}；容器 socket 读取 ${Number(sec.communication_snapshot_count||0)} 条${sec.communication_snapshot_truncated?'（已达到安全上限）':''}。均为单次有界元数据快照，不持续抓包。</p>${processCards}${socketCards}`;
+   const communicationProcesses=Array.isArray(sec.communication_processes)?sec.communication_processes:[],communicationSockets=Array.isArray(sec.communication_sockets)?sec.communication_sockets:[];
+   const processCards=communicationProcesses.length?`<div class='comm-process-grid'>${communicationProcesses.map(x=>`<article class='comm-process'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)||'-'}</strong><div class='comm-meta'>入站 ${Number(x.inbound_connections||0)} · 出站 ${Number(x.outbound_connections||0)} · 远端 IP ${Number(x.unique_remote_ips||0)}</div></article>`).join('')}</div>`:`<div class='ok'>${sec.communication_detail_available?'当前没有可归属的活动通信':'容器内缺少 ss，暂时无法归属到具体进程'}</div>`;
+   const originName=x=>x.origin==='local_process'?'本机进程发起':x.origin==='remote_peer'?'远端发起':'发起方未知',originConfidence=x=>({confirmed:'已确认',probable:'推定',mixed:'证据冲突',unknown:'未知'})[x.origin_confidence]||'未知';
+   const socketCards=communicationSockets.length?`<h3>活动连接（最多展示 ${communicationSockets.length} 条）</h3><div class='socket-grid'>${communicationSockets.slice(0,100).map(x=>`<article class='socket-card'><div class='socket-head'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)||'-'}</strong><span class='direction ${x.direction==='inbound'?'inbound':'outbound'}'>${x.direction==='inbound'?'入站':x.direction==='outbound'?'出站':'未知'} · ${originConfidence(x)}</span></div><div class='socket-meta'>${esc(String(x.proto||'').toUpperCase())} · ${esc(x.state||'-')} · ${originName(x)}<br/>本地 ${esc(x.local||'-')}<br/>远端 ${esc(x.remote||'-')}<br/>证据：${esc(x.direction_evidence||'无')} · PID ${Number(x.pid||0)>0?'已归属':'不可用'}</div></article>`).join('')}</div>`:'';
+   const sourceSignals=Array.isArray(sec.inbound_source_signals)?sec.inbound_source_signals:[],sourceLabel=x=>({possible_multiport_probe:'疑似多端口探测（线索）',mixed_connection_evidence:'已建立与未应答并存',bidirectional_tcp_observed:'观察到 TCP 双向数据',unreplied_tcp_observed:'未应答 TCP 尝试',insufficient_transport_evidence:'传输层证据不足'})[x]||x||'未知';
+   const sourceSignalCards=sourceSignals.length?`<h3>入站来源行为线索</h3><div class='deep-list'>${sourceSignals.slice(0,20).map(x=>`<div class='deep-row'><strong>${esc(x.ip||'-')}</strong> · ${esc(sourceLabel(x.classification))}<br/>TCP 已建立 ${Number(x.tcp_established_flows||0)} · 未应答 ${Number(x.tcp_unreplied_flows||0)} · SYN_RECV ${Number(x.tcp_handshake_pending_flows||0)} · 回包 ${Number(x.reply_packets||0)}<br/>目标端口 ${(x.public_ports||[]).slice(0,16).map(v=>Number(v)).join(', ')||'-'} · 证据 ${esc((x.evidence_sources||[]).join('、')||'未知')} · ${esc(x.scope||'单次快照')}</div>`).join('')}</div>`:'';
+   const inboundPortEvidence=Array.isArray(sec.inbound_port_evidence)?sec.inbound_port_evidence:[];
+   const inboundPortCards=inboundPortEvidence.length?`<h3>端口级公网来源关联</h3><p class='comm-note'>NAT/代理恢复出的来源按容器目标端口聚合，不等于逐条 socket 精确关联。</p><div class='deep-list'>${inboundPortEvidence.slice(0,20).map(x=>`<div class='deep-row'><strong>容器端口 ${Number(x.container_port||0)}</strong> · ${Number(x.connections||0)} 条 · ${Number(x.source_ip_count||0)} 个来源<br/>${esc((x.source_ips||[]).join('、')||'-')}<br/>监听进程：${esc((x.process_listeners||[]).map(p=>`${p.process||'unknown'} PID ${Number(p.pid||0)}`).join('、')||'未归属')} · 端口聚合</div>`).join('')}</div>`:'';
+   document.getElementById('communications').innerHTML=`<p class='comm-note'>宿主机 conntrack 读取 ${Number(sec.host_conntrack_snapshot_count||0)} 条${sec.host_conntrack_snapshot_truncated?'（已达到安全上限）':''}；容器 socket 读取 ${Number(sec.communication_snapshot_count||0)} 条${sec.communication_snapshot_truncated?'（已达到安全上限）':''}。均为单次有界元数据快照，不持续抓包。进程归属和连接发起方是两项不同证据；发起方向也不代表用户意图。</p>${processCards}${socketCards}${sourceSignalCards}${inboundPortCards}`;
   document.getElementById('samples').innerHTML=pts.length?pts.slice(-20).reverse().map(x=>`<div class='sample'><span>${esc(x.timestamp_iso_utc8||'-')}</span><span>CPU ${num(x.cpu_percent)}%</span><span>内存 ${num(x.mem_percent)}%</span><span>RX ${num(mbps(x.net_rx_bps))}M</span><span>TX ${num(mbps(x.net_tx_bps))}M</span><span>连接 ${Number(x.conn_count||0)}</span></div>`).join(''):`<div class='ok'>暂无历史采样</div>`;
  }catch(error){const status=document.getElementById('status');status.className='status bad';status.innerText=`详情加载失败：${error.message||error}`}
 }

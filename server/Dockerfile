@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY abuse_api.py .
 COPY admission_api.py .
+COPY ip_reputation.py .
 COPY disk_cleanup.py .
 COPY connection_policy.py .
 COPY operations.py operations_api.py buyer_notifications.py buyer_mapping.py buyer_content.py investigation.py dashboard_auth.py commerce.py tcping.py ./
