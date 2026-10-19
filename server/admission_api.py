@@ -6,6 +6,20 @@ import time
 from fastapi import Header, HTTPException, Request
 
 KINDS={'inbound_source_blocked','tcp_concurrency_limited','admission_unverified','pasarguard_node_removed'}
+ADMISSION_FAILURES={
+    'ambiguous_ownership':'容器地址或宿主机接口无法唯一归属；未确认保护规则已生效。',
+    'unsupported_network':'该容器网络模式不在当前自动保护支持范围内。',
+    'sample_timeout':'容器网络采样命令超时，无法确认当前网络状态。',
+    'permission_denied':'Agent 缺少读取网络或应用防火墙规则所需的权限。',
+    'dependency_unavailable':'Agent 依赖的网络工具或内核接口不可用。',
+    'sample_failed':'Incus/Podman 或网络采样接口返回失败。',
+    'firewall_apply_failed':'nftables/NFQUEUE 规则应用或内核读回失败，保护未能确认。',
+    'sample_invalid':'网络采样数据不完整或无效，保护未能确认。',
+    'stale_sample':'最近一次保护状态采样已超过 30 秒，无法确认仍有效。',
+    'worker_error':'保护检查未完成，具体原因无法归类；请查看节点 Agent 日志。',
+    'unknown':'该节点未上报具体失败原因，请查看节点 Agent 日志。',
+}
+ADMISSION_STAGES={'startup':'启动检查','sampling':'网络采样','ownership':'网络归属检查','enforcement':'防火墙应用/验证','unknown':'状态检查'}
 
 
 def initialize(conn):
@@ -43,6 +57,11 @@ def normalized_alert(value):
     if not isinstance(source,dict) or not isinstance(source.get('sources',[]),list) or not isinstance(source.get('blocked',{}),dict):
         raise HTTPException(400,'invalid admission facts')
     data={k:v for k,v in source.items() if k in {'tcp_connections','sampled_at','observed_at','blocked_packets','tcp_denied','limited_since','review_at','extensions','recovered_at'} and type(v) is int and 0<=v<10**15}
+    if kind=='admission_unverified':
+        code=source.get('failure_code')
+        stage=source.get('failure_stage')
+        data['failure_code']=code if code in ADMISSION_FAILURES else 'unknown'
+        data['failure_stage']=stage if stage in ADMISSION_STAGES else 'unknown'
     data.update(state=source.get('state') if source.get('state') in {'enforced','unverified','unavailable'} else 'unverified',
                 limited=source.get('limited') is True,source_limit=5,tcp_limit=500 if source.get('limited') is True else None)
     data['sources']=[];data['blocked']={}
@@ -57,7 +76,7 @@ def normalized_alert(value):
     titles={'inbound_source_blocked':'入站超过 5 个来源，已拒绝新增来源','tcp_concurrency_limited':'TCP 新连接上限已设为 500','admission_unverified':'容器网络保护未确认生效'}
     messages={'inbound_source_blocked':f"保留先观测到的 {len(data['sources'])} 个来源，拒绝新增来源；不影响母鸡及其他容器。",
         'tcp_concurrency_limited':f"TCP 当前 {data.get('tcp_connections',0)} 条，新连接上限 500，已续期 {data.get('extensions',0)} 次。已有连接自然回落，通知失败不影响保护。",
-        'admission_unverified':'采样、网络归属或执行能力未完整验证；需管理员检查，不能认定保护已生效。'}
+        'admission_unverified':f"{ADMISSION_STAGES[data['failure_stage']]}未通过：{ADMISSION_FAILURES[data['failure_code']]}这表示保护状态待核实，不代表已确认攻击，也不能认定保护已生效。"}
     clean.update(title=titles[kind],message=messages[kind],admission=data,value=data.get('tcp_connections',0) if kind=='tcp_concurrency_limited' else len(data['sources'])+len(data['blocked']))
     return clean
 

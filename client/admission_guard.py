@@ -9,6 +9,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,6 +22,29 @@ except ImportError:
     import admission_linux as linux
     import network_quarantine as isolation
     import admission_observe as observation
+
+
+def failure_details(error, stage):
+    """Return bounded, non-sensitive diagnostics for operator-facing receipts."""
+    if stage == 'ownership':
+        return 'ambiguous_ownership', 'ownership', '容器地址或宿主机接口无法唯一归属；未确认保护规则已生效'
+    if isinstance(error, observation.UnsupportedNetwork):
+        return 'unsupported_network', 'sampling', '容器网络模式不在当前自动保护支持范围'
+    if isinstance(error, subprocess.TimeoutExpired):
+        return 'sample_timeout', 'sampling', '容器网络采样命令超时'
+    if isinstance(error, PermissionError):
+        return 'permission_denied', stage if stage in {'startup', 'sampling', 'ownership', 'enforcement'} else 'enforcement', 'Agent 缺少读取网络或应用防火墙规则所需的权限'
+    if isinstance(error, FileNotFoundError):
+        return 'dependency_unavailable', stage if stage in {'startup', 'sampling', 'ownership', 'enforcement'} else 'enforcement', 'Agent 依赖的网络工具或内核接口不可用'
+    if isinstance(error, RuntimeError):
+        if stage == 'sampling':
+            return 'sample_failed', 'sampling', 'Incus/Podman 或网络采样接口返回失败'
+        return 'firewall_apply_failed', 'enforcement', 'nftables/NFQUEUE 规则应用或内核读回失败'
+    if isinstance(error, ValueError):
+        if stage == 'sampling':
+            return 'sample_invalid', 'sampling', '网络采样数据不完整或无效'
+        return 'firewall_apply_failed', 'enforcement', '保护规则配置无效，未能完成应用或验证'
+    return 'worker_error', stage if stage in {'startup', 'sampling', 'ownership', 'enforcement'} else 'enforcement', '保护检查未完成，具体原因无法归类'
 
 
 class Guard:
@@ -199,11 +223,16 @@ class Guard:
         if self.queues:
             for queue in removed:self.queues.remove(queue)
 
-    def failed(self, container, now, reason='采样或执行能力不可用，未确认保护生效'):
+    def failed(self, container, now, reason=None, stage='enforcement'):
+        code,stage,message=failure_details(reason, stage)
+        # Keep compatibility with older callers passing an explanatory string,
+        # but never forward arbitrary exception text to users or the server.
+        if isinstance(reason, str):
+            code,stage,message='worker_error','enforcement','保护检查未完成，具体原因无法归类'
         with self.lock:
             key=(container['runtime'],container.get('project') or '',container['name'])
             previous=self.results.get(key,{})
-            self.results[key]={**previous,'state':'unverified','error':reason,'observed_at':now}
+            self.results[key]={**previous,'state':'unverified','error':message,'failure_code':code,'failure_stage':stage,'observed_at':now}
             for target,record in self.records.items():
                 c=record['container']
                 if (c['runtime'],c.get('project') or '',c['name'])==key:
@@ -217,7 +246,8 @@ class Guard:
         with self.lock:
             result=copy.deepcopy(self.results.get((container['runtime'],container.get('project') or '',container['name']),{}))
         if result and time.time()-result.get('observed_at',0)>30:
-            result.update(state='unverified',error='本地保护采样已过期，不能确认当前状态')
+            result.update(state='unverified',error='本地保护采样已过期，不能确认当前状态',
+                          failure_code='stale_sample',failure_stage='sampling')
         return result
 
     def alerts(self, container):
@@ -282,7 +312,7 @@ def start(inventory, provider, emit, emit_status=None):
                 if _guard is None:continue
                 for alert in _guard.alerts(container):
                     data=alert['admission']
-                    signature=(key,alert['type'],data.get('review_at'),data.get('state'))
+                    signature=(key,alert['type'],data.get('review_at'),data.get('state'),data.get('failure_code'),data.get('failure_stage'))
                     now=time.time()
                     if now-_guard.notifications.get(signature,0)<300:continue
                     try:emit(container,alert)
@@ -319,8 +349,8 @@ def start(inventory, provider, emit, emit_status=None):
                     except observation.UnsupportedNetwork as error:
                         try:_guard.withdraw_unsupported(container,error.instance_id)
                         except Exception:pass
-                        _guard.failed(container,int(time.time()),'已核实网络结构不受支持；旧的专属规则已撤回或待核实，未修改其他规则')
-                    except Exception:_guard.failed(container,int(time.time()))
+                        _guard.failed(container,int(time.time()),error,'sampling')
+                    except Exception as error:_guard.failed(container,int(time.time()),error,'sampling')
             conflicts=set()
             ownership={}
             for index,(_,snap) in enumerate(snapshots):
@@ -332,13 +362,13 @@ def start(inventory, provider, emit, emit_status=None):
             for index,(container,snapshot) in enumerate(snapshots):
                 now=int(time.time())
                 latest_targets[(container['runtime'],container.get('project') or '',container['name'])]=dict(container)
-                try:
-                    if index in conflicts:
-                        _guard.withdraw_unsupported(container,snapshot['instance_id'])
-                        raise ValueError('ambiguous network ownership')
-                    _guard.update(container,snapshot,now)
-                except Exception:
-                    _guard.failed(container,now)
+                if index in conflicts:
+                    try:_guard.withdraw_unsupported(container,snapshot['instance_id'])
+                    except Exception:pass
+                    _guard.failed(container,now,ValueError('ambiguous network ownership'),'ownership')
+                    continue
+                try:_guard.update(container,snapshot,now)
+                except Exception as error:_guard.failed(container,now,error,'enforcement')
                 # Network delivery runs in its own thread, never in packet or
                 # sampling execution. A slow API cannot postpone protection.
             # Missing/failed snapshots preserve previous rules and their journal.

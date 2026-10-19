@@ -144,6 +144,16 @@ class LinuxTests(unittest.TestCase):
             self.assertEqual(next(iter(g.states.values())).data['above_since'],0)
             self.assertEqual(g.status(c)['state'],'unverified')
 
+    def test_failed_receipt_has_safe_failure_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=mock.Mock(),queues=mock.Mock())
+            c={'runtime':'incus','project':'default','name':'test'}
+            g.failed(c,int(time.time()),RuntimeError('sensitive command output'),'enforcement')
+            result=g.status(c)
+            self.assertEqual(result['failure_code'],'firewall_apply_failed')
+            self.assertEqual(result['failure_stage'],'enforcement')
+            self.assertNotIn('sensitive',result['error'])
+
     def test_tcp_cap_does_not_hide_sixth_source_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
             nft=mock.Mock();nft.digests={}
@@ -197,6 +207,15 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaises(HTTPException):admission_api.normalized_alert(value)
         value['runtime']='docker'
         with self.assertRaises(HTTPException):admission_api.normalized_alert(value)
+
+    def test_unverified_alert_explains_bounded_failure_without_raw_error(self):
+        value={'type':'admission_unverified','runtime':'incus','project':'default','container_name':'customer',
+            'admission':{'state':'unverified','observed_at':int(time.time()),'failure_stage':'enforcement',
+                'failure_code':'firewall_apply_failed','error':'secret command output'}}
+        result=admission_api.normalized_alert(value)
+        self.assertIn('防火墙应用/验证未通过',result['message'])
+        self.assertIn('nftables/NFQUEUE',result['message'])
+        self.assertNotIn('secret command output',json.dumps(result,ensure_ascii=False))
 
 
 class APITests(unittest.TestCase):
