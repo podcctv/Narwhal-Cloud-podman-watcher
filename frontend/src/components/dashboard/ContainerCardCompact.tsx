@@ -16,6 +16,7 @@ import {
 import { ContainerItem, ContainerIdentity } from '../../api/types';
 import { fmtBytes, fmtMbps } from '../../api/client';
 import { ContainerRiskInfo } from './HostContainerList';
+import { AdmissionStatus } from '../container/AdmissionStatus';
 
 interface ContainerCardCompactProps {
   container: ContainerItem;
@@ -264,6 +265,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
       </div>
 
       {/* Section 4: Card Footer (Risk Indicator or Timestamp + Actions) */}
+      <AdmissionStatus data={sec.admission} stale={isStale} compact />
       <div className="pl-1 mt-2 pt-1.5 border-t border-slate-800/70 flex items-center justify-between gap-1 text-[10px]">
         {/* Left: Risk Summary or Timestamp */}
         <div className="min-w-0 flex-1">

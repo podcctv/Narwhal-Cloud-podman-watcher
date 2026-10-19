@@ -22,13 +22,16 @@ write_result() {
   mv -f "$base/managed-update-result.json.tmp" "$base/managed-update-result.json"
 }
 restore() {
-  for module in abuse_detection abuse_collection abuse_guard network_quarantine disk_cleanup disk_cleanup_worker socks_detector; do
+  [[ -f "$snapshot/agent.py" && -f "$snapshot/client.env" ]] || return 1
+  systemctl stop narwhal-monitor-client.service || return 1
+  if [[ -f "$app_dir/admission_guard.py" ]]; then
+    "$app_dir/.venv/bin/python" "$app_dir/admission_guard.py" --release-all || return 1
+  fi
+  for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard disk_cleanup disk_cleanup_worker socks_detector; do
     if [[ -f "$snapshot/$module.py" ]]; then
       install -m 0644 "$snapshot/$module.py" "$app_dir/$module.py" || return 1
     fi
   done
-  [[ -f "$snapshot/agent.py" && -f "$snapshot/client.env" ]] || return 1
-  systemctl stop narwhal-monitor-client.service || return 1
   install -m 0644 "$snapshot/agent.py" "$app_dir/agent.py" || return 1
   if [[ -f "$snapshot/operations.py" ]]; then
     install -m 0644 "$snapshot/operations.py" "$app_dir/operations.py" || return 1
@@ -87,14 +90,14 @@ cleanup_stage() {
 }
 trap cleanup_stage EXIT
 git -C "$repo" archive "$revision" | tar -x -C "$stage"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine disk_cleanup disk_cleanup_worker socks_detector; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard disk_cleanup disk_cleanup_worker socks_detector; do
   "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
 done
 "$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py"
 mkdir -p "$snapshot"
 chmod 0700 "$snapshot"
 install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine disk_cleanup disk_cleanup_worker socks_detector; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard disk_cleanup disk_cleanup_worker socks_detector; do
   [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
 done
 [[ ! -f "$app_dir/operations.py" ]] || install -m 0644 "$app_dir/operations.py" "$snapshot/operations.py"

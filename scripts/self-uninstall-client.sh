@@ -11,6 +11,13 @@ SHARED_SECRET="$(value SHARED_SECRET)"
 HOST_ID="$(value HOST_ID)"
 NODE_ID="$(value NODE_ID)"
 CA_FILE="$(value SERVER_TLS_CA_FILE)"
+if [[ -f /opt/narwhal-monitor/client-agent/admission_guard.py ]]; then
+  systemctl stop narwhal-monitor-client.service || exit 1
+  if ! /opt/narwhal-monitor/client-agent/.venv/bin/python /opt/narwhal-monitor/client-agent/admission_guard.py --release-all; then
+    systemctl start narwhal-monitor-client.service
+    exit 1
+  fi
+fi
 systemctl disable --now narwhal-monitor-client.service narwhal-monitor-client-update.timer >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/narwhal-monitor-client.service \
   /etc/systemd/system/narwhal-monitor-client-update.service \

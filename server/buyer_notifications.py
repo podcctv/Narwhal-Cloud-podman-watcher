@@ -144,6 +144,9 @@ def observe(conn, host, ts, containers, alerts):
         unknown=a["alert_type"] in {"socks_weak_auth", "socks_password_review"} and ("detected" not in socks or (socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}))
         if a["alert_type"] == "ops_bandwidth_saturation":
             unknown = not c.get("bandwidth_monitor", {}).get("available", False)
+        if a['alert_type'] in {'inbound_source_blocked','tcp_concurrency_limited','admission_unverified'}:
+            admission=c.get('security',{}).get('admission') or {}
+            unknown=admission.get('state')!='enforced' or ts-admission.get('observed_at',0)>30
         # Only verify events with an existing observation/remediation history.
         clean_samples=0 if present or unknown else (old["clean_samples"] if old and old["episode"]==a["first_seen"] else 0)+1
         state="awaiting_report" if present and a["status"]=="remediated" else "active" if present else "unverified" if unknown else "verified" if clean_samples>=2 else "awaiting_report"

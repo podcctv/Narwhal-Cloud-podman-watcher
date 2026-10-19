@@ -73,6 +73,17 @@ METRICS = {
 def issue(alert, details):
     kind = alert.get("alert_type", alert.get("type", ""))
     obs = details.get("observation") or details
+    if kind in {'inbound_source_blocked','tcp_concurrency_limited','admission_unverified'}:
+        data=details.get('admission') or {}
+        if kind=='inbound_source_blocked':
+            sources='、'.join(clean(x.get('ip'),50) for x in data.get('sources',[])[:5])
+            blocked='、'.join(clean(x,50) for x in list(data.get('blocked',{}))[:5])
+            return '服务器同时被超过 5 个来源访问', f"已保留的来源：{sources or '详见管理面板'}；被拒绝的新增来源：{blocked or '详见管理面板'}。仅限制该实例，不影响其他服务器。", '请检查账号共享和访问来源；需要调整时请发工单。'
+        if kind=='tcp_concurrency_limited':
+            return '服务器同时连接过多，已启用保护', f"TCP 当前 {fmt(data.get('tcp_connections'))} 条，新连接上限 500 条；最少限制 30 分钟，已追加 {fmt(data.get('extensions'))} 次。已有连接会自然回落；复查仍达到 500 条会再追加 30 分钟。", '请停止不需要的任务或异常连接；有效采样持续低于 500 条至少 2 分钟，且本轮期限已到，才会解除限制。'
+        return '服务器网络保护需要管理员检查','当前无法确认采样或保护规则已生效；未将证据不足视为恢复。','请发工单，由管理员核查处理。'
+    if kind=='pasarguard_node_removed':
+        return '服务器发现禁止运行的 PasarGuard Node 服务', '已核实程序或镜像归属，具体清理结果见下方处理回执。', '请勿再次安装此服务；如有疑问，请发工单。'
     if kind in METRICS:
         description, label, unit, advice = METRICS[kind]
         value, threshold = num(alert.get("value")), num(alert.get("threshold"))

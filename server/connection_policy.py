@@ -42,11 +42,15 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
         row = conn.execute('SELECT payload FROM connection_windows WHERE host_id=? AND runtime=? AND project=? AND container_name=?', key).fetchone()
         old = json.loads(row[0]) if row else {}
         m = metrics(c, now)
+        tcp_active=bool((c.get('security') or {}).get('admission'))
+        if m is not None and tcp_active:
+            m={**m,'total':m['tcp_established']+m['tcp_pending']}
         policy = {'metric': 'TCP 各状态 + UDP socket 总数', 'critical_threshold': critical,
                   'stop_threshold': stop, 'required_duration_seconds': duration,
                   'critical_duration_seconds': 0, 'stop_duration_seconds': 0,
                   'max_gap_seconds': max_gap, 'valid': m is not None,
                   'status': 'waiting_threshold', 'reason': '未达到自动停机门槛'}
+        if tcp_active:policy['metric']='TCP 已建立及握手中连接（不含 TIME_WAIT / UDP socket）'
         if m is None:
             state = {'last': max(ts, old.get('last', 0)), 'epoch': '', 'critical_since': 0, 'stop_since': 0}
             policy.update(status='unverified', reason='采样缺失、过期或口径未验证；仅提醒，不自动停止')
@@ -56,7 +60,7 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
             continue
         else:
             stamp = m['sampled_at']
-            epoch = f"{m['epoch']}:{critical}:{stop}:{duration}:{max_gap}"
+            epoch = f"{m['epoch']}:{critical}:{stop}:{duration}:{max_gap}:{'tcp_active' if tcp_active else 'all_sockets'}"
             continuous = old.get('epoch') == epoch and 0 < stamp - old.get('last', 0) <= max_gap
             state = {'last': stamp, 'epoch': epoch}
             state['retries'] = old.get('retries', 0) if continuous else 0
@@ -96,6 +100,7 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                           'required_duration_seconds': duration, 'metric_schema': 1,
                           'metric_epoch': m['epoch'], 'observed_at': stamp, 'expires_at': now + max_gap,
                           'stop_since':state['stop_since']}
+                if tcp_active:params['metric_tcp_active']=True
                 # Protection is independent of delivery/mapping/API availability.
                 params['notice_best_effort'] = True
                 action = conn.execute("""INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at)

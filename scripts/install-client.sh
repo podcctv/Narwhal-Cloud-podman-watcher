@@ -251,6 +251,8 @@ default_monitored_patterns="$(load_non_empty_or_default "$CLIENT_ENV_FILE" MONIT
 default_monitored_incus_patterns="$(load_non_empty_or_default "$CLIENT_ENV_FILE" MONITORED_INCUS_PATTERNS "*")"
 default_incus_project="$(load_non_empty_or_default "$CLIENT_ENV_FILE" INCUS_PROJECT "all")"
 default_security_enabled="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_MONITOR_ENABLED "true")"
+admission_enabled="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_ADMISSION_ENABLED "true")"
+pasarguard_ban_enabled="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_PASARGUARD_BAN_ENABLED "true")"
 default_access_log_paths="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_ACCESS_LOG_PATHS "/var/log/nginx/access.log,/var/log/caddy/access.log")"
 default_container_access_log_paths="$(load_non_empty_or_default "$CLIENT_ENV_FILE" SECURITY_CONTAINER_ACCESS_LOG_PATHS "/var/log/nginx/access.log,/var/log/caddy/access.log")"
 ddos_rx_bps="$(load_non_empty_or_default "$CLIENT_ENV_FILE" ALERT_DDOS_RX_BPS "100000000")"
@@ -395,6 +397,8 @@ MONITORED_IMAGE_PATTERNS=$monitored_patterns
 MONITORED_INCUS_PATTERNS=$monitored_incus_patterns
 INCUS_PROJECT=$incus_project
 SECURITY_MONITOR_ENABLED=$security_enabled
+SECURITY_ADMISSION_ENABLED=$admission_enabled
+SECURITY_PASARGUARD_BAN_ENABLED=$pasarguard_ban_enabled
 SECURITY_ACCESS_LOG_PATHS=$access_log_paths
 SECURITY_CONTAINER_ACCESS_LOG_PATHS=$container_access_log_paths
 ALERT_DDOS_RX_BPS=$ddos_rx_bps
@@ -465,7 +469,7 @@ cp "$ROOT_DIR/client/operations.py" "$CLIENT_APP_DIR/operations.py"
 cp "$ROOT_DIR/client/disk_cleanup.py" "$CLIENT_APP_DIR/disk_cleanup.py"
 cp "$ROOT_DIR/client/disk_cleanup_worker.py" "$CLIENT_APP_DIR/disk_cleanup_worker.py"
 cp "$ROOT_DIR/client/security_banner.py" "$CLIENT_APP_DIR/security_banner.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard; do
   cp "$ROOT_DIR/client/$module.py" "$CLIENT_APP_DIR/$module.py"
 done
 cp "$ROOT_DIR/client/tcp_probe.py" "$CLIENT_APP_DIR/tcp_probe.py"
@@ -476,6 +480,11 @@ cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"
 chmod 0700 "$SELF_UNINSTALL_SCRIPT"
 
 ensure_client_venv
+
+if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 || ! command -v nsenter >/dev/null 2>&1 || ! ldconfig -p 2>/dev/null | grep libnetfilter_queue >/dev/null; then
+  apt-get update
+  apt-get install -y nftables libnetfilter-queue1 iproute2 util-linux
+fi
 
 "$CLIENT_VENV_DIR/bin/pip" install --upgrade pip >/dev/null
 "$CLIENT_VENV_DIR/bin/pip" install -r "$CLIENT_APP_DIR/requirements.txt"

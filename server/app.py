@@ -141,12 +141,15 @@ except ImportError:
     import tcping
 
 try:
-    from server import abuse_api
+    from server import abuse_api, admission_api
 except ImportError:
     import abuse_api
+    import admission_api
 
 _AGENT_ONLY_PATHS = {
     "/api/v1/abuse/events",
+    "/api/v1/admission/events",
+    "/api/v1/admission/status",
     "/api/v1/report",
     "/api/v1/tls/ca",
     "/api/v1/actions/poll",
@@ -406,6 +409,7 @@ def init_db() -> None:
     commerce.initialize(conn)
     tcping.initialize(conn)
     abuse_api.initialize(conn)
+    admission_api.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -2239,6 +2243,8 @@ def latest(include_stale: bool = False) -> JSONResponse:
 
     conn = db()
     try:
+        admission_rows={(r['host_id'],r['runtime'],r['project'],r['container_name']):dict(r)
+                        for r in conn.execute('SELECT * FROM admission_states')}
         host_heartbeats = {
             str(row["host_id"]): int(row["last_seen"])
             for row in conn.execute("SELECT host_id, last_seen FROM hosts").fetchall()
@@ -2281,6 +2287,12 @@ def latest(include_stale: bool = False) -> JSONResponse:
     out = []
     for r in rows:
         payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+        admission=admission_rows.get((r['host_id'],r['runtime'],r['project'],r['container_name']))
+        reported_identity=(payload.get('security') or {}).get('admission',{}).get('instance_id') or payload.get('stable_id') or payload.get('id') or ''
+        if admission and (not admission['instance_id'] or (len(reported_identity)>=12 and admission['instance_id'].startswith(reported_identity))):
+            security=payload.setdefault('security',{})
+            if admission['observed_at']>security.get('admission',{}).get('observed_at',0):
+                security['admission']=json.loads(admission['payload'])
         disk = payload.get("disk", {})
         host_disk = host_disk_map.get(r["host_id"], {})
         alert_disk = (r["disk_used_percent"] or 0) >= ALERT_DISK_THRESHOLD_PERCENT
@@ -3842,6 +3854,7 @@ disk_cleanup.attach(app,db)
 commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD))
 tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)
+admission_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, buyer_notifications.reconcile)
 
 
 @app.get("/api/v1/security/actions")

@@ -56,6 +56,19 @@ export interface ContainerItem {
 }
 
 export interface ContainerSecurity {
+  admission?: {
+    state: 'enforced' | 'unverified' | 'unavailable';
+    observed_at?: number;
+    error?: string;
+    sources?: { ip: string; first_seen: number }[];
+    blocked?: Record<string, { first_seen: number; last_seen: number; packets: number }>;
+    limited?: boolean;
+    tcp_connections?: number;
+    review_at?: number;
+    extensions?: number;
+    blocked_packets?: number;
+    tcp_denied?: number;
+  };
   process_count?: number;
   top_cpu_process_command?: string;
   top_cpu_process_cpu_percent?: number;

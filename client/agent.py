@@ -37,11 +37,14 @@ except ImportError:  # Optional at import time for source-only/test environments
     maxminddb = None
 
 try:
-    from client import abuse_guard, abuse_collection, network_quarantine
+    from client import abuse_guard, abuse_collection, network_quarantine, admission_guard, admission_observe, pasarguard_guard
 except ImportError:
     import abuse_guard
     import abuse_collection
     import network_quarantine
+    import admission_guard
+    import admission_observe
+    import pasarguard_guard
 
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 
@@ -2575,6 +2578,7 @@ MOTD_MARKER_START = "# >>> NARWHAL SECURITY ALERT BEGIN >>>"
 MOTD_MARKER_END = "# <<< NARWHAL SECURITY ALERT END <<<"
 
 _MOTD_THREAT_TYPES = {
+    'inbound_source_blocked', 'tcp_concurrency_limited', 'admission_unverified', 'pasarguard_node_removed',
     "socks_weak_auth",
     "socks_password_review",
     "malicious_process",
@@ -2696,6 +2700,25 @@ def _schedule_abuse_guard(server, secret, host_id, node_id):
             'host_id': host_id, 'node_id': node_id, 'agent_version': APP_VERSION,
             'timestamp': int(time.time()), 'alert': alert})
     abuse_guard.engine().schedule(_abuse_targets, _abuse_provider, emit)
+
+
+def _start_admission_guard(server, secret, host_id, node_id):
+    if not node_id or os.name != 'posix':return
+    def observe(container):
+        return admission_observe.snapshot(container,get_runtime_bins(),_run_action_command)
+    def emit(container,alert):
+        # SSH and API delivery are independent of the already-applied rules.
+        try:update_container_motd_alerts(container,[alert])
+        except Exception:pass
+        return signed_post_json(server,secret,'/api/v1/admission/events',{
+            'host_id':host_id,'node_id':node_id,'timestamp':int(time.time()),'alert':alert})
+    def emit_status(items):
+        return signed_post_json(server,secret,'/api/v1/admission/status',{
+            'host_id':host_id,'node_id':node_id,'timestamp':int(time.time()),'items':items})
+    admission_guard.start(list_containers,observe,emit,emit_status)
+    def software_observe(container):
+        return admission_observe.snapshot(container,get_runtime_bins(),_run_action_command,require_forward=False)
+    pasarguard_guard.start(list_containers,software_observe,_run_action_command,get_runtime_bins,_checked_banner_exec,emit)
 
 
 _CRITICAL_BUYER_NOTIFY_TYPES = {
@@ -2979,6 +3002,9 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         summary["syn_recv_count"] = int(summary["syn_recv_count"]) + syn_recv
 
         conn_count = int(container.get("conn_count") or 0)
+        if admission_guard.status(container) and security.get('connection_metrics',{}).get('valid') is True:
+            metric=security['connection_metrics']
+            conn_count=int(metric.get('tcp_established') or 0)+int(metric.get('tcp_pending') or 0)
         if conn_count > conn_warning:
             critical = conn_count > conn_critical
             alerts.append(
@@ -3710,6 +3736,10 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             })
             container_access_readable_files += int(container_access.get("readable_files") or 0)
             alerts.extend(_http_security_alerts(container_access, container))
+        if container.get('runtime') in {'incus','podman'}:
+            alerts.extend(admission_guard.alerts(container))
+            alerts.extend(pasarguard_guard.alerts(container))
+            container.setdefault('security',{})['admission']=admission_guard.status(container)
         container_alerts = alerts[start_alert_idx:]
         update_container_motd_alerts(container, container_alerts)
 
@@ -7339,6 +7369,8 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             return False, f"runtime {runtime_kind} is unavailable"
         if params.get('metric_schema') != 1:
             return False, 'legacy automatic stop lacks validated socket evidence; fresh samples required'
+        if admission_guard.status({'runtime':runtime_kind,'project':project,'name':container_name}) and params.get('metric_tcp_active') is not True:
+            return False, 'automatic stop needs fresh TCP-active evidence; legacy socket totals cannot stop a guarded instance'
         if params.get('notice_required') and (not re.fullmatch(r'[0-9a-f]{32}',str(params.get('notice_id','')))
                 or type(params.get('notification_accepted_at')) is not int or params['notification_accepted_at']<=0):
             return False, 'user notification acknowledgement is missing; no stop executed'
@@ -7357,8 +7389,10 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             except (ValueError, KeyError, IndexError, TypeError):
                 return False, 'cannot verify current container identity'
         fresh = _collect_socket_security(pid).get('connection_metrics') or {}
+        current=(int(fresh.get('tcp_established') or 0)+int(fresh.get('tcp_pending') or 0)
+                 if params.get('metric_tcp_active') is True else int(fresh.get('total') or 0))
         if (fresh.get('valid') is not True or fresh.get('epoch') != params.get('metric_epoch')
-                or int(fresh.get('total') or 0) <= threshold):
+                or current <= threshold):
             return False, 'automatic stop cancelled: container restarted, recovered or fresh evidence unavailable'
         command = _runtime_base(runtime_bin, project) + ["stop", container_name]
         ok, message = _run_action_command(command)
@@ -7627,6 +7661,7 @@ def main() -> None:
     parser.add_argument("--node-id", default=os.getenv("NODE_ID", ""))
     args = parser.parse_args()
     node_operations.load_config()
+    _start_admission_guard(args.server,args.secret,args.host_id,args.node_id)
 
     while True:
         containers = list_containers()

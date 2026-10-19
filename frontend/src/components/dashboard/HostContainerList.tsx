@@ -27,6 +27,7 @@ import { DashboardToolbar, ViewMode, FilterState } from './DashboardToolbar';
 import { ContainerCardCompact } from './ContainerCardCompact';
 import { ContainerTableView } from './ContainerTableView';
 import { HostDiskPressure, hostDiskPressure } from './HostDiskPressure';
+import { AdmissionStatus } from '../container/AdmissionStatus';
 
 interface HostContainerListProps {
   containers: ContainerItem[];
@@ -714,6 +715,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                 </div>
 
                                 {/* Bandwidth & Conns Block */}
+                                <AdmissionStatus data={sec.admission} stale={Boolean(c.alerts?.stale)} compact />
                                 <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
                                   <div className="rounded-lg bg-slate-950/70 p-2 border border-slate-800/80">
                                     <div className="flex items-center justify-between text-slate-500 text-[10px]">

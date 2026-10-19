@@ -1,5 +1,6 @@
 """Loopback-only synthetic UI, lifespan disabled: no buyers, Agents or bots contacted."""
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ def main():
         server.DASHBOARD_USERNAME = 'preview'
         server.DASHBOARD_PASSWORD = 'local-preview-only'
         server.PUBLIC_BASE_URL = ''
-        server.APP_VERSION = '1.7.41'
+        server.APP_VERSION = '1.7.44'
         server.init_db()
         now = int(time.time())
         with closing(server.db()) as conn:
@@ -36,6 +37,11 @@ def main():
                     'machine_id':'00000000-0000-0000-0000-000000000001','user_id':'synthetic-user-1','node_name':'香港演示服务器'})
                 container={'name':name,'runtime':'incus','project':'default','cpu_percent':1,'mem_bytes':1024,
                     'mem_percent':1,'net_rx_bps':0,'net_tx_bps':0,'conn_count':2,'security':{'socks_proxy':{'detected':True,'auth_mode':'unknown'}}}
+                if index==0:
+                    container['security']['admission']={'state':'enforced','instance_id':'a'*36,'observed_at':now,
+                        'sources':[{'ip':ip,'first_seen':now-300} for ip in ('192.0.2.1','2001:db8::1','192.0.2.2','2001:db8::2','192.0.2.3')],
+                        'blocked':{'2001:db8:ffff:ffff:ffff:ffff:ffff:ffff':{'first_seen':now,'last_seen':now,'packets':42}},
+                        'limited':True,'tcp_connections':499,'review_at':now+900,'extensions':2}
                 conn.execute("INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,ts,payload_json,podman_network_ok_v4,podman_network_ok_v6) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1)",
                     ('合成香港节点',name,'incus','default',1,1024,1,0,0,2,now,json.dumps(container)))
             panel_alert={'type':'standalone_proxy_panel','severity':'warning','title':'检测到独立代理管理面板（仅提醒）',
@@ -54,7 +60,7 @@ def main():
             conn.execute("UPDATE security_alerts SET status='resolved',last_seen=? WHERE id=?", (now-60,row['id']))
             conn.execute('INSERT INTO buyer_checks(alert_id,episode,clean_samples,last_sample,state,verified_at) VALUES(?,?,2,?,?,?)', (row['id'],first,now,'verified',now))
             conn.commit()
-        uvicorn.run(server.app,host='127.0.0.1',port=8793,log_level='warning',lifespan='off')
+        uvicorn.run(server.app,host='127.0.0.1',port=int(os.getenv('NARWHAL_PREVIEW_PORT','8793')),log_level='warning',lifespan='off')
 
 
 if __name__ == '__main__': main()

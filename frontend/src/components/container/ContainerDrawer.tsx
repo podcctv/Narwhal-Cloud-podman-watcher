@@ -25,6 +25,7 @@ import { ResourceChart } from './ResourceChart';
 import { NetworkChart } from './NetworkChart';
 import { DiagnosticPanel } from './DiagnosticPanel';
 import { ConfirmDialog } from '../common/ConfirmDialog';
+import { AdmissionStatus } from './AdmissionStatus';
 
 interface ContainerDrawerProps {
   identity: ContainerIdentity | null;
@@ -184,8 +185,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
       />
 
       {/* Slide-over Drawer Panel */}
-      <div className="absolute inset-y-0 right-0 flex max-w-full pl-10">
-        <div className="w-screen max-w-2xl transform bg-slate-900 border-l border-slate-800 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
+      <div className="absolute inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10">
+        <div className="min-w-0 w-screen max-w-2xl transform bg-slate-900 border-l border-slate-800 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
           {/* Drawer Header */}
           <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/80 px-6 py-4">
             <div className="flex items-center gap-3 min-w-0">
@@ -237,6 +238,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
           {/* Drawer Scrollable Body */}
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <AdmissionStatus data={sec.admission} stale={container?.alerts?.stale} />
             {/* Quick KPI Cards Grid */}
             <div className="grid grid-cols-3 gap-3 font-mono text-xs">
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
