@@ -75,9 +75,10 @@ def normalized_alert(value):
         raise HTTPException(400,'fresh verified enforcement receipt required')
     titles={'inbound_source_blocked':'入站超过 5 个来源，已拒绝新增来源','tcp_concurrency_limited':'TCP 新连接上限已设为 500','admission_unverified':'容器网络保护未确认生效'}
     messages={'inbound_source_blocked':f"保留先观测到的 {len(data['sources'])} 个来源，拒绝新增来源；不影响母鸡及其他容器。",
-        'tcp_concurrency_limited':f"TCP 当前 {data.get('tcp_connections',0)} 条，新连接上限 500，已续期 {data.get('extensions',0)} 次。已有连接自然回落，通知失败不影响保护。",
-        'admission_unverified':f"{ADMISSION_STAGES[data['failure_stage']]}未通过：{ADMISSION_FAILURES[data['failure_code']]}这表示保护状态待核实，不代表已确认攻击，也不能认定保护已生效。"}
-    clean.update(title=titles[kind],message=messages[kind],admission=data,value=data.get('tcp_connections',0) if kind=='tcp_concurrency_limited' else len(data['sources'])+len(data['blocked']))
+        'tcp_concurrency_limited':f"TCP 当前 {data.get('tcp_connections',0)} 条，新连接上限 500，已续期 {data.get('extensions',0)} 次。已有连接自然回落，通知失败不影响保护。"}
+    message=(f"{ADMISSION_STAGES[data['failure_stage']]}未通过：{ADMISSION_FAILURES[data['failure_code']]}这表示保护状态待核实，不代表已确认攻击，也不能认定保护已生效。"
+        if kind=='admission_unverified' else messages[kind])
+    clean.update(title=titles[kind],message=message,admission=data,value=data.get('tcp_connections',0) if kind=='tcp_concurrency_limited' else len(data['sources'])+len(data['blocked']))
     return clean
 
 
