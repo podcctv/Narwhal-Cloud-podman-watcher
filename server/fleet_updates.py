@@ -29,7 +29,11 @@ def resolve(version):
         req = urllib.request.Request(path, headers={'User-Agent': 'Narwhal-Fleet'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return response.read(100_000)
-    head = json.loads(get(f'https://api.github.com/repos/{REPOSITORY}/commits/main'))['sha']
+    # The commits endpoint may include a large file list/diff; truncating it at
+    # 100 KB can turn a valid response into malformed JSON. The Git ref endpoint
+    # returns only the branch's commit pointer, which is all we need here.
+    ref = get(f'https://api.github.com/repos/{REPOSITORY}/git/ref/heads/main')
+    head = json.loads(ref)['object']['sha']
     if head != revision or get(f'https://raw.githubusercontent.com/{REPOSITORY}/{revision}/VERSION').decode().strip() != version:
         raise ValueError('running release is not the current published main')
     return revision

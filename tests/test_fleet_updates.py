@@ -70,9 +70,12 @@ class FleetTests(unittest.TestCase):
     def test_publication_requires_build_sha_main_and_version(self):
         with mock.patch.dict('os.environ',{'NARWHAL_REVISION':'a'*40}),mock.patch.object(fleet.urllib.request,'urlopen') as url:
             response=url.return_value.__enter__.return_value
-            response.read.side_effect=[json.dumps({'sha':'a'*40}).encode(),b'1.7.47\n']
+            response.read.side_effect=[json.dumps({'object':{'sha':'a'*40}}).encode(),b'1.7.47\n']
             self.assertEqual(fleet.resolve('1.7.47'),'a'*40)
-            response.read.side_effect=[json.dumps({'sha':'b'*40}).encode()]
+            self.assertTrue(
+                url.call_args_list[0].args[0].full_url.endswith('/git/ref/heads/main')
+            )
+            response.read.side_effect=[json.dumps({'object':{'sha':'b'*40}}).encode()]
             with self.assertRaises(ValueError): fleet.resolve('1.7.47')
         with mock.patch.dict('os.environ',{'NARWHAL_REVISION':'unknown'}):
             with self.assertRaises(ValueError): fleet.resolve('1.7.47')
