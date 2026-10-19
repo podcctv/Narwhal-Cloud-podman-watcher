@@ -475,7 +475,7 @@ def write_proc(pid, banner):
         os.close(rootfd)
 
 
-def update(container, alerts, threat_types, checked_exec, server_states, version):
+def update(container, alerts, threat_types, checked_exec, server_states, version, partial=False):
     delivery={"status":"disabled","mechanism":"post_login_motd"}
     container.setdefault("security",{})["motd_delivery"]=delivery
     if os.getenv("SECURITY_INJECT_MOTD_ALERT","true").lower() in {"false","0","off","no"} or (container.get("runtime")=="docker" and container.get("monitor_mode")=="notice"):
@@ -536,6 +536,8 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
         if matching:
             e["event_id"]=safe(matching.get("event_id"),80)
         if e.get("type") not in present:
+            if partial:
+                continue  # Incremental notices are not a clean observation.
             socks=container.get("security",{}).get("socks_proxy",{})
             unknown=e.get("type") in {"socks_weak_auth", "socks_password_review"} and ("detected" not in socks or (socks.get("detected") and socks.get("auth_mode") not in {"configured","no_auth","weak_password"}))
             e["clean_samples"]=0 if unknown else int(e.get("clean_samples",0))+1

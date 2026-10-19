@@ -430,6 +430,11 @@ async def _cleanup_background_loop() -> None:
 async def startup() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     init_db()
+    try:
+        from server import fleet_updates
+    except ImportError:
+        import fleet_updates
+    asyncio.create_task(fleet_updates.run(db, lambda: APP_VERSION))
     asyncio.create_task(_buyer_background_loop())
     asyncio.create_task(_cleanup_background_loop())
     if not PUBLIC_BASE_URL:

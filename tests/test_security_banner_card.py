@@ -13,6 +13,18 @@ from client import agent
 
 
 class CardTests(unittest.TestCase):
+    def test_incremental_guard_notice_is_not_a_clean_scan(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {'SECURITY_MOTD_STATE_FILE':str(Path(directory)/'state.json')}), mock.patch.object(banner,'install_shell',return_value=(True,True)), mock.patch.object(banner,'write_proc',return_value=False):
+            banner.incidents.clear(); banner._loaded_path=''; banner._checks.clear()
+            c={'name':'c','runtime':'incus','pid':99}; key='["incus", "", "c", ""]'
+            banner.incidents[key]=[{'type':'connections','title':'高连接数','state':'active','event_id':'NW-old','time_epoch':1000,'clean_samples':0}]
+            for at in (2000,2300,2600):
+                with mock.patch.object(banner.time,'time',return_value=at):
+                    banner.update(c,[{'type':'inbound_source_blocked','message':'已阻断新增来源'}],set(),mock.Mock(return_value=(True,'')),[],'test',partial=True)
+            e=next(e for e in banner.incidents[key] if e['type']=='connections')
+            self.assertEqual(e['state'],'active'); self.assertEqual(e['clean_samples'],0)
+            banner.incidents.clear(); banner._loaded_path=''; banner._checks.clear()
+
     def test_historical_alert_is_past_tense_and_has_relative_age(self):
         entry = {'type': 'connections', 'title': '容器连接数过高', 'state': 'verified',
                  'time_epoch': 1791509400, 'recovered_at_epoch': 1791510000,

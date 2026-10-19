@@ -1262,7 +1262,7 @@ ENV
   local image_name="narwhal-monitor-server:latest"
   case "$image_source" in
     local)
-      podman build --build-arg "APP_VERSION=$PROJECT_VERSION" -t "$image_name" -f server/Dockerfile server
+      podman build --build-arg "APP_VERSION=$PROJECT_VERSION" --build-arg "APP_REVISION=$(git rev-parse HEAD)" -t "$image_name" -f server/Dockerfile server
       ;;
     github)
       echo "Trying to pull $github_image..."
@@ -1270,7 +1270,7 @@ ENV
         image_name="$github_image"
       else
         echo "[WARN] Pull github image failed. Falling back to local build (this avoids GHCR 403/private image issues)."
-        podman build --build-arg "APP_VERSION=$PROJECT_VERSION" -t "$image_name" -f server/Dockerfile server
+        podman build --build-arg "APP_VERSION=$PROJECT_VERSION" --build-arg "APP_REVISION=$(git rev-parse HEAD)" -t "$image_name" -f server/Dockerfile server
       fi
       ;;
     *)

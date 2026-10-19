@@ -291,6 +291,7 @@ class OperationsTests(unittest.TestCase):
         self.conn.execute("INSERT INTO ops_upgrade_nodes VALUES(1,'h',9,'dispatched','1.6.74')")
         self.conn.execute("INSERT INTO security_actions(id,alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(9,0,'h','host','','__host__','managed_upgrade','{}','running','test',?,?)",(self.now,self.now))
         data=self.data()
+        self.conn.execute("UPDATE security_actions SET params_json=? WHERE id=9",(json.dumps({'expected_node_id':'node'}),))
         data["agent_version"]="1.7.0"
         data["operations"]["health"]=[{"source":"network_counters","status":"partial"}]
         self.ingest(self.now,data)

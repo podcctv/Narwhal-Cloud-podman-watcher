@@ -10,8 +10,10 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 try:
     from . import operations as ops
+    from . import fleet_updates
 except ImportError:
     import operations as ops
+    import fleet_updates
 
 
 def attach(app, db, database_path, storage, cleanup, version, admin_name):
@@ -259,7 +261,24 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
     def upgrades():
         conn=db()
         try:
-            return {"nodes":rows(conn,"SELECT host_id,node_id,agent_version,last_seen FROM hosts ORDER BY host_id LIMIT 500"),"campaigns":unpack(rows(conn,"SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 50")),"progress":rows(conn,"SELECT * FROM ops_upgrade_nodes ORDER BY campaign DESC LIMIT 500"),"server_version":version()}
+            return {"automatic":fleet_updates.settings(conn),"nodes":rows(conn,"SELECT host_id,node_id,agent_version,last_seen FROM hosts ORDER BY host_id LIMIT 500"),"campaigns":unpack(rows(conn,"SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 50")),"progress":rows(conn,"SELECT * FROM ops_upgrade_nodes ORDER BY campaign DESC LIMIT 500"),"server_version":version()}
+        finally:
+            conn.close()
+
+    @router.post("/upgrades/automatic")
+    async def automatic_upgrades(request:Request):
+        p=await request.json()
+        if not isinstance(p.get('enabled'),bool):
+            raise HTTPException(400,'enabled must be boolean')
+        conn=db()
+        try:
+            cfg=fleet_updates.settings(conn)
+            host=p.get('resume_host')
+            if host is not None and host not in cfg['holds']:
+                raise HTTPException(400,'node is not held')
+            fleet_updates.save(conn,{**cfg,'enabled':p['enabled'],'holds':[h for h in cfg['holds'] if h!=host]})
+            conn.commit()
+            return {'ok':True}
         finally:
             conn.close()
 
@@ -308,6 +327,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             row=conn.execute("SELECT * FROM ops_upgrades WHERE id=?",(campaign,)).fetchone()
             if not row or row["status"]!="canary" or not conn.execute("SELECT 1 FROM ops_upgrade_nodes WHERE campaign=? AND status='verified'",(campaign,)).fetchone():
                 raise HTTPException(409,"灰度节点尚未验证目标版本")
+            if ops.loads(row['payload']).get('automatic'):
+                raise HTTPException(409,'自动发布由协调器完成健康观察和分批推广，请勿手动跳过')
             for n in conn.execute("SELECT host_id FROM ops_upgrade_nodes WHERE campaign=? AND status='pending'",(campaign,)).fetchall():
                 action=queue(conn,n[0],"managed_upgrade",{"revision":row["revision"],"version":row["version"]},request.state.dashboard_user)
                 conn.execute("UPDATE ops_upgrade_nodes SET status='dispatched',action_id=? WHERE campaign=? AND host_id=?",(action,campaign,n[0]))
@@ -327,6 +348,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             if not previous:
                 raise HTTPException(409,"没有该节点受管升级记录，无法确认回滚目标")
             action=queue(conn,host,"managed_rollback",{"version":previous[0]},request.state.dashboard_user)
+            cfg=fleet_updates.settings(conn)
+            fleet_updates.save(conn,{**cfg,'holds':sorted(set(cfg['holds']+[host]))})
             conn.commit()
             return {"action_id":action}
         finally:

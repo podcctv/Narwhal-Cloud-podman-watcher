@@ -253,10 +253,12 @@ def ingest(conn, host_id, node_id, ts, data):
         if service:
             conn.execute("INSERT INTO ops_service_results VALUES(?,?,?) ON CONFLICT(service_id) DO UPDATE SET ts=excluded.ts,payload=excluded.payload", (service[0], ts, json.dumps(result)))
             event(conn, identity(node), f"service:{service[0]}", ts, {**result,"severity":"critical" if result.get("status")=="failed" else "warning"}, result.get("status") != "healthy")
-    for upgrade in conn.execute("SELECT n.*,u.version FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign WHERE n.host_id=? AND n.status='dispatched'", (host_id,)).fetchall():
+    for upgrade in conn.execute("SELECT n.*,u.version FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign WHERE n.host_id=? AND n.status IN ('dispatched','failed')", (host_id,)).fetchall():
         core_health=[x for x in operations.get("health",[]) if x.get("source") in {"network_counters","security"}]
         healthy_scan = data.get("security",{}).get("enabled") is True and bool(core_health) and all(x.get("status") in {"healthy","idle"} for x in core_health) and all(x.get("status")=="healthy" for x in operations.get("services",[]))
-        if data.get("agent_version") == upgrade["version"] and healthy_scan:
+        action=conn.execute('SELECT params_json,created_at FROM security_actions WHERE id=?',(upgrade['action_id'],)).fetchone()
+        bound=action and loads(action['params_json']).get('expected_node_id')==node_id and ts>=action['created_at']
+        if bound and data.get("agent_version") == upgrade["version"] and healthy_scan:
             conn.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
             conn.execute("UPDATE security_actions SET status='succeeded',result_message='target version reported',updated_at=? WHERE id=?", (ts, upgrade["action_id"]))
     result = operations.get("upgrade_result",{})
