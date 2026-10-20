@@ -43,6 +43,15 @@ jobs:
           TCPING_TAIWAN_HOST: taiwan-target.invalid
         run: python -m unittest discover -s tests -v
 
+      - name: Build and smoke-test server image
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg APP_VERSION="$(tr -d '[:space:]' < VERSION)" \
+            --build-arg APP_REVISION="$(git rev-parse HEAD)" \
+            --tag narwhal-monitor-server-smoke:ci ./server
+          docker run --rm --entrypoint python narwhal-monitor-server-smoke:ci \
+            -c "import app, inbound_assessment"
+
       - name: Test isolated Linux packet admission (no host firewall changes)
         run: |
           sudo apt-get update -qq
