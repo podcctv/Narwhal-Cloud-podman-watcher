@@ -1430,6 +1430,10 @@ class ServerRuntimeTests(unittest.TestCase):
                     "name": "same-name",
                     "runtime": "incus",
                     "project": "default",
+                    "security": {
+                        "host_conntrack_available": True,
+                        "inbound_source_signals": [],
+                    },
                     "deep_sample": {
                         "action_id": first["action"]["id"],
                         "sampled_at": now,
@@ -1457,6 +1461,8 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(status["action"]["status"], "succeeded")
         self.assertEqual(status["sample"]["process_count"], 7)
         self.assertEqual(status["sample"]["agent_version"], "1.1.0")
+        self.assertEqual(status["sample"]["inbound_source_history"]["status"], "insufficient_history")
+        self.assertEqual(status["sample"]["inbound_source_history"]["report_sample_count"], 1)
 
     def test_container_diagnostic_rejects_stale_container(self):
         self._insert(

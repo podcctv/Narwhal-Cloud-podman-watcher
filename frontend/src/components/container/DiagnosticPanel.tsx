@@ -99,6 +99,47 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   const inboundIps = sample?.inbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
   const outboundIps = sample?.outbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.outbound || 0) > 0);
   const unclassifiedIps = sample?.unclassified_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.unknown || 0) > 0);
+  const inboundSourceHistory = sample?.inbound_source_history;
+  const inboundSourceAssessmentByIp = new Map(
+    (inboundSourceHistory?.assessments || []).map((item) => [item.ip, item]),
+  );
+  const inboundBehaviorLabels: Record<string, { label: string; className: string; detail: string }> = {
+    repeated_bidirectional_service_port_activity: {
+      label: '多次连接到已监听服务端口',
+      className: 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200',
+      detail: '近几次采样都观察到该 IP 连接容器正在监听的端口，且有双向 TCP 数据；这更像服务使用，但不能确认访问者身份。',
+    },
+    repeated_uncompleted_multiport_probe: {
+      label: '重复探测多个非监听端口',
+      className: 'border-amber-500/30 bg-amber-950/30 text-amber-200',
+      detail: '同一 IP 在多次采样中访问多个没有本地监听服务的端口，且多数连接未完成；这是较强的扫描行为线索，不等于已证明恶意。',
+    },
+    mixed_repeated_service_and_probe_clues: {
+      label: '服务访问与探测线索并存',
+      className: 'border-amber-500/30 bg-amber-950/30 text-amber-200',
+      detail: '该 IP 既出现已监听端口的双向通信，也出现多端口未完成连接；可能是混合行为，需结合服务日志核实。',
+    },
+    mixed_single_sample_clues: {
+      label: '单次快照线索混合',
+      className: 'border-slate-700 bg-slate-900 text-slate-300',
+      detail: '服务访问和未完成连接线索都只出现于有限采样，证据不足以分类。',
+    },
+    insufficient_evidence: {
+      label: '历史证据不足',
+      className: 'border-slate-700 bg-slate-900 text-slate-300',
+      detail: '当前历史窗口没有足够的重复 conntrack 证据；不能据此判断是用户业务还是扫描。',
+    },
+  };
+  const inboundBehaviorCounts = (inboundSourceHistory?.assessments || []).reduce(
+    (counts, item) => {
+      if (item.classification === 'repeated_bidirectional_service_port_activity') counts.service += 1;
+      else if (item.classification === 'repeated_uncompleted_multiport_probe') counts.probe += 1;
+      else if (item.classification?.startsWith('mixed_')) counts.mixed += 1;
+      else counts.unknown += 1;
+      return counts;
+    },
+    { service: 0, probe: 0, mixed: 0, unknown: 0 },
+  );
   const automaticReputationCandidates = useMemo(() => {
     const candidates = sample?.inbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
     const seen = new Set<string>();
@@ -230,6 +271,12 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             insufficient_transport_evidence: { label: '传输层证据不足', className: 'border-slate-700 bg-slate-900 text-slate-300', detail: '当前快照不能区分正常访问与探测。' },
           };
           const evidenceView = evidenceLabels[evidence?.classification || ''];
+          const sourceBehavior = direction === 'inbound' && ip.ip
+            ? inboundSourceAssessmentByIp.get(ip.ip)
+            : undefined;
+          const sourceBehaviorView = sourceBehavior
+            ? inboundBehaviorLabels[sourceBehavior.classification || '']
+            : undefined;
           const repLabel = reputation?.status === 'checked'
             ? reputation.classification === 'many_recent_reports' ? `近期公开举报较多 · ${reputation.abuse_confidence_score}/100`
               : reputation.classification === 'reported' ? `有近期公开举报 · ${reputation.abuse_confidence_score}/100`
@@ -272,6 +319,18 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
                 : ip.processes?.length
                   ? `旧版快照仅有关联列表，未按方向区分：${ip.processes.join('、')}`
                   : '进程 / PID 归属本次未取得'}
+            </div>}
+            {direction === 'inbound' && sourceBehavior && sourceBehaviorView && <div className={sourceBehaviorView.className + ' mt-2 rounded-md border px-2 py-1.5 text-[11px]'}>
+              <strong>{sourceBehaviorView.label}</strong>
+              <p className="mt-0.5 leading-4 opacity-90">{sourceBehaviorView.detail}</p>
+              <p className="mt-1 text-[10px] opacity-80">
+                近 {Math.round((inboundSourceHistory?.lookback_seconds || 600) / 60)} 分钟 · 样本 {sourceBehavior.sample_count || 0} 次 ·
+                服务端口样本 {sourceBehavior.service_activity_samples || 0} 次 · 探测线索 {sourceBehavior.probe_clue_samples || 0} 次
+              </p>
+              {(sourceBehavior.service_ports?.length || sourceBehavior.non_listener_ports?.length || 0) > 0 && <p className="mt-1 text-[10px] opacity-80">
+                已监听端口：{sourceBehavior.service_ports?.join(', ') || '-'} · 非监听端口：{sourceBehavior.non_listener_ports?.join(', ') || '-'}
+              </p>}
+              <p className="mt-1 text-[10px] opacity-80">这是网络行为判断，不是用户身份或恶意结论；AbuseIPDB 信誉分另行参考。</p>
             </div>}
             {direction === 'inbound' && <div className="mt-2 space-y-1.5 border-t border-slate-800 pt-2">
               {evidenceView ? <div className={`rounded-md border px-2 py-1.5 text-[11px] ${evidenceView.className}`}>
@@ -372,6 +431,27 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
       {/* Snapshot Data View */}
       {sample && (
         <div className="space-y-4 pt-2">
+          {inboundSourceHistory && <div className={inboundSourceHistory.status === 'available'
+            ? 'rounded-lg border border-sky-500/25 bg-sky-950/20 p-3 text-xs leading-5 text-sky-100'
+            : 'rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100'}>
+            <div className="font-semibold">近 10 分钟入站行为对照</div>
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 tabular-nums">
+              <span>有效 conntrack 采样 {inboundSourceHistory.conntrack_sample_count || 0} 次</span>
+              <span>服务端口活动 {inboundBehaviorCounts.service} 个 IP</span>
+              <span>重复多端口探测 {inboundBehaviorCounts.probe} 个 IP</span>
+              <span>混合线索 {inboundBehaviorCounts.mixed} 个 IP</span>
+              <span>待判断 {inboundBehaviorCounts.unknown} 个 IP</span>
+            </div>
+            <p className="mt-1 text-slate-300">
+              对照快照时间：{inboundSourceHistory.reference_sample_at
+                ? new Date(inboundSourceHistory.reference_sample_at * 1000).toLocaleString('zh-CN', { hour12: false })
+                : '未知'}。
+              {inboundSourceHistory.status === 'available'
+                ? '需至少 ' + (inboundSourceHistory.minimum_repeat_samples || 2) + ' 次、跨 ' + (inboundSourceHistory.minimum_repeat_span_seconds || 15) + ' 秒的采样，才会标记重复行为。'
+                : '有效历史采样不足，系统会保留“证据不足”，不会把多 IP 数量当成扫描或客户违规。'}
+              {' '}即使反复连接服务端口，也不能单靠网络元数据确认客户身份；需把服务端认证/访问日志按 IP 和时间关联。AbuseIPDB 只代表外部历史举报信号。
+            </p>
+          </div>}
           {reputationSettingsLoaded && <div aria-live="polite" className={`rounded-lg border p-2.5 text-xs leading-5 ${reputationConfigured ? 'border-sky-500/25 bg-sky-950/20 text-sky-200' : 'border-amber-500/30 bg-amber-950/30 text-amber-200'}`}>
             {reputationConfigured
               ? `AbuseIPDB 已启用：自动查询最多 5 个入站公网 IP，结果缓存 24 小时；每日查询保护上限 900 次。信誉分只作提醒，不会自动封禁。${checkingReputation ? ` 正在查询 ${checkingReputation}…` : ''}`

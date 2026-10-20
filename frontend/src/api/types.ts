@@ -558,6 +558,34 @@ export interface DiagnosticData {
     unclassified_ips?: DeepEvidenceIp[];
     connection_ips?: DeepEvidenceIp[];
     inbound_port_evidence?: InboundPortEvidence[];
+    inbound_source_history?: {
+      status?: 'available' | 'insufficient_history' | string;
+      lookback_seconds?: number;
+      report_sample_count?: number;
+      conntrack_sample_count?: number;
+      conntrack_sample_span_seconds?: number;
+      first_sampled_at?: number;
+      last_sampled_at?: number;
+      reference_sample_at?: number;
+      minimum_repeat_samples?: number;
+      minimum_repeat_span_seconds?: number;
+      identity_confirmed?: boolean;
+      requires_application_auth_logs?: boolean;
+      assessments?: {
+        ip: string;
+        classification?: string;
+        confidence?: 'low' | 'moderate' | string;
+        sample_count?: number;
+        sample_span_seconds?: number;
+        service_activity_samples?: number;
+        probe_clue_samples?: number;
+        service_ports?: number[];
+        non_listener_ports?: number[];
+        max_established_flows?: number;
+        max_incomplete_flows?: number;
+        identity_confirmed?: boolean;
+      }[];
+    };
     connection_count?: number;
     communication_sockets?: {
       process?: string;

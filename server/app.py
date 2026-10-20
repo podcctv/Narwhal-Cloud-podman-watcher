@@ -130,7 +130,7 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy, ip_reputation
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy, ip_reputation, inbound_assessment
 except ImportError:
     import operations
     import connection_policy
@@ -142,6 +142,7 @@ except ImportError:
     import commerce
     import tcping
     import ip_reputation
+    import inbound_assessment
 
 try:
     from server import abuse_api, admission_api
@@ -3514,6 +3515,36 @@ def container_diagnostic_status(
         (host_id[:200], runtime[:40].lower(), project[:100], container_name[:200]),
     ).fetchone()
     sample = _latest_deep_sample(conn, host_id[:200], runtime[:40].lower(), project[:100], container_name[:200])
+    now = int(time.time())
+    history_reference = now
+    if isinstance(sample, dict):
+        try:
+            candidate = int(sample.get("sampled_at") or sample.get("report_timestamp") or now)
+            if 0 < candidate <= now:
+                history_reference = candidate
+        except (TypeError, ValueError, OverflowError):
+            pass
+    history_rows = conn.execute(
+        """
+        SELECT ts, payload_json FROM reports
+        WHERE host_id=? AND runtime=? AND project=? AND container_name=?
+          AND ts>=? AND ts<=?
+        ORDER BY ts DESC LIMIT ?
+        """,
+        (
+            host_id[:200],
+            runtime[:40].lower(),
+            project[:100],
+            container_name[:200],
+            history_reference - inbound_assessment.LOOKBACK_SECONDS,
+            history_reference,
+            inbound_assessment.MAX_REPORTS,
+        ),
+    ).fetchall()
+    source_history = inbound_assessment.assess(history_rows, now=history_reference)
+    source_history["reference_sample_at"] = history_reference
+    if sample is not None:
+        sample["inbound_source_history"] = source_history
     conn.close()
     return JSONResponse(content={"action": _action_item(action) if action is not None else None, "sample": sample})
 
