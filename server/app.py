@@ -2099,8 +2099,8 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
 
     raw_abuse = payload.get("abuse", {})
     categories = {"speedtest", "mining", "bt"}
-    if not isinstance(raw_abuse, dict) or set(raw_abuse) - (categories | {"interfaces"}):
-        raise HTTPException(status_code=400, detail="防滥用策略只支持固定端口规则及明确的容器桥接网卡")
+    if not isinstance(raw_abuse, dict) or set(raw_abuse) - (categories | {"interfaces", "runtimes"}):
+        raise HTTPException(status_code=400, detail="防滥用策略只支持固定端口规则、容器桥接网卡或 Incus/Podman 运行时")
     abuse = {}
     for category in sorted(categories):
         value = raw_abuse.get(category, False)
@@ -2117,14 +2117,27 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="容器桥接网卡名称无效")
         if name not in interfaces:
             interfaces.append(name)
-    if any(abuse.values()) and not interfaces:
-        raise HTTPException(status_code=400, detail="启用容器防滥用前必须填写实际的容器桥接网卡")
+    raw_runtimes = raw_abuse.get("runtimes", [])
+    if not isinstance(raw_runtimes, list) or len(raw_runtimes) > 2:
+        raise HTTPException(status_code=400, detail="容器运行时必须从 Incus / Podman 中选择，最多两项")
+    runtimes = []
+    for runtime in raw_runtimes:
+        name = str(runtime).strip().lower()
+        if name not in {"incus", "podman"}:
+            raise HTTPException(status_code=400, detail="容器运行时只支持 Incus 或 Podman")
+        if name not in runtimes:
+            runtimes.append(name)
+    if interfaces and runtimes:
+        raise HTTPException(status_code=400, detail="请使用具体网卡或运行时作为目标，不要混合填写")
+    if any(abuse.values()) and not interfaces and not runtimes:
+        raise HTTPException(status_code=400, detail="启用容器防滥用前必须选择已采集的容器网卡或运行时")
     abuse["interfaces"] = interfaces
+    abuse["runtimes"] = runtimes
     return {"rules": rules, "abuse": abuse}
 
 
 def _empty_host_firewall_policy() -> Dict[str, Any]:
-    return {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": []}}
+    return {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": [], "runtimes": []}}
 
 
 def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, Any] | None:
@@ -2471,6 +2484,54 @@ def _host_firewall_interface_inventory(
     }
 
 
+def _host_firewall_policy_targets(
+    conn: sqlite3.Connection, host_id: str, policy: Dict[str, Any], now: int | None = None
+) -> Tuple[List[str] | None, str]:
+    """Resolve a logical runtime selection to fresh, agent-discovered bridge names."""
+    abuse = policy.get("abuse") if isinstance(policy, dict) else None
+    if not isinstance(abuse, dict) or not any(abuse.get(key) is True for key in ("speedtest", "mining", "bt")):
+        return [], "not_required"
+
+    inventory = _host_firewall_interface_inventory(conn, host_id, now)
+    if inventory["status"] != "ready" or inventory["stale"]:
+        return None, "inventory_unavailable"
+
+    eligible = [item for item in inventory["interfaces"] if item["firewall_eligible"]]
+    runtimes = abuse.get("runtimes") if isinstance(abuse.get("runtimes"), list) else []
+    requested_interfaces = abuse.get("interfaces") if isinstance(abuse.get("interfaces"), list) else []
+    if runtimes:
+        selected = [
+            item["name"] for item in eligible
+            if set(item["runtimes"]).intersection(runtimes)
+        ]
+        if not selected:
+            return None, "runtime_not_found"
+        return list(dict.fromkeys(selected)), "ready"
+
+    eligible_names = {item["name"] for item in eligible}
+    if not requested_interfaces or any(name not in eligible_names for name in requested_interfaces):
+        return None, "interface_not_found"
+    return list(dict.fromkeys(requested_interfaces)), "ready"
+
+
+def _materialize_host_firewall_policy(
+    conn: sqlite3.Connection, host_id: str, policy: Dict[str, Any], now: int | None = None
+) -> Tuple[Dict[str, Any] | None, str]:
+    """Build the host-local policy sent to Runman; never send logical runtime selectors."""
+    targets, status = _host_firewall_policy_targets(conn, host_id, policy, now)
+    if targets is None:
+        return None, status
+    materialized = dict(policy)
+    abuse = dict(policy.get("abuse") or {})
+    abuse.pop("runtimes", None)
+    if any(abuse.get(key) is True for key in ("speedtest", "mining", "bt")):
+        abuse["interfaces"] = targets
+    materialized["abuse"] = abuse
+    validated = _validate_host_firewall_policy(materialized)
+    validated["abuse"].pop("runtimes", None)
+    return validated, status
+
+
 def _latest_host_firewall_action(conn: sqlite3.Connection, host_id: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT id,status,result_message,updated_at,params_json FROM security_actions "
@@ -2581,8 +2642,11 @@ def _maybe_queue_fleet_firewall_policy(
         compatibility = _policy_protocol_compatibility(policy, live_readback)
         if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
             return False
+    host_policy, _target_status = _materialize_host_firewall_policy(conn, host_id, policy, ts)
+    if host_policy is None:
+        return False
     _enqueue_host_firewall_policy(
-        conn, host_id, node_id, policy, "fleet-policy-reconcile", ts, fleet_revision
+        conn, host_id, node_id, host_policy, "fleet-policy-reconcile", ts, fleet_revision
     )
     return True
 
@@ -2786,6 +2850,7 @@ def _fleet_firewall_node_state(
     fleet_revision: int,
     now: int,
     required_protocols: List[str] | None = None,
+    required_policy: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     host_id = str(host["host_id"])
     node_id = str(host["node_id"] or "")
@@ -2793,9 +2858,20 @@ def _fleet_firewall_node_state(
     online = bool(node_id) and now - last_seen <= STALE_SECONDS
     runtime = _host_firewall_runtime_status(conn, host_id)
     live_readback = _host_firewall_live_readback(conn, host_id, now)
+    interface_inventory = _host_firewall_interface_inventory(conn, host_id, now)
+    container_interfaces = {
+        runtime_name: [
+            item["name"] for item in interface_inventory["interfaces"]
+            if item["firewall_eligible"] and runtime_name in item["runtimes"]
+        ]
+        for runtime_name in ("incus", "podman")
+    }
+    _targets, target_status = _host_firewall_policy_targets(conn, host_id, required_policy or {}, now)
     protocol_status = _policy_protocol_compatibility(
         {"rules": [{"protocol": protocol} for protocol in (required_protocols or [])]}, live_readback
     )
+    policy_abuse = (required_policy or {}).get("abuse") or {}
+    container_policy_enabled = any(policy_abuse.get(key) is True for key in ("speedtest", "mining", "bt"))
     policy_row = conn.execute(
         "SELECT revision,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
     ).fetchone()
@@ -2814,6 +2890,10 @@ def _fleet_firewall_node_state(
                 status = "rfw_protocol_update_required"
             elif protocol_status["unknown_protocols"]:
                 status = "awaiting_rfw_capability"
+            elif container_policy_enabled and target_status == "inventory_unavailable":
+                status = "awaiting_interfaces"
+            elif container_policy_enabled and target_status in {"runtime_not_found", "interface_not_found"}:
+                status = "interfaces_not_found"
             elif action is not None and action["status"] in {"queued", "dispatched", "running"}:
                 status = "queued"
             elif action is not None and action["status"] == "failed":
@@ -2844,6 +2924,12 @@ def _fleet_firewall_node_state(
         "required_protocols": protocol_status["required_protocols"],
         "unsupported_protocols": protocol_status["unsupported_protocols"],
         "unknown_protocols": protocol_status["unknown_protocols"],
+        "container_interfaces": {
+            "status": interface_inventory["status"],
+            "observed_at": interface_inventory["observed_at"],
+            "stale": interface_inventory["stale"],
+            "by_runtime": container_interfaces,
+        },
         "last_action": None if action is None else {
             "id": int(action["id"]),
             "status": str(action["status"]),
@@ -4460,6 +4546,11 @@ async def update_host_firewall_policy(host_id: str, request: Request) -> JSONRes
         node_id = str(host["node_id"] or "")
         if not node_id:
             raise HTTPException(status_code=409, detail="该主机尚未注册可校验身份的 Watcher Agent")
+        host_policy, target_status = _materialize_host_firewall_policy(conn, host_id, policy, now)
+        if host_policy is None:
+            message = "网卡清单尚未就绪或已过期，请刷新并等待母机重新上报后再应用。" if target_status == "inventory_unavailable" else "所选运行时/网卡未出现在母机最新采集到的 Incus / Podman bridge 中，请重新选择。"
+            raise HTTPException(status_code=409, detail=message)
+        policy = host_policy
         if _policy_required_protocols(policy):
             live_readback = _host_firewall_live_readback(conn, host_id, now)
             compatibility = _policy_protocol_compatibility(policy, live_readback)
@@ -4503,7 +4594,10 @@ def get_fleet_firewall_policy() -> JSONResponse:
             "SELECT host_id,node_id,last_seen,agent_version FROM hosts ORDER BY host_id"
         ).fetchall()
         required_protocols = _policy_required_protocols(policy)
-        nodes = [_fleet_firewall_node_state(conn, host, revision, now, required_protocols) for host in hosts]
+        nodes = [
+            _fleet_firewall_node_state(conn, host, revision, now, required_protocols, policy)
+            for host in hosts
+        ]
         readback_current = sum(1 for item in nodes if item["live_readback"]["status"] == "ready" and not item["live_readback"]["stale"])
         readback_drifted = sum(
             1 for item in nodes
@@ -4525,6 +4619,7 @@ def get_fleet_firewall_policy() -> JSONResponse:
                 "control_ready": sum(1 for item in nodes if item["control_api"] == "ready"),
                 "last_apply_succeeded": sum(1 for item in nodes if item["state"] == "last_apply_succeeded"),
                 "deferred": sum(1 for item in nodes if item["state"] not in {"last_apply_succeeded", "ready"}),
+                "network_deferred": sum(1 for item in nodes if item["state"] in {"awaiting_interfaces", "interfaces_not_found"}),
                 "live_readback_current": readback_current,
                 "drifted_hosts": readback_drifted,
                 "readback_unavailable": readback_unavailable,
@@ -4571,6 +4666,7 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
         hosts = conn.execute("SELECT host_id,node_id FROM hosts ORDER BY host_id").fetchall()
         queued = 0
         deferred = 0
+        network_deferred = 0
         for host in hosts:
             host_id = str(host["host_id"])
             node_id = str(host["node_id"] or "")
@@ -4582,7 +4678,12 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
                     if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
                         deferred += 1
                         continue
-                _enqueue_host_firewall_policy(conn, host_id, node_id, policy, requested_by, now, revision)
+                host_policy, target_status = _materialize_host_firewall_policy(conn, host_id, policy, now)
+                if host_policy is None:
+                    deferred += 1
+                    network_deferred += 1
+                    continue
+                _enqueue_host_firewall_policy(conn, host_id, node_id, host_policy, requested_by, now, revision)
                 queued += 1
             else:
                 deferred += 1
@@ -4592,6 +4693,7 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
             "revision": revision,
             "queued_hosts": queued,
             "deferred_hosts": deferred,
+            "network_deferred_hosts": network_deferred,
             "total_hosts": len(hosts),
         })
     except Exception:

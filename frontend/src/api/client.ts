@@ -159,7 +159,7 @@ export const api = {
     request<FleetFirewallPolicyResponse>('/api/v1/firewall/fleet-policy'),
 
   updateFleetFirewallPolicy: (policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy }) =>
-    request<{ ok: boolean; revision: number; queued_hosts: number; deferred_hosts: number; total_hosts: number }>('/api/v1/firewall/fleet-policy', {
+    request<{ ok: boolean; revision: number; queued_hosts: number; deferred_hosts: number; network_deferred_hosts: number; total_hosts: number }>('/api/v1/firewall/fleet-policy', {
       method: 'POST', body: JSON.stringify(policy),
     }),
 

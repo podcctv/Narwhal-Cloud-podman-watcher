@@ -292,6 +292,8 @@ export interface HostFirewallAbusePolicy {
   mining: boolean;
   bt: boolean;
   interfaces: string[];
+  /** Fleet templates use logical runtimes and resolve real interfaces per host. */
+  runtimes?: Array<'incus' | 'podman'>;
 }
 
 export interface HostFirewallRuntimeStatus {
@@ -395,10 +397,16 @@ export interface FleetFirewallHostStatus {
   observed_at: number;
   local_revision: number;
   fleet_revision: number;
-  state: 'unregistered' | 'offline' | 'awaiting_capability' | 'awaiting_rfw_capability' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
+  state: 'unregistered' | 'offline' | 'awaiting_capability' | 'awaiting_rfw_capability' | 'awaiting_interfaces' | 'interfaces_not_found' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
   required_protocols: string[];
   unsupported_protocols: string[];
   unknown_protocols: string[];
+  container_interfaces: {
+    status: HostFirewallInterfaceInventory['status'];
+    observed_at: number;
+    stale: boolean;
+    by_runtime: Record<'incus' | 'podman', string[]>;
+  };
   live_readback: Omit<HostFirewallLiveReadback, 'snapshot'>;
   last_action: null | { id: number; status: string; message: string; updated_at_utc8: string };
 }
@@ -409,7 +417,7 @@ export interface FleetFirewallPolicyResponse {
   updated_by: string;
   updated_at_utc8: string;
   hosts: FleetFirewallHostStatus[];
-  counts: { total: number; registered: number; online: number; control_ready: number; last_apply_succeeded: number; deferred: number; live_readback_current: number; drifted_hosts: number; readback_unavailable: number; mtproto_supported_hosts: number; mtproto_unsupported_hosts: number; mtproto_capability_unknown_hosts: number; required_protocols_supported_hosts: number; required_protocols_unsupported_hosts: number; required_protocols_unknown_hosts: number };
+  counts: { total: number; registered: number; online: number; control_ready: number; last_apply_succeeded: number; deferred: number; network_deferred: number; live_readback_current: number; drifted_hosts: number; readback_unavailable: number; mtproto_supported_hosts: number; mtproto_unsupported_hosts: number; mtproto_capability_unknown_hosts: number; required_protocols_supported_hosts: number; required_protocols_unsupported_hosts: number; required_protocols_unknown_hosts: number };
   live_rule_readback_supported: boolean;
 }
 

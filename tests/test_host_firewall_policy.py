@@ -44,6 +44,28 @@ class HostFirewallPolicyTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def set_host_interface_inventory(self, host_id="host-a", interfaces=None, observed_at=None):
+        observed_at = self.now if observed_at is None else observed_at
+        interfaces = interfaces if interfaces is not None else [{
+            "name": "incusbr0", "kind": "bridge", "state": "up", "mtu": 1500,
+            "addresses": ["10.90.0.1/24"], "runtimes": ["incus"],
+            "network_names": ["default"], "firewall_eligible": True,
+        }]
+        payload = {"host_firewall": {
+            "control_api": "ready", "observed_at": observed_at,
+            "interface_inventory": {
+                "status": "ready", "observed_at": observed_at, "interfaces": interfaces,
+            },
+        }}
+        conn = server.db()
+        conn.execute("DELETE FROM host_security WHERE host_id=?", (host_id,))
+        conn.execute(
+            "INSERT INTO host_security(host_id,ts,payload_json) VALUES(?,?,?)",
+            (host_id, observed_at, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
     @staticmethod
     def policy():
         return {
@@ -55,6 +77,10 @@ class HostFirewallPolicyTests(unittest.TestCase):
         }
 
     def save(self, payload=None, role="admin"):
+        candidate = payload or self.policy()
+        abuse = candidate.get("abuse") if isinstance(candidate, dict) else None
+        if isinstance(abuse, dict) and any(abuse.get(key) is True for key in ("speedtest", "mining", "bt")):
+            self.set_host_interface_inventory()
         return asyncio.run(server.update_host_firewall_policy("host-a", Request(payload or self.policy(), role)))
 
     def install_rfw_capabilities(self, host_id, protocols, observed_at=None):
@@ -312,6 +338,7 @@ class HostFirewallPolicyTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+        self.set_host_interface_inventory()
         self.install_rfw_capabilities("host-a", ["all", "tcp", "udp", "wireguard"])
         self.install_rfw_capabilities("host-unsupported", ["all", "tcp", "udp", "socks"])
 
@@ -420,6 +447,7 @@ class HostFirewallPolicyTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+        self.set_host_interface_inventory()
 
         response = asyncio.run(server.update_fleet_firewall_policy(Request(self.policy())))
         result = json.loads(response.body)
@@ -444,6 +472,115 @@ class HostFirewallPolicyTests(unittest.TestCase):
         self.assertTrue(state["live_rule_readback_supported"])
         self.assertEqual(state["revision"], 1)
         self.assertEqual({item["host_id"]: item["state"] for item in state["hosts"]}["host-old"], "runman_update_required")
+
+    def test_fleet_runtime_selection_maps_to_each_hosts_discovered_bridges(self):
+        self.set_host_interface_inventory()
+        podman_interface = {
+            "name": "podman-lab", "kind": "bridge", "state": "up", "mtu": 1500,
+            "addresses": ["10.89.0.1/24"], "runtimes": ["podman"],
+            "network_names": ["lab"], "firewall_eligible": True,
+        }
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO hosts(host_id,last_seen,node_id) VALUES('host-b',?,'watcher-node-b')",
+            (self.now,),
+        )
+        conn.commit()
+        conn.close()
+        self.set_host_interface_inventory("host-b", [podman_interface])
+
+        policy = self.policy()
+        policy["abuse"]["interfaces"] = []
+        policy["abuse"]["runtimes"] = ["incus", "podman"]
+        response = asyncio.run(server.update_fleet_firewall_policy(Request(policy)))
+        result = json.loads(response.body)
+        self.assertEqual((result["queued_hosts"], result["network_deferred_hosts"]), (2, 0))
+
+        conn = server.db()
+        actions = conn.execute(
+            "SELECT host_id,params_json FROM security_actions WHERE action_type='apply_host_firewall_policy' ORDER BY host_id"
+        ).fetchall()
+        fleet_policy = json.loads(conn.execute("SELECT policy_json FROM fleet_firewall_policy WHERE id=1").fetchone()[0])
+        conn.close()
+        self.assertEqual(fleet_policy["abuse"]["runtimes"], ["incus", "podman"])
+        self.assertEqual(fleet_policy["abuse"]["interfaces"], [])
+        mapped = {row["host_id"]: json.loads(row["params_json"])["policy"]["abuse"] for row in actions}
+        self.assertEqual(mapped["host-a"]["interfaces"], ["incusbr0"])
+        self.assertEqual(mapped["host-b"]["interfaces"], ["podman-lab"])
+        self.assertNotIn("runtimes", mapped["host-a"])
+        self.assertNotIn("runtimes", mapped["host-b"])
+
+        state = json.loads(server.get_fleet_firewall_policy().body)
+        by_host = {item["host_id"]: item for item in state["hosts"]}
+        self.assertEqual(by_host["host-b"]["container_interfaces"]["by_runtime"]["podman"], ["podman-lab"])
+
+    def test_fleet_policy_defers_nodes_without_a_matching_discovered_runtime(self):
+        self.set_host_interface_inventory()
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO hosts(host_id,last_seen,node_id) VALUES('host-c',?,'watcher-node-c')",
+            (self.now,),
+        )
+        conn.commit()
+        conn.close()
+        self.set_host_interface_inventory("host-c", [{
+            "name": "eth0", "kind": "ether", "state": "up", "mtu": 1500,
+            "addresses": ["192.0.2.10/24"], "runtimes": [],
+            "network_names": [], "firewall_eligible": False,
+        }])
+
+        policy = self.policy()
+        policy["abuse"]["interfaces"] = []
+        policy["abuse"]["runtimes"] = ["podman"]
+        response = asyncio.run(server.update_fleet_firewall_policy(Request(policy)))
+        result = json.loads(response.body)
+        self.assertEqual((result["queued_hosts"], result["deferred_hosts"], result["network_deferred_hosts"]), (0, 2, 2))
+        state = json.loads(server.get_fleet_firewall_policy().body)
+        by_host = {item["host_id"]: item for item in state["hosts"]}
+        self.assertEqual(by_host["host-a"]["state"], "interfaces_not_found")
+        self.assertEqual(by_host["host-c"]["state"], "interfaces_not_found")
+        self.assertEqual(state["counts"]["network_deferred"], 2)
+
+    def test_fleet_policy_waits_for_fresh_inventory_before_mapping_runtime(self):
+        self.set_host_interface_inventory(observed_at=self.now - server.STALE_SECONDS - 1)
+        policy = self.policy()
+        policy["abuse"]["interfaces"] = []
+        policy["abuse"]["runtimes"] = ["incus"]
+
+        response = asyncio.run(server.update_fleet_firewall_policy(Request(policy)))
+        result = json.loads(response.body)
+        self.assertEqual((result["queued_hosts"], result["network_deferred_hosts"]), (0, 1))
+
+        state = json.loads(server.get_fleet_firewall_policy().body)
+        self.assertEqual(state["hosts"][0]["state"], "awaiting_interfaces")
+        self.assertEqual(state["counts"]["network_deferred"], 1)
+
+    def test_single_host_runtime_selector_is_resolved_before_agent_dispatch(self):
+        policy = self.policy()
+        policy["abuse"]["interfaces"] = []
+        policy["abuse"]["runtimes"] = ["incus"]
+        self.save(policy)
+        conn = server.db()
+        action = conn.execute(
+            "SELECT params_json FROM security_actions WHERE action_type='apply_host_firewall_policy'"
+        ).fetchone()
+        conn.close()
+        dispatched_policy = json.loads(action["params_json"])["policy"]
+        self.assertEqual(dispatched_policy["abuse"]["interfaces"], ["incusbr0"])
+        self.assertNotIn("runtimes", dispatched_policy["abuse"])
+
+    def test_single_host_rejects_unverified_or_stale_bridge_selection(self):
+        self.set_host_interface_inventory()
+        policy = self.policy()
+        policy["abuse"]["interfaces"] = ["not-a-bridge"]
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(server.update_host_firewall_policy("host-a", Request(policy)))
+        self.assertEqual(raised.exception.status_code, 409)
+
+        self.set_host_interface_inventory(observed_at=self.now - server.STALE_SECONDS - 1)
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(server.update_host_firewall_policy("host-a", Request(self.policy())))
+        self.assertEqual(raised.exception.status_code, 409)
 
     def test_fleet_mtproto_policy_defers_nodes_until_fresh_rfw_support_is_confirmed(self):
         conn = server.db()
@@ -528,6 +665,7 @@ class HostFirewallPolicyTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+        self.set_host_interface_inventory()
 
         snapshot = {
             "status": "drifted", "policy_revision": 1, "rule_count": 1,
@@ -593,6 +731,7 @@ class HostFirewallPolicyTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+        self.set_host_interface_inventory()
 
         conn = server.db()
         queued = server._maybe_queue_fleet_firewall_policy(
