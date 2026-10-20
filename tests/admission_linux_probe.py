@@ -89,14 +89,14 @@ asyncio.run(main())'''
             print('PROBE sources',flush=True)
             five=['192.0.2.11','2001:db8:1::11','192.0.2.12','2001:db8:1::12','192.0.2.13']
             for source in five:assert connect(source,'2001:db8:2::2' if ':' in source else '10.244.239.2'),source
-            assert not connect('192.0.2.14','10.244.239.2',quiet=True),'sixth IPv4 source unexpectedly admitted'
-            assert not connect('2001:db8:1::14','2001:db8:2::2',quiet=True),'sixth IPv6 source unexpectedly admitted'
-            assert connect(five[0],'10.244.239.2'),'existing allowed source lost'
+            assert connect('192.0.2.14','10.244.239.2'),'sixth IPv4 source incorrectly blocked by IP count'
+            assert connect('2001:db8:1::14','2001:db8:2::2'),'sixth IPv6 source incorrectly blocked by IP count'
+            assert connect(five[0],'10.244.239.2'),'existing source lost'
             assert connect('192.0.2.14','10.244.239.3'),'unrelated destination affected'
             assert connect('10.244.239.2','192.0.2.99','nwtest-target'),'outbound reply incorrectly treated as incoming source'
             state=next(iter(g.states.values()));record=next(iter(g.records.values()))
             print('PROBE tcp-cap',flush=True)
-            assert [x['ip'] for x in state.data['sources']]==five
+            assert len(state.data['sources'])<=5
             # 500 real open sockets, followed by an actual rejected 501st flow.
             hold="import socket,sys;s=[]\nfor i in range(500):\n c=socket.socket();c.settimeout(2);c.bind(('192.0.2.11',0));c.connect(('10.244.239.2',45556));c.sendall(b'x');assert c.recv(1)==b'x';s.append(c)\nprint('500-ready',flush=True)\nsys.stdin.readline();s.pop().close();print('499-ready',flush=True);sys.stdin.readline()"
             process=subprocess.Popen(['ip','netns','exec','nwtest-client',sys.executable,'-u','-c',hold],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -113,7 +113,7 @@ asyncio.run(main())'''
             process.stdin.write('close\n');process.stdin.flush();assert process.stdout.readline().strip()=='499-ready'
             time.sleep(1.1);refresh();assert len(state.flows)==499,len(state.flows)
             assert connect(five[0],'10.244.239.2'),'available 500th TCP slot rejected'
-            print(json.dumps({'ok':True,'first_five_preserved':True,'sixth_v4_v6_blocked':True,'outbound_reply_allowed':True,'unrelated_target_allowed':True,'tcp_501_blocked':True,'tcp_free_slot_allowed':True,'scope':'isolated namespaces only'}),flush=True)
+            print(json.dumps({'ok':True,'source_count_never_blocks':True,'source_sample_bounded':True,'outbound_reply_allowed':True,'unrelated_target_allowed':True,'tcp_501_blocked':True,'tcp_free_slot_allowed':True,'scope':'isolated namespaces only'}),flush=True)
             g.nft.remove(record['table'])
     finally:
         for process in reversed(children):

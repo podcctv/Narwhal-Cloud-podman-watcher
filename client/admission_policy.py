@@ -1,7 +1,8 @@
-"""Deterministic node-local admission policy. No networking, subprocess or AI.
+"""Deterministic node-local network policy. No networking, subprocess or AI.
 
-First-observed source order is recorded, never represented as historical arrival
-order. IPv4-mapped IPv6 is normalized. Unknown evidence cannot release protection.
+Source IPs are observation samples, not user identities and never an automatic
+denylist. IPv4-mapped IPv6 is normalized. Unknown evidence cannot release the
+separate TCP concurrency protection.
 """
 import ipaddress
 import time
@@ -34,7 +35,7 @@ class Policy:
         self.last_denied_at = 0
 
     def seed(self, sources, now):
-        """Only the first complete observation seeds slots; later sources queue."""
+        """Keep a bounded sample of established sources for display only."""
         if self.data.get('seeded'):
             return
         seen = set()
@@ -50,20 +51,15 @@ class Policy:
                 self.data['sources'].append({'ip': ip, 'first_seen': now})
         self.data.update(seeded=True, source_order_basis='first_complete_observation')
 
-    def admit_source(self, source, now):
+    def observe_source(self, source, now):
+        """Record a bounded sample of current IPs without an admission decision."""
         ip = address(source)
         if any(x['ip'] == ip for x in self.data['sources']):
-            return True, False
+            return False
         if len(self.data['sources']) < 5:
             self.data['sources'].append({'ip': ip, 'first_seen': now})
-            return True, True
-        self.data['blocked_packets'] += 1
-        blocked = self.data['blocked']
-        if ip not in blocked and len(blocked)>=32:
-            blocked.pop(min(blocked,key=lambda key:blocked[key].get('last_seen',0)))
-        item = blocked.setdefault(ip, {'first_seen': now, 'packets': 0})
-        item.update(last_seen=now, packets=item['packets']+1)
-        return False, False
+            return True
+        return False
 
     def admit_tcp(self, flow, now):
         if not self.data.get('limited'):
@@ -100,6 +96,8 @@ class Policy:
         old_sources = self.data['sources']
         self.data['sources'] = [s for s in old_sources if s['ip'] in live]
         changed = len(old_sources) != len(self.data['sources'])
+        for value in list(inbound) + list(live_sources):
+            changed = self.observe_source(value, now) or changed
         count = len(self.flows)
         above = (self.data.get('above_since') or now) if same and count > 1000 else now if count > 1000 else 0
         below = (self.data.get('below_since') or now) if same and count < 500 and now-self.last_denied_at > WINDOW else now if count < 500 and now-self.last_denied_at > WINDOW else 0

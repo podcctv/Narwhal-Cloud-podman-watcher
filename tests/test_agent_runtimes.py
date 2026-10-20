@@ -1409,6 +1409,8 @@ class SecurityTelemetryTests(unittest.TestCase):
             "runtime": "incus",
             "security": {
                 "inbound_unique_ips": 11,
+                "inbound_established_unique_ips": 2,
+                "inbound_syn_recv_unique_ips": 9,
                 "communication_processes": [],
                 "socks_proxy": {
                     "detected": True,
@@ -1429,6 +1431,10 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertIn("socks_weak_auth", types)
         self.assertIn("socks_inbound_fanout", types)
         self.assertNotIn("inbound_ip_fanout", types)
+        fanout=next(item for item in result["alerts"] if item["type"]=="socks_inbound_fanout")
+        self.assertEqual(fanout["severity"],"warning")
+        self.assertIn("已建立 TCP 连接的来源 2 个，SYN_RECV 握手未完成来源 9 个",fanout["message"])
+        self.assertIn("单凭数量不会自动限制",fanout["message"])
 
     def test_socks_alert_contains_safe_action_evidence(self):
         container = {

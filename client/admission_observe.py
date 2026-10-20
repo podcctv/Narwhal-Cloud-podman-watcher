@@ -60,12 +60,15 @@ def sockets(pid):
     listen={port for state,_,port,_,_ in entries if state=='0A'}
     flows=set();inbound=[]
     for state,local,port,remote,rport in entries:
-        if state not in {'01','02','03'}:
+        # Only ESTABLISHED sockets count toward the automatic concurrency cap
+        # or the displayed source sample. SYN_SENT/SYN_RECV are useful scan
+        # signals, but they are not verified live client sessions.
+        if state != '01':
             continue
         try:laddr,raddr=decode(local),decode(remote)
         except ValueError:continue
         flows.add((laddr,port,raddr,rport))
-        if (port in listen or state=='03') and raddr not in inbound:
+        if port in listen and raddr not in inbound:
             inbound.append(raddr)
     if epoch!=incarnation(pid):
         raise ValueError('container restarted during observation')

@@ -78,26 +78,14 @@ class Guard:
             if (dst if direction=='in' else src) not in record['ips']:
                 return False
             flow=(dst,dport,src,sport) if direction=='in' else (src,sport,dst,dport)
-            reserved=flow in state.pending
             if proto==6 and not state.admit_tcp(flow,now):
-                if direction=='in' and len(state.data['sources'])>=5 and not any(s['ip']==policy.address(src) for s in state.data['sources']):
-                    # A simultaneous TCP cap must not hide the sixth-source
-                    # rejection or omit its IP from the operator's warning.
-                    state.admit_source(src,now)
                 return False
             if direction=='out':
                 return True
-            accepted,changed=state.admit_source(src,now)
-            if not accepted:
-                if not reserved:state.pending.pop(flow,None)
-                return False
-            if changed:
-                # Persist the five-slot decision before acknowledging its packet.
-                try:self.save()
-                except Exception:
-                    state.data['sources']=[s for s in state.data['sources'] if s['ip']!=policy.address(src)]
-                    raise
-                self.nft.admit(record['table'],policy.address(src))
+            # Source addresses are not authenticated users. A scanner, NAT,
+            # mobile hand-off, or legitimate multi-egress client can all
+            # produce multiple IPs; only the separate TCP concurrency rule
+            # may reject a flow here.
             return True
 
     def start(self):
@@ -171,10 +159,6 @@ class Guard:
             self.save()
             if changed:
                 self.nft.apply(record['table'],ips,record['queue'],state.data['sources'],state.data.get('limited',False),interfaces=interfaces)
-            else:
-                for source in state.data['sources']:
-                    if source['ip'] not in live:
-                        self.nft.admit(record['table'],source['ip'])
             # Readback is required; a missing/overwritten table is never green.
             self.nft.live(record['table'])
             digest=self.nft.digests.get(record['table'])
@@ -183,6 +167,7 @@ class Guard:
             record.pop('dirty',None);record.pop('disabled',None)
             self.save()
             result={**state.status(),'instance_id':identity,'state':'enforced','source_limit':5,
+                    'source_limit_enforced':False,'source_policy':'observe_only',
                     'tcp_limit':500 if state.data.get('limited') else None,'observed_at':now}
             self.results[(runtime,project,name)]=result
             return result
@@ -261,11 +246,6 @@ class Guard:
             return [{**base,'type':'admission_unverified','severity':'warning','title':'容器准入保护待核实',
                      'message':status.get('error','保护执行未确认'),'value':0,'threshold':1}]
         result=[]
-        active={ip:v for ip,v in status.get('blocked',{}).items() if time.time()-v['last_seen']<120}
-        if active:
-            result.append({**base,'type':'inbound_source_blocked','severity':'critical','title':'超出 5 个入站来源，已阻断新增来源',
-                'message':f"当前保留 {len(status['sources'])} 个来源；近两分钟拒绝 {len(active)} 个新增来源；不影响母鸡和其他容器。",
-                'value':len(status['sources'])+len(active),'threshold':5})
         if status.get('limited'):
             result.append({**base,'type':'tcp_concurrency_limited','severity':'warning','title':'TCP 并发已限制为 500',
                 'message':f"当前 TCP 并发 {status.get('tcp_connections',0)}；新连接上限 500，本轮复查时间 {status.get('review_at')}，已续期 {status.get('extensions',0)} 次；已有连接自然回落。",

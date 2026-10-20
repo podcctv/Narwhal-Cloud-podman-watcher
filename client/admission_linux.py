@@ -66,20 +66,9 @@ def rules(table, ips, queue, sources, limited=False, management_ports=(), interf
     if not interfaces or len(interfaces)>8 or any(not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',x) for x in interfaces):
         raise ValueError('verified private veth required')
     devices='{ '+', '.join('"'+x+'"' for x in interfaces)+' }'
-    allowed={4:[],6:[]}
-    if len(sources)>5:
-        raise ValueError('source capacity exceeded')
-    for source in sources:
-        addr=ipaddress.ip_address(source['ip'])
-        allowed[addr.version].append(str(addr))
     lines=[f'add table inet {table}',
-           f'add set inet {table} sources4 {{ type ipv4_addr; flags dynamic,timeout; timeout 90s; size 5; }}',
-           f'add set inet {table} sources6 {{ type ipv6_addr; flags dynamic,timeout; timeout 90s; size 5; }}',
            f'add chain inet {table} incoming',f'add chain inet {table} outgoing',
            f'add chain inet {table} forward {{ type filter hook forward priority -20; policy accept; }}']
-    for family, values in allowed.items():
-        if values:
-            lines.append(f'add element inet {table} sources{family} {{ '+', '.join(values)+' }')
     for family, values in by_family.items():
         if not values:
             continue
@@ -95,11 +84,11 @@ def rules(table, ips, queue, sources, limited=False, management_ports=(), interf
         lines.append(f'add rule inet {table} incoming meta l4proto tcp tcp dport {{ '+', '.join(map(str,ports))+' } return')
     if limited:
         lines.append(f'add rule inet {table} incoming meta l4proto tcp ct state new queue num {queue}')
-    for family in (4,6):
-        kind='ip' if family==4 else 'ip6'
-        lines.append(f'add rule inet {table} incoming {kind} saddr @sources{family} update @sources{family} {{ {kind} saddr timeout 90s }} return')
-    lines.extend([f'add rule inet {table} incoming counter queue num {queue}',
-                  f'add rule inet {table} outgoing counter queue num {queue+1}'])
+        lines.append(f'add rule inet {table} outgoing meta l4proto tcp ct state new queue num {queue+1}')
+    # Source-IP counts are not identity or abuse evidence. Pass all other
+    # traffic; only the independently verified TCP concurrency policy queues
+    # new TCP flows when it is active.
+    lines.extend([f'add rule inet {table} incoming return',f'add rule inet {table} outgoing return'])
     return '\n'.join(lines)+'\n'
 
 

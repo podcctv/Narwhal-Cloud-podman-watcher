@@ -15,6 +15,7 @@ const fs = require('node:fs');
       const response = await route.fetch(); const data = await response.json();
       for (const item of data.items || []) if (item.security?.admission) {
         item.security.admission.observed_at = Math.floor(Date.now() / 1000);
+        item.security.admission.source_limit_enforced = false;
         for (const value of Object.values(item.security.admission.blocked || {})) value.last_seen = Math.floor(Date.now() / 1000);
       }
       await route.fulfill({ response, json: data });
@@ -23,9 +24,9 @@ const fs = require('node:fs');
     await page.getByLabel('用户名', { exact: true }).fill('preview');
     await page.getByLabel('密码', { exact: true }).fill('local-preview-only');
     await page.getByRole('button', { name: '登录控制台' }).click();
-    await page.getByText('入站准入 5/5', { exact: true }).waitFor();
+    await page.getByText('入站来源观测 5 个样本', { exact: true }).waitFor();
     await page.getByText('synthetic-instance-1', { exact: true }).last().click();
-    await page.getByText('保留来源', { exact: true }).waitFor();
+    await page.getByText('已建立连接来源样本', { exact: true }).waitFor();
     await page.getByText(/TCP 当前 499 条/).waitFor();
     await page.getByText('2001:db8:ffff:ffff:ffff:ffff:ffff:ffff', { exact: false }).last().waitFor();
     const panel = page.getByRole('region', { name: '容器网络准入保护' }).last();
@@ -39,6 +40,6 @@ const fs = require('node:fs');
     }
     assert.deepEqual(errors, []);
     assert.deepEqual(mutations, []);
-    console.log(JSON.stringify({ passed: true, widths: [375, 768, 1440], source_order: true, blocked_ipv6_wrap: true, tcp_cap_and_extensions: true, no_mutations: true, screenshots: output }));
+    console.log(JSON.stringify({ passed: true, widths: [375, 768, 1440], source_count_is_observation_only: true, blocked_ipv6_wrap: true, tcp_cap_and_extensions: true, no_mutations: true, screenshots: output }));
   } finally { await browser.close(); }
 })().catch(error => { console.error(error.stack); process.exit(1); });

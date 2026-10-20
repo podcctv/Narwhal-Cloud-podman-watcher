@@ -78,7 +78,7 @@ def issue(alert, details):
         if kind=='inbound_source_blocked':
             sources='、'.join(clean(x.get('ip'),50) for x in data.get('sources',[])[:5])
             blocked='、'.join(clean(x,50) for x in list(data.get('blocked',{}))[:5])
-            return '容器新增来源连接已被保护策略拒绝', f"按策略保留先观测到的最多 5 个来源，并拒绝后续新增连接。保留来源：{sources or '详见管理面板'}；被拒绝来源：{blocked or '详见管理面板'}。这不代表来源恶意或客户违规；仅影响该容器网络入口，不影响母机及其他容器。", '请结合业务访问日志核实；正常用户也可能因来源数上限而无法新建连接，需要调整时请联系管理员。'
+            return '旧版来源数量规则曾拒绝新连接', f"旧版 Agent 当时按最多 5 个来源放行，并拒绝后续新增来源。放行来源：{sources or '详见管理面板'}；被拒绝来源：{blocked or '详见管理面板'}。来源 IP 数量不能证明恶意或客户违规；当前版本不会仅按来源数量封禁。", '这是历史处置记录，不代表当前仍在拦截。请结合业务访问日志核实；如有正常用户连接受影响，请联系管理员。'
         if kind=='tcp_concurrency_limited':
             return '服务器同时连接过多，已启用保护', f"TCP 当前 {fmt(data.get('tcp_connections'))} 条，新连接上限 500 条；最少限制 30 分钟，已追加 {fmt(data.get('extensions'))} 次。已有连接会自然回落；复查仍达到 500 条会再追加 30 分钟。", '请停止不需要的任务或异常连接；有效采样持续低于 500 条至少 2 分钟，且本轮期限已到，才会解除限制。'
         return '服务器网络保护需要管理员检查','当前无法确认采样或保护规则已生效；未将证据不足视为恢复。','请发工单，由管理员核查处理。'

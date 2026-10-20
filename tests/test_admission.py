@@ -14,7 +14,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest import mock
-from client import admission_policy as p, admission_linux as linux, admission_guard as guard, pasarguard_guard as pasar
+from client import admission_policy as p, admission_linux as linux, admission_guard as guard, admission_observe as observe, pasarguard_guard as pasar
 from server import admission_api
 from fastapi import HTTPException
 from fastapi import FastAPI
@@ -65,17 +65,18 @@ class PolicyTests(unittest.TestCase):
         for stamp in range(deadline+10,deadline+121,10):self.sample(restored,0,stamp)
         self.assertFalse(restored.data['limited'])
 
-    def test_combined_five_and_persistent_first_order(self):
+    def test_source_ip_count_is_observation_only_and_sample_stays_bounded(self):
         state=p.Policy();sources=['192.0.2.1','2001:db8::1','192.0.2.2','2001:db8::2','192.0.2.3','2001:db8::3']
         self.sample(state,1,1000,sources)
         self.assertEqual([x['ip'] for x in state.data['sources']],sources[:5])
-        self.assertFalse(state.admit_source(sources[5],1001)[0])
-        self.assertTrue(state.admit_source('::ffff:192.0.2.1',1002)[0])
+        self.assertFalse(state.observe_source(sources[5],1001))
+        self.assertEqual(state.data['blocked_packets'],0)
+        self.assertFalse(state.observe_source('::ffff:192.0.2.1',1002))
         restored=p.Policy(copy.deepcopy(state.data))
         self.sample(restored,1,1010,list(reversed(sources)))
         self.assertEqual([x['ip'] for x in restored.data['sources']],sources[:5])
         self.sample(restored,1,1020,sources[1:5])
-        self.assertTrue(restored.admit_source(sources[5],1021)[0])
+        self.assertTrue(restored.observe_source(sources[5],1021))
         self.assertEqual(restored.data['sources'][-1]['ip'],sources[5])
 
     def test_pending_reservations_prevent_burst_and_stale_admission(self):
@@ -85,14 +86,34 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(state.admit_tcp(flow(9001),1132))
         self.assertFalse(state.admit_tcp(flow(9002),1161))
 
-    def test_denial_counters_bounded(self):
+    def test_observation_sample_is_bounded_without_denial_counters(self):
         state=p.Policy();state.seed([f'192.0.2.{n}' for n in range(1,6)],1000)
-        for n in range(1,101):state.admit_source(f'198.51.100.{n}',1001)
-        self.assertEqual(len(state.data['blocked']),32)
-        self.assertEqual(state.data['blocked_packets'],100)
+        for n in range(1,101):state.observe_source(f'198.51.100.{n}',1001)
+        self.assertEqual(len(state.data['sources']),5)
+        self.assertEqual(state.data['blocked'],{})
+        self.assertEqual(state.data['blocked_packets'],0)
 
 
 class LinuxTests(unittest.TestCase):
+    def test_half_open_syn_recv_is_not_a_source_sample_or_concurrency_flow(self):
+        import builtins
+        import io
+        tcp='''  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1
+   1: 0200090A:01BB 010200C0:3039 01 00000000:00000000 00:00000000 00000000 0 0 2
+   2: 0200090A:01BB 016433C6:303A 03 00000000:00000000 00:00000000 00000000 0 0 3
+'''
+        header='  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
+        def fake_open(path, *args, **kwargs):
+            name=str(path).rsplit('/',1)[-1]
+            return io.StringIO(tcp if name=='tcp' else header)
+        with mock.patch.object(observe,'incarnation',return_value='boot:net:pid'), \
+             mock.patch.object(builtins,'open',side_effect=fake_open):
+            epoch,flows,inbound=observe.sockets(123)
+        self.assertEqual(epoch,'boot:net:pid')
+        self.assertEqual(len(flows),1)
+        self.assertEqual(inbound,['192.0.2.1'])
+
     def test_failed_write_then_restart_retries_desired_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal=guard.isolation.Journal(str(Path(tmp)/'state.json'))
@@ -121,8 +142,13 @@ class LinuxTests(unittest.TestCase):
         text=linux.rules('nwguard_'+'a'*16,['10.9.0.2','2001:db8::2'],20000,[],True,interfaces=['br-test'])
         self.assertIn('oifname { "br-test" } ip daddr',text)
         self.assertIn('iifname { "br-test" } ip6 saddr',text)
-        for forbidden in ('flush ruleset','hook input','hook output','bypass','reject with tcp reset'):
+        self.assertIn('ct state new queue num 20000',text)
+        self.assertIn('ct state new queue num 20001',text)
+        for forbidden in ('flush ruleset','hook input','hook output','bypass','reject with tcp reset','sources4','sources6','saddr @sources'):
             self.assertNotIn(forbidden,text)
+        unrestricted=linux.rules('nwguard_'+'a'*16,['10.9.0.2'],20000,[],False,interfaces=['br-test'])
+        self.assertNotIn('queue num',unrestricted)
+        self.assertIn('incoming return',unrestricted)
         with self.assertRaises(ValueError):linux.rules('nwguard_'+'a'*16,['10.9.0.2'],20000,[])
 
     def test_packet_parser(self):
@@ -154,7 +180,7 @@ class LinuxTests(unittest.TestCase):
             self.assertEqual(result['failure_stage'],'enforcement')
             self.assertNotIn('sensitive',result['error'])
 
-    def test_tcp_cap_does_not_hide_sixth_source_warning(self):
+    def test_source_ip_count_never_blocks_but_tcp_cap_still_limits_new_flows(self):
         with tempfile.TemporaryDirectory() as tmp:
             nft=mock.Mock();nft.digests={}
             g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=nft,queues=mock.Mock())
@@ -167,9 +193,14 @@ class LinuxTests(unittest.TestCase):
             raw=bytearray(24);raw[0]=0x45;raw[9]=6
             raw[12:16]=socket.inet_aton('198.51.100.6');raw[16:20]=socket.inet_aton('10.9.0.2');raw[20:24]=struct.pack('!HH',123,443)
             queue=next(iter(g.records.values()))['queue']
-            self.assertFalse(g.decision(queue,raw))
-            self.assertIn('198.51.100.6',state.data['blocked'])
+            state.data['limited']=False
+            self.assertTrue(g.decision(queue,raw))
+            self.assertNotIn('198.51.100.6',state.data['blocked'])
             self.assertEqual(len(state.data['sources']),5)
+            state.data['limited']=True
+            self.assertFalse(g.decision(queue,raw))
+            self.assertEqual(state.data['tcp_denied'],1)
+            self.assertNotIn('198.51.100.6',state.data['blocked'])
 
 
 class PasarTests(unittest.TestCase):
@@ -199,10 +230,16 @@ class PasarTests(unittest.TestCase):
 class ReceiptTests(unittest.TestCase):
     def test_bounded_evidence_and_no_secret(self):
         value={'type':'inbound_source_blocked','runtime':'podman','container_name':'customer','instance_id':'a'*64,
-            'admission':{'state':'enforced','observed_at':int(time.time()),'sources':[{'ip':'192.0.2.1','first_seen':1000}],'password':'NEVER-SEND','blocked':{'2001:db8::1':{'packets':2,'last_seen':1000}}}}
+            'admission':{'state':'enforced','observed_at':int(time.time()),'source_limit_enforced':False,
+                'sources':[{'ip':'192.0.2.1','first_seen':1000}],'password':'NEVER-SEND','blocked':{'2001:db8::1':{'packets':2,'last_seen':1000}}}}
         result=admission_api.normalized_alert(value)
         self.assertNotIn('NEVER-SEND',json.dumps(result))
         self.assertEqual(result['admission']['source_limit'],5)
+        self.assertFalse(result['admission']['source_limit_enforced'])
+        legacy=json.loads(json.dumps(value));legacy['admission'].pop('source_limit_enforced')
+        legacy_result=admission_api.normalized_alert(legacy)
+        self.assertTrue(legacy_result['admission']['source_limit_enforced'])
+        self.assertEqual(legacy_result['admission']['source_policy'],'first_five_enforced')
         value['admission']['observed_at']=1000
         with self.assertRaises(HTTPException):admission_api.normalized_alert(value)
         value['runtime']='docker'

@@ -58,14 +58,14 @@ class NotificationEvidenceTests(unittest.TestCase):
         self.assertIn('不会自动停容器或处罚客户', text)
         self.assertNotIn('已确认攻击', text)
 
-    def test_inbound_source_limit_explains_that_blocking_is_not_malicious_verdict(self):
+    def test_legacy_inbound_source_block_is_labeled_historical_not_malicious_verdict(self):
         alert = self.alert('inbound_source_blocked')
         alert['details_json'] = json.dumps({'admission': {
             'sources': [{'ip': '198.51.100.1'}], 'blocked': {'203.0.113.2': {'packets': 5}},
         }})
         _, text = content.render(alert, 'active')
-        self.assertIn('这不代表来源恶意或客户违规', text)
-        self.assertIn('仅影响该容器网络入口', text)
+        self.assertIn('旧版来源数量规则曾拒绝新连接', text)
+        self.assertIn('当前版本不会仅按来源数量封禁', text)
 
     def test_service_listeners_do_not_use_instance_all_ports(self):
         details = {'listening_ports':[22,80,1080], 'service_listeners':[

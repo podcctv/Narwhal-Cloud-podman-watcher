@@ -1633,6 +1633,8 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         "syn_recv_count": 0,
         "incoming_established": 0,
         "inbound_unique_ips": 0,
+        "inbound_established_unique_ips": 0,
+        "inbound_syn_recv_unique_ips": 0,
         "inbound_top_ips": [],
         "inbound_unique_ip_threshold": int(_env_float("ALERT_INBOUND_UNIQUE_IPS", 10)),
         "inbound_ip_observation": "container_socket",
@@ -1734,6 +1736,10 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
     outbound_ports = set()
     inbound_source_ports: Dict[str, set] = {}
     inbound_ip_connections: Dict[str, int] = {}
+    inbound_ip_established: Dict[str, int] = {}
+    inbound_ip_syn_recv: Dict[str, int] = {}
+    inbound_established_ips = set()
+    inbound_syn_recv_ips = set()
     suspicious_ports = {
         int(x.strip())
         for x in os.getenv("SECURITY_SUSPICIOUS_OUTBOUND_PORTS", "25,465,587,23,445,6667").split(",")
@@ -1768,6 +1774,12 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
             if _is_trackable_ip(remote_ip) and remote_ip != local_ip:
                 inbound_source_ports.setdefault(remote_ip, set()).add(local_port)
                 inbound_ip_connections[remote_ip] = inbound_ip_connections.get(remote_ip, 0) + 1
+                if proto == "tcp" and state == "01":
+                    inbound_established_ips.add(remote_ip)
+                    inbound_ip_established[remote_ip] = inbound_ip_established.get(remote_ip, 0) + 1
+                elif proto == "tcp" and state == "03":
+                    inbound_syn_recv_ips.add(remote_ip)
+                    inbound_ip_syn_recv[remote_ip] = inbound_ip_syn_recv.get(remote_ip, 0) + 1
             continue
         if not _is_trackable_ip(remote_ip):
             continue
@@ -1792,8 +1804,15 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
             "syn_recv_count": syn_recv,
             "incoming_established": incoming_established,
             "inbound_unique_ips": len(inbound_source_ports),
+            "inbound_established_unique_ips": len(inbound_established_ips),
+            "inbound_syn_recv_unique_ips": len(inbound_syn_recv_ips),
             "inbound_top_ips": [
-                {"ip": ip, "connections": count}
+                {
+                    "ip": ip,
+                    "connections": count,
+                    "established_connections": inbound_ip_established.get(ip, 0),
+                    "syn_recv_connections": inbound_ip_syn_recv.get(ip, 0),
+                }
                 for ip, count in sorted(
                     inbound_ip_connections.items(), key=lambda item: item[1], reverse=True
                 )[:20]
@@ -3725,17 +3744,19 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     f"(PID {int(top_process.get('pid') or 0)})"
                 )
             alert_type = "socks_inbound_fanout" if socks_detected else "inbound_ip_fanout"
-            alert_title = "SOCKS 入站来源 IP 数量过多" if socks_detected else "入站来源 IP 数量过多"
+            alert_title = "SOCKS 入站来源 IP 较多，需核实" if socks_detected else "入站来源 IP 较多，需核实"
             socks_hint = "；已识别 SOCKS 服务，此告警替代通用入站 IP 告警" if socks_detected else ""
+            established_ips = int(security.get("inbound_established_unique_ips") or 0)
+            pending_ips = int(security.get("inbound_syn_recv_unique_ips") or 0)
             alerts.append(
                 _security_alert(
                     alert_type,
-                    "critical"
-                    if inbound_unique_ips > inbound_unique_ip_threshold * 2
-                    else "warning",
+                    "warning",
                     alert_title,
-                    f"容器当前有 {inbound_unique_ips} 个不同入站 IP，"
-                    f"超过重点提醒阈值 {int(inbound_unique_ip_threshold)}{process_hint}{socks_hint}",
+                    f"容器当前观察到 {inbound_unique_ips} 个入站来源 IP；其中有已建立 TCP 连接的来源 "
+                    f"{established_ips} 个，SYN_RECV 握手未完成来源 {pending_ips} 个。"
+                    f"来源 IP 数不等于真实用户数，单凭数量不会自动限制；请结合端口扫描线索、进程归属和应用认证日志核实。"
+                    f"超过提醒阈值 {int(inbound_unique_ip_threshold)}{process_hint}{socks_hint}",
                     inbound_unique_ips,
                     inbound_unique_ip_threshold,
                     container,
