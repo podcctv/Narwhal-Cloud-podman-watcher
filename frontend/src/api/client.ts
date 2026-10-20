@@ -90,6 +90,12 @@ export const api = {
   getLatest: (includeStale = true) =>
     request<LatestResponse>(`/api/v1/latest?include_stale=${includeStale}`),
 
+  saveContainerUserNote: (identity: ContainerIdentity, data: { user_email: string; user_note: string }) =>
+    request<{ ok: boolean; user_email: string; user_note: string }>('/api/v1/containers/user-note', {
+      method: 'POST',
+      body: JSON.stringify({ ...identity, ...data }),
+    }),
+
   getActiveAlerts: () =>
     request<{ items?: SecurityAlert[]; alerts?: SecurityAlert[]; active_count?: number }>('/api/v1/security/alerts'),
 

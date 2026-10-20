@@ -45,7 +45,7 @@ def names(items):
 
 
 METRICS = {
-    "container_connection_count": ("同时连接过多", "当前连接", "个", "请检查代理账号、后台任务及访问记录，限制异常连接。"),
+    "container_connection_count": ("连接数量达到保护观察线", "当前连接", "个", "这是连接数量保护信号，未关联到具体用户身份，不代表用户滥用；系统仅按预设策略保护实例。"),
     "socks_inbound_fanout": ("代理接入来源 IP 较多", "不同来源 IP", "个", "IP 数量不能证明账号共享、客户本人操作或恶意行为；可能来自正常用户、NAT、监控或扫描器。请结合连接状态和应用访问日志核查；本提醒不会自动处罚客户。"),
     "inbound_ip_fanout": ("容器接入来源 IP 较多", "不同来源 IP", "个", "IP 数量只是网络观测结果，不能证明客户本人操作或存在恶意行为；来源也可能是正常用户、NAT、监控或扫描器。请结合连接状态、访问日志和信誉记录核查；本提醒不会自动停容器或处罚客户。"),
     "ddos_bandwidth": ("收到的网络流量异常增大，可能存在攻击或业务流量突增", "下载速度", "Mbps", "请检查网络访问及业务情况；如影响正常使用，请发工单。"),
@@ -156,9 +156,14 @@ def issue(alert, details):
         for key, label, factor, unit in (("connections", "连接", 1, "个"), ("rx_bps", "下载", 8/1e6, "Mbps"), ("http_rps", "网站请求", 1, "次/秒")):
             if obs.get("signals", {}).get(key) and key in obs.get("values", {}) and key in obs.get("thresholds", {}):
                 facts.append(f"{label} {fmt(num(obs['values'][key])*factor)} {unit}，阈值 {fmt(num(obs['thresholds'][key])*factor)} {unit}")
-        return "使用情况超过该实例的提醒范围", "；".join(facts) or "具体数值未采集，请检查业务使用情况。", "请核对业务访问及后台任务。"
+        return "运行指标达到该实例的保护观察线", "；".join(facts) or "具体数值未采集。", "这是运行保护信号，未关联到具体用户身份，不代表用户滥用；仅由管理员依据保护策略处理。"
     if kind == "ops_connection_guard":
-        return "连接数量长时间超过安全限制", f"连接 {fmt(obs.get('connection_count'))} 个，限制 {fmt(obs.get('threshold'))} 个；有效采样跨度 {fmt(num(obs.get('duration_seconds'))/60)} 分钟。", "请检查代理账号和后台任务；需要协助恢复服务时，请发工单。"
+        facts = f"连接 {fmt(obs.get('connection_count'))} 个，保护阈值 {fmt(obs.get('threshold'))} 个。"
+        if obs.get('duration_verified') is True and type(obs.get('sample_count')) is int and obs['sample_count'] >= 2:
+            facts += f"已由 {obs['sample_count']} 次有效采样核验，覆盖 {fmt(num(obs.get('duration_seconds'))/60)} 分钟；相邻采样间隔不超过 {fmt(obs.get('max_gap_seconds'))} 秒。"
+        else:
+            facts += "持续时长未通过有效采样核验；请以消息检测时间为准。"
+        return "连接数量达到主机保护条件", facts, "该信号尚未关联到具体用户或认证记录，不代表认定用户滥用。系统按主机保护策略处理；如需恢复服务，请联系管理员。"
     if kind.startswith('ops_service:'):
         facts = f"检查结果：{'无法连接或访问失败' if obs.get('status')=='failed' else '响应或证书需要关注'}。"
         if 'latency_ms' in obs:

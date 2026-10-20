@@ -110,7 +110,7 @@ class IPReputationTests(unittest.TestCase):
         self.assertTrue(result["cached"])
         query.assert_not_called()
 
-    def test_provider_uses_key_header_and_url_encodes_ipv6(self):
+    def test_provider_uses_server_side_key_header_and_url_encodes_ipv6(self):
         provider_response = mock.MagicMock()
         provider_response.status = 200
         provider_response.read.return_value = json.dumps({"data": {

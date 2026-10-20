@@ -133,6 +133,27 @@ export const Dashboard: React.FC = () => {
     }
   }, [addToast, isDocumentHidden]);
 
+  const openAlertContainer = useCallback((identity: ContainerIdentity) => {
+    const target = containers.find((container) =>
+      container.host_id === identity.host_id &&
+      container.runtime === identity.runtime &&
+      (container.project || '') === (identity.project || '') &&
+      container.container_name === identity.container_name
+    );
+    if (!target) {
+      addToast('info', '该容器当前没有在线采样数据，请从告警详情核对主机状态');
+      return;
+    }
+    setActiveTab('dashboard');
+    setSelectedContainer({
+      host_id: target.host_id,
+      runtime: target.runtime,
+      project: target.project || '',
+      container_name: target.container_name,
+      container_id: target.container_id,
+    });
+  }, [addToast, containers]);
+
   useEffect(() => {
     const onVisibilityChange = () => {
       const hidden = document.hidden;
@@ -237,6 +258,7 @@ export const Dashboard: React.FC = () => {
                 onRefresh={fetchAllData}
                 onViewAllHistory={() => setActiveTab('alerts')}
                 onToast={addToast}
+                onSelectContainer={openAlertContainer}
               />
 
               {/* Host Security Telemetry */}
@@ -284,6 +306,7 @@ export const Dashboard: React.FC = () => {
         onClose={() => setSelectedContainer(null)}
         serverVersion={serverVersion}
         onToast={addToast}
+        onRefresh={fetchAllData}
       />
 
       {/* Command Palette (Ctrl+K) */}

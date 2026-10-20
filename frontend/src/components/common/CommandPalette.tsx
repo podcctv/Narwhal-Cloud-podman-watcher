@@ -42,6 +42,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     return (
       c.container_name.toLowerCase().includes(q) ||
       c.host_id.toLowerCase().includes(q) ||
+      (c.user_email || '').toLowerCase().includes(q) ||
+      (c.user_note || '').toLowerCase().includes(q) ||
       (c.project && c.project.toLowerCase().includes(q)) ||
       c.runtime.toLowerCase().includes(q)
     );
@@ -65,7 +67,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     }
     const container = filteredContainers[index - quickActions.length];
     if (!container) return;
-    onSelectContainer({ host_id: container.host_id, runtime: container.runtime, project: container.project, container_name: container.container_name });
+    onSelectContainer({ host_id: container.host_id, runtime: container.runtime, project: container.project, container_name: container.container_name, container_id: container.container_id });
     onClose();
   };
 
@@ -93,11 +95,11 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           <input
             ref={inputRef}
             type="text"
-            aria-label="搜索节点或容器"
+            aria-label="搜索节点、容器或用户邮箱"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onInputKeyDown}
-            placeholder="搜索节点、容器名称、运行时或快捷指令... (Esc 退出)"
+            placeholder="搜索节点、容器名称、用户邮箱、运行时或快捷指令... (Esc 退出)"
             className="flex-1 bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-none"
           />
           <button
@@ -149,7 +151,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     <Box className="h-4 w-4 text-sky-400 shrink-0" />
                     <span className="font-medium truncate">{c.container_name}</span>
                     <span className="text-xs text-slate-500 truncate">
-                      {c.host_id} · {c.project ? `${c.runtime}/${c.project}` : c.runtime}
+                      {c.user_email ? `${c.user_email} · ` : ''}{c.user_note ? `${c.user_note} · ` : ''}{c.host_id} · {c.project ? `${c.runtime}/${c.project}` : c.runtime}
                     </span>
                   </div>
                   <div className="flex items-center gap-2 text-xs text-slate-400 shrink-0">

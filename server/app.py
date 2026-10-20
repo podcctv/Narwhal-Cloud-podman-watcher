@@ -231,6 +231,19 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_reports_host_ts ON reports(host_id, ts);
         CREATE INDEX IF NOT EXISTS idx_reports_host_container_ts ON reports(host_id, container_name, ts);
         CREATE INDEX IF NOT EXISTS idx_reports_ts ON reports(ts);
+        CREATE TABLE IF NOT EXISTS container_user_notes (
+            host_id TEXT NOT NULL,
+            runtime TEXT NOT NULL,
+            project TEXT NOT NULL DEFAULT '',
+            container_name TEXT NOT NULL,
+            container_id TEXT NOT NULL,
+            user_email TEXT NOT NULL DEFAULT '',
+            user_note TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL,
+            updated_by TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(host_id, runtime, project, container_name, container_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_container_user_notes_email ON container_user_notes(user_email);
         CREATE TABLE IF NOT EXISTS hosts (
             host_id TEXT PRIMARY KEY,
             last_seen INTEGER NOT NULL,
@@ -3152,13 +3165,18 @@ async def report(
 
 
 @app.get("/api/v1/latest")
-def latest(include_stale: bool = False) -> JSONResponse:
+def latest(include_stale: bool = False, request: Request = None) -> JSONResponse:
     global _latest_cache, _latest_cache_time
+    can_view_user_notes = request is None or getattr(request.state, "dashboard_role", "admin") in {"admin", "operator"}
 
     conn = db()
     try:
         admission_rows={(r['host_id'],r['runtime'],r['project'],r['container_name']):dict(r)
                         for r in conn.execute('SELECT * FROM admission_states')}
+        container_notes = {
+            (r["host_id"], r["runtime"], r["project"], r["container_name"], r["container_id"]): dict(r)
+            for r in conn.execute("SELECT * FROM container_user_notes")
+        }
         host_heartbeats = {
             str(row["host_id"]): int(row["last_seen"])
             for row in conn.execute("SELECT host_id, last_seen FROM hosts").fetchall()
@@ -3201,6 +3219,8 @@ def latest(include_stale: bool = False) -> JSONResponse:
     out = []
     for r in rows:
         payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+        current_container_id = str(payload.get("id") or "")
+        note = container_notes.get((r["host_id"], r["runtime"], r["project"], r["container_name"], current_container_id), {})
         admission=admission_rows.get((r['host_id'],r['runtime'],r['project'],r['container_name']))
         reported_identity=(payload.get('security') or {}).get('admission',{}).get('instance_id') or payload.get('stable_id') or payload.get('id') or ''
         if admission and (not admission['instance_id'] or (len(reported_identity)>=12 and admission['instance_id'].startswith(reported_identity))):
@@ -3265,6 +3285,8 @@ def latest(include_stale: bool = False) -> JSONResponse:
             "host_id": r["host_id"],
             "agent_version": str(payload.get("_agent_version") or "unknown"),
             "container_id": payload.get("id", ""),
+            "user_email": note.get("user_email", "") if can_view_user_notes else "",
+            "user_note": note.get("user_note", "") if can_view_user_notes else "",
             "container_name": r["container_name"],
             "runtime": r["runtime"],
             "project": r["project"],
@@ -3336,6 +3358,82 @@ def latest(include_stale: bool = False) -> JSONResponse:
         })
     res_content = {"server_version": APP_VERSION, "items": out}
     return JSONResponse(content=res_content)
+
+
+@app.post("/api/v1/containers/user-note")
+async def save_container_user_note(request: Request) -> JSONResponse:
+    """Save private dashboard lookup metadata for the current Incus/Podman instance."""
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="请求内容不是有效 JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求内容格式无效")
+
+    host_id = str(payload.get("host_id") or "").strip()
+    runtime = str(payload.get("runtime") or "").strip().lower()
+    project = str(payload.get("project") or "").strip()
+    container_name = str(payload.get("container_name") or "").strip()
+    container_id = str(payload.get("container_id") or "").strip()
+    user_email = str(payload.get("user_email") or "").strip()
+    user_note = str(payload.get("user_note") or "").strip()
+
+    if runtime not in {"incus", "podman"}:
+        raise HTTPException(status_code=400, detail="仅支持 Incus 和 Podman 容器")
+    if not host_id or len(host_id) > 255 or not container_name or len(container_name) > 255:
+        raise HTTPException(status_code=400, detail="主机或容器标识无效")
+    if len(project) > 255 or not container_id or len(container_id) > 255:
+        raise HTTPException(status_code=400, detail="容器实例 ID 无效，请刷新容器详情后重试")
+    if len(user_email) > 254 or (user_email and not re.fullmatch(r"[^@\s]{1,64}@[^@\s.]+(?:\.[^@\s.]+)+", user_email)):
+        raise HTTPException(status_code=400, detail="请输入有效的用户邮箱（最多 254 个字符）")
+    if len(user_note) > 500:
+        raise HTTPException(status_code=400, detail="备注不能超过 500 个字符")
+
+    now = int(time.time())
+    conn = db()
+    try:
+        host = conn.execute("SELECT last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        row = conn.execute(
+            """
+            SELECT ts, payload_json FROM reports
+            WHERE host_id=? AND runtime=? AND project=? AND container_name=?
+            ORDER BY ts DESC, id DESC LIMIT 1
+            """,
+            (host_id, runtime, project, container_name),
+        ).fetchone()
+        if not row or now - int(row["ts"]) > STALE_SECONDS:
+            raise HTTPException(status_code=409, detail="容器数据已过期或不存在，请刷新后重试")
+        if host and now - int(host["last_seen"]) > STALE_SECONDS:
+            raise HTTPException(status_code=409, detail="主机已离线，请恢复上报后再编辑备注")
+        current_payload = json.loads(row["payload_json"] or "{}")
+        if str(current_payload.get("id") or "") != container_id:
+            raise HTTPException(status_code=409, detail="容器实例已变化，请刷新详情后重新编辑，避免备注错配")
+
+        note_key = (host_id, runtime, project, container_name, container_id)
+        if not user_email and not user_note:
+            conn.execute(
+                "DELETE FROM container_user_notes WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND container_id=?",
+                note_key,
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO container_user_notes(
+                    host_id, runtime, project, container_name, container_id,
+                    user_email, user_note, updated_at, updated_by
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(host_id, runtime, project, container_name, container_id)
+                DO UPDATE SET user_email=excluded.user_email, user_note=excluded.user_note,
+                    updated_at=excluded.updated_at, updated_by=excluded.updated_by
+                """,
+                (*note_key, user_email, user_note, now,
+                 str(getattr(request.state, "dashboard_user", "dashboard"))[:100]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return JSONResponse({"ok": True, "user_email": user_email, "user_note": user_note})
 
 
 @app.get("/api/v1/history")
@@ -3627,6 +3725,7 @@ def _security_alert_item(conn: sqlite3.Connection, row: sqlite3.Row) -> Dict[str
         "project": row["project"],
         "container_name": row["container_name"],
         "type": row["alert_type"],
+        "protection_only": buyer_notifications.is_protection_only_alert(row),
         "severity": row["severity"],
         "title": row["title"],
         "message": row["message"],

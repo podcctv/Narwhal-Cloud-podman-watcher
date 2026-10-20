@@ -5,16 +5,42 @@ import {
   Check,
   EyeOff,
   ExternalLink,
+  ArrowUpRight,
   ShieldCheck,
   AlertTriangle,
   CheckCircle2,
 } from 'lucide-react';
-import { SecurityAlert } from '../../api/types';
+import { ContainerIdentity, SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { SocksPasswordReview } from '../alerts/SocksPasswordReview';
 import { UserNoticeAction } from '../alerts/UserNoticeAction';
+
+const PROTECTION_ONLY_ALERT_TYPES = new Set([
+  'container_connection_count', 'inbound_ip_fanout', 'socks_inbound_fanout',
+  'inbound_source_blocked', 'tcp_concurrency_limited', 'admission_unverified',
+  'ddos_bandwidth', 'ddos_packets', 'ddos_syn', 'cc_total_rps', 'cc_single_ip',
+  'cc_4xx_ratio', 'http_5xx_ratio', 'http_abuse', 'web_scan', 'port_scan',
+  'outbound_fanout', 'outbound_sensitive_ports', 'outbound_bandwidth_abuse',
+  'outbound_packet_abuse', 'outbound_connection_churn', 'outbound_connection_failures',
+  'udp_outbound_flood', 'hy2_high_concurrency', 'hy2_abnormal_throttle',
+  'traffic_imbalance', 'ops_policy_signal', 'ops_bandwidth_saturation',
+  'ops_baseline_anomaly', 'ops_connection_guard',
+]);
+
+const hasVerifiedUserAttribution = (alert: SecurityAlert): boolean => {
+  const details = alert.details || {};
+  const attribution = details.user_attribution || details.observation?.user_attribution;
+  return attribution?.verified === true
+    && ['application_auth_log', 'proxy_auth_log'].includes(attribution?.source)
+    && Boolean(attribution?.user_id || attribution?.account_id);
+};
+
+const isProtectionOnlySignal = (alert: SecurityAlert): boolean =>
+  typeof alert.protection_only === 'boolean'
+    ? alert.protection_only
+    : PROTECTION_ONLY_ALERT_TYPES.has(alert.type) && !hasVerifiedUserAttribution(alert);
 
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
@@ -36,6 +62,7 @@ interface SecurityAlertSectionProps {
   onRefresh: () => void;
   onViewAllHistory: () => void;
   onToast: (type: 'success' | 'error' | 'info', message: string) => void;
+  onSelectContainer: (identity: ContainerIdentity) => void;
 }
 
 export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
@@ -43,8 +70,10 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   onRefresh,
   onViewAllHistory,
   onToast,
+  onSelectContainer,
 }) => {
   const [submittingId, setSubmittingId] = useState<number | null>(null);
+  const protectionOnlyCount = alerts.filter(isProtectionOnlySignal).length;
   const [pendingDecision, setPendingDecision] = useState<{
     id: number;
     decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve' | 'apply_container_connlimit' | 'release_container_connlimit';
@@ -130,8 +159,13 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
             <span>安全告警中心</span>
             <span className="rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/40 px-2 py-0.2 text-[11px] font-mono font-bold">
-              {alerts.length} 项需处理
+              {alerts.length} 项安全提醒
             </span>
+            {protectionOnlyCount > 0 && (
+              <span className="rounded-full border border-sky-500/30 bg-sky-950/50 px-2 py-0.5 text-[10px] font-medium text-sky-200">
+                {protectionOnlyCount} 项仅保护 · 不计用户滥用
+              </span>
+            )}
           </h2>
         </div>
 
@@ -149,6 +183,16 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
       <div className="divide-y divide-slate-800/80">
         {alerts.map((alert) => {
           const isProcessing = submittingId === alert.id;
+          const protectionOnly = isProtectionOnlySignal(alert);
+          const admissionUnverified = alert.type === 'admission_unverified';
+          const deepEvidence = alert.deep_evidence;
+          const attribution = deepEvidence?.connection_attribution;
+          const inboundEvidence = deepEvidence?.inbound_ips || [];
+          const probeIpCount = new Set(inboundEvidence
+            .filter((item) => item.network_evidence?.classification === 'possible_multiport_probe')
+            .map((item) => item.ip)
+            .filter(Boolean)).size;
+          const evidenceCount = (value?: number) => Number.isFinite(value) ? String(value) : '未采集';
           const runtimeText = alert.project
             ? `${alert.runtime}/${alert.project}`
             : alert.runtime;
@@ -172,6 +216,12 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
               <div className="space-y-2 min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <StatusBadge status={alert.severity} size="sm" />
+                  {protectionOnly && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 bg-sky-950/50 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
+                      <ShieldCheck className="h-3 w-3" />
+                      保护类 · 用户归因未确认
+                    </span>
+                  )}
                   <span className="font-semibold text-sm text-slate-100">
                     {alert.title || alert.type}
                   </span>
@@ -194,6 +244,36 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 <p className="text-xs text-slate-300 leading-relaxed">
                   {alert.message}
                 </p>
+                {protectionOnly && (
+                  <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2.5 text-[11px] leading-relaxed text-slate-300">
+                    <div className="flex items-center gap-1.5 font-semibold text-sky-200">
+                      <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                      {admissionUnverified ? '保护状态待核实' : '仅作为主机保护信号'}
+                    </div>
+                    <p className="mt-1">
+                      {admissionUnverified
+                        ? '采样或规则校验未通过，当前不能确认防护是否生效；这不代表已确认攻击，也不归因为用户行为。'
+                        : '当前数据只反映连接、流量或访问特征，尚未通过应用/代理认证日志关联到具体用户；不计为用户滥用或违规，也不会据此通知或处罚用户。系统仅按独立保护策略处理。'}
+                    </p>
+                    {deepEvidence ? (
+                      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-sky-900/70 pt-2 text-slate-300 tabular-nums">
+                        <span>深度快照：{deepEvidence.captured_at_utc8 || '时间未上报'}</span>
+                        <span>入站：{evidenceCount(deepEvidence.inbound_unique_ips)} IP / {evidenceCount(deepEvidence.inbound_process_count)} 进程</span>
+                        <span>出站：{evidenceCount(deepEvidence.outbound_unique_ips)} IP / {evidenceCount(deepEvidence.outbound_process_count)} 进程</span>
+                        {attribution && <span>
+                          发起方向：本机进程已确认 {evidenceCount(attribution.confirmed_local_initiated)} / 远端发起已确认 {evidenceCount(attribution.confirmed_remote_initiated)} / 未知 {evidenceCount(attribution.unknown_direction)}
+                        </span>}
+                        {probeIpCount > 0 && <span className="text-amber-200">多端口探测线索 {probeIpCount} IP（非攻击定论）</span>}
+                        {attribution?.conntrack_available === false && <span className="text-amber-200">conntrack 不可用，连接方向不能视为已确认</span>}
+                      </div>
+                    ) : (
+                      <p className="mt-2 border-t border-sky-900/70 pt-2 text-slate-400">
+                        尚无深度连接快照；目前不能判断连接来源、发起方向或对应进程。
+                      </p>
+                    )}
+                    <p className="mt-1 text-slate-400">连接方向或进程归属不等于用户身份；需要认证日志才能把行为关联到用户。</p>
+                  </div>
+                )}
                 <SocksPasswordReview alert={alert} onRefresh={onRefresh} onToast={onToast} />
 
                 {/* Remediation Failure Explanation Banner */}
@@ -217,7 +297,23 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
               {/* Action Buttons */}
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                <UserNoticeAction alertId={alert.id} onToast={onToast} />
+                {alert.container_name && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectContainer({
+                      host_id: alert.host_id,
+                      runtime: alert.runtime,
+                      project: alert.project || '',
+                      container_name: alert.container_name || '',
+                    })}
+                    className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/60 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-900/70 transition-colors"
+                    title="打开该告警对应的容器详情"
+                  >
+                    <ArrowUpRight className="h-3.5 w-3.5" />
+                    <span>查看容器</span>
+                  </button>
+                )}
+                {!protectionOnly && <UserNoticeAction alertId={alert.id} onToast={onToast} />}
                 {canUseConnlimit && (connlimitActive ? (
                   <button
                     type="button"
@@ -258,7 +354,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   </span>
                 </button>}
 
-                <button
+                {!protectionOnly && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'allow_silent' })}
@@ -267,7 +363,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 >
                   <Check className="h-3.5 w-3.5 text-emerald-400" />
                   <span>放行策略</span>
-                </button>
+                </button>}
 
                 {isActionFailed && (
                   <button
@@ -282,7 +378,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   </button>
                 )}
 
-                <button
+                {!protectionOnly && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'dismiss_once' })}
@@ -291,7 +387,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 >
                   <EyeOff className="h-3.5 w-3.5 text-slate-400" />
                   <span>本次忽略</span>
-                </button>
+                </button>}
               </div>
             </div>
           );

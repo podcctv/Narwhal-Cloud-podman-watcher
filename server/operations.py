@@ -388,7 +388,12 @@ def permitted(role, method, path):
         return True
     if role != "operator":
         return False
-    return (path.startswith("/api/v1/containers/") or path.startswith("/api/v1/security/alerts/")) and (path.endswith("/diagnostics") or path.endswith("/disposition") or path.endswith("/actions") or path.endswith('/notify-user')) or path == "/api/v1/ops/logs/discover"
+    if path == "/api/v1/containers/user-note":
+        return method == "POST"
+    return ((path.startswith("/api/v1/containers/") or path.startswith("/api/v1/security/alerts/"))
+            and (path.endswith("/diagnostics") or path.endswith("/disposition")
+                 or path.endswith("/actions") or path.endswith('/notify-user'))
+            or path == "/api/v1/ops/logs/discover")
 
 
 def purge_host(conn,host_id):

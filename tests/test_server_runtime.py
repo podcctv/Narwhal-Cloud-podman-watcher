@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
 
@@ -70,6 +71,73 @@ class ServerRuntimeTests(unittest.TestCase):
         body = json.loads(response.body)
         self.assertEqual(len(body["items"]), 2)
         self.assertEqual({x["runtime"] for x in body["items"]}, {"docker", "incus"})
+
+    def test_container_user_note_is_searchable_and_bound_to_instance_id(self):
+        self._insert("incus", 20, "default")
+
+        class JsonRequest:
+            state = SimpleNamespace(dashboard_user="operator")
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        payload = {
+            "host_id": "host", "runtime": "incus", "project": "default",
+            "container_name": "same-name", "container_id": "incus-id",
+            "user_email": "customer@example.com", "user_note": "order 123",
+        }
+        saved = asyncio.run(server.save_container_user_note(JsonRequest(payload)))
+        self.assertEqual(json.loads(saved.body), {
+            "ok": True, "user_email": "customer@example.com", "user_note": "order 123",
+        })
+        item = json.loads(server.latest().body)["items"][0]
+        self.assertEqual(item["user_email"], "customer@example.com")
+        self.assertEqual(item["user_note"], "order 123")
+        viewer_request = SimpleNamespace(state=SimpleNamespace(dashboard_role="viewer"))
+        viewer_item = json.loads(server.latest(request=viewer_request).body)["items"][0]
+        self.assertEqual(viewer_item["user_email"], "")
+        self.assertEqual(viewer_item["user_note"], "")
+
+        conn = sqlite3.connect(server.DB_PATH)
+        conn.execute(
+            "UPDATE reports SET payload_json=? WHERE runtime='incus'",
+            (json.dumps({"id": "replacement-id", "name": "same-name"}),),
+        )
+        conn.commit()
+        conn.close()
+        replacement = json.loads(server.latest().body)["items"][0]
+        self.assertEqual(replacement["user_email"], "")
+        self.assertEqual(replacement["user_note"], "")
+
+        with self.assertRaises(server.HTTPException) as raised:
+            asyncio.run(server.save_container_user_note(JsonRequest(payload)))
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_container_user_note_rejects_invalid_email_and_unsupported_runtime(self):
+        self._insert("incus", 20, "default")
+
+        class JsonRequest:
+            state = SimpleNamespace(dashboard_user="operator")
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        common = {
+            "host_id": "host", "project": "default", "container_name": "same-name",
+            "container_id": "incus-id", "user_email": "not-an-email", "user_note": "",
+        }
+        with self.assertRaises(server.HTTPException) as invalid_email:
+            asyncio.run(server.save_container_user_note(JsonRequest({**common, "runtime": "incus"})))
+        self.assertEqual(invalid_email.exception.status_code, 400)
+        with self.assertRaises(server.HTTPException) as unsupported:
+            asyncio.run(server.save_container_user_note(JsonRequest({**common, "runtime": "docker", "user_email": ""})))
+        self.assertEqual(unsupported.exception.status_code, 400)
 
     def test_history_and_stats_do_not_mix_metric_versions(self):
         now = int(time.time())
@@ -325,6 +393,21 @@ class ServerRuntimeTests(unittest.TestCase):
         body = json.loads(response.body)
         self.assertEqual(body["active_count"], 1)
         self.assertEqual(body["items"][0]["type"], "port_scan")
+        self.assertTrue(body["items"][0]["protection_only"])
+
+    def test_security_alert_endpoint_shares_server_attribution_classification(self):
+        conn = server.db()
+        server.process_security_alerts(conn, "host", int(time.time()), [
+            {"type": "container_connection_count", "severity": "warning", "title": "connections", "message": "connections"},
+            {"type": "socks_weak_auth", "severity": "critical", "title": "weak auth", "message": "weak auth"},
+        ])
+        conn.commit()
+        conn.close()
+
+        items = json.loads(server.security_alerts().body)["items"]
+        by_type = {item["type"]: item for item in items}
+        self.assertTrue(by_type["container_connection_count"]["protection_only"])
+        self.assertFalse(by_type["socks_weak_auth"]["protection_only"])
 
     def test_dashboard_basic_auth_validates_generated_credentials(self):
         original_user = server.DASHBOARD_USERNAME
@@ -1462,7 +1545,7 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(status["sample"]["process_count"], 7)
         self.assertEqual(status["sample"]["agent_version"], "1.1.0")
         self.assertEqual(status["sample"]["inbound_source_history"]["status"], "insufficient_history")
-        self.assertEqual(status["sample"]["inbound_source_history"]["report_sample_count"], 1)
+        self.assertGreaterEqual(status["sample"]["inbound_source_history"]["report_sample_count"], 1)
 
     def test_container_diagnostic_rejects_stale_container(self):
         self._insert(

@@ -35,9 +35,15 @@ class ConnectionPolicyTests(unittest.TestCase):
         n,p = self.observe(1900)
         self.assertEqual(n,1)
         self.assertEqual(p['stop_duration_seconds'],900)
+        self.assertEqual(p['stop_sample_count'],3)
+        self.assertTrue(p['stop_duration_verified'])
+        self.assertIn('3 次有效采样',policy.text(p))
         self.assertEqual(self.observe(2000)[0],0)
         params=json.loads(self.conn.execute('SELECT params_json FROM security_actions').fetchone()[0])
         self.assertEqual(params['metric_schema'],1)
+        self.assertEqual(params['sample_count'],3)
+        self.assertTrue(params['duration_verified'])
+        self.assertEqual(params['max_gap_seconds'],600)
         self.assertEqual(params['expires_at'],2500)
 
     def test_critical_window_does_not_inherit_warning_episode_age(self):
@@ -49,6 +55,7 @@ class ConnectionPolicyTests(unittest.TestCase):
         _,p=self.observe(2350,1001)
         self.assertTrue(p['escalated'])
         self.assertEqual(p['stop_duration_seconds'],0)
+        self.assertFalse(p['stop_duration_verified'])
         self.assertEqual(self.conn.execute('SELECT count(*) FROM security_actions').fetchone()[0],0)
 
     def test_gap_restart_recovery_and_missing_metric_reset_windows(self):

@@ -4,6 +4,8 @@ export interface ContainerItem {
   project?: string;
   container_name: string;
   container_id?: string;
+  user_email?: string;
+  user_note?: string;
   status?: string;
   cpu_percent?: number;
   mem_percent?: number;
@@ -179,6 +181,8 @@ export interface SecurityAlert {
   project?: string;
   container_name?: string;
   type: string;
+  /** Server-side evidence classification; protection signals are not buyer/user misconduct. */
+  protection_only?: boolean;
   severity: 'critical' | 'warning' | 'info' | string;
   status: 'active' | 'suppressed' | 'dismissed' | 'remediated' | 'resolved' | string;
   title?: string;
@@ -644,6 +648,7 @@ export interface ContainerIdentity {
   runtime: string;
   project?: string;
   container_name: string;
+  container_id?: string;
   /** Explicit security alert selected for a targeted disposition. */
   alert_id?: number;
 }
@@ -712,10 +717,10 @@ export interface InvestigationIncident {
 export interface InvestigationResponse {
   concentration: { user_id: string; observed: number; affected: number; share: number | null } | null;
   hosts: { host_id: string; first_sample: number; last_sample: number }[];
-  users: { user_id: string; observed: number; affected: number; unassessed: number; episodes: number; pending: number; rate: number | null; share: number | null; legacy: number; security: number; signals: number }[];
+  users: { user_id: string; observed: number; affected: number; unassessed: number; episodes: number; pending: number; rate: number | null; share: number | null; legacy: number; security: number; signals: number; protection_signals: number }[];
   items: InvestigationIncident[]; total: number; offset: number;
   public_items: InvestigationIncident[]; public_total: number;
-  summary: { observed: number; affected: number; users: number; unknown: number; attributed: number; legacy: number };
+  summary: { observed: number; affected: number; protection_signals: number; users: number; unknown: number; attributed: number; legacy: number };
   coverage: { from: number | null; retention_days: number; complete_window: boolean; note: string };
   window: { start: number; end: number }; host_id: string; days: number;
 }

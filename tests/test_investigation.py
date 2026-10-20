@@ -140,6 +140,34 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(r["summary"]["affected"], 0)
         self.assertEqual(r["users"][0]["episodes"], 0)
 
+    def test_unattributed_connection_signal_is_protection_not_user_abuse(self):
+        self.mapping()
+        connection_alert = {**self.alert, "type": "container_connection_count", "title": "容器连接数达到保护线",
+                            "message": "连接数超过保护阈值", "value": 1200, "threshold": 1000}
+        self.ingest(alerts=[connection_alert])
+        result = self.result()
+        self.assertEqual(result["summary"]["affected"], 0)
+        self.assertEqual(result["summary"]["users"], 0)
+        self.assertEqual(result["summary"]["protection_signals"], 1)
+        self.assertEqual(result["users"][0]["affected"], 0)
+        self.assertEqual(result["users"][0]["protection_signals"], 1)
+        self.assertEqual(result["users"][0]["episodes"], 0)
+        self.assertEqual(result["items"][0]["category"], "protection_signal")
+        self.assertEqual(result["items"][0]["user_id"], "user-1")  # mapping context only
+
+    def test_retained_connection_history_is_reclassified_without_migration(self):
+        self.mapping()
+        connection_alert = {**self.alert, "type": "container_connection_count", "title": "容器连接数达到保护线"}
+        self.ingest(alerts=[connection_alert])
+        # Simulate a row recorded by the older classifier. Read-time logic must
+        # remove it from abuse totals and present it as a protection reminder.
+        self.conn.execute("UPDATE investigation_incidents SET category='operational'")
+        result = self.result()
+        self.assertEqual(result["summary"]["affected"], 0)
+        self.assertEqual(result["summary"]["users"], 0)
+        self.assertEqual(result["summary"]["protection_signals"], 1)
+        self.assertEqual(result["items"][0]["category"], "protection_signal")
+
     def test_allow_policy_history_visible_but_not_counted(self):
         self.mapping()
         self.ingest()

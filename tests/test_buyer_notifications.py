@@ -70,20 +70,53 @@ class BuyerTests(unittest.TestCase):
             send.assert_not_called()
         self.assertNotIn("secret-value",self.rows()[0]["message"])
 
-    def test_connection_escalation_notifies_once_and_supersedes_unsent_initial(self):
+    def test_unattributed_connection_signal_is_protection_only(self):
+        self.mapping()
         self.alert.update(type='container_connection_count', title='连接过多', value=1061, threshold=1000,
-            connection_policy={'metric':'TCP 各状态 + UDP socket 总数','critical_duration_seconds':0,
-                'stop_threshold':1500,'required_duration_seconds':900,'valid':True,'reason':'未达到停机门槛'})
+            connection_policy={'metric':'TCP 各状态 + UDP socket 总数','critical_duration_seconds':900,
+                'stop_threshold':2000,'required_duration_seconds':300,'valid':True,'reason':'未达到停机门槛'})
         self.ingest()
-        self.alert['connection_policy']['escalated']=True
-        self.alert['connection_policy']['critical_duration_seconds']=900
-        self.ingest(when=self.now+900)
-        self.ingest(when=self.now+1000)
-        rows=self.rows()
-        self.assertEqual(len(rows),2)
-        self.assertEqual(rows[0]['status'],'cancelled')
-        self.assertTrue(rows[1]['event_key'].endswith(':connection-escalated'))
-        self.assertIn('15 分钟',rows[1]['message'])
+        self.assertEqual(self.rows(), [])
+        with server.db() as conn:
+            alert_id=conn.execute("SELECT id FROM security_alerts WHERE alert_type='container_connection_count'").fetchone()[0]
+            preview=buyer.notice_preview(conn,alert_id)
+            self.assertTrue(preview['protection_only'])
+            self.assertFalse(preview['can_submit'])
+            with self.assertRaisesRegex(ValueError, '未通过应用或代理认证日志'):
+                buyer.queue_user_notice(conn,alert_id,{
+                    'request_id':'a'*32,'confirm':True,'preview_token':preview['preview_token']
+                },'dashboard')
+
+    def test_verified_application_user_attribution_allows_customer_notice(self):
+        self.mapping()
+        self.alert.update(type='container_connection_count', title='连接过多', value=1061, threshold=1000,
+            user_attribution={'verified':True,'source':'application_auth_log','user_id':'user-1'})
+        self.ingest()
+        self.assertEqual(len(self.rows()),1)
+        with server.db() as conn:
+            alert_id=conn.execute("SELECT id FROM security_alerts WHERE alert_type='container_connection_count'").fetchone()[0]
+            preview=buyer.notice_preview(conn,alert_id)
+            self.assertFalse(preview['protection_only'])
+            self.assertTrue(preview['can_submit'])
+
+    def test_connection_guard_notice_is_neutral_and_not_cancelled_as_abuse(self):
+        self.mapping()
+        self.alert.update(type='container_connection_count', title='连接过多', value=2100, threshold=1000)
+        self.ingest()
+        identity=('host','incus','default','c1')
+        params={'metric_epoch':'epoch-1','threshold':2000,'required_duration_seconds':300,
+                'stop_since':self.now-300,'connection_count':2100,'duration_seconds':300,
+                'sample_count':2,'max_gap_seconds':360,'duration_verified':True}
+        with server.db() as conn:
+            result=buyer.connection_stop_gate(conn,identity,params,self.now)
+            self.assertEqual(result['status'],'queued')
+            buyer.reconcile(conn,'host',self.now+1)
+            notice=conn.execute('SELECT * FROM buyer_user_notices WHERE id=?',(result['notice_id'],)).fetchone()
+            self.assertEqual(notice['telegram_status'],'queued')
+            self.assertIn('不代表认定用户滥用',notice['message'])
+            self.assertNotIn('检查代理账号',notice['message'])
+            self.assertIn('2 次有效采样核验',notice['message'])
+            self.assertIn('单次间隔不超过 360 秒',notice['message'])
 
     def test_persistent_dedup_and_machine_cooldown(self):
         self.mapping()

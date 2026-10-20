@@ -22,6 +22,17 @@ STATES = {"active": "风险存在", "awaiting_report": "已执行，待复查", 
           "resolved": "告警已关闭（未验证）", "recurring": "风险复发 / 处置失败", "unverified": "证据不足，未确认恢复"}
 TERMINAL = ("succeeded", "failed", "uncertain", "cancelled", "expired")
 MAX_ATTEMPTS = 5
+PROTECTION_ONLY_ALERT_TYPES = frozenset({
+    "container_connection_count", "inbound_ip_fanout", "socks_inbound_fanout",
+    "inbound_source_blocked", "tcp_concurrency_limited", "admission_unverified",
+    "ddos_bandwidth", "ddos_packets", "ddos_syn", "cc_total_rps", "cc_single_ip",
+    "cc_4xx_ratio", "http_5xx_ratio", "http_abuse", "web_scan", "port_scan",
+    "outbound_fanout", "outbound_sensitive_ports", "outbound_bandwidth_abuse",
+    "outbound_packet_abuse", "outbound_connection_churn", "outbound_connection_failures",
+    "udp_outbound_flood", "hy2_high_concurrency", "hy2_abnormal_throttle",
+    "traffic_imbalance", "ops_policy_signal", "ops_bandwidth_saturation",
+    "ops_baseline_anomaly", "ops_connection_guard",
+})
 
 
 def clean(value, limit=500):
@@ -75,6 +86,28 @@ def config(conn):
             "api_key": setting(conn, "narwhal_api_key"),
             "min_severity": setting(conn, "buyer_min_severity", "warning"),
             "recovery": setting(conn, "buyer_recovery_enabled", "true").lower() == "true"}
+
+
+def is_protection_only_alert(alert):
+    """Network/traffic metrics are not customer misconduct without auth-log attribution."""
+    try:
+        kind = str(alert["alert_type"] or "")
+        details_json = alert["details_json"]
+    except (KeyError, IndexError, TypeError):
+        kind = str(alert.get("type") or "") if isinstance(alert, dict) else ""
+        details_json = alert.get("details_json", "") if isinstance(alert, dict) else ""
+    if kind not in PROTECTION_ONLY_ALERT_TYPES:
+        return False
+    details = buyer_content.loads(details_json)
+    observation = details.get("observation") if isinstance(details.get("observation"), dict) else {}
+    attribution = details.get("user_attribution") or observation.get("user_attribution")
+    if not isinstance(attribution, dict):
+        return True
+    return not (
+        attribution.get("verified") is True
+        and attribution.get("source") in {"application_auth_log", "proxy_auth_log"}
+        and bool(attribution.get("user_id") or attribution.get("account_id"))
+    )
 
 
 def valid_uuid(value):
@@ -206,6 +239,12 @@ def reconcile(conn, host, now):
         if alert["alert_type"] == "ops_traffic_quota":
             conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
             continue
+        if is_protection_only_alert(alert):
+            # Preserve the operator alert and its protection policy, but do not
+            # present unattributed network activity as buyer misconduct.
+            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='网络保护信号未关联到用户身份，不作为用户滥用通知' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
+            conn.execute("UPDATE buyer_user_notices SET telegram_status='cancelled',banner_status=CASE WHEN banner_status IN ('queued','blocked','retrying') THEN 'cancelled' ELSE banner_status END,last_error='网络保护信号未关联到用户身份，不发送用户滥用通知',updated_at=? WHERE alert_id=? AND requested_by<>'system:connection-guard' AND telegram_status IN ('queued','blocked','retrying')", (now, alert['id']))
+            continue
         state = current_state(conn, alert)
         # Reconcile pending snapshots: never send stale active warnings after recovery.
         conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='事件状态或等级已变化' WHERE alert_id=? AND (state<>? OR severity<>? OR event_key NOT LIKE ?) AND status IN ('queued','retrying','blocked')", (now, alert["id"], state, alert["severity"], f"{alert['id']}:{alert['first_seen']}:%"))
@@ -263,16 +302,21 @@ def notice_preview(conn, alert_id):
     if not a:
         raise ValueError('告警不存在')
     now = int(time.time())
+    protection_only = is_protection_only_alert(a)
     t = target(conn, a, now)
     mapped = bool(t and t['scope'] == 'user' and t['user_id'])
     cfg = config(conn)
     subject, message = render(a, current_state(conn, a), t['node_name'] if t else '', conn)
     snapshot = [a[k] for k in ('id', 'first_seen', 'status', 'host_id', 'runtime', 'project', 'container_name')]
+    snapshot.append(protection_only)
     instance = container_id(conn, a)
     snapshot += [t['machine_id'] if mapped else '', t['user_id'] if mapped else '', instance, subject, message]
     token = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False).encode()).hexdigest()
     live = a['runtime'] in {'incus', 'podman'} and 0 <= now-a['last_seen'] <= 900
-    return {'subject': subject, 'message': message, 'preview_token': token, 'can_submit': live, 'container_id': instance,
+    return {'subject': subject, 'message': message, 'preview_token': token, 'can_submit': live and not protection_only,
+        'protection_only': protection_only,
+        'notice_block_reason': '当前只有网络/流量保护证据，未通过应用或代理认证日志关联到具体用户；不会发送用户滥用通知。' if protection_only else '',
+        'container_id': instance,
         'audience': f"用户 {t['user_id']} / {t['node_name'] or a['container_name']}" if mapped else '收件未映射（不会整机广播）',
         'telegram': 'ready' if mapped and cfg['enabled'] and cfg['api_key'] else 'blocked',
         'telegram_note': '通过买家通知 API 投递；受理不等于用户已阅读，Telegram 绑定由上游维护' if mapped else '请先补齐精确用户收件映射；SSH 提醒可以独立排队',
@@ -291,6 +335,8 @@ def queue_user_notice(conn, alert_id, payload, requested_by):
             raise ValueError('请求 ID 与目标不匹配')
         return {'ok': True, 'id': notice_id, 'duplicate': True, 'telegram': old['telegram_status'], 'banner': old['banner_status']}
     preview = notice_preview(conn, alert_id)
+    if preview.get('protection_only'):
+        raise ValueError(preview.get('notice_block_reason') or '该网络信号尚未关联到具体用户，不发送用户滥用通知')
     if payload.get('preview_token') != preview['preview_token'] or not preview['can_submit']:
         raise ValueError('目标、收件人或通知内容已变化/过期，请重新预览')
     a = conn.execute('SELECT * FROM security_alerts WHERE id=?', (alert_id,)).fetchone()
@@ -328,7 +374,11 @@ def connection_stop_gate(conn, identity, params, now):
         return {'status':'blocked','reason':'通知队列已满；不影响停机保护'}
     existing=conn.execute("SELECT id,first_seen FROM security_alerts WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND alert_type='container_connection_count' ORDER BY last_seen DESC LIMIT 1",identity).fetchone()
     title='服务器连接数过高提醒'
-    message=clean(f"您的 {t['node_name'] or identity[0]} 服务器（实例 {identity[3]}）检测时连接数 {params['connection_count']}，有效采样已连续 {params['duration_seconds']//60} 分钟超过 {params['threshold']} 个。\n为保护宿主机稳定，系统已下发关闭容器指令，不删除数据。节点将复核当前状态后执行，实际结果以执行回执为准；通知是否成功不影响保护措施。请检查代理账号和后台任务。如有疑问，请发工单。",1600)
+    verified_samples = params.get('duration_verified') is True and type(params.get('sample_count')) is int and params.get('sample_count', 0) >= 2
+    sample_proof = (f"已由 {params['sample_count']} 次有效采样核验，覆盖 {params['duration_seconds']//60} 分钟，单次间隔不超过 {params['max_gap_seconds']} 秒。"
+                    if verified_samples and type(params.get('max_gap_seconds')) is int and params['max_gap_seconds'] > 0
+                    else "持续时长未通过有效采样核验；检测时间见消息末尾。")
+    message=clean(f"您的 {t['node_name'] or identity[0]} 服务器（实例 {identity[3]}）当前连接数 {params['connection_count']}，超过保护阈值 {params['threshold']}。{sample_proof}\n为保护宿主机稳定，系统已下发停止该容器的保护指令，不删除数据；实际结果以节点执行回执为准。该连接指标尚未关联到具体用户或认证记录，不代表认定用户滥用。通知是否成功不影响保护措施。如需恢复服务，请联系管理员。",1600)
     conn.execute('INSERT INTO buyer_user_notices(id,alert_id,episode,host_id,runtime,project,container_name,subject,message,machine_id,user_id,requested_by,created_at,expires_at,telegram_status,banner_status,updated_at,due_at,container_id,connection_stop_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (notice_id,existing['id'] if existing else 0,existing['first_seen'] if existing else now,*identity,title,message,
          t['machine_id'],t['user_id'],'system:connection-guard',now,now+86400,'queued','queued',now,now,container_id(conn,row),json.dumps(params)))

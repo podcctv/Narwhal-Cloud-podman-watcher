@@ -69,6 +69,8 @@ def _key(host_key, identity, container=None):
 
 
 def category(kind):
+    if kind in buyer_notifications.PROTECTION_ONLY_ALERT_TYPES:
+        return "protection_signal"
     if kind in {"socks_weak_auth", "unauthorized_panel_pairing", "malicious_process", "container_security_risk"}:
         return "security"
     if kind in {'socks_auth_unknown', 'socks_password_review', 'standalone_proxy_panel'}:
@@ -285,12 +287,17 @@ def overview(conn, host, start, end, query="", user=None, identity_key="", offse
         params.append(host)
         incident_params.append(host)
     observations = [dict(r) for r in conn.execute(f"SELECT * FROM investigation_observations WHERE {scope}", params)]
-    columns = "id,identity_key,user_id,container_name,title,status,state,category,legacy"
+    columns = "id,identity_key,user_id,container_name,title,status,state,category,legacy,alert_type"
     incidents = [dict(r) for r in conn.execute(f"SELECT {columns} FROM investigation_incidents WHERE {incident_scope} ORDER BY last_anomaly DESC,id DESC", incident_params)]
+    # Reclassify retained historical network alerts at read time as well as at
+    # ingestion, so pre-existing rows stop inflating customer-abuse statistics.
+    for item in incidents:
+        if item["alert_type"] in buyer_notifications.PROTECTION_ONLY_ALERT_TYPES:
+            item["category"] = "protection_signal"
     groups = {}
     def group(owner):
         return groups.setdefault(owner, {"user_id": owner, "observed": set(), "assessed": set(), "affected": set(), "episodes": 0,
-                                         "pending": 0, "security": 0, "signals": 0, "legacy": 0})
+                                         "pending": 0, "security": 0, "signals": 0, "protection_signals": 0, "legacy": 0})
     for row in observations:
         group(row["user_id"])["observed"].add(row["identity_key"])
         if row['assessed']:
@@ -299,6 +306,11 @@ def overview(conn, host, start, end, query="", user=None, identity_key="", offse
     public = [i for i in incidents if not i["container_name"]]
     for item in container_incidents:
         g = group(item["user_id"])
+        if item["category"] == "protection_signal":
+            # Keep mapped ownership as navigation context, never as attribution
+            # of the network behavior to that customer.
+            g["protection_signals"] += 1
+            continue
         # Allowed/ignored and external victim signals remain visible, not violations.
         if item["status"] not in {"suppressed", "dismissed"}:
             g["affected"].add(item["identity_key"])
@@ -332,7 +344,11 @@ def overview(conn, host, start, end, query="", user=None, identity_key="", offse
     if q:
         visible = [i for i in visible if q in (i["user_id"] + " " + i["container_name"] + " " + i["title"]).casefold()]
     def hydrate(items):
-        return [_items(conn.execute("SELECT * FROM investigation_incidents WHERE id=?", (i["id"],)))[0] for i in items]
+        hydrated = [_items(conn.execute("SELECT * FROM investigation_incidents WHERE id=?", (i["id"],)))[0] for i in items]
+        for item in hydrated:
+            if item["alert_type"] in buyer_notifications.PROTECTION_ONLY_ALERT_TYPES:
+                item["category"] = "protection_signal"
+        return hydrated
     details = hydrate(visible[offset:offset + limit])
     for item in details:
         item["transitions"] = _items(conn.execute("SELECT ts,status,state,severity,value,threshold,evidence_json,action_json FROM investigation_transitions WHERE incident_id=? ORDER BY id", (item["id"],)))
@@ -342,8 +358,9 @@ def overview(conn, host, start, end, query="", user=None, identity_key="", offse
     return {"hosts": hosts, "users": users, "concentration": concentration, "items": details, "total": len(visible), "offset": offset,
             "public_items": hydrate(public[:10]), "public_total": len(public),
             "summary": {"observed": len({o["identity_key"] for o in observations} | affected), "affected": len(affected),
+                        "protection_signals": sum(g["protection_signals"] for g in groups.values()),
                         "users": sum(bool(k) and bool(g["affected"]) for k, g in groups.items()),
                         "unknown": len(unknown), "attributed": len(known), "legacy": sum(i["legacy"] for i in incidents)},
             "coverage": {"from": earliest, "retention_days": RETENTION_DAYS,
                          "complete_window": earliest is not None and earliest <= start and trimmed < start,
-                         "note": "历史保留90天，并受事件/观测/状态记录上限约束。仅统计已观测记录；归属转移可能使同一容器出现在多个用户下。旧告警不补猜历史用户；外部攻击信号不是用户违规。"}}
+                         "note": "历史保留90天，并受事件/观测/状态记录上限约束。仅统计已观测记录；归属转移可能使同一容器出现在多个用户下。旧告警不补猜历史用户；网络保护信号仅作防护记录，不计入用户异常/滥用统计。"}}

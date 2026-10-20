@@ -17,6 +17,8 @@ import {
   ArrowUpRight,
   Gauge,
   Unlock,
+  Mail,
+  Save,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData, SecurityAlert } from '../../api/types';
 import { api, fmtBytes, fmtNumber, fmtMbps } from '../../api/client';
@@ -33,6 +35,7 @@ interface ContainerDrawerProps {
   onClose: () => void;
   serverVersion: string;
   onToast: (type: 'success' | 'error' | 'info', message: string) => void;
+  onRefresh: () => void;
 }
 
 export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
@@ -41,12 +44,39 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   onClose,
   serverVersion,
   onToast,
+  onRefresh,
 }) => {
   const [container, setContainer] = useState<ContainerItem | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [diagnostic, setDiagnostic] = useState<DiagnosticData | null>(null);
   const [isDrawerActionLoading, setIsDrawerActionLoading] = useState(false);
   const [pendingDecision, setPendingDecision] = useState<'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle' | null>(null);
+  const [userEmail, setUserEmail] = useState('');
+  const [userNote, setUserNote] = useState('');
+  const [isSavingUserNote, setIsSavingUserNote] = useState(false);
+
+  useEffect(() => {
+    setUserEmail(container?.user_email || '');
+    setUserNote(container?.user_note || '');
+  }, [container?.container_id, container?.user_email, container?.user_note]);
+
+  const saveUserNote = async () => {
+    if (!identity || !container?.container_id) return;
+    setIsSavingUserNote(true);
+    try {
+      const saved = await api.saveContainerUserNote({ ...identity, container_id: container.container_id }, {
+        user_email: userEmail.trim(),
+        user_note: userNote.trim(),
+      });
+      setContainer((current) => current ? { ...current, ...saved } : current);
+      onToast('success', saved.user_email || saved.user_note ? '用户邮箱与备注已保存，可通过全局搜索定位容器' : '用户邮箱与备注已清除');
+      onRefresh();
+    } catch (err: any) {
+      onToast('error', `保存用户备注失败：${err.message || err}`);
+    } finally {
+      setIsSavingUserNote(false);
+    }
+  };
 
   const handleDrawerDisposition = async (
     decision: 'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle'
@@ -75,7 +105,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           c.host_id === identity.host_id &&
           c.runtime === identity.runtime &&
           (c.project || '') === (identity.project || '') &&
-          c.container_name === identity.container_name
+          c.container_name === identity.container_name &&
+          (!identity.container_id || c.container_id === identity.container_id)
       );
       setContainer(found || null);
     } catch (err: any) {
@@ -94,6 +125,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
     }
 
     let isMounted = true;
+    setContainer(null);
 
     const loadData = async () => {
       try {
@@ -110,7 +142,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
             c.host_id === identity.host_id &&
             c.runtime === identity.runtime &&
             (c.project || '') === (identity.project || '') &&
-            c.container_name === identity.container_name
+            c.container_name === identity.container_name &&
+            (!identity.container_id || c.container_id === identity.container_id)
         );
 
         setContainer(found || null);
@@ -239,6 +272,55 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           {/* Drawer Scrollable Body */}
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             <AdmissionStatus data={sec.admission} stale={container?.alerts?.stale} />
+            {(identity.runtime === 'incus' || identity.runtime === 'podman') && (
+              <section className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-2 text-sky-300">
+                    <Mail className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-semibold text-slate-100">用户邮箱与备注</h3>
+                    <p className="mt-1 text-xs leading-relaxed text-slate-400">用于搜索、人工核对和后续封禁定位；保存信息不会自动停止或限制容器。</p>
+                  </div>
+                </div>
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-slate-300">用户邮箱</span>
+                  <input
+                    type="email"
+                    maxLength={254}
+                    value={userEmail}
+                    onChange={(event) => setUserEmail(event.target.value)}
+                    placeholder="例如 user@example.com"
+                    disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
+                  />
+                </label>
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-slate-300">内部备注 <span className="font-normal text-slate-500">（可选，最多 500 字）</span></span>
+                  <textarea
+                    value={userNote}
+                    maxLength={500}
+                    onChange={(event) => setUserNote(event.target.value)}
+                    placeholder="记录订单号、沟通情况或封禁核对信息"
+                    rows={2}
+                    disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
+                    className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
+                  />
+                </label>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] text-slate-500">Ctrl+K 全局搜索可直接输入邮箱或备注内容。</p>
+                  <button
+                    type="button"
+                    onClick={saveUserNote}
+                    disabled={isSavingUserNote || !container?.container_id || Boolean(container?.alerts?.stale)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-600/20 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-600/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    {isSavingUserNote ? '保存中…' : '保存备注'}
+                  </button>
+                </div>
+              </section>
+            )}
             {/* Quick KPI Cards Grid */}
             <div className="grid grid-cols-3 gap-3 font-mono text-xs">
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">

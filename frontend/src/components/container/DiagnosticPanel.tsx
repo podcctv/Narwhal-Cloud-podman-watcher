@@ -70,10 +70,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
         ip,
         message: err?.message || '查询失败',
       };
-      setReputationByIp(current => ({
-        ...current,
-        [ip]: result,
-      }));
+      setReputationByIp(current => ({ ...current, [ip]: result }));
       return result;
     } finally {
       reputationLookupInFlight.current.delete(ip);

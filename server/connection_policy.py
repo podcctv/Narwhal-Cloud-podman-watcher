@@ -48,6 +48,8 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
         policy = {'metric': 'TCP 各状态 + UDP socket 总数', 'critical_threshold': critical,
                   'stop_threshold': stop, 'required_duration_seconds': duration,
                   'critical_duration_seconds': 0, 'stop_duration_seconds': 0,
+                  'critical_sample_count': 0, 'stop_sample_count': 0,
+                  'critical_duration_verified': False, 'stop_duration_verified': False,
                   'max_gap_seconds': max_gap, 'valid': m is not None,
                   'status': 'waiting_threshold', 'reason': '未达到自动停机门槛'}
         if tcp_active:policy['metric']='TCP 已建立及握手中连接（不含 TIME_WAIT / UDP socket）'
@@ -69,6 +71,8 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                 state[label + '_since'] = (old.get(label + '_since') or stamp) if above and continuous else stamp if above else 0
                 state[label + '_samples'] = old.get(label + '_samples', 0) + 1 if above and continuous else 1 if above else 0
                 policy[label + '_duration_seconds'] = stamp - state[label + '_since'] if above else 0
+                policy[label + '_sample_count'] = state[label + '_samples']
+                policy[label + '_duration_verified'] = bool(above and state[label + '_samples'] >= 2 and policy[label + '_duration_seconds'] > 0)
             if m['total'] > stop:
                 policy.update(status='waiting_duration', reason='已超过停机门槛，等待连续有效采样达到要求')
             if policy['critical_duration_seconds'] >= 900:
@@ -83,6 +87,8 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
             if pending and pending['status'] == 'succeeded' and pending['updated_at'] >= state['stop_since'] and state['stop_since']:
                 state['stop_since'], state['stop_samples'] = stamp, 1
                 policy['stop_duration_seconds'] = 0
+                policy['stop_sample_count'] = 1
+                policy['stop_duration_verified'] = False
             ready = (m['total'] > stop and policy['stop_duration_seconds'] >= duration
                      and state['stop_samples'] >= (2 if duration <= 300 else 3) and key[1] in ('podman', 'incus'))
             if not auto_stop:
@@ -98,7 +104,10 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                 params = {'reason': 'sustained_connection_overload', 'connection_count': m['total'],
                           'threshold': stop, 'duration_seconds': policy['stop_duration_seconds'],
                           'required_duration_seconds': duration, 'metric_schema': 1,
-                          'metric_epoch': m['epoch'], 'observed_at': stamp, 'expires_at': now + max_gap,
+                          'metric_epoch': m['epoch'], 'metric': policy['metric'],
+                          'sample_count': state['stop_samples'], 'max_gap_seconds': max_gap,
+                          'duration_verified': policy['stop_duration_verified'],
+                          'observed_at': stamp, 'expires_at': now + max_gap,
                           'stop_since':state['stop_since']}
                 if tcp_active:params['metric_tcp_active']=True
                 # Protection is independent of delivery/mapping/API availability.
@@ -154,10 +163,15 @@ def enrich_alerts(alerts, containers):
 def text(policy):
     if not isinstance(policy, dict) or not all(k in policy for k in ('metric','stop_threshold','required_duration_seconds','reason')):
         return '连续严重超标时长尚未验证；旧记录不能作为停机依据。'
-    covered = f"{policy.get('critical_duration_seconds', 0)//60} 分钟（有效采样覆盖）" if policy.get('valid') else '尚未验证'
+    critical_samples = policy.get('critical_sample_count', 0)
+    stop_samples = policy.get('stop_sample_count', 0)
+    critical_coverage = (f"{policy.get('critical_duration_seconds', 0)//60} 分钟（{critical_samples} 次有效采样，最大间隔 {policy.get('max_gap_seconds', 0)} 秒）"
+                         if policy.get('critical_duration_verified') else '连续时长尚未由多次有效采样验证')
+    stop_coverage = (f"{policy.get('stop_duration_seconds', 0)//60} 分钟（{stop_samples} 次有效采样，最大间隔 {policy.get('max_gap_seconds', 0)} 秒）"
+                     if policy.get('stop_duration_verified') else '连续时长尚未由多次有效采样验证')
     return (f"统计口径：{policy['metric']}\n"
-            f"连续严重超标：{covered}\n"
+            f"连续严重超标：{critical_coverage}\n"
             f"自动停机：超过 {policy['stop_threshold']}，持续 {policy['required_duration_seconds']//60} 分钟，立即停机保护，通知失败不阻塞；"
-            f"当前停机门槛覆盖 {policy.get('stop_duration_seconds', 0)//60} 分钟\n"
+            f"当前停机门槛：{stop_coverage}\n"
             f"处理状态：{policy['reason']}\n"
             '无法准确归属的服务不会自动限流或停止。')

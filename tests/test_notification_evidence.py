@@ -29,6 +29,35 @@ class NotificationEvidenceTests(unittest.TestCase):
             'values': {'connections':1234}, 'thresholds': {'connections':500}}})
         _, text = content.render(alert, 'active')
         self.assertIn('1,234 个，阈值 500 个', text)
+        self.assertIn('不代表用户滥用', text)
+
+    def test_connection_count_copy_is_protection_only_not_customer_blame(self):
+        _, text = content.render(self.alert('container_connection_count'), 'active')
+        self.assertIn('连接数量达到保护观察线', text)
+        self.assertIn('不代表用户滥用', text)
+        self.assertNotIn('检查代理账号', text)
+
+    def test_connection_guard_copy_is_neutral_and_keeps_measured_duration(self):
+        alert = self.alert('ops_connection_guard')
+        alert['details_json'] = json.dumps({'observation': {
+            'connection_count': 2100, 'threshold': 2000, 'duration_seconds': 300,
+            'sample_count': 2, 'max_gap_seconds': 360, 'duration_verified': True,
+        }})
+        _, text = content.render(alert, 'active')
+        self.assertIn('2,100 个', text)
+        self.assertIn('2,000 个', text)
+        self.assertIn('5 分钟', text)
+        self.assertIn('不代表认定用户滥用', text)
+        self.assertNotIn('检查代理账号', text)
+
+    def test_connection_guard_does_not_claim_duration_without_verified_samples(self):
+        alert = self.alert('ops_connection_guard')
+        alert['details_json'] = json.dumps({'observation': {
+            'connection_count': 2100, 'threshold': 2000, 'duration_seconds': 14400,
+        }})
+        _, text = content.render(alert, 'active')
+        self.assertIn('持续时长未通过有效采样核验', text)
+        self.assertNotIn('240 分钟', text)
 
     def test_partial_cleanup_has_actual_names_not_instance_deletion(self):
         details = {'automatic_remediation': {'attempted':True, 'succeeded':False,
@@ -163,7 +192,8 @@ class BandwidthEvidenceTests(unittest.TestCase):
         self.assertEqual(obs['thresholds']['connections'],500)
 
     def test_actual_connection_stop_has_deduplicated_receipt(self):
-        params = json.dumps({'reason':'sustained_connection_overload','connection_count':1800,'threshold':1500,'duration_seconds':3600})
+        params = json.dumps({'reason':'sustained_connection_overload','connection_count':1800,'threshold':1500,
+            'duration_seconds':3600,'duration_verified':True,'sample_count':9,'max_gap_seconds':600})
         self.conn.execute("INSERT INTO security_actions(id,alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at,result_message) VALUES(1,0,'h','incus','default','c','stop_container',?,'succeeded','system:connection-guard',?,?,'stopped')",(params,self.now,self.now))
         ops.record_connection_guard(self.conn,1,self.now)
         ops.record_connection_guard(self.conn,1,self.now)
