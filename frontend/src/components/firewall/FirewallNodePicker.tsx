@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { Check, Search, Server } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Check, ChevronLeft, ChevronRight, Search, Server } from 'lucide-react';
 import { FleetFirewallHostStatus } from '../../api/types';
 
 export interface FirewallNodeOption {
@@ -23,6 +23,7 @@ interface FirewallNodePickerProps {
 
 const healthyStates = new Set(['ready', 'last_apply_succeeded']);
 const errorStates = new Set(['apply_failed', 'drifted', 'runman_update_required', 'rfw_protocol_update_required']);
+const PAGE_SIZE = 6;
 const stateLabels: Record<string, string> = {
   unregistered: '未登记', offline: '离线', awaiting_capability: '等待能力上报',
   awaiting_rfw_capability: '等待 RFW 核验', rfw_protocol_update_required: '需升级 RFW',
@@ -35,6 +36,7 @@ const stateLabels: Record<string, string> = {
 export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
   hosts, fleetHosts, selectedHostId, search, filter, onSearchChange, onFilterChange, onSelect,
 }) => {
+  const [page, setPage] = useState(0);
   const statusByHost = useMemo(() => new Map(fleetHosts.map((host) => [host.host_id, host])), [fleetHosts]);
   const selectedHost = hosts.find((host) => host.host_id === selectedHostId);
   const selectedStatus = selectedHost ? statusByHost.get(selectedHost.host_id) : undefined;
@@ -62,6 +64,12 @@ export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
       || Number(getOnline(b)) - Number(getOnline(a))
       || a.host_id.localeCompare(b.host_id));
   }, [filter, fleetHosts, hosts, search, statusByHost]);
+  const pageCount = Math.max(1, Math.ceil(filteredHosts.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleHosts = filteredHosts.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+
+  useEffect(() => setPage(0), [filter, search]);
+  useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
 
   return <section aria-label="选择防火墙节点" className="space-y-3">
     <div className="flex items-center justify-between gap-3">
@@ -95,8 +103,9 @@ export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
       </button>)}
     </div>
 
-    {filteredHosts.length ? <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1" aria-label="母机列表">
-      {filteredHosts.map((host) => {
+    {filteredHosts.length ? <>
+      <div className="space-y-1.5" aria-label="母机列表">
+      {visibleHosts.map((host) => {
         const status = statusByHost.get(host.host_id);
         const selected = host.host_id === selectedHostId;
         const online = getOnline(host);
@@ -125,7 +134,16 @@ export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
           {selected && <Check className="h-4 w-4 shrink-0 text-sky-300" aria-hidden="true" />}
         </button>;
       })}
-    </div> : <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-6 text-center text-xs text-slate-500">
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-1" aria-label="母机列表分页">
+        <span className="text-[10px] text-slate-500">显示 {currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, filteredHosts.length)} / {filteredHosts.length} 台</span>
+        <div className="flex gap-1.5">
+          <button type="button" onClick={() => setPage(Math.max(0, currentPage - 1))} disabled={currentPage === 0} aria-label="上一页母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />上一页</button>
+          <span className="inline-flex min-h-9 min-w-12 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 px-2 font-mono text-[10px] tabular-nums text-slate-400">{currentPage + 1} / {pageCount}</span>
+          <button type="button" onClick={() => setPage(Math.min(pageCount - 1, currentPage + 1))} disabled={currentPage >= pageCount - 1} aria-label="下一页母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" aria-hidden="true" /></button>
+        </div>
+      </div>
+    </> : <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-6 text-center text-xs text-slate-500">
       没有符合条件的母机。可以切换状态筛选或清空搜索。
     </div>}
   </section>;

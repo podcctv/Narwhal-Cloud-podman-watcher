@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, Clock3, Layers, LoaderCircle, Network, Plus, RefreshCw, Server, Shield, Trash2 } from 'lucide-react';
+import { AlertTriangle, Check, ChevronLeft, ChevronRight, Clock3, Layers, LoaderCircle, Network, Plus, RefreshCw, Server, Shield, Trash2 } from 'lucide-react';
 import { ContainerItem, FleetFirewallPolicyResponse, HostFirewallAbusePolicy, HostFirewallPolicyResponse, HostFirewallRule, SecurityStatusItem } from '../../api/types';
 import { api } from '../../api/client';
 import { ConfirmDialog } from '../common/ConfirmDialog';
@@ -29,6 +29,9 @@ type CnRiskDirection = 'in' | 'out' | 'both';
 type CnRiskAction = 'pass' | 'block';
 type CnRiskProtocol = 'socks' | 'wireguard' | 'fet' | 'mtproto' | 'openvpn';
 type FirewallScope = 'host' | 'fleet';
+type InterfaceFilter = 'all' | 'incus' | 'podman';
+
+const FLEET_NODE_PAGE_SIZE = 6;
 
 const cnRiskProtocolOptions: Array<{ protocol: CnRiskProtocol; label: string; note: string }> = [
   { protocol: 'socks', label: 'SOCKS', note: '协议特征识别，不代表服务未授权' },
@@ -86,6 +89,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [hostFilter, setHostFilter] = useState<FirewallNodeFilter>('all');
   const [fleetHostSearch, setFleetHostSearch] = useState('');
   const [fleetHostFilter, setFleetHostFilter] = useState<'all' | 'attention' | 'online' | 'offline' | 'interfaces' | 'drifted'>('attention');
+  const [fleetNodePage, setFleetNodePage] = useState(0);
+  const [hostInterfaceFilter, setHostInterfaceFilter] = useState<InterfaceFilter>('all');
   const [snapshot, setSnapshot] = useState<HostFirewallPolicyResponse | null>(null);
   const [fleetSnapshot, setFleetSnapshot] = useState<FleetFirewallPolicyResponse | null>(null);
   const [rules, setRules] = useState<HostFirewallRule[]>([]);
@@ -108,6 +113,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const eligibleInterfaces = useMemo(
     () => (interfaceInventory?.interfaces || []).filter((item) => item.firewall_eligible && item.runtimes.length > 0),
     [interfaceInventory],
+  );
+  const visibleEligibleInterfaces = useMemo(
+    () => hostInterfaceFilter === 'all'
+      ? eligibleInterfaces
+      : eligibleInterfaces.filter((item) => item.runtimes.includes(hostInterfaceFilter)),
+    [eligibleInterfaces, hostInterfaceFilter],
   );
   const fleetHosts = fleetSnapshot?.hosts || [];
   const fleetAttentionCount = fleetHosts.filter((host) => !['last_apply_succeeded', 'ready'].includes(host.state)).length;
@@ -139,8 +150,17 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       return true;
     }).sort((a, b) => (rank[a.state] ?? 20) - (rank[b.state] ?? 20) || a.host_id.localeCompare(b.host_id));
   }, [fleetHostFilter, fleetHostSearch, fleetHosts]);
+  const fleetPageCount = Math.max(1, Math.ceil(filteredFleetHosts.length / FLEET_NODE_PAGE_SIZE));
+  const currentFleetNodePage = Math.min(fleetNodePage, fleetPageCount - 1);
+  const visibleFleetHosts = filteredFleetHosts.slice(
+    currentFleetNodePage * FLEET_NODE_PAGE_SIZE,
+    (currentFleetNodePage + 1) * FLEET_NODE_PAGE_SIZE,
+  );
   const activeAction = snapshot?.latest_action;
   const pending = Boolean(activeAction && ['queued', 'dispatched', 'running'].includes(activeAction.status));
+
+  useEffect(() => setFleetNodePage(0), [fleetHostFilter, fleetHostSearch]);
+  useEffect(() => setFleetNodePage((page) => Math.min(page, fleetPageCount - 1)), [fleetPageCount]);
 
   useEffect(() => {
     if (!hosts.length) {
@@ -235,7 +255,11 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   };
 
   const setAbuseOption = (key: 'speedtest' | 'mining' | 'bt', value: boolean) => {
-    setAbuse((current) => ({ ...current, [key]: value }));
+    setAbuse((current) => {
+      const next = { ...current, [key]: value };
+      const hasContainerPolicy = next.speedtest || next.mining || next.bt;
+      return hasContainerPolicy ? next : { ...next, interfaces: [], runtimes: [] };
+    });
     setDirty(true);
   };
 
@@ -245,11 +269,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   };
 
   const toggleAbuseInterface = (name: string, checked: boolean) => {
+    if (!anyAbuseEnabled || interfaceInventory?.stale) return;
     const current = abuse.interfaces || [];
     setAbuseInterfaces(checked ? [...current, name] : current.filter((item) => item !== name));
   };
 
   const toggleRuntimeInterfaces = (runtime: 'incus' | 'podman') => {
+    if (!anyAbuseEnabled || interfaceInventory?.stale) return;
     const runtimeNames = eligibleInterfaces.filter((item) => item.runtimes.includes(runtime)).map((item) => item.name);
     if (!runtimeNames.length) return;
     const current = abuse.interfaces || [];
@@ -266,6 +292,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   };
 
   const toggleFleetRuntime = (runtime: 'incus' | 'podman', checked: boolean) => {
+    if (!anyAbuseEnabled || fleetNetworkCoverage[runtime] === 0) return;
     setAbuse((current) => {
       const selected = current.runtimes || [];
       const runtimes = checked
@@ -467,6 +494,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     : Boolean(fleetSnapshot);
   const blockingRules = rules.filter((rule) => rule.enabled && rule.action === 'block').length;
   const enabledAbuse = Number(abuse.speedtest) + Number(abuse.mining) + Number(abuse.bt);
+  const anyAbuseEnabled = enabledAbuse > 0;
 
   return <div className="mx-auto mt-6 max-w-6xl space-y-5 pb-8">
     <header className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
@@ -531,6 +559,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <ul className="mt-2 space-y-1.5 text-xs leading-5 text-amber-100/80">
               <li>RFW 原生规则作用于母机 RFW 接口，可能影响这台母机上的所有业务和容器。</li>
               <li>下方三项防滥用规则只匹配容器转发流量，不改宿主机 INPUT/OUTPUT；本地手工 RFW 规则不由本页面删除或覆盖。</li>
+              <li>Incus 与系统防火墙可能相互影响；本页只管理已登记的 RFW 规则，不清空其他防火墙规则。应用后请核对节点读回与网络状态。</li>
               <li>未启用进程强杀、容器文件陷阱、内核参数修改或任意脚本执行。</li>
             </ul>
           </div>
@@ -551,17 +580,25 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             : <button type="button" onClick={() => void copyHostDraftToFleet()} disabled={!snapshot || !hostId} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">从所选母鸡复制规则</button>}
         </div>
       </div>
-      {fleetSnapshot && <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+      {fleetSnapshot && <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {[
-          ['登记母机', fleetSnapshot.counts.total], ['在线母机', fleetSnapshot.counts.online],
-          ['Runman 可用', fleetSnapshot.counts.control_ready], ['最近应用成功', fleetSnapshot.counts.last_apply_succeeded],
-          ['待处理 / 延迟', fleetSnapshot.counts.deferred], ['网卡待映射', fleetSnapshot.counts.network_deferred], ['策略偏差', fleetSnapshot.counts.drifted_hosts],
+          ['管理节点', fleetSnapshot.counts.total], ['在线节点', fleetSnapshot.counts.online],
+          ['应用成功', fleetSnapshot.counts.last_apply_succeeded], ['需关注', fleetAttentionCount],
         ].map(([label, value]) => <div key={String(label)} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
           <div className="text-[10px] text-slate-500">{label}</div><div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">{value}</div>
         </div>)}
       </div>}
       {fleetSnapshot && <details className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-        <summary className="cursor-pointer select-none text-xs font-medium text-slate-300">高级能力统计 <span className="ml-1 text-slate-500">读回正常 {fleetSnapshot.counts.live_readback_current} · 读回异常/过期 {fleetSnapshot.counts.readback_unavailable} · 协议支持/需升级/待核验 {fleetSnapshot.counts.required_protocols_supported_hosts}/{fleetSnapshot.counts.required_protocols_unsupported_hosts}/{fleetSnapshot.counts.required_protocols_unknown_hosts}</span></summary>
+        <summary className="cursor-pointer select-none text-xs font-medium text-slate-300">更多同步指标 <span className="ml-1 text-slate-500">待处理 {fleetSnapshot.counts.deferred} · 网卡待映射 {fleetSnapshot.counts.network_deferred} · 策略偏差 {fleetSnapshot.counts.drifted_hosts}</span></summary>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {[
+            ['Runman 可用', fleetSnapshot.counts.control_ready], ['读回正常', fleetSnapshot.counts.live_readback_current],
+            ['读回异常 / 过期', fleetSnapshot.counts.readback_unavailable],
+            ['协议支持 / 需升级 / 待核验', `${fleetSnapshot.counts.required_protocols_supported_hosts} / ${fleetSnapshot.counts.required_protocols_unsupported_hosts} / ${fleetSnapshot.counts.required_protocols_unknown_hosts}`],
+          ].map(([label, value]) => <div key={String(label)} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+            <div className="text-[10px] text-slate-500">{label}</div><div className="mt-1 font-mono text-sm font-semibold tabular-nums text-slate-200">{value}</div>
+          </div>)}
+        </div>
       </details>}
       <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
         <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Incus 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.incus}/{fleetHosts.length}</strong> 台</span>
@@ -571,7 +608,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h4 className="text-xs font-semibold text-slate-200">母机同步状态</h4>
-            <p className="mt-1 text-[10px] text-slate-500">{filteredFleetHosts.length} / {fleetHosts.length} 台 · 待处理 {fleetAttentionCount}</p>
+            <p className="mt-1 text-[10px] text-slate-500">{filteredFleetHosts.length} / {fleetHosts.length} 台 · 待处理 {fleetAttentionCount} · 每页最多 {FLEET_NODE_PAGE_SIZE} 台</p>
           </div>
           <input type="search" value={fleetHostSearch} onChange={(event) => setFleetHostSearch(event.target.value)} placeholder="搜索母机…" className="min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400 sm:max-w-xs" aria-label="搜索全局策略母机" />
         </div>
@@ -582,8 +619,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             ['interfaces', `网卡待处理 ${fleetInterfaceIssueCount}`], ['drifted', `策略偏差 ${fleetDriftedCount}`],
           ] as const).map(([key, label]) => <button key={key} type="button" onClick={() => setFleetHostFilter(key)} aria-pressed={fleetHostFilter === key} className={`min-h-9 rounded-lg border px-3 text-[11px] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 ${fleetHostFilter === key ? 'border-sky-700 bg-sky-950/60 text-sky-100' : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'}`}>{label}</button>)}
         </div>
-        {filteredFleetHosts.length ? <div className="mt-3 space-y-1.5">
-          {filteredFleetHosts.map((host) => <details key={host.host_id} className="rounded-lg border border-slate-800 bg-slate-950/70">
+        {filteredFleetHosts.length ? <>
+          <div className="mt-3 space-y-1.5">
+          {visibleFleetHosts.map((host) => <details key={host.host_id} className="rounded-lg border border-slate-800 bg-slate-950/70">
             <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5">
               <strong className="min-w-0 flex-1 break-all text-[11px] text-slate-200">{host.host_id}</strong>
               <span className={`rounded-full border px-2 py-0.5 text-[10px] ${host.state === 'last_apply_succeeded' || host.state === 'ready' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : host.state === 'apply_failed' || host.state === 'runman_update_required' || host.state === 'rfw_protocol_update_required' || host.state === 'drifted' ? 'border-rose-800 bg-rose-950/40 text-rose-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>{fleetStateLabel[host.state] || host.state}</span>
@@ -609,7 +647,16 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               {host.last_action?.message && <p className="break-words leading-4 text-slate-400 sm:col-span-2">{host.last_action.message}</p>}
             </div>
           </details>)}
-        </div> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950 px-3 py-4 text-center text-xs text-slate-500">没有符合当前筛选条件的母机。</p>}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2" aria-label="全局策略母机分页">
+            <span className="text-[10px] text-slate-500">显示 {currentFleetNodePage * FLEET_NODE_PAGE_SIZE + 1}–{Math.min((currentFleetNodePage + 1) * FLEET_NODE_PAGE_SIZE, filteredFleetHosts.length)} / {filteredFleetHosts.length} 台</span>
+            <div className="flex gap-1.5">
+              <button type="button" onClick={() => setFleetNodePage(Math.max(0, currentFleetNodePage - 1))} disabled={currentFleetNodePage === 0} aria-label="上一页全局策略母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />上一页</button>
+              <span className="inline-flex min-h-9 min-w-12 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 px-2 font-mono text-[10px] tabular-nums text-slate-400">{currentFleetNodePage + 1} / {fleetPageCount}</span>
+              <button type="button" onClick={() => setFleetNodePage(Math.min(fleetPageCount - 1, currentFleetNodePage + 1))} disabled={currentFleetNodePage >= fleetPageCount - 1} aria-label="下一页全局策略母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" aria-hidden="true" /></button>
+            </div>
+          </div>
+        </> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950 px-3 py-4 text-center text-xs text-slate-500">没有符合当前筛选条件的母机。</p>}
       </div>
       <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">实时读回来自节点运行中 RFW 的规则 API，并与平台管理的期望规则逐项比对；它不是直接读取 eBPF 内核 map。未登记为平台所有的手工规则只显示、不删除。MTProto 策略仅下发给新鲜能力读回明确支持的节点；未知或旧版节点会延后显示，不会先下发再失败。</p>
     </section>}
@@ -714,31 +761,45 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h4 className="text-xs font-semibold text-slate-200">选择这台母机的容器网卡</h4>
-              <p className="mt-1 text-[10px] leading-4 text-slate-400">网卡由 Agent 自动采集。可按 Incus / Podman 快速选择，也可在本机的已发现网卡中精确勾选；无需手动填写接口名。</p>
+              <p className="mt-1 text-[10px] leading-4 text-slate-400">只显示已发现且可安全匹配的容器桥接网卡。按运行时筛选或直接勾选；不需要、也不允许手动填写接口名。</p>
             </div>
-            <span className={`rounded-full border px-2.5 py-1 text-[10px] ${interfaceInventory?.status === 'ready' && !interfaceInventory.stale ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>
-              {interfaceInventory?.status === 'ready' ? interfaceInventory.stale ? '网卡清单已过期' : `已采集 ${interfaceInventory.interfaces.length} 张` : '等待网卡采集'}
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`rounded-full border px-2.5 py-1 text-[10px] ${interfaceInventory?.status === 'ready' && !interfaceInventory.stale ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>
+                {interfaceInventory?.status === 'ready' ? interfaceInventory.stale ? '清单已过期' : `清单已更新 · ${interfaceInventory.interfaces.length} 张` : '等待采集'}
+              </span>
+              <span className="rounded-full border border-sky-900/70 bg-sky-950/40 px-2.5 py-1 text-[10px] text-sky-200">已选 {eligibleInterfaces.filter((item) => abuse.interfaces.includes(item.name)).length} 张容器网卡</span>
+            </div>
           </div>
           {(['incus', 'podman'] as const).map((runtime) => {
             const runtimeInterfaces = eligibleInterfaces.filter((item) => item.runtimes.includes(runtime));
             const selectedCount = runtimeInterfaces.filter((item) => abuse.interfaces.includes(item.name)).length;
             const checked = runtimeInterfaces.length > 0 && selectedCount === runtimeInterfaces.length;
-            return <label key={runtime} className={`mt-3 flex min-h-14 items-center gap-3 rounded-lg border p-3 ${runtimeInterfaces.length && !interfaceInventory?.stale ? 'cursor-pointer border-slate-700 bg-slate-950/60 hover:border-slate-600' : 'border-slate-800 bg-slate-950/30 opacity-55'}`}>
-              <input type="checkbox" checked={checked} disabled={!runtimeInterfaces.length || interfaceInventory?.stale} onChange={() => toggleRuntimeInterfaces(runtime)} className="h-4 w-4 shrink-0 accent-sky-500" aria-label={`选择全部 ${runtime} 桥接接口`} />
+              return <label key={runtime} className={`mt-3 flex min-h-14 items-center gap-3 rounded-lg border p-3 ${runtimeInterfaces.length && !interfaceInventory?.stale && anyAbuseEnabled ? 'cursor-pointer border-slate-700 bg-slate-950/60 hover:border-slate-600' : 'border-slate-800 bg-slate-950/30 opacity-55'}`}>
+              <input type="checkbox" checked={checked} disabled={!runtimeInterfaces.length || interfaceInventory?.stale || !anyAbuseEnabled} onChange={() => toggleRuntimeInterfaces(runtime)} className="h-4 w-4 shrink-0 accent-sky-500" aria-label={`选择全部 ${runtime} 桥接接口`} />
               <span className="min-w-0 flex-1"><span className="block text-xs font-semibold capitalize text-slate-100">{runtime === 'incus' ? 'Incus' : 'Podman'}</span><span className="mt-0.5 block text-[10px] text-slate-400">{runtimeInterfaces.length ? `发现 ${runtimeInterfaces.length} 张受支持网卡 · 已选 ${selectedCount}` : '未发现可操作的 bridge 网络'}</span></span>
               {runtimeInterfaces.length > 0 && <span className="max-w-[45%] truncate font-mono text-[10px] text-slate-500">{runtimeInterfaces.map((item) => item.name).join(', ')}</span>}
             </label>;
           })}
-          {eligibleInterfaces.length > 0 ? <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {eligibleInterfaces.map((item) => <label key={item.name} className={`flex min-h-20 items-start gap-3 rounded-lg border p-3 ${interfaceInventory?.stale ? 'border-slate-800 bg-slate-950/30 opacity-60' : 'cursor-pointer border-slate-800 bg-slate-950/50 hover:border-slate-600'}`}>
-              <input type="checkbox" checked={abuse.interfaces.includes(item.name)} disabled={interfaceInventory?.stale} onChange={(event) => toggleAbuseInterface(item.name, event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500" aria-label={`在防滥用规则中使用 ${item.name}`} />
+          {!anyAbuseEnabled && <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-400">先启用上方至少一项固定端口规则，再选择目标网卡；关闭全部规则时，网卡选择会一并清除，避免显示无效配置。</p>}
+          {eligibleInterfaces.length > 0 && <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="按容器运行时筛选网卡">
+              {([
+                ['all', '全部', eligibleInterfaces.length],
+                ['incus', 'Incus', eligibleInterfaces.filter((item) => item.runtimes.includes('incus')).length],
+                ['podman', 'Podman', eligibleInterfaces.filter((item) => item.runtimes.includes('podman')).length],
+              ] as const).map(([key, label, count]) => <button key={key} type="button" onClick={() => setHostInterfaceFilter(key)} aria-pressed={hostInterfaceFilter === key} className={`min-h-9 rounded-lg border px-3 text-[10px] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 ${hostInterfaceFilter === key ? 'border-sky-700 bg-sky-950/60 text-sky-100' : 'border-slate-700 bg-slate-950/70 text-slate-400 hover:bg-slate-800'}`}>{label}<span className="ml-1.5 font-mono tabular-nums">{count}</span></button>)}
+            </div>
+            <span className="text-[10px] text-slate-500">筛选不会改变当前勾选</span>
+          </div>}
+          {eligibleInterfaces.length > 0 ? visibleEligibleInterfaces.length ? <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {visibleEligibleInterfaces.map((item) => <label key={item.name} className={`flex min-h-20 items-start gap-3 rounded-lg border p-3 ${interfaceInventory?.stale || !anyAbuseEnabled ? 'border-slate-800 bg-slate-950/30 opacity-60' : 'cursor-pointer border-slate-800 bg-slate-950/50 hover:border-slate-600'}`}>
+              <input type="checkbox" checked={abuse.interfaces.includes(item.name)} disabled={interfaceInventory?.stale || !anyAbuseEnabled} onChange={(event) => toggleAbuseInterface(item.name, event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500" aria-label={`在防滥用规则中使用 ${item.name}`} />
               <span className="min-w-0 flex-1">
                 <span className="flex flex-wrap items-center gap-1.5"><code className="text-xs font-semibold text-slate-100">{item.name}</code>{item.runtimes.map((runtime) => <span key={runtime} className="rounded border border-sky-900/70 bg-sky-950/50 px-1.5 py-0.5 text-[9px] uppercase text-sky-200">{runtime}</span>)}<span className={`rounded border px-1.5 py-0.5 text-[9px] ${item.state === 'up' ? 'border-emerald-900 bg-emerald-950/40 text-emerald-200' : 'border-amber-900 bg-amber-950/40 text-amber-200'}`}>{item.state}</span></span>
                 <span className="mt-1 block break-all text-[10px] leading-4 text-slate-500">{item.network_names.length ? item.network_names.join(', ') : item.kind}{item.mtu ? ` · MTU ${item.mtu}` : ''}{item.addresses.length ? ` · ${item.addresses.slice(0, 2).join(', ')}` : ''}</span>
               </span>
             </label>)}
-          </div> : <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">当前没有已确认的 Incus / Podman bridge。可能是 Agent 尚未更新、运行时未安装，或容器使用 host、pasta、macvlan/ipvlan 等非桥接网络；请刷新等待采集，不要猜测接口名。</p>}
+          </div> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[11px] leading-5 text-slate-400">当前筛选下没有已确认的桥接网卡；请选择其他运行时，或改为“全部”。</p> : <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">当前没有已确认的 Incus / Podman bridge。可能是 Agent 尚未更新、运行时未安装，或容器使用 host、pasta、macvlan/ipvlan 等非桥接网络；请刷新等待采集，不要猜测接口名。</p>}
           {(abuse.interfaces || []).some((name) => !eligibleInterfaces.some((item) => item.name === name)) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] text-amber-100/80">
             <span>旧策略包含未被当前清单确认的接口：{abuse.interfaces.filter((name) => !eligibleInterfaces.some((item) => item.name === name)).join(', ')}</span>
             <button type="button" onClick={() => setAbuseInterfaces(abuse.interfaces.filter((name) => eligibleInterfaces.some((item) => item.name === name)))} className="min-h-8 rounded border border-amber-800 px-2.5 text-amber-100 hover:bg-amber-900/40">从草稿移除</button>
@@ -762,13 +823,14 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             {(['incus', 'podman'] as const).map((runtime) => {
               const selected = (abuse.runtimes || []).includes(runtime);
               const coverage = fleetNetworkCoverage[runtime];
-              return <label key={runtime} className={`flex min-h-24 items-start gap-3 rounded-xl border p-4 transition-colors ${selected ? 'border-sky-700 bg-sky-950/40' : 'border-slate-700 bg-slate-950/50 hover:border-slate-600'}`}>
-                <input type="checkbox" checked={selected} onChange={(event) => toggleFleetRuntime(runtime, event.target.checked)} className="mt-1 h-4 w-4 shrink-0 accent-sky-500" aria-label={`全局选择 ${runtime === 'incus' ? 'Incus' : 'Podman'} 容器网络`} />
+              return <label key={runtime} className={`flex min-h-24 items-start gap-3 rounded-xl border p-4 transition-colors ${selected ? 'border-sky-700 bg-sky-950/40' : 'border-slate-700 bg-slate-950/50'} ${anyAbuseEnabled && coverage > 0 ? 'hover:border-slate-600' : 'opacity-60'}`}>
+                <input type="checkbox" checked={selected} disabled={!anyAbuseEnabled || coverage === 0} onChange={(event) => toggleFleetRuntime(runtime, event.target.checked)} className="mt-1 h-4 w-4 shrink-0 accent-sky-500" aria-label={`全局选择 ${runtime === 'incus' ? 'Incus' : 'Podman'} 容器网络`} />
                 <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-100">{runtime === 'incus' ? 'Incus' : 'Podman'}</span><span className="mt-1 block text-[11px] leading-5 text-slate-400">当前 {coverage} / {fleetHosts.length} 台母机报告了可用 bridge{coverage < fleetHosts.length ? ` · ${fleetHosts.length - coverage} 台尚未就绪` : ''}</span></span>
                 <Network className={`mt-0.5 h-4 w-4 shrink-0 ${selected ? 'text-sky-300' : 'text-slate-500'}`} aria-hidden="true" />
               </label>;
             })}
           </div>
+          {!anyAbuseEnabled && <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-400">先启用上方至少一项固定端口规则，再选择 Incus / Podman 目标范围；关闭全部规则时，运行时选择会自动清除。</p>}
           {fleetSnapshot?.revision && (abuse.interfaces || []).length > 0 && !(abuse.runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">已保存的旧全局模板使用具体网卡名称，无法安全映射到不同母机。请重新选择 Incus / Podman 运行时；保存后将逐台重新解析网卡。</p>}
           <p className="mt-3 text-[10px] leading-4 text-slate-400">可以只选 Incus、只选 Podman，或同时勾选两者。首次同步只会在网卡清单新鲜且映射明确的节点排队，其他节点状态会在下方列出。</p>
         </>}
