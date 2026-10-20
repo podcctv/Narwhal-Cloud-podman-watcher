@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 API_URL = "https://api.abuseipdb.com/api/v2/check"
 SUCCESS_CACHE_SECONDS = 24 * 60 * 60
@@ -230,8 +231,12 @@ def attach(app, db, db_path, cipher_factory) -> None:
         if not isinstance(payload, dict) or set(payload) != {"ip"}:
             raise HTTPException(status_code=400, detail="仅接受 ip 字段")
         ip = normalize_public_ip(payload.get("ip"))
-        conn = db()
-        try:
-            return JSONResponse(check_ip(conn, ip, db_path, cipher_factory))
-        finally:
-            conn.close()
+
+        def lookup() -> dict:
+            conn = db()
+            try:
+                return check_ip(conn, ip, db_path, cipher_factory)
+            finally:
+                conn.close()
+
+        return JSONResponse(await run_in_threadpool(lookup))

@@ -77,6 +77,29 @@ class IPReputationTests(unittest.TestCase):
         self.assertIn("不能单独证明", result["message"])
         self.assertNotIn("raw", json.dumps(result))
 
+    def test_provider_uses_key_header_and_url_encodes_ipv6(self):
+        provider_response = mock.MagicMock()
+        provider_response.status = 200
+        provider_response.read.return_value = json.dumps({"data": {
+            "abuseConfidenceScore": 82,
+            "totalReports": 14,
+            "numDistinctUsers": 9,
+            "countryCode": "US",
+        }}).encode("utf-8")
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = provider_response
+
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            result = ip_reputation._query_provider(self.key, "2001:4860:4860::8888", 1234)
+
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.get_header("Key"), self.key)
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertIn("ipAddress=2001%3A4860%3A4860%3A%3A8888", request.full_url)
+        self.assertNotIn("key=", request.full_url.lower())
+        self.assertEqual(result["status"], "checked")
+        self.assertEqual(result["abuse_confidence_score"], 82)
+
     def test_local_daily_guard_stops_before_provider_quota(self):
         self.conn.execute(
             "INSERT INTO ip_reputation_daily_usage(utc_day,requests) VALUES('1970-01-01',900)"

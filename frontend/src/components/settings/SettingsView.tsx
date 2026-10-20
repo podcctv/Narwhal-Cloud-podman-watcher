@@ -270,10 +270,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               </span>
             </div>
             <p className="mt-2 text-sm leading-6 text-slate-400">
-              仅在容器深度诊断中点击“查询滥用记录”时，才会将选中的公网来源 IP 发给 AbuseIPDB；结果缓存 24 小时并设有每日查询保护上限。
+              保存密钥后，容器深度快照完成时会自动查询连接数最多的前 5 个入站公网 IP；也可在快照中逐个补查。只向 AbuseIPDB 提交 IP，不发送主机或容器信息。
             </p>
             <p className="mt-2 text-xs leading-5 text-amber-200/90">
-              信誉分和公开举报数不能证明该来源正在攻击本容器，也不能证明是客户本人操作；单凭 IP 数量或信誉分不会自动封禁来源、停容器或处罚客户。
+              命中会在深度快照中提醒，≥75 分标红；信誉分不能证明本次连接恶意或归责客户，不会自动封禁来源、停容器或处罚客户。
             </p>
           </div>
           <form onSubmit={handleSaveIpReputationKey} className="flex w-full flex-col gap-3 sm:flex-row lg:max-w-xl lg:items-end">
@@ -297,7 +297,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
           </form>
         </div>
         <p className="mt-4 border-t border-slate-800 pt-3 text-xs leading-5 text-slate-500">
-          密钥加密保存在主控端数据库，不会返回前端、不下发到节点；查询失败或额度耗尽时显示“无法查询”，不会当作 IP 安全或恶意结论。
+          密钥加密保存在主控端数据库，不会返回前端或下发到节点；成功结果缓存 24 小时，每日最多 900 次查询以留出免费套餐余量。查询失败或额度耗尽不代表 IP 安全或恶意。
         </p>
       </section>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 items-start">

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Sparkles, Terminal, Globe, AlertCircle, CheckCircle2, Clock } from 'lucide-react';
 import { DiagnosticData, ContainerIdentity, IPReputationResult } from '../../api/types';
 import { api, fmtBytes, fmtMbps, fmtNumber } from '../../api/client';
@@ -20,8 +20,11 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
 }) => {
   const [submitting, setSubmitting] = useState(false);
   const [reputationConfigured, setReputationConfigured] = useState(false);
+  const [reputationSettingsLoaded, setReputationSettingsLoaded] = useState(false);
   const [checkingReputation, setCheckingReputation] = useState<string | null>(null);
   const [reputationByIp, setReputationByIp] = useState<Record<string, IPReputationResult>>({});
+  const reputationLookupInFlight = useRef(new Set<string>());
+  const reputationLookupsStarted = useRef(new Set<string>());
 
   const action = diagnostic?.action;
   const sample = diagnostic?.sample;
@@ -40,26 +43,43 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   React.useEffect(() => {
     let active = true;
     api.getIPReputationSettings()
-      .then(result => { if (active) setReputationConfigured(Boolean(result.configured)); })
-      .catch(() => { if (active) setReputationConfigured(false); });
+      .then(result => {
+        if (!active) return;
+        setReputationConfigured(Boolean(result.configured));
+        setReputationSettingsLoaded(true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setReputationConfigured(false);
+        setReputationSettingsLoaded(true);
+      });
     return () => { active = false; };
   }, []);
 
-  const checkReputation = async (ip: string) => {
-    if (checkingReputation) return;
+  const checkReputation = useCallback(async (ip: string) => {
+    if (!ip || reputationLookupInFlight.current.has(ip)) return null;
+    reputationLookupInFlight.current.add(ip);
     setCheckingReputation(ip);
     try {
       const result = await api.checkIPReputation(ip);
       setReputationByIp(current => ({ ...current, [ip]: result }));
+      return result;
     } catch (err: any) {
+      const result: IPReputationResult = {
+        status: 'error',
+        ip,
+        message: err?.message || '查询失败',
+      };
       setReputationByIp(current => ({
         ...current,
-        [ip]: { status: 'error', ip, message: err?.message || '查询失败' },
+        [ip]: result,
       }));
+      return result;
     } finally {
-      setCheckingReputation(null);
+      reputationLookupInFlight.current.delete(ip);
+      setCheckingReputation(current => current === ip ? null : current);
     }
-  };
+  }, []);
 
   const handleRequest = async () => {
     if (submitting) return;
@@ -79,6 +99,49 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   const inboundIps = sample?.inbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
   const outboundIps = sample?.outbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.outbound || 0) > 0);
   const unclassifiedIps = sample?.unclassified_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.unknown || 0) > 0);
+  const automaticReputationCandidates = useMemo(() => {
+    const candidates = sample?.inbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
+    const seen = new Set<string>();
+    return [...candidates]
+      .filter((ip) => Boolean(ip.ip) && Number(ip.inbound || 0) > 0)
+      .sort((a, b) => Number(b.inbound || 0) - Number(a.inbound || 0))
+      .filter((ip) => {
+        const address = ip.ip || '';
+        if (seen.has(address)) return false;
+        seen.add(address);
+        return true;
+      })
+      .slice(0, 5)
+      .map((ip) => ip.ip as string);
+  }, [sample?.inbound_ips, sample?.connection_ips]);
+  const highlyReportedInboundIps = inboundIps.filter((ip) => {
+    const result = reputationByIp[ip.ip || ''];
+    return result?.status === 'checked' && Number(result.abuse_confidence_score || 0) >= 75;
+  });
+  const diagnosticSnapshotId = action?.id ?? sample?.report_timestamp_utc8 ?? '';
+  const reputationLookupScope = [
+    identity.host_id,
+    identity.runtime,
+    identity.project || '',
+    identity.container_name,
+    diagnosticSnapshotId,
+  ].join(':');
+
+  React.useEffect(() => {
+    if (!reputationConfigured || isStale || action?.status !== 'succeeded' || !sample || !diagnosticSnapshotId) return;
+    let active = true;
+    const checkTopInboundIps = async () => {
+      for (const ip of automaticReputationCandidates) {
+        const lookupKey = `${reputationLookupScope}:${ip}`;
+        if (reputationLookupsStarted.current.has(lookupKey)) continue;
+        reputationLookupsStarted.current.add(lookupKey);
+        await checkReputation(ip);
+        if (!active) return;
+      }
+    };
+    void checkTopInboundIps();
+    return () => { active = false; };
+  }, [action?.status, automaticReputationCandidates, checkReputation, diagnosticSnapshotId, isStale, reputationConfigured, reputationLookupScope, sample]);
   const attribution = sample?.connection_attribution;
   const connectionSockets = sample?.communication_sockets || [];
   const inboundPortEvidence = sample?.inbound_port_evidence || [];
@@ -243,7 +306,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             <h3 className="text-sm font-bold text-slate-100">按需深度快照分析</h3>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            仅在下一周期对容器做一次有界快照（不持续抓包、不全盘扫描）；完成后自动恢复普通采集。
+            一次性有界快照（不持续抓包、不全盘扫描）；配置 AbuseIPDB 后，完成时自动查询入站连接数最多的 5 个公网 IP。
           </p>
         </div>
 
@@ -305,6 +368,21 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
       {/* Snapshot Data View */}
       {sample && (
         <div className="space-y-4 pt-2">
+          {reputationSettingsLoaded && <div aria-live="polite" className={`rounded-lg border p-2.5 text-xs leading-5 ${reputationConfigured ? 'border-sky-500/25 bg-sky-950/20 text-sky-200' : 'border-amber-500/30 bg-amber-950/30 text-amber-200'}`}>
+            {reputationConfigured
+              ? `AbuseIPDB 已启用：自动查询最多 5 个入站公网 IP，结果缓存 24 小时；每日查询保护上限 900 次。信誉分只作提醒，不会自动封禁。${checkingReputation ? ` 正在查询 ${checkingReputation}…` : ''}`
+              : 'AbuseIPDB 尚未配置 API Key；请到“系统设置 → 入站 IP 信誉查询”加密保存后，深度快照才会自动检查前 5 个入站公网 IP。'}
+          </div>}
+          {highlyReportedInboundIps.length > 0 && <div role="alert" className="rounded-lg border border-red-500/40 bg-red-950/30 p-3 text-xs leading-5 text-red-200">
+            <strong>AbuseIPDB 高举报信号：{highlyReportedInboundIps.length} 个来源</strong>
+            <span className="ml-1 inline-flex flex-wrap gap-1.5">
+              {highlyReportedInboundIps.map((ip) => <span key={ip.ip} className="inline-flex items-center gap-1 rounded border border-red-500/30 bg-red-950/50 px-1.5 py-0.5">
+                <span className="font-mono">{ip.ip}</span>
+                <span className="tabular-nums">{reputationByIp[ip.ip || '']?.abuse_confidence_score || 0}/100</span>
+              </span>)}
+            </span>
+            <p className="mt-1 text-red-200/80">这是第三方社区举报信誉，不足以证明本次连接是攻击或归责客户；请结合本页连接方向、进程和 conntrack 证据人工判断。</p>
+          </div>}
           {/* Rate Summary Cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs">
             <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
