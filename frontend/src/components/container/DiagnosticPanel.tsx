@@ -234,13 +234,17 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             ? reputation.classification === 'many_recent_reports' ? `近期公开举报较多 · ${reputation.abuse_confidence_score}/100`
               : reputation.classification === 'reported' ? `有近期公开举报 · ${reputation.abuse_confidence_score}/100`
                 : reputation.classification === 'few_reports' ? `少量近期公开举报 · ${reputation.abuse_confidence_score}/100`
-                  : '过去 90 天无公开举报（不代表安全）'
+                  : reputation.classification === 'reports_low_confidence'
+                    ? reputation.is_whitelisted === true
+                      ? '有举报记录，但被 AbuseIPDB 列入白名单 · 当前评分 0/100'
+                      : '有近期公开举报记录，但当前可信度评分为 0/100'
+                    : '过去 90 天无公开举报（不代表安全）'
             : reputation?.message;
           const repTone = reputation?.status !== 'checked'
             ? 'border-slate-700 bg-slate-900 text-slate-300'
             : (reputation.abuse_confidence_score || 0) >= 75
               ? 'border-rose-500/30 bg-rose-950/30 text-rose-200'
-              : (reputation.abuse_confidence_score || 0) > 0
+              : (reputation.abuse_confidence_score || 0) > 0 || ((reputation.total_reports || 0) > 0 && reputation.is_whitelisted !== true)
                 ? 'border-amber-500/30 bg-amber-950/30 text-amber-200'
                 : 'border-slate-700 bg-slate-900 text-slate-300';
           return (
@@ -284,7 +288,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
               </div>
               {reputation && <div className={`rounded-md border px-2 py-1.5 text-[11px] ${repTone}`}>
                 <strong>{repLabel}</strong>
-                {reputation.status === 'checked' && <p className="mt-0.5 leading-4 opacity-90">公开举报 {reputation.total_reports || 0} 次 · 最近举报 {reputation.last_reported_at || '无'}{reputation.usage_type ? ` · 网络类型 ${reputation.usage_type}` : ''}</p>}
+                {reputation.status === 'checked' && <p className="mt-0.5 leading-4 opacity-90">公开举报 {reputation.total_reports || 0} 次 · 最近举报 {reputation.last_reported_at || '无'} · AbuseIPDB 白名单：{reputation.is_whitelisted === true ? '是' : reputation.is_whitelisted === false ? '否' : '未说明'}{reputation.usage_type ? ` · 网络类型 ${reputation.usage_type}` : ''}</p>}
                 <p className="mt-0.5 leading-4 opacity-80">{reputation.status === 'checked' ? reputation.message : '查询失败、未配置或额度不足均不代表该 IP 安全或恶意。'}</p>
               </div>}
             </div>}

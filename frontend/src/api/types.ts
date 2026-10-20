@@ -493,7 +493,7 @@ export interface IPReputationResult {
   status: 'checked' | 'error' | 'not_configured' | 'local_limit' | string;
   provider?: string;
   ip: string;
-  classification?: 'many_recent_reports' | 'reported' | 'few_reports' | 'no_recent_reports' | string;
+  classification?: 'many_recent_reports' | 'reported' | 'few_reports' | 'reports_low_confidence' | 'no_recent_reports' | string;
   abuse_confidence_score?: number;
   total_reports?: number;
   distinct_reporters?: number;

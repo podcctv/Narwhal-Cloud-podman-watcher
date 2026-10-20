@@ -77,6 +77,39 @@ class IPReputationTests(unittest.TestCase):
         self.assertIn("不能单独证明", result["message"])
         self.assertNotIn("raw", json.dumps(result))
 
+        low_confidence = ip_reputation._safe_result("8.8.8.8", {
+            "abuseConfidenceScore": 0,
+            "totalReports": 235,
+            "numDistinctUsers": 91,
+        }, 1000)
+        self.assertEqual(low_confidence["classification"], "reports_low_confidence")
+        self.assertEqual(low_confidence["abuse_confidence_score"], 0)
+        self.assertEqual(low_confidence["total_reports"], 235)
+
+    def test_cached_classification_is_recomputed_from_reports_and_score(self):
+        stale_cache = {
+            "status": "checked",
+            "ip": "8.8.8.8",
+            "classification": "no_recent_reports",
+            "abuse_confidence_score": 0,
+            "total_reports": 235,
+            "distinct_reporters": 91,
+        }
+        self.conn.execute(
+            "INSERT INTO ip_reputation_cache(ip,result_json,checked_at,expires_at) VALUES(?,?,?,?)",
+            ("8.8.8.8", json.dumps(stale_cache), 999, 10000),
+        )
+        self.conn.commit()
+
+        with mock.patch.object(ip_reputation, "_query_provider") as query:
+            result = ip_reputation.check_ip(
+                self.conn, "8.8.8.8", lambda: "/tmp/test.db", self.cipher_factory, now=1000
+            )
+
+        self.assertEqual(result["classification"], "reports_low_confidence")
+        self.assertTrue(result["cached"])
+        query.assert_not_called()
+
     def test_provider_uses_key_header_and_url_encodes_ipv6(self):
         provider_response = mock.MagicMock()
         provider_response.status = 200

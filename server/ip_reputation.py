@@ -49,13 +49,15 @@ def _api_error(status: int) -> str:
     return "AbuseIPDB 查询失败"
 
 
-def _classification(score: int) -> str:
+def _classification(score: int, total_reports: int) -> str:
     if score >= 75:
         return "many_recent_reports"
     if score >= 25:
         return "reported"
     if score > 0:
         return "few_reports"
+    if total_reports > 0:
+        return "reports_low_confidence"
     return "no_recent_reports"
 
 
@@ -72,7 +74,7 @@ def _safe_result(ip: str, data: object, checked_at: int) -> dict:
         "status": "checked",
         "provider": "AbuseIPDB",
         "ip": ip,
-        "classification": _classification(score),
+        "classification": _classification(score, reports),
         "abuse_confidence_score": score,
         "total_reports": reports,
         "distinct_reporters": reporters,
@@ -135,8 +137,14 @@ def _cached_result(conn: sqlite3.Connection, ip: str, now: int):
         return None
     try:
         data = json.loads(row["result_json"] or "{}")
-        return data if isinstance(data, dict) else None
-    except (TypeError, ValueError):
+        if not isinstance(data, dict):
+            return None
+        if data.get("status") == "checked":
+            score = max(0, min(100, int(data.get("abuse_confidence_score") or 0)))
+            reports = max(0, min(1_000_000_000, int(data.get("total_reports") or 0)))
+            data["classification"] = _classification(score, reports)
+        return data
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
