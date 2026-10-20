@@ -4390,7 +4390,7 @@ async def set_container_disposition(request: Request) -> JSONResponse:
     return await set_security_alert_disposition(selected_alert_id, request)
 
 
-@app.get("/api/v1/hosts/{host_id}/firewall-policy")
+@app.get("/api/v1/hosts/{host_id:path}/firewall-policy")
 def get_host_firewall_policy(host_id: str) -> JSONResponse:
     if not host_id or len(host_id) > 200:
         raise HTTPException(status_code=400, detail="主机标识无效")
@@ -4432,7 +4432,7 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
         conn.close()
 
 
-@app.post("/api/v1/hosts/{host_id}/firewall-policy")
+@app.post("/api/v1/hosts/{host_id:path}/firewall-policy")
 async def update_host_firewall_policy(host_id: str, request: Request) -> JSONResponse:
     if getattr(request.state, "dashboard_role", "admin") != "admin":
         raise HTTPException(status_code=403, detail="只有管理员可以修改母机防火墙策略")

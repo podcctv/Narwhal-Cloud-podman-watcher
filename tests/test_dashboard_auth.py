@@ -2,8 +2,10 @@
 import base64
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 from unittest import mock
 
 from fastapi.testclient import TestClient
@@ -63,6 +65,29 @@ class DashboardAuthTests(unittest.TestCase):
         asset = next(server.ASSETS_DIR.glob("*.css"))
         self.assertEqual(self.client.get("/assets/" + asset.name).status_code, 200)
         self.assertNotEqual(self.client.get("/assets/../../app.py").status_code, 200)
+
+    def test_firewall_policy_routes_accept_host_ids_with_encoded_slashes(self):
+        host_id = "region/hk node"
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO hosts(host_id,last_seen,node_id) VALUES(?,?,?)",
+            (host_id, int(time.time()), "watcher-node-slash"),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self.login().status_code, 200)
+        endpoint = f"/api/v1/hosts/{quote(host_id, safe='')}/firewall-policy"
+        response = self.client.get(endpoint)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["host_id"], host_id)
+
+        saved = self.client.post(
+            endpoint,
+            json={"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": []}},
+            headers={"Origin": "https://testserver"},
+        )
+        self.assertEqual(saved.status_code, 202, saved.text)
 
     def test_login_cookie_and_session(self):
         response = self.login(next="/alerts/history?days=2")

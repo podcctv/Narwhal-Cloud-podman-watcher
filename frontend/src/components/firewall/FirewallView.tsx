@@ -11,23 +11,6 @@ interface FirewallViewProps {
 }
 
 type HostOption = { host_id: string; node_id: string; stale: boolean };
-type HostInterfaceOption = {
-  name: string;
-  kind: string;
-  state: string;
-  mtu: number | null;
-  addresses: string[];
-  is_default_route: boolean;
-  runtimes: Array<'incus' | 'podman'>;
-  network_names: string[];
-  firewall_eligible: boolean;
-};
-type HostInterfaceInventory = {
-  status: 'ready' | 'unavailable' | 'unknown';
-  observed_at: number;
-  stale: boolean;
-  interfaces: HostInterfaceOption[];
-};
 type RuleDraft = {
   priority: number;
   direction: 'in' | 'out';
@@ -113,7 +96,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [cnRiskProtocols, setCnRiskProtocols] = useState<CnRiskProtocol[]>(['socks', 'wireguard', 'fet', 'mtproto']);
 
   const selectedHost = hosts.find((host) => host.host_id === hostId);
-  const interfaceInventory = (snapshot as (HostFirewallPolicyResponse & { interface_inventory?: HostInterfaceInventory }) | null)?.interface_inventory;
+  const interfaceInventory = snapshot?.interface_inventory;
   const eligibleInterfaces = useMemo(
     () => (interfaceInventory?.interfaces || []).filter((item) => item.firewall_eligible && item.runtimes.length > 0),
     [interfaceInventory],

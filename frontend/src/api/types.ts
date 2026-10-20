@@ -299,6 +299,25 @@ export interface HostFirewallRuntimeStatus {
   observed_at: number;
 }
 
+export interface HostFirewallInterface {
+  name: string;
+  kind: string;
+  state: string;
+  mtu: number | null;
+  addresses: string[];
+  is_default_route: boolean;
+  runtimes: Array<'incus' | 'podman'>;
+  network_names: string[];
+  firewall_eligible: boolean;
+}
+
+export interface HostFirewallInterfaceInventory {
+  status: 'ready' | 'unavailable' | 'unknown';
+  observed_at: number;
+  stale: boolean;
+  interfaces: HostFirewallInterface[];
+}
+
 export interface HostFirewallLiveRule {
   id: number;
   priority: number;
@@ -355,6 +374,7 @@ export interface HostFirewallPolicyResponse {
   source_fleet_revision: number;
   policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy };
   runtime_status: HostFirewallRuntimeStatus;
+  interface_inventory?: HostFirewallInterfaceInventory;
   live_readback: HostFirewallLiveReadback;
   updated_by: string;
   updated_at_utc8: string;
