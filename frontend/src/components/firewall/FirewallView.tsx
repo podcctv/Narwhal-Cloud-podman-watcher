@@ -3,6 +3,8 @@ import { AlertTriangle, Check, Clock3, Layers, LoaderCircle, Network, Plus, Refr
 import { ContainerItem, FleetFirewallPolicyResponse, HostFirewallAbusePolicy, HostFirewallPolicyResponse, HostFirewallRule, SecurityStatusItem } from '../../api/types';
 import { api } from '../../api/client';
 import { ConfirmDialog } from '../common/ConfirmDialog';
+import { FirewallNodePicker } from './FirewallNodePicker';
+import type { FirewallNodeFilter } from './FirewallNodePicker';
 
 interface FirewallViewProps {
   containers: ContainerItem[];
@@ -81,8 +83,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [pendingScope, setPendingScope] = useState<FirewallScope | null>(null);
   const [scopeConfirmOpen, setScopeConfirmOpen] = useState(false);
   const [hostSearch, setHostSearch] = useState('');
+  const [hostFilter, setHostFilter] = useState<FirewallNodeFilter>('all');
   const [fleetHostSearch, setFleetHostSearch] = useState('');
-  const [fleetHostFilter, setFleetHostFilter] = useState<'all' | 'attention' | 'online' | 'offline'>('attention');
+  const [fleetHostFilter, setFleetHostFilter] = useState<'all' | 'attention' | 'online' | 'offline' | 'interfaces' | 'drifted'>('attention');
   const [snapshot, setSnapshot] = useState<HostFirewallPolicyResponse | null>(null);
   const [fleetSnapshot, setFleetSnapshot] = useState<FleetFirewallPolicyResponse | null>(null);
   const [rules, setRules] = useState<HostFirewallRule[]>([]);
@@ -106,12 +109,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     () => (interfaceInventory?.interfaces || []).filter((item) => item.firewall_eligible && item.runtimes.length > 0),
     [interfaceInventory],
   );
-  const hostSearchMatches = useMemo(() => {
-    const query = hostSearch.trim().toLocaleLowerCase();
-    return query ? hosts.filter((host) => host.host_id.toLocaleLowerCase().includes(query)) : hosts;
-  }, [hostSearch, hosts]);
   const fleetHosts = fleetSnapshot?.hosts || [];
   const fleetAttentionCount = fleetHosts.filter((host) => !['last_apply_succeeded', 'ready'].includes(host.state)).length;
+  const fleetInterfaceIssueCount = fleetHosts.filter((host) => host.container_interfaces.status !== 'ready'
+    || host.container_interfaces.stale
+    || (!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length)).length;
+  const fleetDriftedCount = fleetHosts.filter((host) => host.state === 'drifted').length;
   const fleetNetworkCoverage = useMemo(() => ({
     incus: fleetHosts.filter((host) => host.container_interfaces.status === 'ready' && !host.container_interfaces.stale && host.container_interfaces.by_runtime.incus.length > 0).length,
     podman: fleetHosts.filter((host) => host.container_interfaces.status === 'ready' && !host.container_interfaces.stale && host.container_interfaces.by_runtime.podman.length > 0).length,
@@ -129,14 +132,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       if (fleetHostFilter === 'attention' && ['last_apply_succeeded', 'ready'].includes(host.state)) return false;
       if (fleetHostFilter === 'online' && !host.online) return false;
       if (fleetHostFilter === 'offline' && host.online) return false;
+      if (fleetHostFilter === 'interfaces' && host.container_interfaces.status === 'ready'
+        && !host.container_interfaces.stale
+        && (host.container_interfaces.by_runtime.incus.length > 0 || host.container_interfaces.by_runtime.podman.length > 0)) return false;
+      if (fleetHostFilter === 'drifted' && host.state !== 'drifted') return false;
       return true;
     }).sort((a, b) => (rank[a.state] ?? 20) - (rank[b.state] ?? 20) || a.host_id.localeCompare(b.host_id));
   }, [fleetHostFilter, fleetHostSearch, fleetHosts]);
-  const hostSelectOptions = useMemo(() => {
-    const result = [...hostSearchMatches];
-    if (selectedHost && !result.some((host) => host.host_id === selectedHost.host_id)) result.unshift(selectedHost);
-    return result;
-  }, [hostSearchMatches, selectedHost]);
   const activeAction = snapshot?.latest_action;
   const pending = Boolean(activeAction && ['queued', 'dispatched', 'running'].includes(activeAction.status));
 
@@ -495,22 +497,30 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
     {scope === 'host' && <section className="grid gap-4 lg:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.2fr)]">
       <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-        <label htmlFor="firewall-host" className="mb-2 block text-sm font-semibold text-slate-200">选择母机</label>
-        <input id="firewall-host-search" type="search" value={hostSearch} onChange={(event) => setHostSearch(event.target.value)} placeholder="输入主机名称筛选…" className="mb-2 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400" aria-label="筛选母机列表" />
-        <select id="firewall-host" value={hostId} onChange={(event) => setHostId(event.target.value)} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-400">
-          {hostSelectOptions.map((host) => <option key={host.host_id} value={host.host_id}>{host.host_id}{host.host_id === hostId && !hostSearchMatches.some((item) => item.host_id === hostId) ? '（当前选择）' : ''}</option>)}
-        </select>
-        <div className="mt-3 flex flex-wrap gap-2 text-xs">
-          <span className={`rounded-full border px-2.5 py-1 ${selectedHost?.stale ? 'border-amber-700 bg-amber-950/50 text-amber-200' : 'border-emerald-700 bg-emerald-950/50 text-emerald-200'}`}>{selectedHost?.stale ? '心跳过期' : '心跳正常'}</span>
-          <span className={`rounded-full border px-2.5 py-1 ${snapshot?.agent_ready ? 'border-sky-700 bg-sky-950/50 text-sky-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{snapshot?.agent_ready ? 'Watcher 已注册' : 'Watcher 未注册'}</span>
-          <span className={`rounded-full border px-2.5 py-1 ${runtimeReady ? 'border-emerald-700 bg-emerald-950/50 text-emerald-200' : snapshot?.runtime_status?.control_api === 'unsupported' ? 'border-amber-700 bg-amber-950/50 text-amber-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{runtimeReady ? 'Runman 防火墙接口可用' : snapshot?.runtime_status?.control_api === 'unsupported' ? '需更新 Runman' : snapshot?.runtime_status?.control_api === 'unavailable' ? 'Runman 接口不可用' : '等待能力上报'}</span>
-          {snapshot && <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-slate-300">策略版本 #{snapshot.revision}</span>}
-          {snapshot?.live_readback && <span className={`rounded-full border px-2.5 py-1 ${snapshot.live_readback.status === 'ready' && !snapshot.live_readback.stale ? snapshot.live_readback.sync_status === 'drifted' ? 'border-rose-800 bg-rose-950/50 text-rose-200' : 'border-emerald-800 bg-emerald-950/50 text-emerald-200' : 'border-amber-800 bg-amber-950/50 text-amber-200'}`}>{readbackStatusLabel[snapshot.live_readback.status]} · {syncStatusLabel[snapshot.live_readback.sync_status || 'unknown']}</span>}
-        </div>
+        <FirewallNodePicker
+          hosts={hosts}
+          fleetHosts={fleetHosts}
+          selectedHostId={hostId}
+          search={hostSearch}
+          filter={hostFilter}
+          onSearchChange={setHostSearch}
+          onFilterChange={setHostFilter}
+          onSelect={setHostId}
+        />
+        <details className="mt-3 rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+          <summary className="cursor-pointer select-none text-xs font-medium text-slate-300">查看所选母机的能力与同步详情</summary>
+          <div className="mt-3 flex flex-wrap gap-2 text-[10px]">
+            <span className={`rounded-full border px-2.5 py-1 ${selectedHost?.stale ? 'border-amber-700 bg-amber-950/50 text-amber-200' : 'border-emerald-700 bg-emerald-950/50 text-emerald-200'}`}>{selectedHost?.stale ? '心跳过期' : '心跳正常'}</span>
+            <span className={`rounded-full border px-2.5 py-1 ${snapshot?.agent_ready ? 'border-sky-700 bg-sky-950/50 text-sky-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{snapshot?.agent_ready ? 'Watcher 已注册' : 'Watcher 未注册'}</span>
+            <span className={`rounded-full border px-2.5 py-1 ${runtimeReady ? 'border-emerald-700 bg-emerald-950/50 text-emerald-200' : snapshot?.runtime_status?.control_api === 'unsupported' ? 'border-amber-700 bg-amber-950/50 text-amber-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{runtimeReady ? 'Runman 防火墙接口可用' : snapshot?.runtime_status?.control_api === 'unsupported' ? '需更新 Runman' : snapshot?.runtime_status?.control_api === 'unavailable' ? 'Runman 接口不可用' : '等待能力上报'}</span>
+            {snapshot && <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-slate-300">策略版本 #{snapshot.revision}</span>}
+            {snapshot?.live_readback && <span className={`rounded-full border px-2.5 py-1 ${snapshot.live_readback.status === 'ready' && !snapshot.live_readback.stale ? snapshot.live_readback.sync_status === 'drifted' ? 'border-rose-800 bg-rose-950/50 text-rose-200' : 'border-emerald-800 bg-emerald-950/50 text-emerald-200' : 'border-amber-800 bg-amber-950/50 text-amber-200'}`}>{readbackStatusLabel[snapshot.live_readback.status]} · {syncStatusLabel[snapshot.live_readback.sync_status || 'unknown']}</span>}
+          </div>
+        </details>
         {selectedHost?.stale && <p className="mt-3 text-xs leading-5 text-amber-200">母机当前离线。可以保存期望配置，Agent 恢复连接后会自动执行。</p>}
-      {snapshot?.agent_ready && !runtimeReady && <p className="mt-3 text-xs leading-5 text-amber-200">该节点尚未确认支持 firewall.sock；请更新并重启 Runman Agent，节点恢复上报后会自动补发全局期望策略。</p>}
-      {fleetAuthoritative && <p className="mt-3 text-xs leading-5 text-sky-200">全局模板版本 #{fleetSnapshot?.revision} 已启用并作为统一期望策略；此处单机编辑已锁定。请在下方编辑并同步全局模板。</p>}
-      {!fleetSnapshot && <p className="mt-3 text-xs leading-5 text-slate-400">正在确认全局策略状态；读取完成前暂不开放单机下发。</p>}
+        {snapshot?.agent_ready && !runtimeReady && <p className="mt-3 text-xs leading-5 text-amber-200">该节点尚未确认支持 firewall.sock；请更新并重启 Runman Agent，节点恢复上报后会自动补发全局期望策略。</p>}
+        {fleetAuthoritative && <p className="mt-3 text-xs leading-5 text-sky-200">全局模板版本 #{fleetSnapshot?.revision} 已启用并作为统一期望策略；此处单机编辑已锁定。请在下方编辑并同步全局模板。</p>}
+        {!fleetSnapshot && <p className="mt-3 text-xs leading-5 text-slate-400">正在确认全局策略状态；读取完成前暂不开放单机下发。</p>}
       </div>
 
       <div className="rounded-2xl border border-amber-800/60 bg-amber-950/20 p-4">
@@ -569,6 +579,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           {([
             ['attention', `需关注 ${fleetAttentionCount}`], ['all', `全部 ${fleetHosts.length}`],
             ['online', `在线 ${fleetSnapshot?.counts.online ?? 0}`], ['offline', `离线 ${Math.max(0, fleetHosts.length - (fleetSnapshot?.counts.online ?? 0))}`],
+            ['interfaces', `网卡待处理 ${fleetInterfaceIssueCount}`], ['drifted', `策略偏差 ${fleetDriftedCount}`],
           ] as const).map(([key, label]) => <button key={key} type="button" onClick={() => setFleetHostFilter(key)} aria-pressed={fleetHostFilter === key} className={`min-h-9 rounded-lg border px-3 text-[11px] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 ${fleetHostFilter === key ? 'border-sky-700 bg-sky-950/60 text-sky-100' : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'}`}>{label}</button>)}
         </div>
         {filteredFleetHosts.length ? <div className="mt-3 space-y-1.5">
