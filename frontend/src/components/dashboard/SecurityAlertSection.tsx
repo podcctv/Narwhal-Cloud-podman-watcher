@@ -16,31 +16,7 @@ import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { SocksPasswordReview } from '../alerts/SocksPasswordReview';
 import { UserNoticeAction } from '../alerts/UserNoticeAction';
-
-const PROTECTION_ONLY_ALERT_TYPES = new Set([
-  'container_connection_count', 'inbound_ip_fanout', 'socks_inbound_fanout',
-  'inbound_source_blocked', 'tcp_concurrency_limited', 'admission_unverified',
-  'ddos_bandwidth', 'ddos_packets', 'ddos_syn', 'cc_total_rps', 'cc_single_ip',
-  'cc_4xx_ratio', 'http_5xx_ratio', 'http_abuse', 'web_scan', 'port_scan',
-  'outbound_fanout', 'outbound_sensitive_ports', 'outbound_bandwidth_abuse',
-  'outbound_packet_abuse', 'outbound_connection_churn', 'outbound_connection_failures',
-  'udp_outbound_flood', 'hy2_high_concurrency', 'hy2_abnormal_throttle',
-  'traffic_imbalance', 'ops_policy_signal', 'ops_bandwidth_saturation',
-  'ops_baseline_anomaly', 'ops_connection_guard',
-]);
-
-const hasVerifiedUserAttribution = (alert: SecurityAlert): boolean => {
-  const details = alert.details || {};
-  const attribution = details.user_attribution || details.observation?.user_attribution;
-  return attribution?.verified === true
-    && ['application_auth_log', 'proxy_auth_log'].includes(attribution?.source)
-    && Boolean(attribution?.user_id || attribution?.account_id);
-};
-
-const isProtectionOnlySignal = (alert: SecurityAlert): boolean =>
-  typeof alert.protection_only === 'boolean'
-    ? alert.protection_only
-    : PROTECTION_ONLY_ALERT_TYPES.has(alert.type) && !hasVerifiedUserAttribution(alert);
+import { isProtectionOnlySignal } from '../alerts/protectionSignals';
 
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
@@ -253,7 +229,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     <p className="mt-1">
                       {admissionUnverified
                         ? '采样或规则校验未通过，当前不能确认防护是否生效；这不代表已确认攻击，也不归因为用户行为。'
-                        : '当前数据只反映连接、流量或访问特征，尚未通过应用/代理认证日志关联到具体用户；不计为用户滥用或违规，也不会据此通知或处罚用户。系统仅按独立保护策略处理。'}
+                        : '当前数据只反映连接、流量或访问特征，尚未通过应用/代理认证日志关联到具体用户；不作为用户滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。'}
                     </p>
                     {deepEvidence ? (
                       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-sky-900/70 pt-2 text-slate-300 tabular-nums">

@@ -8,12 +8,14 @@ import {
   Clock,
   ArrowRight,
   Network,
+  ShieldCheck,
 } from 'lucide-react';
 import { SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 import { SocksPasswordReview } from './SocksPasswordReview';
 import { UserNoticeAction } from './UserNoticeAction';
+import { isProtectionOnlySignal } from './protectionSignals';
 
 const elapsed = (seconds: number): string => {
   const units: [number, string][] = [[86400, '天'], [3600, '小时'], [60, '分钟'], [1, '秒']];
@@ -295,6 +297,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
         ) : (
           items.map((alert) => {
             const isHistorical = alert.status !== 'active';
+            const protectionOnly = isProtectionOnlySignal(alert);
             const canRemediate = hasActionEvidence(alert);
             const attribution = alert.deep_evidence?.connection_attribution;
             const inboundEvidence = alert.deep_evidence?.inbound_ips ||
@@ -312,6 +315,12 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                       <span className="font-bold text-sm text-slate-100">
                         {alert.title || alert.type}
                       </span>
+                      {protectionOnly && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 bg-sky-950/50 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
+                          <ShieldCheck className="h-3 w-3" />
+                          保护类 · 不计用户滥用
+                        </span>
+                      )}
                       <span className="rounded-md bg-slate-800 px-2 py-0.5 font-mono text-xs text-slate-400">
                         {alert.host_id}
                       </span>
@@ -331,8 +340,19 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                     <p className="text-xs text-slate-300 leading-relaxed">
                       {alert.message}
                     </p>
+                    {protectionOnly && (
+                      <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2 text-[11px] leading-relaxed text-slate-300">
+                        <div className="flex items-center gap-1.5 font-semibold text-sky-200">
+                          <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                          仅作为网络保护记录
+                        </div>
+                        <p className="mt-1">
+                          连接、来源 IP 或流量特征不能单独证明用户身份或违规意图；此记录不计入用户异常统计，也不作为滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。
+                        </p>
+                      </div>
+                    )}
                     <SocksPasswordReview alert={alert} onRefresh={() => loadData(true)} onToast={onToast} />
-                    <UserNoticeAction alertId={alert.id} onToast={onToast} />
+                    {!protectionOnly && <UserNoticeAction alertId={alert.id} onToast={onToast} />}
                   </div>
 
                   <span className="text-xs text-slate-500 tabular-nums shrink-0">
