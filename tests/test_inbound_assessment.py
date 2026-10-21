@@ -34,7 +34,7 @@ def signal(ip, *, ports, established=0, unreplied=0, pending=0, replies=0):
 
 
 class InboundAssessmentTests(unittest.TestCase):
-    def test_repeated_bidirectional_listener_traffic_is_likely_service_activity_not_identity(self):
+    def test_repeated_established_listener_transport_does_not_claim_business_or_identity(self):
         rows = [
             report(1000, signals=[signal("8.8.8.8", ports=[443], established=2, replies=5)]),
             report(1040, signals=[signal("8.8.8.8", ports=[443], established=3, replies=8)]),
@@ -44,9 +44,11 @@ class InboundAssessmentTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "available")
         assessment = result["assessments"][0]
-        self.assertEqual(assessment["classification"], "repeated_bidirectional_service_port_activity")
+        self.assertEqual(assessment["classification"], "repeated_established_listener_transport")
         self.assertEqual(assessment["service_ports"], [443])
         self.assertFalse(assessment["identity_confirmed"])
+        self.assertFalse(result["customer_notice_allowed"])
+        self.assertEqual(result["customer_attribution_status"], "not_verified")
         self.assertTrue(result["requires_application_auth_logs"])
 
     def test_repeated_incomplete_multiport_probe_is_separate_from_service_traffic(self):
@@ -72,7 +74,7 @@ class InboundAssessmentTests(unittest.TestCase):
 
         self.assertEqual(
             result["assessments"][0]["classification"],
-            "mixed_repeated_service_and_probe_clues",
+            "mixed_repeated_listener_transport_and_probe_clues",
         )
         self.assertEqual(result["assessments"][0]["confidence"], "moderate")
 

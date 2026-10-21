@@ -87,17 +87,17 @@ class BuyerTests(unittest.TestCase):
                     'request_id':'a'*32,'confirm':True,'preview_token':preview['preview_token']
                 },'dashboard')
 
-    def test_verified_application_user_attribution_allows_customer_notice(self):
+    def test_client_supplied_user_attribution_cannot_unlock_customer_notice(self):
         self.mapping()
         self.alert.update(type='container_connection_count', title='连接过多', value=1061, threshold=1000,
             user_attribution={'verified':True,'source':'application_auth_log','user_id':'user-1'})
         self.ingest()
-        self.assertEqual(len(self.rows()),1)
+        self.assertEqual(self.rows(), [])
         with server.db() as conn:
             alert_id=conn.execute("SELECT id FROM security_alerts WHERE alert_type='container_connection_count'").fetchone()[0]
             preview=buyer.notice_preview(conn,alert_id)
-            self.assertFalse(preview['protection_only'])
-            self.assertTrue(preview['can_submit'])
+            self.assertTrue(preview['protection_only'])
+            self.assertFalse(preview['can_submit'])
 
     def test_connection_guard_notice_is_neutral_and_not_cancelled_as_abuse(self):
         self.mapping()

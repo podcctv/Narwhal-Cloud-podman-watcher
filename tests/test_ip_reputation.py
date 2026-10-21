@@ -180,8 +180,9 @@ class IPReputationTests(unittest.TestCase):
 
     def test_provider_http_errors_are_actionable_without_exposing_response_body(self):
         for status, retryable, expected_message in (
-            (403, False, "Key 无效或已撤销"),
-            (429, False, "额度已用完"),
+            (401, False, "Key 无效或已撤销"),
+            (403, False, "Key 权限"),
+            (429, False, "限流或账号额度不足"),
             (503, True, "暂时不可用"),
         ):
             with self.subTest(status=status):
@@ -205,6 +206,11 @@ class IPReputationTests(unittest.TestCase):
                 self.assertEqual(result["retry_after_seconds"], 120)
                 self.assertIn(expected_message, result["message"])
                 self.assertNotIn("private upstream body", json.dumps(result))
+
+    def test_http_date_retry_after_is_reported_as_seconds(self):
+        retry_at = "Thu, 01 Jan 1970 00:20:00 GMT"
+        result = ip_reputation._provider_error("8.8.8.8", 1000, 429, "rate limited", retry_at)
+        self.assertEqual(result["retry_after_seconds"], 200)
 
     def test_local_daily_guard_stops_before_provider_quota(self):
         self.conn.execute(
@@ -278,10 +284,20 @@ class IPReputationTests(unittest.TestCase):
                 self.assertFalse(tested.json()["cached"])
                 self.assertNotIn(self.key, tested.text)
                 query.assert_called_once()
+                settings = client.get("/api/v1/ip-reputation/settings")
+                last_check = settings.json()["last_check"]
+                self.assertEqual(last_check["status"], "checked")
+                self.assertGreater(last_check["checked_at"], 0)
+                self.assertNotIn('"ip"', settings.text)
+                rotated_key = self.key + "-rotated"
+                rotated = client.post("/api/v1/ip-reputation/settings", json={"api_key": rotated_key})
+                self.assertEqual(rotated.status_code, 200)
+                self.assertIsNone(client.get("/api/v1/ip-reputation/settings").json()["last_check"])
                 connection = sqlite3.connect(path)
                 stored = connection.execute("SELECT encrypted_api_key FROM ip_reputation_settings WHERE id=1").fetchone()[0]
                 connection.close()
-                self.assertNotIn(self.key, stored)
+                self.assertNotIn(rotated_key, stored)
+                self.assertEqual(self.fernet.decrypt(stored.encode()).decode(), rotated_key)
                 self.assertEqual(client.post("/api/v1/ip-reputation/check", json={"ip": "10.0.0.1"}).status_code, 400)
             finally:
                 client.close()

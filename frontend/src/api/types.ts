@@ -494,6 +494,13 @@ export interface IPReputationSettings {
   provider: 'AbuseIPDB' | string;
   configured: boolean;
   updated_at: number;
+  last_check?: {
+    status: 'checked' | 'error' | string;
+    checked_at: number;
+    provider_status?: number;
+    retry_after_seconds?: number;
+    message?: string;
+  } | null;
 }
 
 export interface IPReputationResult {
@@ -543,6 +550,8 @@ export interface DiagnosticData {
   } | null;
   sample?: {
     report_timestamp_utc8?: string;
+    report_timestamp?: number;
+    sampled_at?: number;
     network_rates?: {
       rx_bps?: number;
       tx_bps?: number;
@@ -580,6 +589,8 @@ export interface DiagnosticData {
       minimum_repeat_samples?: number;
       minimum_repeat_span_seconds?: number;
       identity_confirmed?: boolean;
+      customer_attribution_status?: 'not_verified' | string;
+      customer_notice_allowed?: boolean;
       requires_application_auth_logs?: boolean;
       assessments?: {
         ip: string;
@@ -587,6 +598,7 @@ export interface DiagnosticData {
         confidence?: 'low' | 'moderate' | string;
         sample_count?: number;
         sample_span_seconds?: number;
+        listener_transport_samples?: number;
         service_activity_samples?: number;
         probe_clue_samples?: number;
         service_ports?: number[];

@@ -89,7 +89,12 @@ def config(conn):
 
 
 def is_protection_only_alert(alert):
-    """Network/traffic metrics are not customer misconduct without auth-log attribution."""
+    """Network/traffic alerts remain protection-only until evidence is server-verified.
+
+    A node report's ``user_attribution`` JSON is not an independent auth-log
+    proof. A future attribution integration must validate and persist evidence
+    server-side before it can lift this gate.
+    """
     try:
         kind = str(alert["alert_type"] or "")
         details_json = alert["details_json"]
@@ -98,16 +103,9 @@ def is_protection_only_alert(alert):
         details_json = alert.get("details_json", "") if isinstance(alert, dict) else ""
     if kind not in PROTECTION_ONLY_ALERT_TYPES:
         return False
-    details = buyer_content.loads(details_json)
-    observation = details.get("observation") if isinstance(details.get("observation"), dict) else {}
-    attribution = details.get("user_attribution") or observation.get("user_attribution")
-    if not isinstance(attribution, dict):
-        return True
-    return not (
-        attribution.get("verified") is True
-        and attribution.get("source") in {"application_auth_log", "proxy_auth_log"}
-        and bool(attribution.get("user_id") or attribution.get("account_id"))
-    )
+    # Never trust client/node-supplied flags such as verified=true. The current
+    # product has no server-side application-auth-log correlation store yet.
+    return True
 
 
 def valid_uuid(value):

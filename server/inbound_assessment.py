@@ -100,7 +100,10 @@ def assess(rows: Iterable[Any], *, now: int, lookback_seconds: int = LOOKBACK_SE
             except (TypeError, ValueError, OverflowError):
                 continue
             incomplete = unreplied + pending
-            service_activity = established > 0 and reply_packets > 0 and bool(service_ports)
+            # An established flow with replies only proves transport-layer
+            # acceptance/response. It does not prove application payload,
+            # legitimate business use, or the identity behind the source IP.
+            listener_transport = established > 0 and reply_packets > 0 and bool(service_ports)
             multiport_probe = (
                 len(non_listener_ports) >= 3
                 and incomplete >= 3
@@ -108,7 +111,7 @@ def assess(rows: Iterable[Any], *, now: int, lookback_seconds: int = LOOKBACK_SE
             )
             source_samples[ip].append({
                 "sampled_at": sampled_at,
-                "service_activity": service_activity,
+                "listener_transport": listener_transport,
                 "multiport_probe": multiport_probe,
                 "service_ports": sorted(service_ports),
                 "non_listener_ports": sorted(non_listener_ports),
@@ -123,29 +126,31 @@ def assess(rows: Iterable[Any], *, now: int, lookback_seconds: int = LOOKBACK_SE
         # source/sample in case an agent ever emits duplicate source records.
         by_time = {int(item["sampled_at"]): item for item in observations}
         observations = [by_time[key] for key in sorted(by_time)]
-        service_observations = [item for item in observations if item["service_activity"]]
+        listener_transport_observations = [item for item in observations if item["listener_transport"]]
         probe_observations = [item for item in observations if item["multiport_probe"]]
         span = observations[-1]["sampled_at"] - observations[0]["sampled_at"] if len(observations) > 1 else 0
         repeated = len(observations) >= MIN_REPEAT_SAMPLES and span >= MIN_REPEAT_SPAN_SECONDS
-        repeated_service = repeated and len(service_observations) >= MIN_REPEAT_SAMPLES
+        repeated_listener_transport = repeated and len(listener_transport_observations) >= MIN_REPEAT_SAMPLES
         repeated_probe = repeated and len(probe_observations) >= MIN_REPEAT_SAMPLES
-        if repeated and service_observations and probe_observations:
-            classification = "mixed_repeated_service_and_probe_clues"
-        elif repeated_service:
-            classification = "repeated_bidirectional_service_port_activity"
+        if repeated and listener_transport_observations and probe_observations:
+            classification = "mixed_repeated_listener_transport_and_probe_clues"
+        elif repeated_listener_transport:
+            classification = "repeated_established_listener_transport"
         elif repeated_probe:
             classification = "repeated_uncompleted_multiport_probe"
-        elif service_observations and probe_observations:
+        elif listener_transport_observations and probe_observations:
             classification = "mixed_single_sample_clues"
         else:
             classification = "insufficient_evidence"
         assessments.append({
             "ip": ip,
             "classification": classification,
-            "confidence": "moderate" if repeated_service or repeated_probe or classification == "mixed_repeated_service_and_probe_clues" else "low",
+            "confidence": "moderate" if repeated_listener_transport or repeated_probe or classification == "mixed_repeated_listener_transport_and_probe_clues" else "low",
             "sample_count": len(observations),
             "sample_span_seconds": max(0, span),
-            "service_activity_samples": len(service_observations),
+            "listener_transport_samples": len(listener_transport_observations),
+            # Keep this legacy alias while older clients are still in service.
+            "service_activity_samples": len(listener_transport_observations),
             "probe_clue_samples": len(probe_observations),
             "service_ports": sorted({port for item in observations for port in item["service_ports"]})[:16],
             "non_listener_ports": sorted({port for item in observations for port in item["non_listener_ports"]})[:16],
@@ -157,7 +162,7 @@ def assess(rows: Iterable[Any], *, now: int, lookback_seconds: int = LOOKBACK_SE
     assessments.sort(
         key=lambda item: (
             item["classification"] != "repeated_uncompleted_multiport_probe",
-            item["classification"] != "mixed_repeated_service_and_probe_clues",
+            item["classification"] != "mixed_repeated_listener_transport_and_probe_clues",
             item["sample_count"],
         ),
         reverse=False,
@@ -179,5 +184,7 @@ def assess(rows: Iterable[Any], *, now: int, lookback_seconds: int = LOOKBACK_SE
         "minimum_repeat_span_seconds": MIN_REPEAT_SPAN_SECONDS,
         "assessments": assessments,
         "identity_confirmed": False,
+        "customer_attribution_status": "not_verified",
+        "customer_notice_allowed": False,
         "requires_application_auth_logs": True,
     }

@@ -108,20 +108,20 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     (inboundSourceHistory?.assessments || []).map((item) => [item.ip, item]),
   );
   const inboundBehaviorLabels: Record<string, { label: string; className: string; detail: string }> = {
-    repeated_bidirectional_service_port_activity: {
-      label: '多次连接到已监听服务端口',
+    repeated_established_listener_transport: {
+      label: '重复连接到已监听端口',
       className: 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200',
-      detail: '近几次采样都观察到该 IP 连接容器正在监听的端口，且有双向 TCP 数据；这更像服务使用，但不能确认访问者身份。',
+      detail: '近几次采样都观察到该 IP 与容器监听端口建立 TCP 连接并收到回包。它只证明传输层连接被接受；扫描器也能完成握手，不能证明有正常业务数据或确认用户身份。',
     },
     repeated_uncompleted_multiport_probe: {
       label: '重复探测多个非监听端口',
       className: 'border-amber-500/30 bg-amber-950/30 text-amber-200',
       detail: '同一 IP 在多次采样中访问多个没有本地监听服务的端口，且多数连接未完成；这是较强的扫描行为线索，不等于已证明恶意。',
     },
-    mixed_repeated_service_and_probe_clues: {
-      label: '服务访问与探测线索并存',
+    mixed_repeated_listener_transport_and_probe_clues: {
+      label: '监听端口连接与多端口探测线索并存',
       className: 'border-amber-500/30 bg-amber-950/30 text-amber-200',
-      detail: '该 IP 既出现已监听端口的双向通信，也出现多端口未完成连接；可能是混合行为，需结合服务日志核实。',
+      detail: '该 IP 既出现监听端口的已建立连接，也出现多端口未完成连接；这些只是传输层线索，不能据此确认业务、恶意意图或客户身份。',
     },
     mixed_single_sample_clues: {
       label: '单次快照线索混合',
@@ -136,13 +136,13 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   };
   const inboundBehaviorCounts = (inboundSourceHistory?.assessments || []).reduce(
     (counts, item) => {
-      if (item.classification === 'repeated_bidirectional_service_port_activity') counts.service += 1;
+      if (item.classification === 'repeated_established_listener_transport') counts.listener += 1;
       else if (item.classification === 'repeated_uncompleted_multiport_probe') counts.probe += 1;
       else if (item.classification?.startsWith('mixed_')) counts.mixed += 1;
       else counts.unknown += 1;
       return counts;
     },
-    { service: 0, probe: 0, mixed: 0, unknown: 0 },
+    { listener: 0, probe: 0, mixed: 0, unknown: 0 },
   );
   const automaticReputationCandidates = useMemo(() => {
     const candidates = sample?.inbound_ips?.length
@@ -173,9 +173,18 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     identity.container_name,
     diagnosticSnapshotId,
   ].join(':');
+  const sampleTimestamp = Number(sample?.sampled_at || sample?.report_timestamp || 0);
+  const sampleAgeSeconds = sampleTimestamp > 0
+    ? Math.floor(Date.now() / 1000) - sampleTimestamp
+    : Number.POSITIVE_INFINITY;
+  const reputationSampleFresh = sampleAgeSeconds >= -60 && sampleAgeSeconds <= 24 * 60 * 60;
 
   React.useEffect(() => {
-    if (!reputationConfigured || isStale || action?.status !== 'succeeded' || !sample || !diagnosticSnapshotId) return;
+    // Alert-driven deep samples have a non-zero alert_id, so the manual-action
+    // status endpoint can return action=null while a valid sample is available.
+    // Pending/failed manual actions still suppress old data.
+    const sampleIsComplete = !action || action.status === 'succeeded';
+    if (!reputationConfigured || isStale || !sampleIsComplete || !reputationSampleFresh || !sample || !diagnosticSnapshotId) return;
     let active = true;
     const checkTopInboundIps = async () => {
       for (const ip of automaticReputationCandidates) {
@@ -196,7 +205,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     };
     void checkTopInboundIps();
     return () => { active = false; };
-  }, [action?.status, automaticReputationCandidates, checkReputation, diagnosticSnapshotId, isStale, reputationConfigured, reputationLookupScope, sample]);
+  }, [action, automaticReputationCandidates, checkReputation, diagnosticSnapshotId, isStale, reputationConfigured, reputationLookupScope, reputationSampleFresh, sample]);
   const attribution = sample?.connection_attribution;
   const connectionSockets = sample?.communication_sockets || [];
   const inboundPortEvidence = sample?.inbound_port_evidence || [];
@@ -297,8 +306,8 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
                 : reputation.classification === 'few_reports' ? `少量近期公开举报 · ${reputation.abuse_confidence_score}/100`
                   : reputation.classification === 'reports_low_confidence'
                     ? reputation.is_whitelisted === true
-                      ? '有举报记录，但被 AbuseIPDB 列入白名单 · 当前评分 0/100'
-                      : '有近期公开举报记录，但当前可信度评分为 0/100'
+                      ? '上游标记为白名单，评分 0/100；历史举报数仅作背景'
+                      : '有公开举报记录，但当前可信度评分为 0/100'
                     : '过去 90 天无公开举报（不代表安全）'
             : reputation?.status === 'not_configured' ? '尚未配置 AbuseIPDB'
               : reputation?.status === 'local_limit' ? '已达到本地查询上限'
@@ -344,7 +353,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
               <p className="mt-0.5 leading-4 opacity-90">{sourceBehaviorView.detail}</p>
               <p className="mt-1 text-[10px] opacity-80">
                 近 {Math.round((inboundSourceHistory?.lookback_seconds || 600) / 60)} 分钟 · 样本 {sourceBehavior.sample_count || 0} 次 ·
-                服务端口样本 {sourceBehavior.service_activity_samples || 0} 次 · 探测线索 {sourceBehavior.probe_clue_samples || 0} 次
+                监听端口连接样本 {sourceBehavior.listener_transport_samples ?? sourceBehavior.service_activity_samples ?? 0} 次 · 探测线索 {sourceBehavior.probe_clue_samples || 0} 次
               </p>
               {(sourceBehavior.service_ports?.length || sourceBehavior.non_listener_ports?.length || 0) > 0 && <p className="mt-1 text-[10px] opacity-80">
                 已监听端口：{sourceBehavior.service_ports?.join(', ') || '-'} · 非监听端口：{sourceBehavior.non_listener_ports?.join(', ') || '-'}
@@ -467,7 +476,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             <div className="font-semibold">近 10 分钟入站行为对照</div>
             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 tabular-nums">
               <span>有效 conntrack 采样 {inboundSourceHistory.conntrack_sample_count || 0} 次</span>
-              <span>服务端口活动 {inboundBehaviorCounts.service} 个 IP</span>
+              <span>监听端口连接 {inboundBehaviorCounts.listener} 个 IP</span>
               <span>重复多端口探测 {inboundBehaviorCounts.probe} 个 IP</span>
               <span>混合线索 {inboundBehaviorCounts.mixed} 个 IP</span>
               <span>待判断 {inboundBehaviorCounts.unknown} 个 IP</span>
@@ -479,12 +488,12 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
               {inboundSourceHistory.status === 'available'
                 ? '需至少 ' + (inboundSourceHistory.minimum_repeat_samples || 2) + ' 次、跨 ' + (inboundSourceHistory.minimum_repeat_span_seconds || 15) + ' 秒的采样，才会标记重复行为。'
                 : '有效历史采样不足，系统会保留“证据不足”，不会把多 IP 数量当成扫描或客户违规。'}
-              {' '}即使反复连接服务端口，也不能单靠网络元数据确认客户身份；需把服务端认证/访问日志按 IP 和时间关联。AbuseIPDB 只代表外部历史举报信号。
+              {' '}重复连接到监听端口只代表传输层连接被接受；不能证明正常业务、恶意意图或客户身份。除非服务认证日志经主控端核实，否则告警仅用于防护，不发给客户。AbuseIPDB 只代表外部历史举报信号。
             </p>
           </div>}
           {reputationSettingsLoaded && <div aria-live="polite" className={`rounded-lg border p-2.5 text-xs leading-5 ${reputationConfigured ? 'border-sky-500/25 bg-sky-950/20 text-sky-200' : 'border-amber-500/30 bg-amber-950/30 text-amber-200'}`}>
             {reputationConfigured
-              ? `AbuseIPDB 已启用：自动查询最多 5 个入站公网 IP，结果缓存 24 小时；每日查询保护上限 900 次。信誉分只作提醒，不会自动封禁。${checkingReputation ? ` 正在查询 ${checkingReputation}…` : ''}`
+              ? `AbuseIPDB 已启用：打开诊断面板并取得有效深度快照后，自动查询最多 5 个入站公网 IP；不是逐连接或后台持续扫描。结果缓存 24 小时，每日保护上限 900 次。信誉分只作提醒，不会自动封禁。${checkingReputation ? ` 正在查询 ${checkingReputation}…` : ''}`
               : 'AbuseIPDB 尚未配置 API Key；请到“系统设置 → 入站 IP 信誉查询”加密保存后，深度快照才会自动检查前 5 个入站公网 IP。'}
           </div>}
           {highlyReportedInboundIps.length > 0 && <div role="alert" className="rounded-lg border border-red-500/40 bg-red-950/30 p-3 text-xs leading-5 text-red-200">

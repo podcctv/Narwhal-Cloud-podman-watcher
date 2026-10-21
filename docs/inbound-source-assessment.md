@@ -7,26 +7,30 @@ action. It does not modify the five-source admission policy.
 
 ## Evidence labels
 
-- **Repeated bidirectional service-port activity**: the same public source IP
+- **Repeated established listener transport**: the same public source IP
   appears in at least two conntrack observations at least 15 seconds apart,
   with established TCP flows, reply packets, and a destination port that the
-  container reports as listening.
+  container reports as listening. This proves only that a transport connection
+  reached a listener and received a response; scanners can complete handshakes,
+  and packet counters do not prove application payload or legitimate business.
 - **Repeated uncompleted multiport probe**: in at least two observations at
   least 15 seconds apart, the same source touches three or more container
   ports without a listening socket, and incomplete/unreplied TCP flows are at
   least three and at least twice the established-flow count.
-- **Mixed clues**: both service-port and multiport-probe evidence are seen in
-  the same history window.
+- **Mixed clues**: both listener-transport and multiport-probe evidence are
+  seen in the same history window.
 - Otherwise the result is **insufficient evidence**. Missing or unavailable
   conntrack evidence is never counted as a clean/benign observation.
 
 These labels describe transport behaviour, not user identity or malicious
 intent. A port scanner can complete TCP handshakes; a legitimate client can
-have failed or incomplete connections. Confirming the client's account/user
-requires the service's own authentication or access logs correlated by source
-IP, destination port, and time. AbuseIPDB's score is a separate historical
-community-report signal and does not change the behaviour label or trigger
-blocking.
+have failed or incomplete connections. Until the server independently
+validates application-authentication evidence, every network-only alert stays
+protection-only and cannot trigger a buyer/customer notice. Confirming the
+client's account/user requires the service's own authentication or access logs
+correlated by source IP, destination port, and time. AbuseIPDB's score is a
+separate historical community-report signal and does not change the behaviour
+label, establish responsibility, or trigger blocking.
 
 The kernel exposes original/reply conntrack tuples and optional per-flow
 packet/byte counters; per-flow accounting is disabled by default on Linux, so

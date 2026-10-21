@@ -18,7 +18,7 @@ import {
   Info,
 } from 'lucide-react';
 import { api } from '../../api/client';
-import { IPReputationResult, NotificationBot, PushSettingsResponse, PushSettingsPayload } from '../../api/types';
+import { IPReputationResult, IPReputationSettings, NotificationBot, PushSettingsResponse, PushSettingsPayload } from '../../api/types';
 import { ToastMessage } from '../common/Toast';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { BuyerNotificationsView } from './BuyerNotificationsView';
@@ -35,6 +35,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   const [showApiKey, setShowApiKey] = useState(false);
   const [pushSettings, setPushSettings] = useState<PushSettingsResponse | null>(null);
   const [ipReputationConfigured, setIpReputationConfigured] = useState(false);
+  const [ipReputationSettings, setIpReputationSettings] = useState<IPReputationSettings | null>(null);
   const [ipReputationKey, setIpReputationKey] = useState('');
   const [savingIpReputationKey, setSavingIpReputationKey] = useState(false);
   const [testingIpReputation, setTestingIpReputation] = useState(false);
@@ -92,6 +93,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       setProxyConfigured(Boolean(botData.proxy_configured));
       setProxyScheme(botData.proxy_scheme || '');
       setIpReputationConfigured(Boolean(ipReputationData.configured));
+      setIpReputationSettings(ipReputationData);
     } catch (err: any) {
       onToast('error', `加载设置失败：${err.message || err}`);
     } finally {
@@ -179,6 +181,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       setIpReputationTestResult(result);
       onToast('error', `Key 已保存，但验证请求失败：${result.message}`);
     } finally {
+      try {
+        const settings = await api.getIPReputationSettings();
+        setIpReputationConfigured(Boolean(settings.configured));
+        setIpReputationSettings(settings);
+      } catch {
+        // Keep the actual test result visible even if the follow-up status read fails.
+      }
       setTestingIpReputation(false);
     }
   };
@@ -191,6 +200,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       const result = await api.saveIPReputationKey(ipReputationKey.trim());
       setIpReputationKey('');
       setIpReputationConfigured(true);
+      setIpReputationSettings(current => current ? { ...current, last_check: null } : current);
       setIpReputationTestResult(null);
       onToast('info', result.message || 'AbuseIPDB API Key 已加密保存，正在验证上游连通性');
       await testSavedIpReputation();
@@ -233,6 +243,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       setSavingBot(false);
     }
   };
+
+  const reputationLastCheck = ipReputationSettings?.last_check;
+  const reputationStatusLabel = !ipReputationConfigured
+    ? '尚未配置'
+    : !reputationLastCheck
+      ? '已配置 · 尚未验证'
+      : reputationLastCheck.status === 'checked'
+        ? '上游最近查询成功'
+        : '上游最近查询失败';
+  const reputationStatusClass = !ipReputationConfigured || (reputationLastCheck && reputationLastCheck.status !== 'checked')
+    ? 'border-amber-500/30 bg-amber-950/30 text-amber-200'
+    : reputationLastCheck
+      ? 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200'
+      : 'border-slate-700 bg-slate-900 text-slate-300';
+  const reputationCheckedAt = reputationLastCheck?.checked_at
+    ? new Date(reputationLastCheck.checked_at * 1000).toLocaleString('zh-CN', { hour12: false })
+    : '';
 
   return (
     <div className="space-y-6">
@@ -300,12 +327,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
             <div className="flex flex-wrap items-center gap-2">
               <Globe className="h-5 w-5 text-sky-400" />
               <h3 id="ip-reputation-heading" className="font-semibold text-slate-100">入站 IP 信誉查询</h3>
-              <span className={ipReputationConfigured ? 'rounded-full border border-emerald-500/30 bg-emerald-950/30 px-2 py-1 text-xs text-emerald-300' : 'rounded-full border border-amber-500/30 bg-amber-950/30 px-2 py-1 text-xs text-amber-300'}>
-                {ipReputationConfigured ? 'AbuseIPDB 已配置' : '尚未配置'}
+              <span className={`rounded-full border px-2 py-1 text-xs ${reputationStatusClass}`}>
+                {reputationStatusLabel}
               </span>
             </div>
             <p className="mt-2 text-sm leading-6 text-slate-400">
-              保存密钥后，容器深度快照完成时会自动查询连接数最多的前 5 个入站公网 IP；也可在快照中逐个补查。只向 AbuseIPDB 提交 IP，不发送主机或容器信息。
+              这不是逐条连接或全站后台扫描：打开容器诊断并取得有效深度快照后，页面自动查询入站连接数最多的前 5 个公网 IP；也可在快照中逐个补查。只向 AbuseIPDB 提交 IP，不发送主机或容器信息。
+            </p>
+            <p aria-live="polite" className={`mt-2 rounded-lg border px-3 py-2 text-xs leading-5 ${reputationStatusClass}`}>
+              {!ipReputationConfigured
+                ? '尚未保存 API Key。'
+                : !reputationLastCheck
+                  ? 'Key 已保存，但还没有用当前 Key 完成上游验证；点击“测试连通性”进行一次真实查询。'
+                  : reputationLastCheck.status === 'checked'
+                    ? `最近一次上游查询成功${reputationCheckedAt ? ` · ${reputationCheckedAt}` : ''}。即使举报数和评分为 0，也表示 API 有正常返回。`
+                    : `最近一次上游查询失败${reputationCheckedAt ? ` · ${reputationCheckedAt}` : ''}：${reputationLastCheck.message || '请检查 Key、权限、额度或主控网络。'}${reputationLastCheck.provider_status ? `（HTTP ${reputationLastCheck.provider_status}${reputationLastCheck.retry_after_seconds ? `，${reputationLastCheck.retry_after_seconds} 秒后可重试` : ''}）` : ''}`}
             </p>
             <p className="mt-2 text-xs leading-5 text-amber-200/90">
               命中会在深度快照中提醒，≥75 分标红；信誉分不能证明本次连接恶意或归责客户，不会自动封禁来源、停容器或处罚客户。

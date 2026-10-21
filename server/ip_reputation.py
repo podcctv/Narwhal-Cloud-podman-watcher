@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -28,6 +29,10 @@ def initialize(conn: sqlite3.Connection) -> None:
         expires_at INTEGER NOT NULL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS ip_reputation_daily_usage(
         utc_day TEXT PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS ip_reputation_health(
+        id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL,
+        checked_at INTEGER NOT NULL, provider_status INTEGER,
+        retry_after_seconds INTEGER, message TEXT NOT NULL DEFAULT '')""")
 
 
 def normalize_public_ip(value: object) -> str:
@@ -41,10 +46,14 @@ def normalize_public_ip(value: object) -> str:
 
 
 def _api_error(status: int) -> str:
-    if status in (401, 403):
+    if status == 401:
         return "AbuseIPDB Key 无效或已撤销，请在系统设置中更换"
+    if status == 403:
+        return "AbuseIPDB 拒绝了请求；请检查 Key 权限、账号方案或 API 访问限制"
     if status == 429:
-        return "AbuseIPDB 今日 API 额度已用完，请稍后再试"
+        return "AbuseIPDB 请求被限流或账号额度不足，请检查上游配额后重试"
+    if status in (408, 425):
+        return "AbuseIPDB 请求暂时未完成，请稍后重试"
     if status >= 500:
         return "AbuseIPDB 暂时不可用"
     return "AbuseIPDB 查询失败"
@@ -61,12 +70,19 @@ def _provider_error(ip: str, now: int, status: int | None, message: str, retry_a
     }
     if status is not None:
         result["provider_status"] = status
+    delay = None
     try:
         delay = int(str(retry_after).strip())
-        if 0 <= delay <= 86_400:
-            result["retry_after_seconds"] = delay
     except (TypeError, ValueError, OverflowError):
-        pass
+        try:
+            retry_at = parsedate_to_datetime(str(retry_after).strip())
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = int(retry_at.timestamp()) - now
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if delay is not None and 0 <= delay <= 86_400:
+        result["retry_after_seconds"] = delay
     return result
 
 
@@ -170,6 +186,34 @@ def _cached_result(conn: sqlite3.Connection, ip: str, now: int):
         return None
 
 
+def _last_provider_check(conn: sqlite3.Connection) -> dict | None:
+    """Return a redacted connectivity summary for the currently saved key only."""
+    row = conn.execute(
+        "SELECT status,checked_at,provider_status,retry_after_seconds,message "
+        "FROM ip_reputation_health WHERE id=1"
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        status = str(row["status"] or "")
+        checked_at = int(row["checked_at"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    if status not in {"checked", "error"}:
+        return None
+    summary = {"status": status, "checked_at": checked_at}
+    provider_status = row["provider_status"]
+    if type(provider_status) is int and 100 <= provider_status <= 599:
+        summary["provider_status"] = provider_status
+    retry_after = row["retry_after_seconds"]
+    if type(retry_after) is int and 0 <= retry_after <= 86_400:
+        summary["retry_after_seconds"] = retry_after
+    if status == "error":
+        # _provider_error messages are controlled text; never expose upstream bodies.
+        summary["message"] = str(row["message"] or "AbuseIPDB 查询失败")[:240]
+    return summary
+
+
 def check_ip(
     conn: sqlite3.Connection,
     ip: str,
@@ -216,6 +260,25 @@ def check_ip(
         "INSERT OR REPLACE INTO ip_reputation_cache(ip,result_json,checked_at,expires_at) VALUES(?,?,?,?)",
         (ip, json.dumps(result, ensure_ascii=False, separators=(",", ":")), now, now + ttl),
     )
+    if result.get("status") in {"checked", "error"}:
+        # Do not let an in-flight request with an old key overwrite the health
+        # status after an administrator has rotated or removed that key.
+        try:
+            current_key = _read_key(conn, db_path, cipher_factory)
+        except HTTPException:
+            current_key = ""
+        if current_key == api_key:
+            conn.execute(
+                "INSERT OR REPLACE INTO ip_reputation_health "
+                "(id,status,checked_at,provider_status,retry_after_seconds,message) VALUES(1,?,?,?,?,?)",
+                (
+                    result["status"],
+                    now,
+                    result.get("provider_status"),
+                    result.get("retry_after_seconds"),
+                    str(result.get("message") or "")[:240],
+                ),
+            )
     conn.commit()
     result["cached"] = False
     return result
@@ -227,7 +290,14 @@ def attach(app, db, db_path, cipher_factory) -> None:
         conn = db()
         try:
             row = conn.execute("SELECT updated_at FROM ip_reputation_settings WHERE id=1").fetchone()
-            return JSONResponse({"provider": "AbuseIPDB", "configured": row is not None, "updated_at": int(row[0]) if row else 0})
+            updated_at = int(row[0]) if row else 0
+            last_check = _last_provider_check(conn) if row is not None else None
+            return JSONResponse({
+                "provider": "AbuseIPDB",
+                "configured": row is not None,
+                "updated_at": updated_at,
+                "last_check": last_check,
+            })
         finally:
             conn.close()
 
@@ -257,6 +327,7 @@ def attach(app, db, db_path, cipher_factory) -> None:
             conn.execute("""DELETE FROM ip_reputation_cache
                 WHERE CASE WHEN json_valid(result_json)
                     THEN json_extract(result_json, '$.status') ELSE '' END != 'checked'""")
+            conn.execute("DELETE FROM ip_reputation_health")
             conn.commit()
             return JSONResponse({"ok": True, "configured": True, "message": "AbuseIPDB Key 已加密保存；不会返回或下发到节点"})
         finally:
@@ -267,6 +338,7 @@ def attach(app, db, db_path, cipher_factory) -> None:
         conn = db()
         try:
             conn.execute("DELETE FROM ip_reputation_settings WHERE id=1")
+            conn.execute("DELETE FROM ip_reputation_health")
             conn.commit()
             return JSONResponse({"ok": True, "configured": False})
         finally:
