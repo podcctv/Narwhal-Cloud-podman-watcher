@@ -18,7 +18,7 @@ import {
   Info,
 } from 'lucide-react';
 import { api } from '../../api/client';
-import { NotificationBot, PushSettingsResponse, PushSettingsPayload } from '../../api/types';
+import { IPReputationResult, NotificationBot, PushSettingsResponse, PushSettingsPayload } from '../../api/types';
 import { ToastMessage } from '../common/Toast';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { BuyerNotificationsView } from './BuyerNotificationsView';
@@ -37,6 +37,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   const [ipReputationConfigured, setIpReputationConfigured] = useState(false);
   const [ipReputationKey, setIpReputationKey] = useState('');
   const [savingIpReputationKey, setSavingIpReputationKey] = useState(false);
+  const [testingIpReputation, setTestingIpReputation] = useState(false);
+  const [ipReputationTestResult, setIpReputationTestResult] = useState<IPReputationResult | null>(null);
 
   const [apiForm, setApiForm] = useState<PushSettingsPayload>({
     narwhal_api_url: 'https://api.fuckip.me/api/v1',
@@ -155,6 +157,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
     }
   };
 
+  const testSavedIpReputation = async () => {
+    setTestingIpReputation(true);
+    setIpReputationTestResult(null);
+    try {
+      const result = await api.testIPReputation();
+      setIpReputationTestResult(result);
+      if (result.status === 'checked') {
+        onToast('success', 'AbuseIPDB API Key 验证成功');
+      } else if (result.status === 'local_limit') {
+        onToast('info', result.message || 'Key 已保存，但本地每日查询保护上限已触发，暂时无法验证');
+      } else {
+        onToast('error', `Key 已保存，但 AbuseIPDB 验证失败：${result.message || '请检查 API Key、额度或主控网络连接'}`);
+      }
+    } catch (err: any) {
+      const result: IPReputationResult = {
+        status: 'error',
+        ip: '8.8.8.8',
+        message: err?.message || '请求失败，请检查主控 API 状态',
+      };
+      setIpReputationTestResult(result);
+      onToast('error', `Key 已保存，但验证请求失败：${result.message}`);
+    } finally {
+      setTestingIpReputation(false);
+    }
+  };
+
   const handleSaveIpReputationKey = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!ipReputationKey.trim() || savingIpReputationKey) return;
@@ -163,12 +191,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       const result = await api.saveIPReputationKey(ipReputationKey.trim());
       setIpReputationKey('');
       setIpReputationConfigured(true);
-      onToast('success', result.message || 'AbuseIPDB API Key 已安全保存');
+      setIpReputationTestResult(null);
+      onToast('info', result.message || 'AbuseIPDB API Key 已加密保存，正在验证上游连通性');
+      await testSavedIpReputation();
     } catch (err: any) {
       onToast('error', `保存 AbuseIPDB Key 失败：${err.message || err}`);
     } finally {
       setSavingIpReputationKey(false);
     }
+  };
+
+  const handleTestIpReputation = async () => {
+    if (!ipReputationConfigured || testingIpReputation) return;
+    await testSavedIpReputation();
   };
 
   // Save Telegram bot
@@ -276,7 +311,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               命中会在深度快照中提醒，≥75 分标红；信誉分不能证明本次连接恶意或归责客户，不会自动封禁来源、停容器或处罚客户。
             </p>
           </div>
-          <form onSubmit={handleSaveIpReputationKey} className="flex w-full flex-col gap-3 sm:flex-row lg:max-w-xl lg:items-end">
+          <form onSubmit={handleSaveIpReputationKey} className="flex w-full flex-col gap-3 sm:flex-row lg:max-w-2xl lg:items-end">
             <label htmlFor="abuseipdb-key" className="min-w-0 flex-1 text-xs text-slate-300">
               {ipReputationConfigured ? '输入新的 AbuseIPDB API Key 以替换' : 'AbuseIPDB API Key'}
               <input
@@ -291,11 +326,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 outline-none focus:border-sky-500"
               />
             </label>
+            <button type="button" onClick={handleTestIpReputation} disabled={!ipReputationConfigured || testingIpReputation || savingIpReputationKey} className="min-h-11 shrink-0 rounded-lg border border-sky-700/60 bg-sky-950/30 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-900/50 disabled:cursor-not-allowed disabled:opacity-50">
+              {testingIpReputation ? '测试中…' : '测试连通性'}
+            </button>
             <button type="submit" disabled={savingIpReputationKey || !ipReputationKey.trim()} className="min-h-11 shrink-0 rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
               {savingIpReputationKey ? '加密保存中…' : ipReputationConfigured ? '替换密钥' : '加密保存'}
             </button>
           </form>
         </div>
+        <p className="mt-3 text-xs leading-5 text-slate-500">
+          连通性测试会向 AbuseIPDB 发起一次真实查询，使用固定公网测试 IP 8.8.8.8，并计入当日额度；不会提交任何客户 IP、主机名或容器信息。
+        </p>
+        {ipReputationTestResult && <div role="status" className={`mt-3 rounded-lg border px-3 py-2 text-xs leading-5 ${ipReputationTestResult.status === 'checked' ? 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200' : ipReputationTestResult.status === 'local_limit' ? 'border-amber-500/30 bg-amber-950/30 text-amber-200' : 'border-rose-500/30 bg-rose-950/30 text-rose-200'}`}>
+          <strong>{ipReputationTestResult.status === 'checked' ? 'API Key 与上游连通正常' : ipReputationTestResult.status === 'local_limit' ? '本地查询额度保护已触发，尚未完成上游验证' : 'API 连通性验证失败'}</strong>
+          {ipReputationTestResult.status === 'checked'
+            ? <span> · 测试 IP {ipReputationTestResult.ip} · 评分 {ipReputationTestResult.abuse_confidence_score ?? 0}/100 · 公开举报 {ipReputationTestResult.total_reports ?? 0} 次</span>
+            : <span> · {ipReputationTestResult.message || '请检查 API Key、额度或主控网络连接。'}{ipReputationTestResult.provider_status ? `（上游 HTTP ${ipReputationTestResult.provider_status}${ipReputationTestResult.retry_after_seconds ? `，建议 ${ipReputationTestResult.retry_after_seconds} 秒后重试` : ''}）` : ''}</span>}
+        </div>}
         <p className="mt-4 border-t border-slate-800 pt-3 text-xs leading-5 text-slate-500">
           密钥加密保存在主控端数据库，不会返回前端或下发到节点；成功结果缓存 24 小时，每日最多 900 次查询以留出免费套餐余量。查询失败或额度耗尽不代表 IP 安全或恶意。
         </p>

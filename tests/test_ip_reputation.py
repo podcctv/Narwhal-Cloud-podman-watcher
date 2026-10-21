@@ -1,8 +1,11 @@
 import importlib.util
+import io
 import json
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from unittest import mock
 
@@ -60,6 +63,48 @@ class IPReputationTests(unittest.TestCase):
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
         self.assertEqual(query.call_count, 1)
+
+    def test_force_refresh_bypasses_a_valid_cache_entry(self):
+        cached = {
+            "status": "checked", "ip": "8.8.8.8", "abuse_confidence_score": 0,
+            "total_reports": 0, "classification": "no_recent_reports",
+        }
+        self.conn.execute(
+            "INSERT INTO ip_reputation_cache(ip,result_json,checked_at,expires_at) VALUES(?,?,?,?)",
+            ("8.8.8.8", json.dumps(cached), 999, 5000),
+        )
+        self.conn.commit()
+        fresh = {**cached, "abuse_confidence_score": 2, "classification": "few_reports"}
+        with mock.patch.object(ip_reputation, "_query_provider", return_value=fresh) as query:
+            result = ip_reputation.check_ip(
+                self.conn, "8.8.8.8", lambda: "/tmp/test.db", self.cipher_factory,
+                now=1000, force_refresh=True,
+            )
+        self.assertFalse(result["cached"])
+        self.assertEqual(result["abuse_confidence_score"], 2)
+        query.assert_called_once_with(self.key, "8.8.8.8", 1000)
+
+    def test_transient_provider_error_is_not_cached_and_can_be_retried(self):
+        transient = {
+            "status": "error", "ip": "8.8.8.8", "retryable": True,
+            "message": "temporary network failure",
+        }
+        recovered = {
+            "status": "checked", "ip": "8.8.8.8", "abuse_confidence_score": 0,
+            "total_reports": 0, "classification": "no_recent_reports",
+        }
+        with mock.patch.object(ip_reputation, "_query_provider", side_effect=[transient, recovered]) as query:
+            first = ip_reputation.check_ip(
+                self.conn, "8.8.8.8", lambda: "/tmp/test.db", self.cipher_factory, now=1000
+            )
+            second = ip_reputation.check_ip(
+                self.conn, "8.8.8.8", lambda: "/tmp/test.db", self.cipher_factory, now=1000
+            )
+
+        self.assertEqual(first["status"], "error")
+        self.assertEqual(second["status"], "checked")
+        self.assertFalse(second["cached"])
+        self.assertEqual(query.call_count, 2)
 
     def test_reputation_classification_is_not_a_benign_or_malicious_verdict(self):
         data = {
@@ -133,6 +178,34 @@ class IPReputationTests(unittest.TestCase):
         self.assertEqual(result["status"], "checked")
         self.assertEqual(result["abuse_confidence_score"], 82)
 
+    def test_provider_http_errors_are_actionable_without_exposing_response_body(self):
+        for status, retryable, expected_message in (
+            (403, False, "Key 无效或已撤销"),
+            (429, False, "额度已用完"),
+            (503, True, "暂时不可用"),
+        ):
+            with self.subTest(status=status):
+                headers = Message()
+                headers["Retry-After"] = "120"
+                error = urllib.error.HTTPError(
+                    ip_reputation.API_URL,
+                    status,
+                    "synthetic provider error",
+                    headers,
+                    io.BytesIO(b"private upstream body"),
+                )
+                opener = mock.MagicMock()
+                opener.open.side_effect = error
+                with mock.patch("urllib.request.build_opener", return_value=opener):
+                    result = ip_reputation._query_provider(self.key, "8.8.8.8", 1234)
+
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(result["provider_status"], status)
+                self.assertEqual(result["retryable"], retryable)
+                self.assertEqual(result["retry_after_seconds"], 120)
+                self.assertIn(expected_message, result["message"])
+                self.assertNotIn("private upstream body", json.dumps(result))
+
     def test_local_daily_guard_stops_before_provider_quota(self):
         self.conn.execute(
             "INSERT INTO ip_reputation_daily_usage(utc_day,requests) VALUES('1970-01-01',900)"
@@ -158,9 +231,27 @@ class IPReputationTests(unittest.TestCase):
             client = TestClient(app)
             try:
                 self.assertFalse(client.get("/api/v1/ip-reputation/settings").json()["configured"])
+                connection = database()
+                connection.execute(
+                    "INSERT INTO ip_reputation_cache(ip,result_json,checked_at,expires_at) VALUES(?,?,1,2000000000)",
+                    ("8.8.8.8", json.dumps({"status": "error", "message": "old key failure"})),
+                )
+                connection.execute(
+                    "INSERT INTO ip_reputation_cache(ip,result_json,checked_at,expires_at) VALUES(?,?,1,2000000000)",
+                    ("1.1.1.1", json.dumps({"status": "checked", "ip": "1.1.1.1"})),
+                )
+                connection.commit()
+                connection.close()
                 saved = client.post("/api/v1/ip-reputation/settings", json={"api_key": self.key})
                 self.assertEqual(saved.status_code, 200)
                 self.assertTrue(client.get("/api/v1/ip-reputation/settings").json()["configured"])
+                connection = database()
+                cache_statuses = {
+                    row[0]: json.loads(row[1])["status"]
+                    for row in connection.execute("SELECT ip,result_json FROM ip_reputation_cache")
+                }
+                connection.close()
+                self.assertEqual(cache_statuses, {"1.1.1.1": "checked"})
                 with mock.patch.object(ip_reputation, "_query_provider", return_value={
                     "status": "checked", "ip": "8.8.8.8", "abuse_confidence_score": 0,
                     "classification": "no_recent_reports", "message": "safe fixture",
@@ -169,6 +260,24 @@ class IPReputationTests(unittest.TestCase):
                 self.assertEqual(checked.status_code, 200)
                 self.assertEqual(checked.json()["ip"], "8.8.8.8")
                 self.assertEqual(query.call_count, 1)
+                connection = sqlite3.connect(path)
+                connection.execute(
+                    "INSERT OR REPLACE INTO ip_reputation_cache(ip,result_json,checked_at,expires_at) VALUES(?,?,?,?)",
+                    (ip_reputation.API_TEST_IP, json.dumps({"status": "checked", "ip": ip_reputation.API_TEST_IP}), 1, 2_000_000_000),
+                )
+                connection.commit()
+                connection.close()
+                with mock.patch.object(ip_reputation, "_query_provider", return_value={
+                    "status": "checked", "ip": ip_reputation.API_TEST_IP,
+                    "abuse_confidence_score": 0, "classification": "no_recent_reports",
+                    "message": "safe fixture",
+                }) as query:
+                    tested = client.post("/api/v1/ip-reputation/test")
+                self.assertEqual(tested.status_code, 200)
+                self.assertEqual(tested.json()["status"], "checked")
+                self.assertFalse(tested.json()["cached"])
+                self.assertNotIn(self.key, tested.text)
+                query.assert_called_once()
                 connection = sqlite3.connect(path)
                 stored = connection.execute("SELECT encrypted_api_key FROM ip_reputation_settings WHERE id=1").fetchone()[0]
                 connection.close()

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 API_URL = "https://api.abuseipdb.com/api/v2/check"
+API_TEST_IP = "8.8.8.8"
 SUCCESS_CACHE_SECONDS = 24 * 60 * 60
 ERROR_CACHE_SECONDS = 60
 DAILY_LOOKUP_LIMIT = 900  # Leave room below the provider's free 1,000/day allowance.
@@ -47,6 +48,26 @@ def _api_error(status: int) -> str:
     if status >= 500:
         return "AbuseIPDB 暂时不可用"
     return "AbuseIPDB 查询失败"
+
+
+def _provider_error(ip: str, now: int, status: int | None, message: str, retry_after: object = None) -> dict:
+    result = {
+        "status": "error",
+        "provider": "AbuseIPDB",
+        "ip": ip,
+        "checked_at": now,
+        "message": message,
+        "retryable": status is None or status in (408, 425) or status >= 500,
+    }
+    if status is not None:
+        result["provider_status"] = status
+    try:
+        delay = int(str(retry_after).strip())
+        if 0 <= delay <= 86_400:
+            result["retry_after_seconds"] = delay
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return result
 
 
 def _classification(score: int, total_reports: int) -> str:
@@ -103,7 +124,7 @@ def _query_provider(api_key: str, ip: str, now: int) -> dict:
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=5) as response:
             if response.status != 200:
-                return {"status": "error", "ip": ip, "checked_at": now, "message": _api_error(response.status)}
+                return _provider_error(ip, now, int(response.status), _api_error(int(response.status)))
             raw = response.read(64 * 1024 + 1)
         if len(raw) > 64 * 1024:
             raise ValueError("provider response too large")
@@ -111,12 +132,13 @@ def _query_provider(api_key: str, ip: str, now: int) -> dict:
         return _safe_result(ip, payload.get("data") if isinstance(payload, dict) else None, now)
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
+        retry_after = exc.headers.get("Retry-After") if exc.headers else None
         exc.close()
-        return {"status": "error", "ip": ip, "checked_at": now, "message": _api_error(status)}
+        return _provider_error(ip, now, status, _api_error(status), retry_after)
     except (urllib.error.URLError, TimeoutError, OSError):
-        return {"status": "error", "ip": ip, "checked_at": now, "message": "连接 AbuseIPDB 失败，请稍后重试"}
+        return _provider_error(ip, now, None, "连接 AbuseIPDB 失败，请稍后重试")
     except (UnicodeError, ValueError, TypeError):
-        return {"status": "error", "ip": ip, "checked_at": now, "message": "AbuseIPDB 返回数据无法验证"}
+        return _provider_error(ip, now, None, "AbuseIPDB 返回数据无法验证")
 
 
 def _read_key(conn: sqlite3.Connection, db_path, cipher_factory) -> str:
@@ -148,12 +170,20 @@ def _cached_result(conn: sqlite3.Connection, ip: str, now: int):
         return None
 
 
-def check_ip(conn: sqlite3.Connection, ip: str, db_path, cipher_factory, now: int | None = None) -> dict:
+def check_ip(
+    conn: sqlite3.Connection,
+    ip: str,
+    db_path,
+    cipher_factory,
+    now: int | None = None,
+    force_refresh: bool = False,
+) -> dict:
     now = int(now or time.time())
-    cached = _cached_result(conn, ip, now)
-    if cached is not None:
-        cached["cached"] = True
-        return cached
+    if not force_refresh:
+        cached = _cached_result(conn, ip, now)
+        if cached is not None:
+            cached["cached"] = True
+            return cached
     api_key = _read_key(conn, db_path, cipher_factory)
     if not api_key:
         return {"status": "not_configured", "ip": ip, "message": "请先在系统设置配置 AbuseIPDB API Key"}
@@ -174,7 +204,14 @@ def check_ip(conn: sqlite3.Connection, ip: str, db_path, cipher_factory, now: in
     conn.commit()
 
     result = _query_provider(api_key, ip, now)
-    ttl = SUCCESS_CACHE_SECONDS if result.get("status") == "checked" else ERROR_CACHE_SECONDS
+    if result.get("status") == "checked":
+        ttl = SUCCESS_CACHE_SECONDS
+    elif result.get("retryable"):
+        # Let the bounded frontend retry reach the provider instead of replaying
+        # a just-cached network/5xx failure for the full negative-cache window.
+        ttl = 0
+    else:
+        ttl = ERROR_CACHE_SECONDS
     conn.execute(
         "INSERT OR REPLACE INTO ip_reputation_cache(ip,result_json,checked_at,expires_at) VALUES(?,?,?,?)",
         (ip, json.dumps(result, ensure_ascii=False, separators=(",", ":")), now, now + ttl),
@@ -215,6 +252,11 @@ def attach(app, db, db_path, cipher_factory) -> None:
                 "INSERT OR REPLACE INTO ip_reputation_settings(id,encrypted_api_key,updated_at) VALUES(1,?,?)",
                 (encrypted, int(time.time())),
             )
+            # A previous invalid key or a temporary provider outage may have been
+            # cached for a short time. Do not let that stale failure survive key rotation.
+            conn.execute("""DELETE FROM ip_reputation_cache
+                WHERE CASE WHEN json_valid(result_json)
+                    THEN json_extract(result_json, '$.status') ELSE '' END != 'checked'""")
             conn.commit()
             return JSONResponse({"ok": True, "configured": True, "message": "AbuseIPDB Key 已加密保存；不会返回或下发到节点"})
         finally:
@@ -229,6 +271,20 @@ def attach(app, db, db_path, cipher_factory) -> None:
             return JSONResponse({"ok": True, "configured": False})
         finally:
             conn.close()
+
+    @app.post("/api/v1/ip-reputation/test")
+    async def test_settings() -> JSONResponse:
+        """Verify the saved credential with one explicit, fixed public-IP lookup."""
+        def lookup() -> dict:
+            conn = db()
+            try:
+                return check_ip(
+                    conn, API_TEST_IP, db_path, cipher_factory, force_refresh=True
+                )
+            finally:
+                conn.close()
+
+        return JSONResponse(await run_in_threadpool(lookup))
 
     @app.post("/api/v1/ip-reputation/check")
     async def query_ip(request: Request) -> JSONResponse:

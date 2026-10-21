@@ -512,6 +512,9 @@ export interface IPReputationResult {
   checked_at?: number;
   cached?: boolean;
   message?: string;
+  provider_status?: number;
+  retry_after_seconds?: number;
+  retryable?: boolean;
 }
 
 export interface AccessSource {

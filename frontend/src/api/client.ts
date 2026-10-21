@@ -72,6 +72,9 @@ export const api = {
   checkIPReputation: (ip: string) => request<IPReputationResult>('/api/v1/ip-reputation/check', {
     method: 'POST', body: JSON.stringify({ ip }),
   }),
+  testIPReputation: () => request<IPReputationResult>('/api/v1/ip-reputation/test', {
+    method: 'POST', body: JSON.stringify({}),
+  }),
   updatePushSettings: (data: PushSettingsPayload) =>
     request<{ ok: boolean; message: string }>('/api/v1/settings/push', {
       method: 'POST',

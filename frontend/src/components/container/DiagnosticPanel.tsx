@@ -69,6 +69,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
         status: 'error',
         ip,
         message: err?.message || '查询失败',
+        retryable: !err?.status || err.status >= 500,
       };
       setReputationByIp(current => ({ ...current, [ip]: result }));
       return result;
@@ -93,9 +94,15 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   };
 
   const isSupportedRuntime = ['incus', 'podman'].includes(identity.runtime);
-  const inboundIps = sample?.inbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
-  const outboundIps = sample?.outbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.outbound || 0) > 0);
-  const unclassifiedIps = sample?.unclassified_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.unknown || 0) > 0);
+  const inboundIps = sample?.inbound_ips?.length
+    ? sample.inbound_ips
+    : (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
+  const outboundIps = sample?.outbound_ips?.length
+    ? sample.outbound_ips
+    : (sample?.connection_ips || []).filter((ip) => Number(ip.outbound || 0) > 0);
+  const unclassifiedIps = sample?.unclassified_ips?.length
+    ? sample.unclassified_ips
+    : (sample?.connection_ips || []).filter((ip) => Number(ip.unknown || 0) > 0);
   const inboundSourceHistory = sample?.inbound_source_history;
   const inboundSourceAssessmentByIp = new Map(
     (inboundSourceHistory?.assessments || []).map((item) => [item.ip, item]),
@@ -138,7 +145,9 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     { service: 0, probe: 0, mixed: 0, unknown: 0 },
   );
   const automaticReputationCandidates = useMemo(() => {
-    const candidates = sample?.inbound_ips || (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
+    const candidates = sample?.inbound_ips?.length
+      ? sample.inbound_ips
+      : (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);
     const seen = new Set<string>();
     return [...candidates]
       .filter((ip) => Boolean(ip.ip) && Number(ip.inbound || 0) > 0)
@@ -172,9 +181,17 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
       for (const ip of automaticReputationCandidates) {
         const lookupKey = `${reputationLookupScope}:${ip}`;
         if (reputationLookupsStarted.current.has(lookupKey)) continue;
-        reputationLookupsStarted.current.add(lookupKey);
-        await checkReputation(ip);
+        let result = await checkReputation(ip);
         if (!active) return;
+        // Retry only transient network/server failures once. Invalid keys and
+        // quota errors are terminal and must not consume more provider calls.
+        if (result?.retryable) {
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          if (!active) return;
+          result = await checkReputation(ip);
+          if (!active) return;
+        }
+        reputationLookupsStarted.current.add(lookupKey);
       }
     };
     void checkTopInboundIps();
@@ -283,9 +300,14 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
                       ? '有举报记录，但被 AbuseIPDB 列入白名单 · 当前评分 0/100'
                       : '有近期公开举报记录，但当前可信度评分为 0/100'
                     : '过去 90 天无公开举报（不代表安全）'
-            : reputation?.message;
+            : reputation?.status === 'not_configured' ? '尚未配置 AbuseIPDB'
+              : reputation?.status === 'local_limit' ? '已达到本地查询上限'
+                : reputation?.status === 'error' ? 'AbuseIPDB 查询失败'
+                  : reputation?.message;
           const repTone = reputation?.status !== 'checked'
-            ? 'border-slate-700 bg-slate-900 text-slate-300'
+            ? reputation?.status === 'error'
+              ? 'border-amber-500/30 bg-amber-950/30 text-amber-200'
+              : 'border-slate-700 bg-slate-900 text-slate-300'
             : (reputation.abuse_confidence_score || 0) >= 75
               ? 'border-rose-500/30 bg-rose-950/30 text-rose-200'
               : (reputation.abuse_confidence_score || 0) > 0 || ((reputation.total_reports || 0) > 0 && reputation.is_whitelisted !== true)
@@ -345,7 +367,18 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
               {reputation && <div className={`rounded-md border px-2 py-1.5 text-[11px] ${repTone}`}>
                 <strong>{repLabel}</strong>
                 {reputation.status === 'checked' && <p className="mt-0.5 leading-4 opacity-90">公开举报 {reputation.total_reports || 0} 次 · 最近举报 {reputation.last_reported_at || '无'} · AbuseIPDB 白名单：{reputation.is_whitelisted === true ? '是' : reputation.is_whitelisted === false ? '否' : '未说明'}{reputation.usage_type ? ` · 网络类型 ${reputation.usage_type}` : ''}</p>}
-                <p className="mt-0.5 leading-4 opacity-80">{reputation.status === 'checked' ? reputation.message : '查询失败、未配置或额度不足均不代表该 IP 安全或恶意。'}</p>
+                {reputation.status === 'checked'
+                  ? <p className="mt-0.5 leading-4 opacity-80">{reputation.message}</p>
+                  : <>
+                    <p className="mt-0.5 leading-4 opacity-90">{reputation.message || '暂时无法取得 AbuseIPDB 信誉数据。'}</p>
+                    {(reputation.provider_status || reputation.retry_after_seconds) && <p className="mt-1 tabular-nums text-[10px] opacity-80">
+                      上游 HTTP {reputation.provider_status || '—'}
+                      {reputation.retry_after_seconds ? ` · ${reputation.retry_after_seconds} 秒后可重试` : ''}
+                    </p>}
+                    {reputation.retryable
+                      ? <p className="mt-1 leading-4 opacity-80">这是临时连接或服务端故障，可重新查询；查询失败不会被当作“无滥用记录”。</p>
+                      : <p className="mt-1 leading-4 opacity-80">查询失败、未配置或额度不足均不代表该 IP 安全或恶意。</p>}
+                  </>}
               </div>}
             </div>}
           </div>
