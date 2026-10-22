@@ -28,7 +28,7 @@ export function SocksPasswordReview({ alert, onRefresh, onToast }: { alert: Secu
         {p.available ? <>
           <div className="flex flex-wrap gap-x-4 gap-y-2 tabular-nums"><span>账号 #{p.account_index || j+1}：{p.length} 位字符</span><span>小写 {p.lowercase}</span><span>大写 {p.uppercase}</span><span>数字 {p.digits}</span><span>符号 {p.symbols}</span><span>其他/空白 {p.other}</span></div>
           <p className="mt-2 text-slate-400">重复数字 {p.repeated_digits} 个（超过首次出现的次数） · 单个数字最多出现 {p.max_digit_frequency} 次 · 最长连续同字符 {p.longest_identical_run} 位</p>
-        </> : <p className="text-amber-300 break-words">无法统计：{p.reason || '未找到可统计的内联密码，不按空密码处理'}</p>}
+        </> : <p className="text-amber-300 wrap-break-word">无法统计：{p.reason || '未找到可统计的内联密码，不按空密码处理'}</p>}
       </div>)}
     </div>)}
     <div className="flex flex-wrap items-center gap-3">

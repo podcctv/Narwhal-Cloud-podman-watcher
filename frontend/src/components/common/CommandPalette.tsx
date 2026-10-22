@@ -87,7 +87,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="全局检索" className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+    <div role="dialog" aria-modal="true" aria-label="全局检索" className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in duration-150">
       <div className="relative w-full max-w-2xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl overflow-hidden">
         {/* Search Header */}
         <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-3">
@@ -100,13 +100,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onInputKeyDown}
             placeholder="搜索节点、容器名称、用户邮箱、运行时或快捷指令... (Esc 退出)"
-            className="flex-1 bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-none"
+            className="flex-1 bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-hidden"
           />
           <button
             type="button"
             onClick={onClose}
             aria-label="关闭全局检索"
-            className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            className="rounded-sm p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
           >
             <X className="h-4 w-4" />
           </button>
@@ -169,12 +169,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] text-slate-500">
           <span>
-            按 <kbd className="rounded bg-slate-800 px-1 py-0.5 text-slate-400">↑</kbd>{' '}
-            <kbd className="rounded bg-slate-800 px-1 py-0.5 text-slate-400">↓</kbd> 导航，
-            <kbd className="rounded bg-slate-800 px-1 py-0.5 text-slate-400">Enter</kbd> 查看
+            按 <kbd className="rounded-sm bg-slate-800 px-1 py-0.5 text-slate-400">↑</kbd>{' '}
+            <kbd className="rounded-sm bg-slate-800 px-1 py-0.5 text-slate-400">↓</kbd> 导航，
+            <kbd className="rounded-sm bg-slate-800 px-1 py-0.5 text-slate-400">Enter</kbd> 查看
           </span>
           <span>
-            快捷键：<kbd className="rounded bg-slate-800 px-1 py-0.5 text-slate-400">Ctrl+K</kbd>
+            快捷键：<kbd className="rounded-sm bg-slate-800 px-1 py-0.5 text-slate-400">Ctrl+K</kbd>
           </span>
         </div>
       </div>

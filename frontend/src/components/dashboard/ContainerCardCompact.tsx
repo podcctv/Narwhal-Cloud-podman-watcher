@@ -51,16 +51,16 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
   };
 
   // Card theme based on risk severity
-  let cardBorder = 'border-slate-800/90 bg-slate-900/90 hover:border-sky-500/60 shadow-sm';
+  let cardBorder = 'border-slate-800/90 bg-slate-900/90 hover:border-sky-500/60 shadow-xs';
   let accentBar = 'bg-slate-700';
 
   if (risk.isCritical) {
     cardBorder =
-      'border-rose-500/60 bg-gradient-to-b from-rose-950/30 via-slate-900/95 to-slate-900 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
+      'border-rose-500/60 bg-linear-to-b from-rose-950/30 via-slate-900/95 to-slate-900 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
     accentBar = 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.6)]';
   } else if (risk.isWarning) {
     cardBorder =
-      'border-amber-500/50 bg-gradient-to-b from-amber-950/20 via-slate-900/95 to-slate-900 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
+      'border-amber-500/50 bg-linear-to-b from-amber-950/20 via-slate-900/95 to-slate-900 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
     accentBar = 'bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.5)]';
   } else if (!isStale) {
     accentBar = 'bg-emerald-500/80';
@@ -77,7 +77,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           onSelect(identity);
         }
       }}
-      className={`group relative flex flex-col justify-between rounded-xl border p-3 transition-all cursor-pointer select-none overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${cardBorder}`}
+      className={`group relative flex flex-col justify-between rounded-xl border p-3 transition-all cursor-pointer select-none overflow-hidden focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${cardBorder}`}
     >
       {/* Top Left Accent Health Pill */}
       <div className={`absolute left-0 top-0 bottom-0 w-1 ${accentBar} transition-colors`} />
@@ -106,7 +106,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             >
               {c.container_name}
             </h4>
-            <span className="shrink-0 rounded bg-slate-800/90 px-1 py-0.2 font-mono text-[9px] text-slate-400 border border-slate-700/50">
+            <span className="shrink-0 rounded-sm bg-slate-800/90 px-1 py-0.2 font-mono text-[9px] text-slate-400 border border-slate-700/50">
               {c.runtime}
             </span>
           </div>
@@ -116,7 +116,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             {/* HY2 Badge */}
             {(c.alerts?.hy2_detected || sec.hy2_protocol?.detected) && (
               <span
-                className="flex items-center gap-0.5 rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 text-[9px] font-bold text-violet-300 font-mono shadow-sm"
+                className="flex items-center gap-0.5 rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 text-[9px] font-bold text-violet-300 font-mono shadow-xs"
                 title={`检测到 Hysteria 2 协议 (UDP并发: ${c.alerts?.hy2_concurrency ?? sec.hy2_protocol?.udp_concurrency ?? 0})`}
               >
                 <Radio className="h-2.5 w-2.5 text-violet-400" />
@@ -127,7 +127,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             {/* UDP Throttle Badge */}
             {(c.alerts?.udp_throttled || sec.udp_throttle?.throttled) && (
               <span
-                className="flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/60 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 font-mono shadow-sm animate-pulse"
+                className="flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/60 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 font-mono shadow-xs animate-pulse"
                 title={`UDP 靶向限速生效中: ${c.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10}Mbps (剩余约 ${Math.ceil((c.alerts?.udp_throttle_remaining_seconds ?? sec.udp_throttle?.remaining_seconds ?? 0) / 60)} 分钟)`}
               >
                 <Gauge className="h-2.5 w-2.5 text-rose-400" />
@@ -151,7 +151,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             {/* Risk Badge */}
             {risk.isCritical ? (
               <span
-                className="flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/50 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 shadow-sm"
+                className="flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/50 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 shadow-xs"
                 title={risk.reasons.join(' · ')}
               >
                 <AlertTriangle className="h-2.5 w-2.5 text-rose-400 animate-pulse" />
@@ -159,7 +159,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
               </span>
             ) : risk.isWarning ? (
               <span
-                className="flex items-center gap-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.2 text-[9px] font-bold text-amber-300 shadow-sm"
+                className="flex items-center gap-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.2 text-[9px] font-bold text-amber-300 shadow-xs"
                 title={risk.reasons.join(' · ')}
               >
                 <AlertCircle className="h-2.5 w-2.5 text-amber-400" />
@@ -292,7 +292,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
               type="button"
               disabled={isSubmitting}
               onClick={() => onQuickDisposition(identity, 'deny')}
-              className="flex items-center gap-0.5 rounded px-1.5 py-0.5 font-semibold text-[10px] bg-rose-950/80 text-rose-300 border border-rose-500/40 hover:bg-rose-900 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-400 disabled:opacity-50"
+              className="flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 font-semibold text-[10px] bg-rose-950/80 text-rose-300 border border-rose-500/40 hover:bg-rose-900 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 disabled:opacity-50"
               title="定向处置违规服务或进程"
             >
               <Ban className="h-2.5 w-2.5 text-rose-400" />
@@ -303,7 +303,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           <button
             type="button"
             onClick={() => onSelect(identity)}
-            className="flex items-center gap-0.5 rounded px-1.5 py-0.5 font-medium text-[10px] bg-slate-800/90 text-sky-300 border border-slate-700/70 hover:bg-slate-750 hover:text-sky-200 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400"
+            className="flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 font-medium text-[10px] bg-slate-800/90 text-sky-300 border border-slate-700/70 hover:bg-slate-750 hover:text-sky-200 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
             title="查看容器深度诊断面板"
           >
             <Sparkles className="h-2.5 w-2.5 text-sky-400" />

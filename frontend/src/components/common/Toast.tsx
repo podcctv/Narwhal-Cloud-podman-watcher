@@ -41,7 +41,7 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onDismis
             <button
               type="button"
               onClick={() => onDismiss(toast.id)}
-              className="text-slate-400 hover:text-slate-200 p-0.5 rounded transition-colors"
+              className="text-slate-400 hover:text-slate-200 p-0.5 rounded-sm transition-colors"
             >
               <X className="h-4 w-4" />
             </button>

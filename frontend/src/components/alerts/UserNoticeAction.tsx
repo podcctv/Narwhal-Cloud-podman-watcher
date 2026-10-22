@@ -27,7 +27,7 @@ export function UserNoticeAction({ alertId, onToast }: { alertId: number; onToas
       catch (e: any) { onToast('error', e.message || '登记失败；请刷新记录核对，勿重复发送'); }
       finally { setSending(false); }
     }}>
-      {preview && <div className="mt-4 space-y-3 text-xs text-slate-300 break-words" aria-live="polite">
+      {preview && <div className="mt-4 space-y-3 text-xs text-slate-300 wrap-break-word" aria-live="polite">
         <p>收件范围：{preview.audience}</p>
         <div className="rounded-lg border border-slate-700 bg-slate-950 p-3"><h3 className="font-semibold text-slate-100">{preview.subject}</h3><p className="mt-2 whitespace-pre-wrap leading-6">{preview.message}</p></div>
         <p>Telegram{sent ? '通道配置' : ''}：{sent && preview.telegram === 'ready' ? '可用（实际状态见最近记录）' : status[preview.telegram] || preview.telegram} · {preview.telegram_note}</p>

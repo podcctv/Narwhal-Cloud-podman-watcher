@@ -450,7 +450,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                 onClick={() => toggleHost(hostId)}
                 aria-expanded={isExpanded}
                 aria-controls={`host-containers-${hostId}`}
-                className="flex w-full flex-col gap-2 p-3 text-left transition-colors hover:bg-slate-800/40 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sky-400 sm:flex-row sm:items-center sm:justify-between data-[expanded=true]:border-b data-[expanded=true]:border-slate-800/80"
+                className="flex w-full flex-col gap-2 p-3 text-left transition-colors hover:bg-slate-800/40 focus:outline-hidden focus:ring-2 focus:ring-inset focus:ring-sky-400 sm:flex-row sm:items-center sm:justify-between data-[expanded=true]:border-b data-[expanded=true]:border-slate-800/80"
                 data-expanded={isExpanded}
               >
                 {/* Left: Host Identification & Node Specs */}
@@ -517,7 +517,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
                   {/* Risky container badge */}
                   {hostRiskyCount > 0 && (
-                    <span className="rounded-full border border-rose-500/50 bg-rose-950/80 px-2 py-0.5 text-xs font-bold text-rose-300 flex items-center gap-1 shadow-sm animate-pulse">
+                    <span className="rounded-full border border-rose-500/50 bg-rose-950/80 px-2 py-0.5 text-xs font-bold text-rose-300 flex items-center gap-1 shadow-xs animate-pulse">
                       <ShieldAlert className="h-3 w-3 text-rose-400" />
                       <span>{hostRiskyCount} 异常</span>
                     </span>
@@ -589,13 +589,13 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                         const key = `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`;
 
                         let cardStyle =
-                          'border-slate-800 bg-slate-900/90 hover:border-sky-500/50 shadow-sm';
+                          'border-slate-800 bg-slate-900/90 hover:border-sky-500/50 shadow-xs';
                         if (risk.isCritical) {
                           cardStyle =
-                            'border-rose-500/70 bg-gradient-to-b from-rose-950/30 via-slate-900/90 to-slate-900/95 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
+                            'border-rose-500/70 bg-linear-to-b from-rose-950/30 via-slate-900/90 to-slate-900/95 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
                         } else if (risk.isWarning) {
                           cardStyle =
-                            'border-amber-500/50 bg-gradient-to-b from-amber-950/20 via-slate-900/90 to-slate-900/95 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
+                            'border-amber-500/50 bg-linear-to-b from-amber-950/20 via-slate-900/90 to-slate-900/95 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
                         }
 
                         return (
@@ -637,7 +637,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                 <div className="flex items-center gap-1 shrink-0">
                                   {(c.alerts?.hy2_detected || sec.hy2_protocol?.detected) && (
                                     <span
-                                      className="rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 text-[9px] font-bold text-violet-300 flex items-center gap-1 shadow-sm font-mono"
+                                      className="rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 text-[9px] font-bold text-violet-300 flex items-center gap-1 shadow-xs font-mono"
                                       title="检测到 Hysteria 2 协议"
                                     >
                                       <Radio className="h-2.5 w-2.5 text-violet-400" />
@@ -645,13 +645,13 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                     </span>
                                   )}
                                   {risk.isCritical && (
-                                    <span className="rounded-full bg-rose-500/20 border border-rose-500/50 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 flex items-center gap-1 shadow-sm">
+                                    <span className="rounded-full bg-rose-500/20 border border-rose-500/50 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 flex items-center gap-1 shadow-xs">
                                       <AlertTriangle className="h-2.5 w-2.5 text-rose-400 animate-pulse" />
                                       <span>异常</span>
                                     </span>
                                   )}
                                   {risk.isWarning && (
-                                    <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.2 text-[9px] font-bold text-amber-300 flex items-center gap-1 shadow-sm">
+                                    <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.2 text-[9px] font-bold text-amber-300 flex items-center gap-1 shadow-xs">
                                       <AlertCircle className="h-2.5 w-2.5 text-amber-400" />
                                       <span>预警</span>
                                     </span>
@@ -724,7 +724,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                       </span>
                                       {c.alerts?.traffic_imbalance && (
                                         <span
-                                          className="text-[9px] font-bold text-amber-300 bg-amber-500/10 px-1 py-0.2 rounded border border-amber-500/30 flex items-center gap-0.5"
+                                          className="text-[9px] font-bold text-amber-300 bg-amber-500/10 px-1 py-0.2 rounded-sm border border-amber-500/30 flex items-center gap-0.5"
                                           title={`出入流量失衡: ${c.alerts.traffic_imbalance_ratio}x`}
                                         >
                                           <ArrowUpDown className="h-2.5 w-2.5 text-amber-400" />
@@ -786,7 +786,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                       </span>
                                     </div>
                                     {risk.reasons.length > 1 && (
-                                      <span className="rounded bg-black/40 px-1 text-[9px] font-mono shrink-0">
+                                      <span className="rounded-sm bg-black/40 px-1 text-[9px] font-mono shrink-0">
                                         +{risk.reasons.length - 1}
                                       </span>
                                     )}
@@ -809,7 +809,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                   decision: 'deny',
                                 });
                               }}
-                              className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-sm"
+                              className="flex items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-950/80 px-2.5 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all focus:outline-hidden focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-xs"
                               title="定向处置违规进程或停止非合规服务"
                             >
                               <Ban className="h-3 w-3" />
@@ -830,7 +830,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                   decision: 'allow_silent',
                                 });
                               }}
-                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/90 px-2 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
                               title="添加放行策略不再告警"
                             >
                               <Check className="h-3 w-3 text-emerald-400" />
@@ -848,7 +848,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                   alert_id: risk.actionableAlert?.id,
                                 })
                               }
-                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400"
+                              className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-all focus:outline-hidden focus:ring-2 focus:ring-sky-400"
                               title="查看容器详细指标与诊断"
                             >
                               <Sparkles className="h-3 w-3" />
@@ -867,7 +867,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                 alert_id: risk.actionableAlert?.id,
                               })
                             }
-                            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 text-sky-400 px-3 py-1.5 text-xs font-semibold hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750 transition-all focus:outline-none focus:ring-2 focus:ring-sky-400 shadow-sm"
+                            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 text-sky-400 px-3 py-1.5 text-xs font-semibold hover:border-sky-500 hover:text-sky-300 hover:bg-slate-750 transition-all focus:outline-hidden focus:ring-2 focus:ring-sky-400 shadow-xs"
                           >
                             <Sparkles className="h-3.5 w-3.5" />
                             <span>深度排查</span>

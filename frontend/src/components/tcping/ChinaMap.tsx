@@ -57,7 +57,11 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
       const d = (event as { data?: { short?: string } }).data;
       if (d?.short) callback.current(d.short);
     });
-    const resize = new ResizeObserver(() => c.resize()); resize.observe(el.current);
+    // Crossing the mobile breakpoint briefly hides desktop maps before React
+    // removes them. ECharts 6 cannot invert a zero-sized geographic transform.
+    const resize = new ResizeObserver(() => {
+      if (el.current && el.current.clientWidth > 0 && el.current.clientHeight > 0 && !c.isDisposed()) c.resize();
+    }); resize.observe(el.current);
     return () => { resize.disconnect(); c.dispose(); chart.current = undefined; };
   }, []);
   useEffect(() => {

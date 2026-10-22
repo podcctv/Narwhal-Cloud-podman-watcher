@@ -249,7 +249,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                     >
                       {c.container_name}
                     </span>
-                    <span className="rounded bg-slate-800 px-1 py-0.2 text-[9px] text-slate-400 border border-slate-700/50">
+                    <span className="rounded-sm bg-slate-800 px-1 py-0.2 text-[9px] text-slate-400 border border-slate-700/50">
                       {c.runtime}
                     </span>
                   </div>
@@ -364,13 +364,13 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                   {risk.hasRisk ? (
                     <div className="flex items-center gap-1 max-w-[200px]">
                       {risk.isCritical ? (
-                        <span className="inline-flex items-center gap-1 rounded bg-rose-950/70 border border-rose-500/40 px-1.5 py-0.2 text-[10px] font-bold text-rose-300 truncate">
+                        <span className="inline-flex items-center gap-1 rounded-sm bg-rose-950/70 border border-rose-500/40 px-1.5 py-0.2 text-[10px] font-bold text-rose-300 truncate">
                           <AlertTriangle className="h-2.5 w-2.5 text-rose-400 shrink-0" />
                           <span className="truncate">{risk.reasons[0]}</span>
                           {risk.reasons.length > 1 && <span>+{risk.reasons.length - 1}</span>}
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded bg-amber-950/70 border border-amber-500/40 px-1.5 py-0.2 text-[10px] font-bold text-amber-300 truncate">
+                        <span className="inline-flex items-center gap-1 rounded-sm bg-amber-950/70 border border-amber-500/40 px-1.5 py-0.2 text-[10px] font-bold text-amber-300 truncate">
                           <AlertCircle className="h-2.5 w-2.5 text-amber-400 shrink-0" />
                           <span className="truncate">{risk.reasons[0]}</span>
                         </span>
@@ -392,7 +392,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                         type="button"
                         disabled={isSubmitting}
                         onClick={() => onQuickDisposition(identity, 'deny')}
-                        className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold bg-rose-950/80 text-rose-300 border border-rose-500/40 hover:bg-rose-900 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-400 disabled:opacity-50"
+                        className="flex items-center gap-1 rounded-sm px-2 py-0.5 text-[10px] font-semibold bg-rose-950/80 text-rose-300 border border-rose-500/40 hover:bg-rose-900 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 disabled:opacity-50"
                         title="定向处置违规进程或服务"
                       >
                         <Ban className="h-2.5 w-2.5 text-rose-400" />
@@ -403,7 +403,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                     <button
                       type="button"
                       onClick={() => onSelect(identity)}
-                      className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium bg-slate-800 text-sky-300 border border-slate-700 hover:bg-slate-750 hover:text-sky-200 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400"
+                      className="flex items-center gap-1 rounded-sm px-2 py-0.5 text-[10px] font-medium bg-slate-800 text-sky-300 border border-slate-700 hover:bg-slate-750 hover:text-sky-200 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
                       title="打开深度排查抽屉"
                     >
                       <Sparkles className="h-2.5 w-2.5 text-sky-400" />

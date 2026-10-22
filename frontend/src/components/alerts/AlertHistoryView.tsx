@@ -165,7 +165,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-sm">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xs">
         <div className="flex items-center gap-3">
           <div className="rounded-xl bg-amber-950/80 p-2.5 text-amber-400 border border-amber-500/30">
             <ShieldAlert className="h-5 w-5" />
@@ -191,7 +191,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
       </div>
 
       {/* Filter Panel */}
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 space-y-4 shadow-sm">
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 space-y-4 shadow-xs">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-bold text-slate-300">
             <Filter className="h-4 w-4 text-sky-400" />
@@ -214,7 +214,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             <select
               value={severity}
               onChange={(e) => setSeverity(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
             >
               <option value="all">全部级别</option>
               <option value="critical">Critical (高危)</option>
@@ -228,7 +228,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             <select
               value={alertType}
               onChange={(e) => setAlertType(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
             >
               <option value="all">全部类型</option>
               {typeOptions.map((t) => (
@@ -242,7 +242,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             <select
               value={hostId}
               onChange={(e) => setHostId(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
             >
               <option value="">全部主机</option>
               {hostOptions.map((h) => (
@@ -259,7 +259,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="容器、说明、进程特征..."
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
               />
               <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
             </div>
@@ -273,7 +273,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
               key={s}
               type="button"
               onClick={() => setStatusTab(s)}
-              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-none focus:ring-2 focus:ring-sky-400 ${
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${
                 statusTab === s
                   ? 'border-sky-500 bg-sky-950/80 text-sky-300'
                   : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200 hover:border-slate-700'
@@ -306,7 +306,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             return (
               <div
                 key={alert.id}
-                className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 shadow-sm hover:border-slate-700 transition-colors space-y-3"
+                className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 shadow-xs hover:border-slate-700 transition-colors space-y-3"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1 min-w-0">
@@ -362,7 +362,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
 
                 {alert.deep_evidence && (
                   <details className="rounded-xl border border-sky-900/70 bg-sky-950/20 p-3">
-                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold text-sky-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded-md">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold text-sky-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 rounded-md">
                       <span className="flex items-center gap-2">
                         <Network className="h-4 w-4 text-sky-400" />
                         自动深度取证 · {alert.deep_evidence.captured_at_utc8 || '已采集'}
@@ -396,23 +396,23 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                         <div key={`${entry.ip}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-[11px] text-slate-300">
                           <div className="flex items-center justify-between gap-2">
                             <code className="text-sky-300 break-all">{entry.ip || '-'}</code>
-                            <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-400">{entry.country || 'UN'}</span>
+                            <span className="rounded-sm bg-slate-800 px-1.5 py-0.5 font-mono text-slate-400">{entry.country || 'UN'}</span>
                           </div>
                           <div className="mt-1 text-slate-400 tabular-nums">
                             接入连接 {entry.inbound || 0}
                           </div>
-                          <div className="mt-1 break-words text-slate-400">
+                          <div className="mt-1 wrap-break-word text-slate-400">
                             发起方向：外部远端 · {evidenceConfidenceLabel(entry.inbound_origin_confidence)}
                           </div>
                           {entry.network_evidence && (
-                            <div className="mt-1 break-words text-amber-200/90">
+                            <div className="mt-1 wrap-break-word text-amber-200/90">
                               {inboundSignalLabel(entry.network_evidence.classification)} · 已建连 {entry.network_evidence.tcp_established_flows || 0} / 未应答 {entry.network_evidence.tcp_unreplied_flows || 0} / 握手待完成 {entry.network_evidence.tcp_handshake_pending_flows || 0} · 回包 {entry.network_evidence.reply_packets || 0}
                             </div>
                           )}
-                          <div className="mt-1 break-words text-slate-500">
+                          <div className="mt-1 wrap-break-word text-slate-500">
                             归属：{[entry.region, entry.city].filter(Boolean).join(' · ') || '暂未识别'} · 运营商：{entry.isp || '暂未识别'}{entry.asn ? ` · AS${entry.asn}` : ''}
                           </div>
-                          <div className="mt-1 break-words text-slate-500">
+                          <div className="mt-1 wrap-break-word text-slate-500">
                             接入端进程：{(entry.inbound_processes || []).map((item) => item.process).filter(Boolean).join('、') || (entry.processes || []).join('、') || '未归属'}
                           </div>
                         </div>
@@ -429,14 +429,14 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                         <div key={`${entry.ip}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-[11px] text-slate-300">
                           <div className="flex items-center justify-between gap-2">
                             <code className="text-sky-300 break-all">{entry.ip || '-'}</code>
-                            <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-400">{entry.country || 'UN'}</span>
+                            <span className="rounded-sm bg-slate-800 px-1.5 py-0.5 font-mono text-slate-400">{entry.country || 'UN'}</span>
                           </div>
                           <div className="mt-1 text-slate-400 tabular-nums">出站连接 {entry.outbound || 0}</div>
-                          <div className="mt-1 break-words text-slate-500">
+                          <div className="mt-1 wrap-break-word text-slate-500">
                             归属：{[entry.region, entry.city].filter(Boolean).join(' · ') || '暂未识别'} · 运营商：{entry.isp || '暂未识别'}{entry.asn ? ` · AS${entry.asn}` : ''}
                           </div>
-                          <div className="mt-1 break-words text-slate-400">发起方向：本机进程 · {evidenceConfidenceLabel(entry.outbound_origin_confidence)}</div>
-                          <div className="mt-1 break-words text-slate-500">发起进程：{(entry.outbound_processes || []).map((item) => item.process).filter(Boolean).join('、') || (entry.processes || []).join('、') || '未归属'}</div>
+                          <div className="mt-1 wrap-break-word text-slate-400">发起方向：本机进程 · {evidenceConfidenceLabel(entry.outbound_origin_confidence)}</div>
+                          <div className="mt-1 wrap-break-word text-slate-500">发起进程：{(entry.outbound_processes || []).map((item) => item.process).filter(Boolean).join('、') || (entry.processes || []).join('、') || '未归属'}</div>
                         </div>
                       ))}
                       {(alert.deep_evidence.outbound_ips || (alert.deep_evidence.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0)).length === 0 && (
@@ -457,7 +457,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
 
                 {/* Footnotes & Actions */}
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3 text-xs">
-                  <div className="min-w-0 break-words text-slate-500 text-[11px] font-mono">
+                  <div className="min-w-0 wrap-break-word text-slate-500 text-[11px] font-mono">
                     <div>首次 {alert.first_seen_utc8} · 最近 {alert.last_seen_utc8}</div>
                     {alert.recovery?.verified && alert.recovery.duration_seconds != null && (
                       <div className="mt-1 text-emerald-300">告警持续 {elapsed(alert.recovery.duration_seconds)} 后确认恢复 · 恢复 {alert.recovery.recovered_at_utc8}</div>

@@ -62,7 +62,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     : 'border-sky-500/60 bg-sky-950 text-sky-100 hover:bg-sky-900';
 
   return createPortal(
-    <div className="fixed inset-0 z-[200] flex items-end bg-slate-950/80 p-4 backdrop-blur-sm sm:items-center sm:justify-center" role="presentation">
+    <div className="fixed inset-0 z-200 flex items-end bg-slate-950/80 p-4 backdrop-blur-xs sm:items-center sm:justify-center" role="presentation">
       <button
         type="button"
         className="absolute inset-0 cursor-default"
@@ -89,10 +89,10 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         </div>
         {children}
         <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button ref={cancelRef} type="button" disabled={isSubmitting} onClick={onCancel} className="min-h-11 rounded-lg border border-slate-700 bg-slate-800 px-4 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
+          <button ref={cancelRef} type="button" disabled={isSubmitting} onClick={onCancel} className="min-h-11 rounded-lg border border-slate-700 bg-slate-800 px-4 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
             取消
           </button>
-          <button type="button" disabled={isSubmitting} onClick={onConfirm} className={`min-h-11 rounded-lg border px-4 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50 ${confirmClasses}`}>
+          <button type="button" disabled={isSubmitting} onClick={onConfirm} className={`min-h-11 rounded-lg border px-4 text-sm font-semibold transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50 ${confirmClasses}`}>
             {isSubmitting && <LoaderCircle className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" />}
             {isSubmitting ? '处理中…' : confirmLabel}
           </button>

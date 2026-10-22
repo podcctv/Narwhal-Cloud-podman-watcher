@@ -92,13 +92,13 @@ export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
     <label htmlFor="firewall-host-search" className="sr-only">搜索母机名称或节点 ID</label>
     <div className="relative">
       <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden="true" />
-      <input id="firewall-host-search" type="search" value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="搜索母机名称或节点 ID…" className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400" />
+      <input id="firewall-host-search" type="search" value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="搜索母机名称或节点 ID…" className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-hidden focus:ring-2 focus:ring-sky-400" />
     </div>
 
     <div className="flex flex-wrap gap-1.5" role="group" aria-label="筛选母机状态">
       {([
         ['all', '全部'], ['attention', '需关注'], ['online', '在线'], ['offline', '离线'],
-      ] as const).map(([key, label]) => <button key={key} type="button" onClick={() => onFilterChange(key)} aria-pressed={filter === key} className={`min-h-9 rounded-lg border px-2.5 text-[10px] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 ${filter === key ? 'border-sky-700 bg-sky-950/60 text-sky-100' : 'border-slate-700 bg-slate-950/70 text-slate-400 hover:bg-slate-800'}`}>
+      ] as const).map(([key, label]) => <button key={key} type="button" onClick={() => onFilterChange(key)} aria-pressed={filter === key} className={`min-h-9 rounded-lg border px-2.5 text-[10px] transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${filter === key ? 'border-sky-700 bg-sky-950/60 text-sky-100' : 'border-slate-700 bg-slate-950/70 text-slate-400 hover:bg-slate-800'}`}>
         {label} <span className="ml-1 font-mono tabular-nums">{counts[key]}</span>
       </button>)}
     </div>
@@ -124,7 +124,7 @@ export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
             interfaceStatus.by_runtime.podman.length ? `Podman ${interfaceStatus.by_runtime.podman.length}` : '',
           ].filter(Boolean).join(' · ') || '未发现容器网桥';
 
-        return <button key={host.host_id} type="button" onClick={() => onSelect(host.host_id)} aria-pressed={selected} className={`flex min-h-16 w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 ${selected ? 'border-sky-600 bg-sky-950/50' : 'border-slate-800 bg-slate-950/50 hover:border-slate-600 hover:bg-slate-900'}`}>
+        return <button key={host.host_id} type="button" onClick={() => onSelect(host.host_id)} aria-pressed={selected} className={`flex min-h-16 w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${selected ? 'border-sky-600 bg-sky-950/50' : 'border-slate-800 bg-slate-950/50 hover:border-slate-600 hover:bg-slate-900'}`}>
           <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${selected ? 'border-sky-700/70 bg-sky-950 text-sky-300' : 'border-slate-700 bg-slate-900 text-slate-400'}`}><Server className="h-4 w-4" aria-hidden="true" /></span>
           <span className="min-w-0 flex-1">
             <span className="block truncate text-xs font-semibold text-slate-100" title={host.host_id}>{host.host_id}</span>
@@ -138,9 +138,9 @@ export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-2 pt-1" aria-label="母机列表分页">
         <span className="text-[10px] text-slate-500">显示 {currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, filteredHosts.length)} / {filteredHosts.length} 台</span>
         <div className="flex gap-1.5">
-          <button type="button" onClick={() => setPage(Math.max(0, currentPage - 1))} disabled={currentPage === 0} aria-label="上一页母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />上一页</button>
+          <button type="button" onClick={() => setPage(Math.max(0, currentPage - 1))} disabled={currentPage === 0} aria-label="上一页母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />上一页</button>
           <span className="inline-flex min-h-9 min-w-12 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 px-2 font-mono text-[10px] tabular-nums text-slate-400">{currentPage + 1} / {pageCount}</span>
-          <button type="button" onClick={() => setPage(Math.min(pageCount - 1, currentPage + 1))} disabled={currentPage >= pageCount - 1} aria-label="下一页母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" aria-hidden="true" /></button>
+          <button type="button" onClick={() => setPage(Math.min(pageCount - 1, currentPage + 1))} disabled={currentPage >= pageCount - 1} aria-label="下一页母机" className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" aria-hidden="true" /></button>
         </div>
       </div>
     </> : <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-6 text-center text-xs text-slate-500">

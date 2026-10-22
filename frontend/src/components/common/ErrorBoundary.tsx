@@ -37,14 +37,14 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       return (
         <div className="min-h-[300px] flex items-center justify-center p-6">
-          <div className="max-w-lg w-full rounded-2xl border border-rose-500/30 bg-slate-900/95 p-6 shadow-2xl backdrop-blur-sm text-center">
+          <div className="max-w-lg w-full rounded-2xl border border-rose-500/30 bg-slate-900/95 p-6 shadow-2xl backdrop-blur-xs text-center">
             <div className="mx-auto w-12 h-12 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 mb-4">
               <AlertTriangle className="h-6 w-6" />
             </div>
             <h3 className="text-base font-bold text-slate-100">
               {this.props.fallbackTitle || '界面渲染遇到问题'}
             </h3>
-            <p className="mt-2 text-xs text-slate-400 leading-relaxed break-words font-mono bg-slate-950/80 p-3 rounded-lg border border-slate-800 text-left">
+            <p className="mt-2 text-xs text-slate-400 leading-relaxed wrap-break-word font-mono bg-slate-950/80 p-3 rounded-lg border border-slate-800 text-left">
               {this.state.error?.message || '组件渲染发生未预期异常'}
             </p>
             <div className="mt-5 flex items-center justify-center gap-3">

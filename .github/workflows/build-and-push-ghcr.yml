@@ -35,6 +35,17 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r client/requirements.txt -r server/requirements.txt httpx==0.28.1
 
+      - name: Install frontend dependencies from lockfile
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+
+      - name: Audit all frontend dependencies and build
+        working-directory: frontend
+        run: |
+          npm audit --audit-level=low
+          npm run build
+          cd .. && node tests/test_tcping_carriers.cjs
+
       - name: Compile Python sources
         run: python -m compileall -q client server scripts tests
 

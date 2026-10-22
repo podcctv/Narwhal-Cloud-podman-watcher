@@ -37,7 +37,7 @@ export const LoginPage: React.FC = () => {
     }
   };
 
-  const inputClass = 'mt-2 min-h-12 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 text-base text-slate-100 placeholder:text-slate-500 transition-colors focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/30 disabled:opacity-60';
+  const inputClass = 'mt-2 min-h-12 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 text-base text-slate-100 placeholder:text-slate-500 transition-colors focus:border-sky-400 focus:outline-hidden focus:ring-2 focus:ring-sky-400/30 disabled:opacity-60';
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 px-5 py-10 font-sans text-slate-100 sm:px-8">
@@ -72,11 +72,11 @@ export const LoginPage: React.FC = () => {
                 <label htmlFor="login-password" className="text-sm font-medium text-slate-300">密码</label>
                 <div className="relative">
                   <input id="login-password" name="password" type={showPassword ? 'text' : 'password'} autoComplete="current-password" required maxLength={4096} value={password} onChange={e => setPassword(e.target.value)} disabled={busy} className={`${inputClass} pr-14`} placeholder="请输入密码" aria-describedby={error ? 'login-error' : undefined} aria-invalid={Boolean(error)} />
-                  <button type="button" onClick={() => setShowPassword(!showPassword)} disabled={busy} aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword} className="absolute right-1 top-3 flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">{showPassword ? <EyeOff aria-hidden="true" className="h-5 w-5" /> : <Eye aria-hidden="true" className="h-5 w-5" />}</button>
+                  <button type="button" onClick={() => setShowPassword(!showPassword)} disabled={busy} aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword} className="absolute right-1 top-3 flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:text-slate-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400">{showPassword ? <EyeOff aria-hidden="true" className="h-5 w-5" /> : <Eye aria-hidden="true" className="h-5 w-5" />}</button>
                 </div>
               </div>
               <div className="min-h-6 text-sm leading-6 text-rose-300" id="login-error" role="alert" aria-live="polite">{error}</div>
-              <button type="submit" disabled={busy} className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-sky-400 px-4 font-semibold text-slate-950 transition-colors hover:bg-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 focus-visible:ring-offset-4 focus-visible:ring-offset-slate-900 disabled:cursor-wait disabled:opacity-60"><span>{busy ? '正在登录…' : '登录控制台'}</span><ArrowRight aria-hidden="true" className="h-4 w-4" /></button>
+              <button type="submit" disabled={busy} className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-sky-400 px-4 font-semibold text-slate-950 transition-colors hover:bg-sky-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-300 focus-visible:ring-offset-4 focus-visible:ring-offset-slate-900 disabled:cursor-wait disabled:opacity-60"><span>{busy ? '正在登录…' : '登录控制台'}</span><ArrowRight aria-hidden="true" className="h-4 w-4" /></button>
             </form>
             <p className="mt-7 border-t border-slate-800 pt-5 text-xs leading-6 text-slate-400">登录会话最长保留 12 小时。退出登录或服务重启后，需要重新验证身份。</p>
           </section>

@@ -8,7 +8,7 @@ const path=require('node:path');
  const output=process.env.NARWHAL_UI_OUTPUT||'C:/Users/Flanker/AppData/Local/Temp/narwhal-carrier37-ui';fs.mkdirSync(output,{recursive:true});
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'}), errors=[],posts=[];
-  page.on('pageerror',e=>errors.push(e.message));
+  page.on('pageerror',e=>errors.push(e.stack || e.message));
   const nodes=[];
   const add=(province,carrier,value,success=2,attempts=2,error='')=>nodes.push({id:String(nodes.length),kind:'province',province,city:'',carrier,host:'fixture.invalid',port:443,result:value===undefined?null:{median_ms:value,min_ms:value,max_ms:value,samples_ms:[value,value],success,attempts,error,status:success===attempts?'ok':success?'partial':'failed',ip:'192.0.2.1'}});
   add('河北','telecom',1170.1,1,2,'timeout');add('河北','unicom',70.4);add('河北','mobile',57.5);

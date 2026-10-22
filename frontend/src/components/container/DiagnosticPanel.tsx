@@ -331,7 +331,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             <div className="mt-1 text-[11px] text-slate-400">
               {[ip.country || 'UN', ip.region, ip.city].filter(Boolean).join(' · ')}
             </div>
-            <div className="mt-0.5 break-words text-[11px] text-slate-500">
+            <div className="mt-0.5 wrap-break-word text-[11px] text-slate-500">
               运营商：{ip.isp || '暂未识别'}{ip.asn ? ` · AS${ip.asn}` : ''}
             </div>
             <div className={`mt-2 rounded-md border px-2 py-1.5 text-[11px] ${originTone}`}>
@@ -340,7 +340,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
               {directionEvidence && directionEvidence.length > 0 && <p className="mt-1 leading-4 opacity-80">证据：{directionEvidence.map((value) => originEvidenceLabels[value] || value).join('；')}</p>}
               {directionalProcesses && directionalProcesses.length > 0 && <p className="mt-1 leading-4 opacity-80">进程归属：{directionalProcesses.map((item) => `${item.process || 'unknown'}${item.pid ? ` (PID ${item.pid})` : ''}`).join('、')}</p>}
             </div>
-            {direction !== 'unknown' && <div className="mt-1 break-words text-[11px] text-slate-400">
+            {direction !== 'unknown' && <div className="mt-1 wrap-break-word text-[11px] text-slate-400">
               <strong>{direction === 'inbound' ? '服务端接受进程：' : '本地发起进程：'}</strong>
               {directionalProcesses && directionalProcesses.length > 0
                 ? directionalProcesses.map((item) => `${item.process || 'unknown'}${item.pid ? ` (PID ${item.pid})` : ''}`).join('、')
@@ -399,7 +399,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   );
 
   return (
-    <div className="rounded-xl border border-sky-500/30 bg-gradient-to-br from-slate-900 via-slate-900/90 to-sky-950/30 p-4 shadow-sm">
+    <div className="rounded-xl border border-sky-500/30 bg-linear-to-br from-slate-900 via-slate-900/90 to-sky-950/30 p-4 shadow-xs">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
         <div>
@@ -416,7 +416,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
           type="button"
           disabled={submitting || isQueuedOrDispatched || !isSupportedRuntime || isStale}
           onClick={handleRequest}
-          className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 transition-all disabled:opacity-50 shadow-sm shrink-0"
+          className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 transition-all disabled:opacity-50 shadow-xs shrink-0"
         >
           <Sparkles className="h-3.5 w-3.5" />
           <span>
@@ -499,7 +499,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
           {highlyReportedInboundIps.length > 0 && <div role="alert" className="rounded-lg border border-red-500/40 bg-red-950/30 p-3 text-xs leading-5 text-red-200">
             <strong>AbuseIPDB 高举报信号：{highlyReportedInboundIps.length} 个来源</strong>
             <span className="ml-1 inline-flex flex-wrap gap-1.5">
-              {highlyReportedInboundIps.map((ip) => <span key={ip.ip} className="inline-flex items-center gap-1 rounded border border-red-500/30 bg-red-950/50 px-1.5 py-0.5">
+              {highlyReportedInboundIps.map((ip) => <span key={ip.ip} className="inline-flex items-center gap-1 rounded-sm border border-red-500/30 bg-red-950/50 px-1.5 py-0.5">
                 <span className="font-mono">{ip.ip}</span>
                 <span className="tabular-nums">{reputationByIp[ip.ip || '']?.abuse_confidence_score || 0}/100</span>
               </span>)}
@@ -566,16 +566,16 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
                   return (
                     <article key={`${socket.proto || 'unknown'}-${socket.local || ''}-${socket.remote || ''}-${index}`} className="min-w-0 rounded-md border border-slate-800 bg-slate-900/70 p-2.5">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${origin.className}`}>{origin.label}</span>
-                        <span className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300">{String(socket.proto || 'unknown').toUpperCase()}</span>
-                        <span className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400">{socket.state || '状态未知'}</span>
+                        <span className={`rounded-sm border px-1.5 py-0.5 text-[10px] font-semibold ${origin.className}`}>{origin.label}</span>
+                        <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300">{String(socket.proto || 'unknown').toUpperCase()}</span>
+                        <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400">{socket.state || '状态未知'}</span>
                       </div>
                       <div className="mt-1.5 break-all font-mono text-[11px] text-slate-200">{socket.local || '-'} → {socket.remote || '-'}</div>
-                      <div className="mt-1 break-words text-[11px] text-slate-400">
+                      <div className="mt-1 wrap-break-word text-[11px] text-slate-400">
                         进程：{socket.process || 'unknown'}{Number(socket.pid || 0) > 0 ? ` · PID ${socket.pid}` : ' · PID 未取得'}
                         {socket.process_role === 'initiator' ? ' · 角色：发起方' : socket.process_role === 'acceptor' ? ' · 角色：接受连接的服务端' : ''}
                       </div>
-                      <div className="mt-1 break-words text-[10px] text-slate-500">判定依据：{evidence}</div>
+                      <div className="mt-1 wrap-break-word text-[10px] text-slate-500">判定依据：{evidence}</div>
                       {Array.isArray(socket.original_remote_ips) && socket.original_remote_ips.length > 0 && (
                         <div className="mt-1 break-all text-[10px] text-emerald-300">conntrack 五元组还原来源：{socket.original_remote_ips.join(', ')}</div>
                       )}
@@ -619,7 +619,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             <section className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h4 className="text-xs font-bold text-slate-200">NAT / 代理端口级来源关联 ({inboundPortEvidence.length})</h4>
-                <span className="rounded border border-amber-500/30 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-200">聚合推定 · 非逐连接确认</span>
+                <span className="rounded-sm border border-amber-500/30 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-200">聚合推定 · 非逐连接确认</span>
               </div>
               <p className="mt-1 text-[11px] leading-4 text-slate-400">
                 当 NAT 或用户态代理隐藏了公网来源时，主控按容器目标端口汇总来源 IP 和监听进程。端口上有进程只能说明服务在接收连接，不能把每个 IP 精确绑定到某个已建立 socket，也不能据此判断客户有责。
@@ -629,7 +629,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
                   <article key={`${item.container_port || 0}-${index}`} className="min-w-0 rounded-md border border-slate-800 bg-slate-900/70 p-2.5 text-[11px]">
                     <div className="font-semibold text-slate-200">容器端口 {item.container_port || '-'} · {item.connections || 0} 条聚合连接</div>
                     <div className="mt-1 break-all text-slate-400">来源 IP ({item.source_ip_count || 0})：{(item.source_ips || []).join('、') || '-'}</div>
-                    <div className="mt-1 break-words text-slate-500">监听进程：{(item.process_listeners || []).map(listener => `${listener.process || 'unknown'}${listener.pid ? ` (PID ${listener.pid})` : ''}`).join('、') || '未取得'}</div>
+                    <div className="mt-1 wrap-break-word text-slate-500">监听进程：{(item.process_listeners || []).map(listener => `${listener.process || 'unknown'}${listener.pid ? ` (PID ${listener.pid})` : ''}`).join('、') || '未取得'}</div>
                   </article>
                 ))}
               </div>

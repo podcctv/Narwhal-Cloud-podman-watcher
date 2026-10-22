@@ -1,6 +1,51 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-dark-50: #0b1220;
+  --color-dark-100: #0f172a;
+  --color-dark-200: #172033;
+  --color-dark-300: #1e293b;
+  --color-dark-400: #283b56;
+  --color-dark: #020617;
+
+  --color-border: #334155;
+  --color-border-subtle: #233854;
+  --color-border-glow: #0ea5e9;
+
+  --color-accent: #38bdf8;
+  --color-accent-hover: #7dd3fc;
+
+  --color-brand: #0ea5e9;
+  --color-brand-glow: rgba(14, 165, 233, 0.15);
+
+  --font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: 'Fira Sans', Inter, system-ui, -apple-system, sans-serif;
+
+  --shadow-glass: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  --shadow-glow: 0 0 20px -3px rgba(14, 165, 233, 0.25);
+  --shadow-glow-emerald: 0 0 20px -3px rgba(34, 197, 94, 0.25);
+  --shadow-glow-rose: 0 0 20px -3px rgba(239, 68, 68, 0.25);
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
 
 :root {
   color-scheme: dark;

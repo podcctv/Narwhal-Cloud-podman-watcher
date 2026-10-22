@@ -214,7 +214,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
       {/* Backdrop */}
       <div
         onClick={onClose}
-        className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm transition-opacity animate-in fade-in duration-200"
+        className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs transition-opacity animate-in fade-in duration-200"
       />
 
       {/* Slide-over Drawer Panel */}
@@ -261,7 +261,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                 type="button"
                 onClick={onClose}
                 aria-label="关闭容器详情"
-                className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400"
                 title="关闭抽屉 (Esc)"
               >
                 <X className="h-5 w-5" />
@@ -292,7 +292,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     onChange={(event) => setUserEmail(event.target.value)}
                     placeholder="例如 user@example.com"
                     disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
                   />
                 </label>
                 <label className="block space-y-1.5">
@@ -304,7 +304,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     placeholder="记录订单号、沟通情况或封禁核对信息"
                     rows={2}
                     disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
+                    className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
                   />
                 </label>
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -448,7 +448,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       Hysteria 2 协议
                     </span>
                     {(container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
-                      <span className="text-[10px] font-bold bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 rounded text-violet-200">
+                      <span className="text-[10px] font-bold bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 rounded-sm text-violet-200">
                         {container?.security?.hy2_protocol?.confidence === 'confirmed' ? '已确认' : '疑似'}
                       </span>
                     )}
@@ -482,11 +482,11 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                         <span>UDP 流量管控与限速</span>
                       </span>
                       {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
-                        <span className="text-[10px] font-bold bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 rounded text-rose-300 animate-pulse">
+                        <span className="text-[10px] font-bold bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 rounded-sm text-rose-300 animate-pulse">
                           限速生效中: {container?.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10} Mbps
                         </span>
                       ) : (
-                        <span className="text-[10px] font-medium bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded text-emerald-400">
+                        <span className="text-[10px] font-medium bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-sm text-emerald-400">
                           全速运行 (自动防滥用保护中)
                         </span>
                       )}
@@ -505,7 +505,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                             type="button"
                             disabled={isDrawerActionLoading}
                             onClick={() => setPendingDecision('release_udp_throttle')}
-                            className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/80 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-900 transition-all disabled:opacity-50 shadow-sm"
+                            className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/80 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-900 transition-all disabled:opacity-50 shadow-xs"
                           >
                             <Unlock className="h-3.5 w-3.5 text-sky-400" />
                             <span>立即解除限速</span>
@@ -585,7 +585,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       type="button"
                       disabled={isDrawerActionLoading}
                       onClick={() => setPendingDecision('deny')}
-                      className="flex items-center gap-1.5 rounded-lg border border-rose-500/60 bg-rose-950/90 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900 transition-all disabled:opacity-50 shadow-sm"
+                      className="flex items-center gap-1.5 rounded-lg border border-rose-500/60 bg-rose-950/90 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900 transition-all disabled:opacity-50 shadow-xs"
                     >
                       <Ban className="h-3.5 w-3.5" />
                       <span>{isDrawerActionLoading ? '处理中...' : '定向处置违规服务'}</span>

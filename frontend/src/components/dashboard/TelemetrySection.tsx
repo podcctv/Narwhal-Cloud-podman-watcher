@@ -29,7 +29,7 @@ const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode 
   <div className={`min-w-0 rounded-xl border p-3 ${tones[level]}`}>
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-semibold">
       <h4>{title}</h4><span className="text-[11px]">{labels[level]}</span>
-    </div><div className="space-y-1.5 break-words text-xs leading-5 tabular-nums">{children}</div>
+    </div><div className="space-y-1.5 wrap-break-word text-xs leading-5 tabular-nums">{children}</div>
   </div>;
 
 const HttpSource: React.FC<{ source: AccessSource }> = ({ source: s }) => {
@@ -56,7 +56,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   const [deleting, setDeleting] = useState<SecurityStatusItem | null>(null);
   const [busy, setBusy] = useState(false);
   if (!telemetry?.length) return null;
-  return <section className="mb-6 min-w-0 rounded-2xl border border-slate-800 bg-slate-900/60 shadow-sm">
+  return <section className="mb-6 min-w-0 rounded-2xl border border-slate-800 bg-slate-900/60 shadow-xs">
     <header className="flex items-start gap-3 border-b border-slate-800 px-4 py-4">
       <Activity className="mt-0.5 h-5 w-5 shrink-0 text-sky-400" />
       <div className="min-w-0">
@@ -98,15 +98,15 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1 basis-56">
               <h3 className="break-all text-sm font-semibold text-slate-100">{t.host_id}</h3>
-              <p className="mt-1 break-words text-xs text-slate-300">采样：{t.timestamp_iso_utc8 || '—'} · 窗口 {t.interval_seconds || '—'} 秒
+              <p className="mt-1 wrap-break-word text-xs text-slate-300">采样：{t.timestamp_iso_utc8 || '—'} · 窗口 {t.interval_seconds || '—'} 秒
                 {t.stale ? ' · 数据已过期' : !t.enabled ? ' · 安全采集未启用' : ''}</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={() => setEditing(t)} className="rounded-lg border border-sky-700 bg-sky-950/60 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-900/60 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400">配置</button>
-              <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-none focus:ring-2 focus:ring-red-400">删除</button>
+              <button type="button" onClick={() => setEditing(t)} className="rounded-lg border border-sky-700 bg-sky-950/60 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400">配置</button>
+              <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-red-400">删除</button>
             </div>
           </div>
-          <div className="grid min-w-0 gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr))]">
+          <div className="grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
             <Signal title="实时速率 / 今日峰值" level={signalLevel(t, /^ddos_(host_)?bandwidth$/)}>
               <p>↓ {fmtNetSpeed(t.rx_bps).mbps} · ↑ {fmtNetSpeed(t.tx_bps).mbps}</p>
               <p>今日峰值 ↓ {fmtNetSpeed(t.today_peak_rx_bps).mbps}</p>
@@ -135,7 +135,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           <details className="mt-3 rounded-lg border border-slate-700 p-3 text-xs text-slate-300">
             <summary className="cursor-pointer font-semibold text-slate-100">查看本次采样事件（{events.length} 项，含普通提示）与阈值说明</summary>
             <div className="mt-3 space-y-2">
-              {events.map((event, i) => <div key={i} className={`min-w-0 rounded-lg border p-3 break-words ${tones[event.severity === 'critical' ? 'critical' : event.severity === 'warning' ? 'warning' : 'unknown']}`}>
+              {events.map((event, i) => <div key={i} className={`min-w-0 rounded-lg border p-3 wrap-break-word ${tones[event.severity === 'critical' ? 'critical' : event.severity === 'warning' ? 'warning' : 'unknown']}`}>
                 <p className="font-semibold">{event.severity === 'critical' ? '危险' : event.severity === 'warning' ? '警告' : '提示'} · {event.title || event.type}</p>
                 <p className="break-all">{[event.runtime, event.project, event.container_name].filter(Boolean).join('/') || '主机汇总'} · {event.message}</p>
                 {event.threshold != null && <p>触发值 {String(event.value ?? '—')} · 阈值 {String(event.threshold)}</p>}
@@ -183,7 +183,7 @@ const HostConfigDialog: React.FC<{
   return (
     <div
       role="presentation"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs"
       onClick={(e) => {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
@@ -217,7 +217,7 @@ const HostConfigDialog: React.FC<{
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 font-mono text-xs"
               required
             />
           </label>
@@ -230,7 +230,7 @@ const HostConfigDialog: React.FC<{
               max="3600"
               value={interval}
               onChange={(e) => setIntervalValue(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 font-mono text-xs"
               required
             />
           </label>
@@ -240,7 +240,7 @@ const HostConfigDialog: React.FC<{
             <input
               value={runtimes}
               onChange={(e) => setRuntimes(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 font-mono text-xs"
             />
           </label>
 
@@ -249,7 +249,7 @@ const HostConfigDialog: React.FC<{
             <select
               value={docker}
               onChange={(e) => setDocker(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 text-xs"
+              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 text-xs"
             >
               <option value="notice">仅提示 (notice)</option>
               <option value="full">完整采集 (full)</option>
@@ -262,14 +262,14 @@ const HostConfigDialog: React.FC<{
               type="button"
               onClick={onClose}
               disabled={busy}
-              className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
             >
               取消
             </button>
             <button
               type="submit"
               disabled={busy}
-              className="rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-500 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50 shadow-sm"
+              className="rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-500 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50 shadow-xs"
             >
               {busy ? '下发中…' : '保存并下发'}
             </button>
@@ -302,7 +302,7 @@ const HostDeleteDialog: React.FC<{
   return (
     <div
       role="presentation"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs"
       onClick={(e) => {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
@@ -349,7 +349,7 @@ const HostDeleteDialog: React.FC<{
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
             placeholder={`请输入 ${host.host_id}`}
-            className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-rose-500"
+            className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 font-mono text-xs focus:outline-hidden focus:ring-2 focus:ring-rose-500"
           />
         </label>
 
@@ -358,7 +358,7 @@ const HostDeleteDialog: React.FC<{
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
           >
             取消
           </button>
@@ -366,7 +366,7 @@ const HostDeleteDialog: React.FC<{
             type="button"
             disabled={busy || confirm !== host.host_id}
             onClick={() => onDelete(mode)}
-            className="rounded-lg bg-rose-700 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-600 transition-colors focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-sm"
+            className="rounded-lg bg-rose-700 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-600 transition-colors focus:outline-hidden focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-xs"
           >
             {busy ? '处理中…' : '确认删除'}
           </button>

@@ -52,7 +52,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
   return (
     <div className="mb-4 space-y-2.5">
       {/* Primary Toolbar Bar */}
-      <div className="flex flex-col gap-2.5 rounded-xl border border-slate-800 bg-slate-900/90 p-2.5 shadow-sm backdrop-blur-md lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-col gap-2.5 rounded-xl border border-slate-800 bg-slate-900/90 p-2.5 shadow-xs backdrop-blur-md lg:flex-row lg:items-center lg:justify-between">
         {/* Left: Search & Filter Chips */}
         <div className="flex flex-1 flex-wrap items-center gap-2 min-w-0">
           {/* Quick Search Input */}
@@ -63,13 +63,13 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               placeholder="搜索容器名 / 主机 / 运行时..."
-              className="h-8 w-full rounded-lg border border-slate-750 bg-slate-950/80 pl-8 pr-7 text-xs text-slate-200 placeholder-slate-500 transition-colors focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+              className="h-8 w-full rounded-lg border border-slate-750 bg-slate-950/80 pl-8 pr-7 text-xs text-slate-200 placeholder-slate-500 transition-colors focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => onSearchChange('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 focus:outline-none"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 focus:outline-hidden"
                 title="清空搜索"
               >
                 <X className="h-3.5 w-3.5" />
@@ -83,9 +83,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onFilterStateChange('all')}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 filterState === 'all'
-                  ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
+                  ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-xs'
                   : 'bg-slate-950/50 text-slate-400 border border-slate-800 hover:text-slate-200 hover:bg-slate-800/60'
               }`}
             >
@@ -99,9 +99,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onFilterStateChange('risk')}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-400 ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 ${
                 filterState === 'risk'
-                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-950/50'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50 shadow-xs shadow-rose-950/50'
                   : 'bg-slate-950/50 text-slate-400 border border-slate-800 hover:text-rose-300 hover:bg-slate-800/60'
               }`}
             >
@@ -120,9 +120,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onFilterStateChange('hy2')}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400 ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${
                 filterState === 'hy2'
-                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/50 shadow-sm shadow-violet-950/50'
+                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/50 shadow-xs shadow-violet-950/50'
                   : 'bg-slate-950/50 text-slate-400 border border-slate-800 hover:text-violet-300 hover:bg-slate-800/60'
               }`}
             >
@@ -141,9 +141,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onFilterStateChange('imbalance')}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-400 ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${
                 filterState === 'imbalance'
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm shadow-amber-950/50'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-xs shadow-amber-950/50'
                   : 'bg-slate-950/50 text-slate-400 border border-slate-800 hover:text-amber-300 hover:bg-slate-800/60'
               }`}
             >
@@ -162,9 +162,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onFilterStateChange('healthy')}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-emerald-400 ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-emerald-400 ${
                 filterState === 'healthy'
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-sm'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-xs'
                   : 'bg-slate-950/50 text-slate-400 border border-slate-800 hover:text-emerald-300 hover:bg-slate-800/60'
               }`}
             >
@@ -192,7 +192,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
           <button
             type="button"
             onClick={onToggleAllHosts}
-            className="flex h-8 items-center gap-1 rounded-lg border border-slate-750 bg-slate-950/70 px-2.5 text-xs font-medium text-slate-300 transition-colors hover:border-slate-600 hover:text-sky-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400"
+            className="flex h-8 items-center gap-1 rounded-lg border border-slate-750 bg-slate-950/70 px-2.5 text-xs font-medium text-slate-300 transition-colors hover:border-slate-600 hover:text-sky-300 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
             title={allExpanded ? '折叠所有母鸡' : '展开所有母鸡'}
           >
             {allExpanded ? (
@@ -213,9 +213,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onViewModeChange('grid')}
-              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ${
+              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 viewMode === 'grid'
-                  ? 'bg-sky-500 text-slate-950 font-bold shadow-sm'
+                  ? 'bg-sky-500 text-slate-950 font-bold shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
               title="高密网格 (Pro Grid · 紧凑卡片)"
@@ -227,9 +227,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onViewModeChange('table')}
-              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ${
+              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 viewMode === 'table'
-                  ? 'bg-sky-500 text-slate-950 font-bold shadow-sm'
+                  ? 'bg-sky-500 text-slate-950 font-bold shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
               title="数据表格 (Data Table · 超高密度列表)"
@@ -241,9 +241,9 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             <button
               type="button"
               onClick={() => onViewModeChange('detailed')}
-              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ${
+              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 viewMode === 'detailed'
-                  ? 'bg-sky-500 text-slate-950 font-bold shadow-sm'
+                  ? 'bg-sky-500 text-slate-950 font-bold shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
               title="拓扑卡片 (Detailed · 宽体卡片)"

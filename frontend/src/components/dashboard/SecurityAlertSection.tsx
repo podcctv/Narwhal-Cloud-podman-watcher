@@ -96,7 +96,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
   if (alerts.length === 0) {
     return (
-      <section className="mb-6 rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-5 backdrop-blur-sm">
+      <section className="mb-6 rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-5 backdrop-blur-xs">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="rounded-xl bg-emerald-500/10 p-2.5 text-emerald-400 border border-emerald-500/30">
@@ -125,7 +125,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   }
 
   return (
-    <section className="mb-6 rounded-2xl border border-rose-500/30 bg-slate-900/90 shadow-xl overflow-hidden backdrop-blur-sm">
+    <section className="mb-6 rounded-2xl border border-rose-500/30 bg-slate-900/90 shadow-xl overflow-hidden backdrop-blur-xs">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/60 px-5 py-3.5">
         <div className="flex items-center gap-2.5">

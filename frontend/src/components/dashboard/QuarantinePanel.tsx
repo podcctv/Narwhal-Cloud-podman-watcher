@@ -86,7 +86,7 @@ export const QuarantinePanel: React.FC<{
             <p className="mt-1 text-xs leading-5 text-slate-300">只处理多次佐证的高置信度行为；隔离全部受管入站和出站，保留容器、磁盘和证据。</p>
           </div>
         </div>
-        <button type="button" onClick={() => void refresh()} className="min-h-11 rounded-lg border border-slate-600 px-3 text-sky-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400" aria-label="刷新隔离状态">
+        <button type="button" onClick={() => void refresh()} className="min-h-11 rounded-lg border border-slate-600 px-3 text-sky-300 hover:bg-slate-800 focus:outline-hidden focus:ring-2 focus:ring-sky-400" aria-label="刷新隔离状态">
           <RefreshCw className="h-4 w-4" />
         </button>
       </div>
@@ -122,7 +122,7 @@ export const QuarantinePanel: React.FC<{
               </ul>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />隔离会阻断 SSH；请通过宿主机控制台排查。解除不代表风险已恢复。</p>
-                <button type="button" disabled={stale || busy || pending} onClick={() => setSelected(item)} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-500/60 bg-sky-950 px-4 text-xs font-semibold text-sky-100 hover:bg-sky-900 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
+                <button type="button" disabled={stale || busy || pending} onClick={() => setSelected(item)} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-500/60 bg-sky-950 px-4 text-xs font-semibold text-sky-100 hover:bg-sky-900 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
                   <UnlockKeyhole className="h-4 w-4" aria-hidden="true" />{pending ? '等待解除隔离回执' : '管理员复核后解除隔离'}
                 </button>
               </div>

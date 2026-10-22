@@ -264,7 +264,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   return (
     <div className="space-y-6">
       {/* Settings Top Overview Banner */}
-      <section className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 p-5 sm:p-6 shadow-xl">
+      <section className="rounded-2xl border border-slate-800 bg-linear-to-br from-slate-900 via-slate-950 to-slate-900 p-5 sm:p-6 shadow-xl">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-start gap-3.5">
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-sky-500/30 bg-sky-500/10 shadow-inner">
@@ -359,7 +359,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 value={ipReputationKey}
                 onChange={event => setIpReputationKey(event.target.value)}
                 placeholder={ipReputationConfigured ? '已配置的密钥不会显示' : '粘贴新签发的 API Key'}
-                className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 outline-none focus:border-sky-500"
+                className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 outline-hidden focus:border-sky-500"
               />
             </label>
             <button type="button" onClick={handleTestIpReputation} disabled={!ipReputationConfigured || testingIpReputation || savingIpReputationKey} className="min-h-11 shrink-0 rounded-lg border border-sky-700/60 bg-sky-950/30 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-900/50 disabled:cursor-not-allowed disabled:opacity-50">
@@ -413,7 +413,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   onChange={e => setApiForm({ ...apiForm, buyer_notify_enabled: e.target.checked })}
                   className="sr-only peer"
                 />
-                <div className="relative w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-sky-500"></div>
+                <div className="relative w-11 h-6 bg-slate-800 peer-focus:outline-hidden rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-sky-500"></div>
               </label>
             </div>
 
@@ -450,7 +450,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                     value={apiForm.narwhal_api_url}
                     onChange={e => setApiForm({ ...apiForm, narwhal_api_url: e.target.value })}
                     placeholder="https://api.fuckip.me/api/v1"
-                    className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 pl-10 pr-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500 font-mono"
+                    className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 pl-10 pr-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-hidden focus:border-sky-500 font-mono"
                   />
                 </div>
                 <span className="mt-1 block text-[11px] text-slate-500">
@@ -484,12 +484,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                         ? '留空保持现有密钥，输入新密钥覆盖'
                         : '请输入 Narwhal 平台 API Key (例如 sk_...)'
                     }
-                    className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 pl-10 pr-12 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500 font-mono"
+                    className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 pl-10 pr-12 py-2 text-sm text-slate-100 placeholder-slate-500 outline-hidden focus:border-sky-500 font-mono"
                   />
                   <button
                     type="button"
                     onClick={() => setShowApiKey(prev => !prev)}
-                    className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-slate-400 hover:text-sky-300 focus-visible:outline-none"
+                    className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-slate-400 hover:text-sky-300 focus-visible:outline-hidden"
                     aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}
                   >
                     {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -509,7 +509,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                     value={apiForm.narwhal_machine_id}
                     onChange={e => setApiForm({ ...apiForm, narwhal_machine_id: e.target.value })}
                     placeholder="选填，如 00000000-0000-0000-0000-000000000001"
-                    className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500 font-mono"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-hidden focus:border-sky-500 font-mono"
                   />
                   <span className="mt-1 block text-[11px] text-slate-500">
                     此处仅供格式预览；实际告警使用下方登记的精确收件映射
@@ -526,7 +526,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                     value={apiForm.narwhal_node_name}
                     onChange={e => setApiForm({ ...apiForm, narwhal_node_name: e.target.value })}
                     placeholder="选填，如 US-LAX-01 或 宿主机名"
-                    className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-sky-500"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-hidden focus:border-sky-500"
                   />
                   <span className="mt-1 block text-[11px] text-slate-500">
                     实际告警标题使用精确映射中的节点名称
@@ -547,7 +547,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   <div className="font-bold text-amber-300">
                     [已执行，待复查] {apiForm.narwhal_node_name || 'US-LAX-01'}
                   </div>
-                  <div className="bg-slate-900/80 p-2.5 rounded border border-slate-800/60 whitespace-pre-line text-slate-300 text-[11px]">
+                  <div className="bg-slate-900/80 p-2.5 rounded-sm border border-slate-800/60 whitespace-pre-line text-slate-300 text-[11px]">
                     {`事件 NW-demo\n容器 incus/default/c-demo-8f3a\n状态 已执行，待复查\n问题 无认证 / 弱口令 SOCKS5 代理\n执行成功不等于复查通过，请等待新报告验证。`}
                   </div>
                 </div>
@@ -558,7 +558,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 <button
                   type="submit"
                   disabled={savingPush || loadingPush}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-sky-400 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60 shadow-sm"
+                  className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-sky-400 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-60 shadow-xs"
                 >
                   <Save className="h-4 w-4" />
                   {savingPush ? '保存中…' : '保存 API 配置'}
@@ -568,7 +568,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   type="button"
                   disabled={testingPush || loadingPush}
                   onClick={handleTestPush}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-sky-600/50 bg-sky-950/40 px-4 py-2 text-xs sm:text-sm font-semibold text-sky-300 hover:bg-sky-900/60 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60"
+                  className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-sky-600/50 bg-sky-950/40 px-4 py-2 text-xs sm:text-sm font-semibold text-sky-300 hover:bg-sky-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-60"
                 >
                   <Send className="h-3.5 w-3.5" />
                   {testingPush ? '预览中…' : '检查通知预览（不发送）'}
@@ -639,7 +639,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   value={botForm.name}
                   onChange={e => setBotForm({ ...botForm, name: e.target.value })}
                   placeholder="如 运维告警群"
-                  className="mt-1 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500"
+                  className="mt-1 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-hidden focus:border-sky-500"
                 />
               </div>
 
@@ -648,7 +648,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 <select
                   value={botForm.min_severity}
                   onChange={e => setBotForm({ ...botForm, min_severity: e.target.value })}
-                  className="mt-1 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500"
+                  className="mt-1 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-hidden focus:border-sky-500"
                 >
                   <option value="critical">仅严重告警 (Critical)</option>
                   <option value="warning">警告及以上 (Warning+)</option>
@@ -667,7 +667,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   value={botForm.token}
                   onChange={e => setBotForm({ ...botForm, token: e.target.value })}
                   placeholder="123456789:ABCdef-GHI..."
-                  className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 py-2 pl-3 pr-12 text-sm text-slate-100 font-mono outline-none focus:border-sky-500"
+                  className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 py-2 pl-3 pr-12 text-sm text-slate-100 font-mono outline-hidden focus:border-sky-500"
                 />
                 <button
                   type="button"
@@ -689,7 +689,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 value={botForm.target}
                 onChange={e => setBotForm({ ...botForm, target: e.target.value })}
                 placeholder="-1001234567890、@channel 或 -100xxx:topic_id"
-                className="mt-1 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 font-mono outline-none focus:border-sky-500"
+                className="mt-1 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 font-mono outline-hidden focus:border-sky-500"
               />
               <span className="mt-1 block text-[11px] text-slate-500">
                 私聊先发送 /start；频道填 @channel；群论坛话题填 -100xxx:topic_id
@@ -700,7 +700,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               <button
                 type="submit"
                 disabled={savingBot}
-                className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-sky-400 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60"
+                className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-sky-400 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-60"
               >
                 <Bot className="h-4 w-4" />
                 {savingBot ? '保存中…' : '添加机器人并验证'}
@@ -722,7 +722,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 <div className="space-y-1">
                   <p className="font-semibold text-sm text-slate-100 flex items-center gap-2">
                     {bot.name}
-                    <span className="font-mono text-xs font-normal text-slate-400 bg-slate-800/60 px-2 py-0.5 rounded">
+                    <span className="font-mono text-xs font-normal text-slate-400 bg-slate-800/60 px-2 py-0.5 rounded-sm">
                       {bot.target}
                     </span>
                   </p>
@@ -759,7 +759,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                         onToast('error', e.message);
                       }
                     }}
-                    className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-sky-700/60 bg-sky-950/30 px-3 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-900/50 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400"
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-sky-700/60 bg-sky-950/30 px-3 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-900/50 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400"
                   >
                     <Send className="h-3.5 w-3.5" />
                     测试
@@ -768,7 +768,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   <button
                     type="button"
                     onClick={() => setDeletingBot(bot)}
-                    className="flex h-11 w-11 items-center justify-center rounded-lg border border-rose-800/60 bg-rose-950/20 text-rose-300 hover:bg-rose-900/50 transition-colors focus:outline-none focus:ring-2 focus:ring-rose-400"
+                    className="flex h-11 w-11 items-center justify-center rounded-lg border border-rose-800/60 bg-rose-950/20 text-rose-300 hover:bg-rose-900/50 transition-colors focus:outline-hidden focus:ring-2 focus:ring-rose-400"
                     aria-label={`删除机器人 ${bot.name}`}
                   >
                     <Trash2 className="h-4 w-4" />

@@ -19,7 +19,7 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
   return (
     <section aria-label="运行概览指标" className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
       {/* KPI 1: 在线主机 */}
-      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-sm hover:border-slate-700 transition-colors">
+      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-xs hover:border-slate-700 transition-colors">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-slate-400">在线主机</span>
           <div className="rounded-lg bg-sky-950/60 p-2 text-sky-400 border border-sky-500/20">
@@ -35,7 +35,7 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
       </div>
 
       {/* KPI 2: 监控容器 */}
-      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-sm hover:border-slate-700 transition-colors">
+      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-xs hover:border-slate-700 transition-colors">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-slate-400">活跃容器</span>
           <div className="rounded-lg bg-emerald-950/60 p-2 text-emerald-400 border border-emerald-500/20">
@@ -61,7 +61,7 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
             onFilterAlerts();
           }
         }}
-        className={`relative overflow-hidden rounded-2xl border p-4 shadow-sm transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+        className={`relative overflow-hidden rounded-2xl border p-4 shadow-xs transition-all cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${
           activeAlerts > 0
             ? 'border-rose-500/40 bg-rose-950/20 hover:border-rose-500/70 hover:shadow-glow-rose'
             : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
@@ -101,7 +101,7 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
       </div>
 
       {/* KPI 4: 离线/过期 */}
-      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-sm hover:border-slate-700 transition-colors">
+      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-xs hover:border-slate-700 transition-colors">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-slate-400">离线或过期容器</span>
           <div className="rounded-lg bg-slate-800/80 p-2 text-slate-400 border border-slate-700/50">

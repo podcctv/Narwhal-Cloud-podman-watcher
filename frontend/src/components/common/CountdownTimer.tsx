@@ -26,7 +26,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
   const strokeDashoffset = circumference - progress * circumference;
 
   return (
-    <div className="flex h-12 shrink-0 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/90 px-2 shadow-sm" aria-label="自动刷新控制">
+    <div className="flex h-12 shrink-0 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/90 px-2 shadow-xs" aria-label="自动刷新控制">
       {/* Circular Countdown Indicator */}
       <div className="relative flex h-6 w-6 items-center justify-center">
         <svg className="h-6 w-6 -rotate-90 transform" viewBox="0 0 24 24">
@@ -75,7 +75,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
           onClick={onTogglePause}
           title={isPaused ? '恢复自动刷新' : '暂停自动刷新'}
           aria-label={isPaused ? '恢复自动刷新' : '暂停自动刷新'}
-          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-400"
+          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-400"
         >
           {isPaused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
         </button>
@@ -85,7 +85,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
           disabled={isRefreshing}
           title="立即手动刷新"
           aria-label="立即手动刷新"
-          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-sky-300 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
         >
           <RotateCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin text-sky-400' : ''}`} />
         </button>
