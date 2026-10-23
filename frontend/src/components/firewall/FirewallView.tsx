@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, Clock3, Layers, LoaderCircle, Network, Plus, RefreshCw, Server, Shield, Trash2 } from 'lucide-react';
-import { ContainerItem, FleetFirewallPolicyResponse, HostFirewallAbusePolicy, HostFirewallPolicyResponse, HostFirewallRule, SecurityStatusItem } from '../../api/types';
+import { ContainerItem, FleetFirewallPolicyResponse, HostFirewallAbusePolicy, HostFirewallLiveRule, HostFirewallPolicyResponse, HostFirewallRule, SecurityStatusItem } from '../../api/types';
 import { api } from '../../api/client';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { FirewallNodePicker } from './FirewallNodePicker';
@@ -107,6 +107,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [cnRiskDirection, setCnRiskDirection] = useState<CnRiskDirection>('both');
   const [cnRiskAction, setCnRiskAction] = useState<CnRiskAction>('pass');
   const [cnRiskProtocols, setCnRiskProtocols] = useState<CnRiskProtocol[]>(['socks', 'wireguard', 'fet', 'mtproto']);
+  const [pendingManualDelete, setPendingManualDelete] = useState<HostFirewallLiveRule | null>(null);
+  const [deletingManualRuleId, setDeletingManualRuleId] = useState<number | null>(null);
 
   const selectedHost = hosts.find((host) => host.host_id === hostId);
   const interfaceInventory = snapshot?.interface_inventory;
@@ -308,6 +310,26 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     setDirty(true);
   };
 
+  const confirmManualRuleDelete = useCallback(async () => {
+    if (!hostId || !pendingManualDelete || deletingManualRuleId !== null) return;
+    const rule = pendingManualDelete;
+    setDeletingManualRuleId(rule.id);
+    try {
+      const result = await api.deleteHostFirewallRule(hostId, rule.id);
+      setPendingManualDelete(null);
+      setSnapshot((current) => current ? {
+        ...current,
+        latest_action: { id: result.action_id, status: 'queued', message: `手工 RFW 规则 #${rule.id} 删除已排队`, updated_at_utc8: '' },
+      } : current);
+      onToast('success', `RFW 规则 #${rule.id} 的删除请求已排队；母机执行后会读回确认。`);
+      void loadPolicy(false);
+    } catch (error: any) {
+      onToast('error', `RFW 规则未删除：${error.message || error}`);
+    } finally {
+      setDeletingManualRuleId(null);
+    }
+  }, [deletingManualRuleId, hostId, loadPolicy, onToast, pendingManualDelete]);
+
   const addCnRiskPolicyPreset = () => {
     const directions: Array<'in' | 'out'> = cnRiskDirection === 'both'
       ? ['in', 'out']
@@ -492,6 +514,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const canEdit = scope === 'host'
     ? Boolean(snapshot?.agent_ready && runtimeReady && fleetSnapshot && !fleetAuthoritative)
     : Boolean(fleetSnapshot);
+  const canDeleteManualRules = Boolean(scope === 'host' && snapshot?.agent_ready && runtimeReady
+    && !selectedHost?.stale && snapshot?.live_readback?.status === 'ready' && !snapshot.live_readback.stale);
   const blockingRules = rules.filter((rule) => rule.enabled && rule.action === 'block').length;
   const enabledAbuse = Number(abuse.speedtest) + Number(abuse.mining) + Number(abuse.bt);
   const anyAbuseEnabled = enabledAbuse > 0;
@@ -503,6 +527,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         <div className="min-w-0">
           <h2 className="text-lg font-bold text-slate-100">母机防火墙策略</h2>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">单机或全局保存期望策略，由 Watcher 排队并通过本机 Runman 的受限 Unix 接口应用到 RFW。</p>
+          <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">8792 是 Agent 面板端口；RFW API 默认仅监听 127.0.0.1:7734（地址可配置）。Watcher 通过 Agent 受限控制通道读回和同步，不需要将 RFW API 暴露到公网。</p>
         </div>
       </div>
       <button type="button" onClick={() => scope === 'host' ? void loadPolicy(true) : void loadFleetPolicy()} disabled={scope === 'host' ? loading || !hostId : fleetLoading} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-200 transition-colors hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
@@ -658,28 +683,33 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           </div>
         </> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950 px-3 py-4 text-center text-xs text-slate-500">没有符合当前筛选条件的母机。</p>}
       </div>
-      <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">实时读回来自节点运行中 RFW 的规则 API，并与平台管理的期望规则逐项比对；它不是直接读取 eBPF 内核 map。未登记为平台所有的手工规则只显示、不删除。MTProto 策略仅下发给新鲜能力读回明确支持的节点；未知或旧版节点会延后显示，不会先下发再失败。</p>
+      <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">实时读回来自节点运行中 RFW 的规则 API，并与平台管理的期望规则逐项比对；它不是直接读取 eBPF 内核 map。手工规则只能在新鲜读回后逐条确认删除；平台规则从期望列表移除并应用，避免被自动同步重新创建。MTProto 策略仅下发给能力明确支持的节点。</p>
     </section>}
 
     <section className="rounded-2xl border border-slate-800 bg-slate-900/70">
       <div className="flex flex-col gap-2 border-b border-slate-800 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
         <div>
           <h3 className="text-sm font-bold text-slate-100">所选母机的 RFW 实际规则</h3>
-          <p className="mt-1 text-xs leading-5 text-slate-400">读取 RFW 当前规则表；平台管理的规则会标注同步状态，手工规则保持只读。</p>
+          <p className="mt-1 text-xs leading-5 text-slate-400">读取母机 RFW 当前规则；平台规则从期望列表移除后应用，手工规则可在新鲜读回并确认后单条删除。</p>
         </div>
         {snapshot?.live_readback?.last_success_at ? <span className="text-[10px] text-slate-500">最近成功读回：{new Date(snapshot.live_readback.last_success_at * 1000).toLocaleString()}</span> : null}
       </div>
       {snapshot?.live_readback?.stale && <p className="mx-4 mt-4 rounded-lg border border-amber-900/60 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/80 sm:mx-5">当前没有新鲜的 RFW 读回。以下若有规则，是最近一次成功读回的留存快照，不能视为当前生效状态。</p>}
       {!snapshot?.live_readback?.snapshot ? <p className="px-5 py-7 text-center text-sm text-slate-400">{readbackStatusLabel[snapshot?.live_readback?.status || 'unknown'] || '等待节点上报'}。请确认 Watcher 与 Runman 已更新且 RFW API 正常。</p> : snapshot.live_readback.snapshot.rules.length ? <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] text-left text-xs">
-          <thead className="bg-slate-950/60 text-slate-400"><tr><th className="px-4 py-3 font-medium">来源 / 同步</th><th className="px-4 py-3 font-medium">方向 / 协议</th><th className="px-4 py-3 font-medium">端口</th><th className="px-4 py-3 font-medium">IP 匹配</th><th className="px-4 py-3 font-medium">动作 / 优先级</th><th className="px-4 py-3 font-medium">RFW ID</th></tr></thead>
+        <table className="w-full min-w-[900px] text-left text-xs">
+          <thead className="bg-slate-950/60 text-slate-400"><tr><th className="px-4 py-3 font-medium">来源 / 同步</th><th className="px-4 py-3 font-medium">方向 / 协议</th><th className="px-4 py-3 font-medium">端口</th><th className="px-4 py-3 font-medium">IP 匹配</th><th className="px-4 py-3 font-medium">动作 / 优先级</th><th className="px-4 py-3 font-medium">RFW ID</th><th className="px-4 py-3 text-right font-medium">操作</th></tr></thead>
           <tbody>{snapshot.live_readback.snapshot.rules.map((rule) => <tr key={rule.id} className="border-t border-slate-800 text-slate-200">
-            <td className="px-4 py-3"><span className={`rounded-full border px-2 py-1 ${rule.sync_state === 'drifted' || rule.sync_state === 'orphaned' ? 'border-rose-800 bg-rose-950/50 text-rose-200' : rule.origin === 'platform' ? 'border-sky-800 bg-sky-950/50 text-sky-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{rule.origin === 'platform' ? `平台 · ${rule.sync_state === 'in_sync' ? '一致' : rule.sync_state === 'orphaned' ? '多余' : '偏差'}` : '手工 · 只读'}</span>{rule.managed_key && <span className="ml-2 text-slate-500">{rule.managed_key}</span>}</td>
+            <td className="px-4 py-3"><span className={`rounded-full border px-2 py-1 ${rule.sync_state === 'drifted' || rule.sync_state === 'orphaned' ? 'border-rose-800 bg-rose-950/50 text-rose-200' : rule.origin === 'platform' ? 'border-sky-800 bg-sky-950/50 text-sky-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{rule.origin === 'platform' ? `平台 · ${rule.sync_state === 'in_sync' ? '一致' : rule.sync_state === 'orphaned' ? '多余' : '偏差'}` : '手工 · 可单条删除'}</span>{rule.managed_key && <span className="ml-2 text-slate-500">{rule.managed_key}</span>}</td>
             <td className="px-4 py-3">{rule.direction === 'in' ? '入站' : '出站'} · <code>{rule.protocol}</code></td>
             <td className="px-4 py-3 font-mono">{rule.port_start === 0 && rule.port_end === 0 ? '任意' : rule.port_start === rule.port_end ? rule.port_start : `${rule.port_start}–${rule.port_end}`}</td>
             <td className="px-4 py-3">{rule.ip_type === 'any' ? '任意 IP' : rule.ip_type === 'cidr' ? rule.ip : (rule.countries || []).join(', ')}</td>
             <td className="px-4 py-3"><span className={rule.action === 'block' ? 'text-rose-300' : 'text-emerald-300'}>{rule.enabled ? rule.action === 'block' ? '阻断' : '放行' : '停用'}</span> · P{rule.priority}</td>
             <td className="px-4 py-3 font-mono tabular-nums text-slate-400">#{rule.id}</td>
+            <td className="px-4 py-2 text-right">
+              {rule.origin === 'manual' ? <button type="button" onClick={() => setPendingManualDelete(rule)} disabled={!canDeleteManualRules || deletingManualRuleId === rule.id} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-rose-800/70 bg-rose-950/40 px-2.5 text-[11px] font-medium text-rose-200 hover:bg-rose-900/50 focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-45" title={canDeleteManualRules ? '确认后只删除当前显示的这条手工 RFW 规则' : '需要母机在线且 RFW 读回新鲜'}>{deletingManualRuleId === rule.id ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />}删除</button>
+                : rule.managed_key && rules.some((item) => item.key === rule.managed_key) ? <button type="button" onClick={() => removeRule(rule.managed_key!)} disabled={!canEdit} className="min-h-9 rounded-lg border border-slate-700 px-2.5 text-[11px] text-slate-300 hover:border-rose-800 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-45" title="从当前期望策略草稿中移除；保存并应用后同步删除">从期望策略移除</button>
+                  : <span className="text-[10px] text-slate-500">通过期望策略同步</span>}
+            </td>
           </tr>)}</tbody>
         </table>
       </div> : <p className="px-5 py-7 text-center text-sm text-slate-400">最近一次 RFW 读回没有规则。</p>}
@@ -857,7 +887,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     </section>
 
     <ConfirmDialog open={scopeConfirmOpen} title="切换配置范围？" description="当前草稿尚未保存。切换后会放弃这份草稿，并载入目标范围的已保存策略。" confirmLabel="放弃草稿并切换" tone="primary" onConfirm={() => { if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); setScopeConfirmOpen(false); }} onCancel={() => { setPendingScope(null); setScopeConfirmOpen(false); }} />
-    <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。RFW 协议规则可能影响该母机的全部容器和服务；已启用 ${blockingRules} 条阻断规则与 ${enabledAbuse} 项固定端口防滥用策略。Watcher 只会删除自身登记的规则。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
+    <ConfirmDialog open={pendingManualDelete !== null} title="删除这条手工 RFW 规则？" description={`这只会删除 ${hostId} 上当前读回的 RFW 规则 #${pendingManualDelete?.id ?? ''}。执行前 Runman 会再次核对规则 ID 与完整规则内容；若规则已变化或已被平台接管，删除会被拒绝。`} confirmLabel="确认删除并排队" tone="danger" isSubmitting={deletingManualRuleId !== null} onConfirm={confirmManualRuleDelete} onCancel={() => { if (deletingManualRuleId === null) setPendingManualDelete(null); }}>
+      {pendingManualDelete && <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">{pendingManualDelete.direction === 'in' ? '入站' : '出站'} {pendingManualDelete.protocol} · 端口 {pendingManualDelete.port_start === 0 && pendingManualDelete.port_end === 0 ? '任意' : pendingManualDelete.port_start === pendingManualDelete.port_end ? pendingManualDelete.port_start : `${pendingManualDelete.port_start}–${pendingManualDelete.port_end}`} · {pendingManualDelete.ip_type === 'any' ? '任意 IP' : pendingManualDelete.ip_type === 'cidr' ? pendingManualDelete.ip : (pendingManualDelete.countries || []).join(', ')} · {pendingManualDelete.action === 'block' ? '阻断' : '放行'} · P{pendingManualDelete.priority}</div>}
+    </ConfirmDialog>
+    <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。RFW 协议规则可能影响该母机的全部容器和服务；已启用 ${blockingRules} 条阻断规则与 ${enabledAbuse} 项固定端口防滥用策略。平台只自动删除自身登记的规则；手工规则需在实时读回后逐条确认删除。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
       <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">执行依赖 Watcher Agent、支持 firewall.sock 的 Runman Agent 与运行中的 RFW。Watcher 离线时排队等待；成功回执是 Runman 应用结果，不等同于平台实时读取内核规则。</div>
     </ConfirmDialog>
     <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用阻断规则、${enabledAbuse} 项固定端口策略；容器网络选择：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}。每个节点会按本机网卡清单独立映射；无法安全映射的节点将等待，不会应用错误接口名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>

@@ -164,6 +164,11 @@ export const api = {
       method: 'POST', body: JSON.stringify(policy),
     }),
 
+  deleteHostFirewallRule: (hostId: string, ruleId: number) =>
+    request<{ ok: boolean; rule_id: number; action_id: number; queued: boolean }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/firewall-rules/${ruleId}`, {
+      method: 'DELETE',
+    }),
+
   getFleetFirewallPolicy: () =>
     request<FleetFirewallPolicyResponse>('/api/v1/firewall/fleet-policy'),
 

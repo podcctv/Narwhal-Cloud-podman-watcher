@@ -2549,7 +2549,7 @@ def _materialize_host_firewall_policy(
 def _latest_host_firewall_action(conn: sqlite3.Connection, host_id: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT id,status,result_message,updated_at,params_json FROM security_actions "
-        "WHERE host_id=? AND action_type='apply_host_firewall_policy' ORDER BY id DESC LIMIT 1",
+        "WHERE host_id=? AND action_type IN ('apply_host_firewall_policy','delete_host_firewall_rule') ORDER BY id DESC LIMIT 1",
         (host_id,),
     ).fetchone()
 
@@ -3660,6 +3660,10 @@ def _action_item(row: sqlite3.Row) -> Dict[str, Any]:
             for key in ("max_connections", "lease_expires_at")
             if key in params
         }
+    elif row["action_type"] == "delete_host_firewall_rule":
+        rule = params.get("rule") if isinstance(params, dict) else None
+        rule_id = rule.get("id") if isinstance(rule, dict) else None
+        params = {"rule_id": rule_id if type(rule_id) is int and rule_id > 0 else 0}
     elif row["action_type"] == "apply_host_firewall_policy":
         policy = params.get("policy") if isinstance(params.get("policy"), dict) else {}
         fleet_revision = params.get("fleet_revision")
@@ -4702,6 +4706,88 @@ async def update_host_firewall_policy(host_id: str, request: Request) -> JSONRes
         conn.close()
 
 
+@app.delete("/api/v1/hosts/{host_id:path}/firewall-rules/{rule_id}")
+async def delete_host_firewall_rule(host_id: str, rule_id: int, request: Request) -> JSONResponse:
+    if getattr(request.state, "dashboard_role", "admin") != "admin":
+        raise HTTPException(status_code=403, detail="只有管理员可以删除母机 RFW 规则")
+    if not host_id or len(host_id) > 200 or not 1 <= rule_id <= 2**63 - 1:
+        raise HTTPException(status_code=400, detail="主机或 RFW 规则标识无效")
+
+    now = int(time.time())
+    requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
+    conn = db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if host is None:
+            raise HTTPException(status_code=404, detail="主机不存在")
+        node_id = str(host["node_id"] or "")
+        if not node_id:
+            raise HTTPException(status_code=409, detail="该主机尚未注册可校验身份的 Watcher Agent")
+
+        readback = _host_firewall_live_readback(conn, host_id, now)
+        if readback.get("status") != "ready" or readback.get("stale") is not False:
+            raise HTTPException(status_code=409, detail="RFW 规则读回已过期或不可用；刷新并等待母机重新上报后再删除")
+        snapshot = readback.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise HTTPException(status_code=409, detail="没有可验证的当前 RFW 规则快照")
+        rules = snapshot.get("rules") if isinstance(snapshot.get("rules"), list) else []
+        target = next((
+            rule for rule in rules
+            if isinstance(rule, dict) and type(rule.get("id")) is int and rule["id"] == rule_id
+        ), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="该规则已不在最近一次 RFW 读回中，请刷新列表")
+        if target.get("origin") != "manual" or target.get("sync_state") != "manual":
+            raise HTTPException(status_code=409, detail="平台管理规则请先在期望规则列表中移除，再保存并应用")
+
+        expected_rule = {
+            key: target[key]
+            for key in (
+                "id", "priority", "direction", "protocol", "action", "enabled",
+                "port_start", "port_end", "ip_type", "origin", "sync_state",
+            )
+            if key in target
+        }
+        if "ip" in target:
+            expected_rule["ip"] = target["ip"]
+        if "countries" in target:
+            expected_rule["countries"] = target["countries"]
+
+        pending_rows = conn.execute(
+            "SELECT id,params_json FROM security_actions WHERE host_id=? AND action_type='delete_host_firewall_rule' "
+            "AND status IN ('queued','dispatched','running')",
+            (host_id,),
+        ).fetchall()
+        for pending_row in pending_rows:
+            try:
+                pending_params = json.loads(pending_row["params_json"] or "{}")
+            except (TypeError, ValueError):
+                pending_params = {}
+            pending_rule = pending_params.get("rule") if isinstance(pending_params, dict) else None
+            if isinstance(pending_rule, dict) and pending_rule.get("id") == rule_id:
+                conn.commit()
+                return JSONResponse(status_code=202, content={
+                    "ok": True, "rule_id": rule_id, "action_id": int(pending_row["id"]), "queued": True,
+                })
+
+        params = {"expected_node_id": node_id, "rule": expected_rule}
+        cur = conn.execute(
+            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
+            "VALUES(0,?,'host','','__host__','delete_host_firewall_rule',?,'queued',?,?,?)",
+            (host_id, json.dumps(params, ensure_ascii=False), requested_by, now, now),
+        )
+        conn.commit()
+        return JSONResponse(status_code=202, content={
+            "ok": True, "rule_id": rule_id, "action_id": int(cur.lastrowid), "queued": True,
+        })
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/firewall/fleet-policy")
 def get_fleet_firewall_policy() -> JSONResponse:
     now = int(time.time())
@@ -4926,7 +5012,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
+            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -4984,7 +5070,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy'} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"
