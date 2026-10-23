@@ -15,5 +15,6 @@ COPY admission_policy.py admission_linux.py admission_guard.py admission_observe
 COPY pasarguard_guard.py ./
 COPY tcp_probe.py .
 COPY socks_detector.py .
+COPY host_security_audit.py .
 
 CMD ["python", "agent.py"]

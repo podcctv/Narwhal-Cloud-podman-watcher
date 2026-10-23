@@ -25,6 +25,31 @@ const signalLevel = (t: SecurityStatusItem, pattern: RegExp): Level => {
   return matches.some(a => a.severity === 'critical') ? 'critical'
     : matches.some(a => a.severity === 'warning') ? 'warning' : 'normal';
 };
+const hostAuditLevel = (t: SecurityStatusItem): Level => {
+  if (!t.enabled || t.stale || !t.host_audit?.enabled) return 'unknown';
+  const sshOnly = t.host_audit.scope === 'agent_container';
+  const alerts = (t.sample_alerts || []).filter(a => sshOnly
+    ? /^(host_security_finding|host_integrity_change|host_ssh_login)$/.test(a.type || '')
+    : /^(host_vulnerability|host_security_finding|host_integrity_change|host_ssh_login)$/.test(a.type || ''));
+  if (alerts.some(a => a.severity === 'critical') || Number(t.host_audit.vulnerability_scan?.critical_count || 0) > 0
+    || Number(t.host_audit.security_indicator_scan?.critical_count || 0) > 0) return 'critical';
+  if (alerts.some(a => a.severity === 'warning')) return 'warning';
+  if (sshOnly) {
+    if (t.host_audit.snapshot_status === 'partial' || t.host_audit.ssh_log_status === 'unavailable'
+      || t.host_audit.security_indicator_scan?.coverage === 'partial') return 'warning';
+    if (t.host_audit.snapshot_status === 'unavailable') return 'unknown';
+    return 'normal';
+  }
+  if (t.host_audit.snapshot_status === 'partial' || t.host_audit.ssh_log_status === 'unavailable'
+    || t.host_audit.vulnerability_scan?.coverage === 'partial'
+    || t.host_audit.security_indicator_scan?.coverage === 'partial') return 'warning';
+  if (t.host_audit.snapshot_status === 'unavailable' || t.host_audit.vulnerability_scan?.coverage === 'unavailable'
+    || t.host_audit.security_indicator_scan?.coverage === 'unavailable') return 'unknown';
+  return 'normal';
+};
+const auditTime = (value?: number) => value
+  ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+  : '尚无完整扫描记录';
 const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode }> = ({ title, level, children }) =>
   <div className={`min-w-0 rounded-xl border p-3 ${tones[level]}`}>
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-semibold">
@@ -68,6 +93,13 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
       {telemetry.map(t => {
         const thresholds = t.thresholds || {};
         const events = t.sample_alerts || [];
+        const hostAudit = t.host_audit;
+        const vulnerabilityScan = hostAudit?.vulnerability_scan;
+        const indicatorScan = hostAudit?.security_indicator_scan;
+        const sshOnlyAudit = hostAudit?.scope === 'agent_container';
+        const hostAuditEvents = hostAudit?.recent_events || [];
+        const hostFindings = hostAudit?.recent_findings || [];
+        const securityIndicators = hostAudit?.recent_indicators || [];
         const networkEvents = events.filter(a => /^ddos_/.test(a.type || ''));
         const httpEvents = events.filter(a => /^(cc_|http_|web_scan)/.test(a.type || ''));
         const sources = t.access_sources || [];
@@ -130,6 +162,54 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <p><span className={peakTone(t.today_peak_inbound_ips, ipWarning, ipCritical)}>最高入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}</span> · <span className="text-slate-300">最高出站 IP {fmtNumber(t.today_peak_outbound_ips, 0)}</span></p>
               <p className="text-slate-300">连接 ≥ {connWarning} / {connCritical}、入站 IP ≥ {ipWarning} / {ipCritical}：警告 / 危险。</p>
               <p className="text-slate-300">UTC+8 当日采样最大值；各项可能来自不同容器。推送使用触发当时的单容器值，峰值不代表当前仍异常。</p>
+            </Signal>
+            <Signal title={sshOnlyAudit ? '小鸡 SSH 安全检查' : '母鸡完整性、漏洞与威胁指标'} level={hostAuditLevel(t)}>
+              {!hostAudit?.enabled ? <p>尚未收到新版 Agent 的安全审计数据。</p> : <>
+                <p>{sshOnlyAudit
+                  ? '审计范围：小鸡容器，仅检查 SSH 可登录账户、公钥、成功登录来源和 SSH/PAM 认证配置；不会扫描母鸡、系统软件漏洞、Python 依赖、供应链指标或容器镜像。'
+                  : '审计范围：母鸡宿主机，执行账户/SSH 基线、系统软件漏洞与供应链/配置检查。'}</p>
+                <p>{sshOnlyAudit ? 'SSH 安全基线：' : '完整性基线：'}{hostAudit.baseline_pending ? '首次采样，正在建立静默基线' : hostAudit.snapshot_status === 'ready' ? '正常 · ' + fmtNumber(hostAudit.user_accounts || 0, 0) + ' 个可登录账户 · ' + fmtNumber(hostAudit.ssh_key_count || 0, 0) + ' 个 SSH 公钥指纹' : '采集不完整，需检查 Agent 权限'}</p>
+                <p>SSH 登录日志：{hostAudit.ssh_log_status === 'available' ? '已接入 · 本周期 ' + fmtNumber(hostAudit.ssh_events_last_period || 0, 0) + ' 条成功登录 · 新来源 ' + fmtNumber(hostAudit.new_ssh_login_events || 0, 0) + ' 项' : hostAudit.ssh_log_status === 'partial' ? '日志读取不完整' : '不可用，无法监测新登录来源'}</p>
+                {sshOnlyAudit ? <>
+                  <p>SSH 配置复核：{indicatorScan?.coverage === 'complete' ? '已完成' : indicatorScan?.coverage === 'partial' ? '部分完成' : '暂不可用'} · 检查 {fmtNumber(indicatorScan?.config_files_checked || 0, 0)} 个 SSH 配置文件 · 发现 {fmtNumber(indicatorScan?.finding_count || 0, 0)} 项</p>
+                  <p className="text-slate-300">母鸡软件漏洞、Python 依赖、供应链与镜像检查按范围关闭，不会显示为“无风险”或“扫描通过”。</p>
+                </> : <>
+                  <p>漏洞扫描：{vulnerabilityScan?.coverage === 'complete' ? '覆盖完整' : vulnerabilityScan?.coverage === 'partial' ? '部分覆盖' : '暂不可用'} · {fmtNumber(vulnerabilityScan?.packages_checked || 0, 0)} 个软件包 · 匹配 {fmtNumber(vulnerabilityScan?.finding_count || 0, 0)} 条（严重 {fmtNumber(vulnerabilityScan?.critical_count || 0, 0)} 条）</p>
+                  <p className="text-slate-300">最近完整扫描：{auditTime(vulnerabilityScan?.checked_at)} · OS 系统包、已安装 Python 包及发现的依赖锁文件；每日检查 OSV 公告。</p>
+                  <p>供应链 / 配置补充检查：{indicatorScan?.coverage === 'complete' ? '覆盖完整' : indicatorScan?.coverage === 'partial' ? '部分覆盖' : '暂不可用'} · {fmtNumber(indicatorScan?.finding_count || 0, 0)} 项（严重 {fmtNumber(indicatorScan?.critical_count || 0, 0)} 项）</p>
+                  <p className="text-slate-300">每 6 小时检查 Python 虚拟环境元数据、LiteLLM 事件 IOC、本地镜像摘要及常见 SSH / Nginx / Traefik / Compose / CI 配置；不会启动应用或进入容器。</p>
+                  <p className="text-slate-300">本次可见 Python 环境 {fmtNumber(indicatorScan?.python_site_roots || 0, 0)} 个 · 配置文件 {fmtNumber(indicatorScan?.config_files_checked || 0, 0)} 个 · 默认 CA {fmtNumber(indicatorScan?.ca_certificates_checked || 0, 0)} 张 · 本地镜像 {fmtNumber(indicatorScan?.runtime_inventory?.images_checked || 0, 0)} 个（{(indicatorScan?.runtime_inventory?.engines || []).join('、') || '运行时未接入'}）。</p>
+                  <p className="text-slate-300">OSV 查询会发送软件包名称和版本，不包含主机名、IP、账户或配置内容。</p>
+                </>}
+                {hostAuditEvents.length > 0 && <div className="rounded-lg border border-slate-700/70 p-2">
+                  <p className="font-semibold">{sshOnlyAudit ? '本次 SSH 安全变化' : '本次主机变化'}</p>
+                  {hostAuditEvents.slice(0, 4).map((event, index) => <p key={(event.type || 'event') + '-' + index} className="break-all">{event.title || event.type}：{event.message}</p>)}
+                </div>}
+                {!sshOnlyAudit && hostFindings.length > 0 && <details className="rounded-lg border border-slate-700/70 p-2">
+                  <summary className="cursor-pointer font-semibold">查看漏洞匹配（最多 {hostFindings.length} 条）</summary>
+                  <div className="mt-2 space-y-2">
+                    {hostFindings.slice(0, 12).map((finding, index) => <div key={(finding.ecosystem || '') + '-' + (finding.package || '') + '-' + (finding.version || '') + '-' + (finding.id || index)} className="border-t border-slate-700/70 pt-2">
+                      <p className="break-all font-semibold">{finding.severity === 'critical' ? '严重' : '待复核'} · {finding.cve || finding.id || 'OSV 公告'} · {finding.package}@{finding.version} · {finding.source === 'system' ? '系统软件' : finding.source === 'installed' ? '已安装 Python 包' : finding.source === 'manifest' ? 'Maven 清单（非锁定）' : '依赖锁文件'}</p>
+                      {finding.summary && <p className="text-slate-300">{finding.summary}</p>}
+                    </div>)}
+                  </div>
+                  <p className="mt-2 text-slate-300">锁文件命中不一定已安装或运行；公告版本匹配也不等于已被利用，发行版可能回移安全补丁，处理前请核对厂商公告。</p>
+                </details>}
+                {!sshOnlyAudit && securityIndicators.length > 0 && <details className="rounded-lg border border-slate-700/70 p-2">
+                  <summary className="cursor-pointer font-semibold">查看供应链与配置风险复核项（{securityIndicators.length} 类）</summary>
+                  <div className="mt-2 space-y-2">
+                    {securityIndicators.slice(0, 16).map((finding, index) => <div key={finding.id || finding.rule || index} className="border-t border-slate-700/70 pt-2">
+                      <p className={`break-all font-semibold ${finding.severity === 'critical' ? 'text-red-300' : finding.severity === 'warning' ? 'text-amber-300' : ''}`}>{finding.severity === 'critical' ? '严重' : finding.severity === 'warning' ? '待复核' : '提示'} · {finding.component || '主机安全检查'} · {finding.title} {Number(finding.instance_count || 0) > 1 ? `（${finding.instance_count} 处）` : ''}</p>
+                      {(finding.evidence || []).slice(0, 3).map((evidence, i) => <p key={i} className="break-all text-slate-300">证据位置：{evidence}</p>)}
+                      {finding.guidance && <p className="text-slate-300">建议：{finding.guidance}</p>}
+                      {finding.reference && <a className="text-sky-300 underline" href={finding.reference} target="_blank" rel="noreferrer">查看上游公告</a>}
+                    </div>)}
+                  </div>
+                  <p className="mt-2 text-slate-300">IOC 或配置文本命中是调查线索，不等于已确认入侵或配置已生效；可疑 Python 文件只检查名称和元数据，不会导入或执行。</p>
+                </details>}
+                {!sshOnlyAudit && vulnerabilityScan?.error && <p className="text-amber-200">扫描提示：{vulnerabilityScan.error}</p>}
+                {indicatorScan?.error && <p className="text-amber-200">{sshOnlyAudit ? 'SSH 配置检查提示：' : '补充扫描提示：'}{indicatorScan.error}</p>}
+              </>}
             </Signal>
           </div>
           <details className="mt-3 rounded-lg border border-slate-700 p-3 text-xs text-slate-300">

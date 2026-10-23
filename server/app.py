@@ -20,7 +20,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import socks
@@ -723,6 +723,9 @@ def _alert_fingerprint(host_id: str, alert: Dict[str, Any]) -> str:
         str(alert.get("container_name") or ""),
         str(alert.get("type") or "unknown"),
     ]
+    alert_key = str(alert.get("alert_key") or "").strip()
+    if alert_key:
+        parts.append(alert_key[:240])
     if alert.get('type') == 'prohibited_activity':
         parts.append(str(alert.get('instance_id') or ''))
     if str(alert.get("type") or "") == "unauthorized_panel_pairing":
@@ -748,6 +751,7 @@ def process_security_alerts(
     ts: int,
     alerts: List[Dict[str, Any]],
     partial: bool = False,
+    preserve_active_types: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     active_fingerprints: List[str] = []
     notifications: List[Dict[str, Any]] = []
@@ -775,6 +779,7 @@ def process_security_alerts(
         fingerprint_source = dict(normalized)
         fingerprint_source["unapproved_domains"] = raw_alert.get("unapproved_domains")
         fingerprint_source['instance_id'] = raw_alert.get('instance_id')
+        fingerprint_source["alert_key"] = raw_alert.get("alert_key")
         fingerprint = _alert_fingerprint(host_id, fingerprint_source)
         active_fingerprints.append(fingerprint)
         existing = conn.execute(
@@ -822,6 +827,12 @@ def process_security_alerts(
                 if alert_type == 'container_connection_count':
                     was_escalated = _alert_details(existing['details_json']).get('connection_policy', {}).get('escalated')
                     should_notify = should_notify or bool(raw_alert.get('connection_policy', {}).get('escalated') and not was_escalated)
+                if alert_type in {"host_vulnerability", "host_security_finding"}:
+                    previous_details = _alert_details(existing["details_json"])
+                    previous_ids = previous_details.get("finding_keys") or previous_details.get("finding_ids")
+                    current_ids = raw_alert.get("finding_keys") or raw_alert.get("finding_ids")
+                    if isinstance(previous_ids, list) and isinstance(current_ids, list):
+                        should_notify = should_notify or bool(set(map(str, current_ids)) - set(map(str, previous_ids)))
             conn.execute(
                 """
                 UPDATE security_alerts
@@ -882,6 +893,16 @@ def process_security_alerts(
 
     if partial:
         return notifications
+    preserve_types = sorted({
+        str(item).strip()[:80] for item in (preserve_active_types or []) if str(item).strip()
+    })
+    if preserve_types:
+        placeholders = ",".join("?" for _ in preserve_types)
+        preserved = conn.execute(
+            f"SELECT fingerprint FROM security_alerts WHERE host_id=? AND alert_type IN ({placeholders}) AND status IN ('active','dismissed')",
+            (host_id, *preserve_types),
+        ).fetchall()
+        active_fingerprints.extend(str(row["fingerprint"]) for row in preserved)
     pending_network_review = "NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status<>'released')"
     if active_fingerprints:
         placeholders = ",".join("?" for _ in active_fingerprints)
@@ -2975,6 +2996,7 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
                     "runtime": alert["runtime"], "project": alert["project"],
                     "container_name": alert["container_name"], "type": alert["alert_type"],
                     "message": alert["message"], "unapproved_domains": details.get("unapproved_domains"),
+                    "alert_key": details.get("alert_key"),
                 })
                 existing = conn.execute("SELECT id FROM security_alerts WHERE fingerprint=?", (fingerprint,)).fetchone()
                 old_fingerprint = str(alert["fingerprint"])
@@ -3119,7 +3141,22 @@ async def report(
             combined_alerts = connection_policy.enrich_alerts(security_alerts + firewall_event_alerts + operations_alerts, containers)
             previous_sample = conn.execute("SELECT MAX(ts) FROM host_security WHERE host_id=?", (host_id,)).fetchone()[0] or 0
             if security.get("enabled", True) and ts > previous_sample:
-                notifications = process_security_alerts(conn, host_id, ts, combined_alerts)
+                host_audit = security.get("host_audit") if isinstance(security.get("host_audit"), dict) else {}
+                vulnerability_scan = host_audit.get("vulnerability_scan") if isinstance(host_audit.get("vulnerability_scan"), dict) else {}
+                indicator_scan = host_audit.get("security_indicator_scan") if isinstance(host_audit.get("security_indicator_scan"), dict) else {}
+                preserve_types = []
+                # Child Agents intentionally perform SSH-only checks. Their
+                # not-applicable scans must not keep old container-scoped
+                # package/indicator alerts active as if they were host checks.
+                if host_audit.get("scope") != "agent_container":
+                    if vulnerability_scan.get("coverage") != "complete":
+                        preserve_types.append("host_vulnerability")
+                    if indicator_scan.get("coverage") != "complete":
+                        preserve_types.append("host_security_finding")
+                notifications = process_security_alerts(
+                    conn, host_id, ts, combined_alerts,
+                    preserve_active_types=preserve_types,
+                )
                 buyer_notifications.observe(conn, host_id, ts, containers, combined_alerts)
             automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, host_id, ts)
             _store_host_firewall_readback(conn, host_id, security, ts)
@@ -5397,6 +5434,7 @@ def security_status() -> JSONResponse:
                 "interval_seconds": payload.get("interval_seconds"),
                 "thresholds": payload.get("thresholds") or {},
                 "sample_alerts": payload.get("alerts") or [],
+                "host_audit": payload.get("host_audit") if isinstance(payload.get("host_audit"), dict) else {},
                 "access_sources": payload.get("access_sources") or [],
                 "total_rx_bps": cur_rx,
                 "total_tx_bps": cur_tx,
