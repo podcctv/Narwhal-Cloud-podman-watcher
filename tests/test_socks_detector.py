@@ -67,7 +67,7 @@ class DirectionTests(unittest.TestCase):
         self.assertEqual(
             result['endpoints'],
             [
-                {'protocol': 'vless', 'port': 443, 'listen': '*'},
+                {'protocol': 'vless', 'port': 443, 'listen': '*', 'transports': ['tcp']},
                 {'protocol': 'trojan', 'port': 8443, 'listen': '*', 'transports': ['tcp']},
             ],
         )
@@ -83,6 +83,101 @@ class DirectionTests(unittest.TestCase):
         self.assertEqual(result['endpoints'], [
             {'protocol': 'hysteria2', 'port': 443, 'listen': '0.0.0.0'},
         ])
+
+    def test_xray_stream_methods_map_to_socket_layer_protocols(self):
+        methods = {
+            'raw': 'tcp', 'xhttp': 'tcp', 'grpc': 'tcp',
+            'websocket': 'tcp', 'httpupgrade': 'tcp',
+            'mkcp': 'udp', 'hysteria': 'udp',
+        }
+        for method, transport in methods.items():
+            with self.subTest(method=method):
+                result = detector.parse_inbound_protocols(json.dumps({
+                    'inbounds': [{
+                        'protocol': 'vmess', 'port': 443,
+                        'streamSettings': {'method': method},
+                    }],
+                }), 'xray')
+                self.assertEqual(result['endpoints'][0]['transports'], [transport])
+
+    def test_xray_xhttp_h3_and_mixed_alpn_are_handled_conservatively(self):
+        for alpn, expected in ((['h3'], ['udp']), (['h2'], ['tcp']), (['h2', 'h3'], None)):
+            with self.subTest(alpn=alpn):
+                result = detector.parse_inbound_protocols(json.dumps({
+                    'inbounds': [{
+                        'protocol': 'vmess', 'port': 443,
+                        'streamSettings': {
+                            'method': 'xhttp', 'security': 'tls',
+                            'tlsSettings': {'alpn': alpn},
+                        },
+                    }],
+                }), 'xray')
+                if expected is None:
+                    self.assertNotIn('transports', result['endpoints'][0])
+                else:
+                    self.assertEqual(result['endpoints'][0]['transports'], expected)
+
+    def test_xray_masque_transport_is_not_guessed_without_alpn_evidence(self):
+        result = detector.parse_inbound_protocols(json.dumps({
+            'inbounds': [{
+                'protocol': 'masque', 'port': 443,
+                'streamSettings': {
+                    'method': 'masque', 'security': 'tls',
+                    'tlsSettings': {'alpn': ['h2', 'h3']},
+                },
+            }],
+        }), 'xray')
+        self.assertNotIn('transports', result['endpoints'][0])
+
+    def test_legacy_xray_network_aliases_map_to_socket_layer_protocols(self):
+        for network, transport in (('ws', 'tcp'), ('grpc', 'tcp'), ('kcp', 'udp'), ('tcp', 'tcp')):
+            with self.subTest(network=network):
+                result = detector.parse_inbound_protocols(json.dumps({
+                    'inbounds': [{'protocol': 'vmess', 'port': 443, 'network': network}],
+                }), 'xray')
+                self.assertEqual(result['endpoints'][0]['transports'], [transport])
+
+    def test_unknown_xray_stream_method_stays_unattributed(self):
+        result = detector.parse_inbound_protocols(json.dumps({
+            'inbounds': [{
+                'protocol': 'vmess', 'port': 443,
+                'streamSettings': {'method': 'future-transport'},
+            }],
+        }), 'xray')
+        self.assertNotIn('transports', result['endpoints'][0])
+
+    def test_vmess_transport_mapping_correlates_to_exact_live_socket(self):
+        config = detector.parse_inbound_protocols(json.dumps({
+            'inbounds': [{
+                'protocol': 'vmess', 'port': 443,
+                'streamSettings': {'method': 'websocket'},
+            }],
+        }), 'xray')
+        configured = [{
+            'pid': 120000, 'process': 'xray', **config['endpoints'][0],
+        }]
+        inventory, _ = agent._build_service_inventory(
+            {
+                'connection_metrics': {'valid': True},
+                'listening_ports': [443],
+                'listening_endpoints': ['0.0.0.0:443'],
+                'udp_listening_ports': [443],
+            },
+            {
+                'communication_detail_available': True,
+                'communication_snapshot_truncated': False,
+                'service_listeners': [{
+                    'process': 'xray', 'pid': 120000, 'proto': 'tcp',
+                    'local': '0.0.0.0:443', 'port': 443,
+                    'source': 'ss_process_owner',
+                }],
+            },
+            configured,
+        )
+        tcp = next(item for item in inventory if item['proto'] == 'tcp' and item['port'] == 443)
+        udp = next(item for item in inventory if item['proto'] == 'udp' and item['port'] == 443)
+        self.assertEqual(tcp['application_protocols'], ['vmess'])
+        self.assertNotIn('application_protocols', udp)
 
     def test_bad_or_oversized_input_is_unverified_not_negative_proof(self):
         for raw in ('{','[]','{"inbounds":{}}','{"inbounds":[5]}',' '*262145):

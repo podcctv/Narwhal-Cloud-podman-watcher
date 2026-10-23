@@ -249,22 +249,77 @@ def parse_inbound_protocols(raw, process):
         # an application protocol on a transport when the config explicitly
         # declares that transport; otherwise the caller treats dual-transport
         # matches as ambiguous rather than guessing.
-        if 'network' in inbound:
-            network = inbound.get('network')
-        elif process in {'xray', 'v2ray'} and isinstance(inbound.get('streamSettings'), dict):
-            network = inbound['streamSettings'].get('network')
+        stream_settings = inbound.get('streamSettings')
+        stream_settings = stream_settings if isinstance(stream_settings, dict) else {}
+        if process in {'xray', 'v2ray'}:
+            # Xray's stream method is not the socket L4 protocol. Older configs
+            # used `network` names such as ws/kcp. Convert only known methods;
+            # unknown or dual-L4 methods stay unspecified so the live PID/port
+            # inventory can disambiguate a single socket or fail closed.
+            if 'method' in stream_settings:
+                configured_network = stream_settings.get('method')
+            elif 'network' in inbound:
+                configured_network = inbound.get('network')
+            else:
+                configured_network = stream_settings.get('network')
+                if configured_network is None:
+                    configured_network = 'tcp' if process == 'v2ray' else 'raw'
+            if isinstance(configured_network, str):
+                networks = [item.strip().lower() for item in configured_network.split(',') if item.strip()]
+            elif isinstance(configured_network, list) and all(isinstance(item, str) for item in configured_network):
+                networks = [item.strip().lower() for item in configured_network if item.strip()]
+            else:
+                networks = []
+            socket_protocols = {
+                'tcp': 'tcp', 'raw': 'tcp', 'ws': 'tcp', 'websocket': 'tcp',
+                'grpc': 'tcp', 'http': 'tcp', 'h2': 'tcp', 'httpupgrade': 'tcp',
+                'kcp': 'udp', 'mkcp': 'udp', 'quic': 'udp', 'h3': 'udp',
+                'hysteria': 'udp',
+            }
+            mapped = []
+            for network in networks:
+                if network == 'xhttp':
+                    # XHTTP's normal H1/H2 listener uses TCP. The Xray
+                    # inbound switches to UDP only for TLS with h3 as the
+                    # sole ALPN; mixed or malformed ALPN is ambiguous.
+                    tls_settings = stream_settings.get('tlsSettings')
+                    tls_settings = tls_settings if isinstance(tls_settings, dict) else {}
+                    alpn = tls_settings.get('alpn')
+                    if alpn is None:
+                        mapped.append('tcp')
+                    elif (stream_settings.get('security') == 'tls'
+                          and isinstance(alpn, list)
+                          and bool(alpn)
+                          and all(isinstance(value, str) for value in alpn)):
+                        normalized_alpn = [value.strip().lower() for value in alpn]
+                        if normalized_alpn == ['h3']:
+                            mapped.append('udp')
+                        elif 'h3' in normalized_alpn:
+                            mapped.append(None)
+                        else:
+                            mapped.append('tcp')
+                    elif stream_settings.get('security') == 'reality':
+                        mapped.append('tcp')
+                    else:
+                        mapped.append(None)
+                elif network == 'masque':
+                    # MASQUE may expose TCP, UDP, or both depending on TLS
+                    # ALPN; do not guess from the transport name alone.
+                    mapped.append(None)
+                else:
+                    mapped.append(socket_protocols.get(network))
+            if mapped and all(mapped):
+                endpoint['transports'] = sorted(set(mapped))
         else:
-            network = None
-        if network is not None:
+            network = inbound.get('network')
             if isinstance(network, str):
                 networks = [item.strip().lower() for item in network.split(',') if item.strip()]
             elif isinstance(network, list) and all(isinstance(item, str) for item in network):
                 networks = [item.strip().lower() for item in network if item.strip()]
             else:
                 networks = []
-            endpoint['transports'] = sorted(set(networks)) if networks and all(
-                item in {'tcp', 'udp'} for item in networks
-            ) else []
+            if networks and all(item in {'tcp', 'udp'} for item in networks):
+                endpoint['transports'] = sorted(set(networks))
         result['endpoints'].append(endpoint)
     return result
 

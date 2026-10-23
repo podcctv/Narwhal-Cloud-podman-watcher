@@ -83,6 +83,27 @@ class HostFirewallInterfaceInventoryTests(unittest.TestCase):
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(result["interfaces"], [])
 
+    def test_rfw_readback_and_events_continue_when_security_scans_are_disabled(self):
+        readback = {"status": "ready", "observed_at": 100, "snapshot": {"rule_count": 1}}
+        events = {"events_api": "ready", "next_cursor": "instance:2", "events": []}
+        with (
+            mock.patch.dict(agent.os.environ, {"SECURITY_MONITOR_ENABLED": "false"}),
+            mock.patch.object(agent, "_firewall_event_cursor", "instance:1"),
+            mock.patch.object(agent, "_pending_firewall_event_cursor", "unchanged"),
+            mock.patch.object(agent, "_runman_firewall_control_status", return_value={"control_api": "ready", "observed_at": 100}),
+            mock.patch.object(agent, "_collect_host_firewall_interface_inventory", return_value={"status": "ready", "interfaces": []}),
+            mock.patch.object(agent, "_runman_firewall_readback", return_value=readback) as get_readback,
+            mock.patch.object(agent, "_runman_firewall_events", return_value=events) as get_events,
+        ):
+            summary = agent.collect_security_summary([], 10)
+
+        self.assertFalse(summary["enabled"])
+        self.assertEqual(summary["host_firewall"]["readback"], readback)
+        self.assertEqual(summary["host_firewall"]["events_api"], "ready")
+        self.assertEqual(summary["host_firewall"]["next_cursor"], "instance:2")
+        get_readback.assert_called_once_with()
+        get_events.assert_called_once_with("instance:1")
+
 
 if __name__ == "__main__":
     unittest.main()

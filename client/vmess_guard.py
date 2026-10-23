@@ -43,7 +43,8 @@ def _publicly_reachable_listener(listener, network_exposure):
     return socks_detector.exposed({"local": local}, network_exposure) is True
 
 
-def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_state="unavailable"):
+def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_state="unavailable",
+         process_scan_states=None, listener_inventory_complete=None):
     """Build only unambiguous VMess targets from config+live listener evidence."""
     runtime = str(runtime or "").strip().lower()
     configured_protocols = configured_protocols if isinstance(configured_protocols, list) else []
@@ -66,8 +67,14 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         "pending_endpoints": [],
         "release_eligible": False,
     }
+    has_scoped_scan_states = isinstance(process_scan_states, list)
+    listener_snapshot_complete = (
+        listener_inventory_complete is True
+        if has_scoped_scan_states
+        else listener_inventory_complete is not False
+    )
     if not detected:
-        if scan_state == "complete":
+        if scan_state == "complete" and listener_snapshot_complete:
             result["release_eligible"] = runtime in SUPPORTED_RUNTIMES
             return result
         result.update(state="unverified", reason="configuration_scan_incomplete")
@@ -75,7 +82,21 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
     if runtime not in SUPPORTED_RUNTIMES:
         result.update(state="unverified", reason="runtime_not_supported")
         return result
-    if scan_state != "complete":
+    if not listener_snapshot_complete:
+        result.update(state="unverified", reason="listener_inventory_incomplete")
+        result["pending_endpoints"] = [{"port": item["port"], "process": item["process"], "reason": "listener_inventory_incomplete"} for item in vmess[:20]]
+        return result
+
+    process_states = None
+    if has_scoped_scan_states:
+        process_states = {
+            (_integer(item.get("pid"), 2, 4194304), str(item.get("process") or "").lower()):
+                str(item.get("state") or "partial").lower()
+            for item in process_scan_states if isinstance(item, dict)
+        }
+    if process_states is None and scan_state != "complete":
+        # Compatibility for callers that only provide the historical aggregate
+        # scan state. The Agent now supplies process-scoped evidence below.
         result.update(state="unverified", reason="configuration_scan_incomplete")
         result["pending_endpoints"] = [{"port": item["port"], "process": item["process"], "reason": "configuration_scan_incomplete"} for item in vmess[:20]]
         return result
@@ -85,6 +106,9 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
     saw_loopback_only = False
     for configured in vmess:
         pid, process, port = configured["pid"], configured["process"], configured["port"]
+        if process_states is not None and process_states.get((pid, process)) != "complete":
+            pending.append({"port": port, "process": process, "reason": "configuration_scan_incomplete"})
+            continue
         configured_transports = None
         for item in configured_protocols:
             if not isinstance(item, dict):
@@ -209,6 +233,24 @@ def _owned_endpoints(readback, marker):
     return endpoints
 
 
+def _firewall_failure_reason(completed, fallback):
+    """Map nft errors to safe diagnostic codes; never return command output."""
+    if completed is None:
+        return fallback
+    diagnostic = " ".join(
+        str(getattr(completed, field, "") or "") for field in ("stdout", "stderr")
+    ).lower()
+    if any(token in diagnostic for token in ("operation not permitted", "permission denied", "not permitted")):
+        return "firewall_permission_denied"
+    if any(token in diagnostic for token in ("operation not supported", "not supported by kernel", "protocol not supported")):
+        return "firewall_kernel_unsupported"
+    if any(token in diagnostic for token in ("file exists", "resource busy", "device or resource busy")):
+        return "firewall_state_conflict"
+    if any(token in diagnostic for token in ("syntax error", "unexpected", "invalid argument", "unknown keyword")):
+        return "firewall_rule_validation_failed"
+    return fallback
+
+
 def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_epoch, runner, namespace_fd,
                            *, release_if_absent=False, live_listeners=None, preserve_existing=False):
     result = {"state": "unverified", "blocked_endpoints": [], "reason": "firewall_apply_failed"}
@@ -304,15 +346,15 @@ def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_ep
     script = "\n".join(lines) + "\n"
     checked = call(prefix + ["--check", "-f", "-"], script)
     if checked is None or checked.returncode != 0:
-        result["reason"] = "firewall_rule_validation_failed"
+        result["reason"] = _firewall_failure_reason(checked, "firewall_rule_validation_failed")
         return result
     applied = call(prefix + ["-f", "-"], script)
     if applied is None or applied.returncode != 0:
-        result["reason"] = "firewall_apply_failed"
+        result["reason"] = _firewall_failure_reason(applied, "firewall_apply_failed")
         return result
     readback = call(prefix + ["-a", "list", "table", "inet", table])
     if readback is None or readback.returncode != 0 or marker not in (readback.stdout or ""):
-        result["reason"] = "firewall_readback_failed"
+        result["reason"] = _firewall_failure_reason(readback, "firewall_readback_failed")
         return result
     for transport, port in endpoint_map:
         if f"{marker}-{transport}-{port}" not in (readback.stdout or ""):

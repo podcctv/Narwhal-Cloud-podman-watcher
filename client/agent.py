@@ -3439,9 +3439,6 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             "interface_inventory": _collect_host_firewall_interface_inventory(),
         },
     }
-    if not enabled:
-        return summary
-
     if isinstance(summary.get("host_firewall"), dict):
         summary["host_firewall"] = {
             **summary["host_firewall"],
@@ -3455,6 +3452,12 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         if firewall_events.get("events_api") == "ready"
         else _firewall_event_cursor
     )
+    # RFW visibility and policy synchronization are independent from generic
+    # host/container security scanning. Keep collecting these control-plane
+    # signals even when SECURITY_MONITOR_ENABLED is disabled.
+    if not enabled:
+        return summary
+
     try:
         host_audit = host_security_audit.prepare_report(country_lookup=_geoip_local_country_batch)
         summary["host_audit"] = host_audit.get("host_audit") or {}
@@ -3595,6 +3598,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             else:
                 reason_labels = {
                     "configuration_scan_incomplete": "配置文件未能完整读取",
+                    "listener_inventory_incomplete": "实时监听清单不完整，无法确认端口归属",
                     "live_listener_not_confirmed": "未找到配置对应的实时监听端口",
                     "listener_protocol_or_owner_ambiguous": "实时监听的进程或协议归属不唯一",
                     "shared_configured_port": "该端口还配置了其他协议",
@@ -3605,8 +3609,15 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "container_namespace_changed_or_shared": "容器网络命名空间身份无法确认",
                     "container_namespace_changed_cleanup_failed": "网络命名空间身份变化，规则清理未能确认",
                     "firewall_dependency_unavailable": "主机缺少 nftables 或 nsenter",
+                    "firewall_rule_validation_failed": "nftables 规则校验未通过",
+                    "firewall_permission_denied": "Agent 缺少目标网络命名空间所需的防火墙权限",
+                    "firewall_kernel_unsupported": "当前内核或 nftables 不支持所需的规则操作",
+                    "firewall_state_conflict": "防火墙规则状态冲突，需检查 Agent 专属规则表",
                     "firewall_apply_failed": "防火墙规则应用失败",
                     "firewall_readback_failed": "防火墙读回未确认规则生效",
+                    "firewall_readback_unavailable": "无法读取 nftables 当前规则",
+                    "firewall_readback_invalid": "nftables 返回的规则数据无效",
+                    "endpoint_limit_exceeded": "待保护端口超过 Agent 安全上限",
                     "previous_guard_rule_preserved": "当前证据不足以确认旧 VMess 入口已消失，因此保留原端口阻断",
                 }
                 labels = pending_labels or [str(item.get("port")) for item in pending if isinstance(item, dict) and item.get("port")]
@@ -5011,6 +5022,7 @@ def _collect_socks_config_evidence(
         "risk_reasons": [],
         "json_processes": [],
         "configured_inbound_protocols": [],
+        "protocol_process_scan_states": [],
         "protocol_inventory_state": "unavailable",
     }
     if not process_output.strip() and not enabled:
@@ -5071,6 +5083,10 @@ def _collect_socks_config_evidence(
     scan_deadline = time.monotonic() + 8
     configured_processes = socks_detector.process_configs(process_output)
     protocol_processes = [proc for proc in configured_processes if proc['process'] in vmess_guard.SUPPORTED_ENGINES]
+    protocol_process_scan_states = {
+        (int(proc['pid']), str(proc['process'])): 'partial'
+        for proc in protocol_processes
+    }
     if len(configured_processes) >= 8:
         protocol_complete = False
     for proc in configured_processes:
@@ -5082,28 +5098,42 @@ def _collect_socks_config_evidence(
         documents = []
         sources = []
         password_facts = []
+        is_protocol_process = proc['process'] in vmess_guard.SUPPORTED_ENGINES
+        process_protocol_complete = is_protocol_process and bool(proc['paths']) and not proc['additional_configs']
+        if is_protocol_process and not process_protocol_complete:
+            protocol_complete = False
         start_ticks = run(_runtime_exec_cmd(runtime, name,
             f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if enabled else ''
         for path in proc['paths']:
             if time.monotonic() >= scan_deadline:
                 documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
-                if proc['process'] in vmess_guard.SUPPORTED_ENGINES:
+                if is_protocol_process:
+                    process_protocol_complete = False
                     protocol_complete = False
                 break
             # Raw JSON is local-only and bounded; it never enters a report/log.
             raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
-            protocol_document = socks_detector.parse_inbound_protocols(raw, proc['process']) if proc['process'] in vmess_guard.SUPPORTED_ENGINES else {'parsed': True, 'endpoints': []}
-            if proc['process'] in vmess_guard.SUPPORTED_ENGINES:
+            protocol_document = socks_detector.parse_inbound_protocols(raw, proc['process']) if is_protocol_process else {'parsed': True, 'endpoints': []}
+            if is_protocol_process:
                 if not protocol_document.get('parsed'):
+                    process_protocol_complete = False
                     protocol_complete = False
                 for endpoint in protocol_document.get('endpoints', []):
-                    configured_inbound_protocols.append({
-                        'pid': int(proc['pid']), 'process': proc['process'],
-                        'protocol': endpoint['protocol'], 'port': endpoint['port'],
-                        'listen': endpoint['listen'],
-                        **({'transports': endpoint['transports']} if 'transports' in endpoint else {}),
-                    })
+                    if len(configured_inbound_protocols) < 100:
+                        configured_inbound_protocols.append({
+                            'pid': int(proc['pid']), 'process': proc['process'],
+                            'protocol': endpoint['protocol'], 'port': endpoint['port'],
+                            'listen': endpoint['listen'],
+                            **({'transports': endpoint['transports']} if 'transports' in endpoint else {}),
+                        })
+                    else:
+                        # Retain complete evidence for earlier processes, but do
+                        # not claim this process complete if its endpoints were
+                        # omitted from the bounded report.
+                        process_protocol_complete = False
+                        protocol_complete = False
                 if proc.get('additional_configs'):
+                    process_protocol_complete = False
                     protocol_complete = False
             document = socks_detector.parse_config(raw, proc['process']) if enabled else {'parsed': False, 'endpoints': [], 'single_purpose': False}
             if enabled:
@@ -5131,6 +5161,11 @@ def _collect_socks_config_evidence(
             review_processes.append({'pid': proc['pid'], 'process': proc['process'],
             'start_ticks': start_ticks if start_ticks.isdigit() else '', 'sources': sources,
             'password_profiles': password_facts})
+        if is_protocol_process:
+            if process_protocol_complete:
+                protocol_process_scan_states[(int(proc['pid']), str(proc['process']))] = 'complete'
+            else:
+                protocol_complete = False
         if proc['process'] not in socks_detector.FAMILIES:
             continue
         if enabled:
@@ -5156,6 +5191,10 @@ def _collect_socks_config_evidence(
             "risk_reasons": sorted(reasons),
             "json_processes": json_processes,
             "configured_inbound_protocols": configured_inbound_protocols[:100],
+            "protocol_process_scan_states": [
+                {"pid": pid, "process": process, "state": state}
+                for (pid, process), state in sorted(protocol_process_scan_states.items())
+            ],
             "review_processes": review_processes,
             "protocol_inventory_state": protocol_state,
         }
@@ -5379,6 +5418,7 @@ def collect_panel_pairing_indicators(
         "review_processes": socks_config.get('review_processes', []),
         "direction_verified": any(p['parsed'] for p in json_processes),
         "configured_inbound_protocols": socks_config.get("configured_inbound_protocols", []),
+        "protocol_process_scan_states": socks_config.get("protocol_process_scan_states", []),
         "protocol_inventory_state": socks_config.get("protocol_inventory_state", "unavailable"),
         "risk_reasons": sorted(
             set(socks_process.get("risk_reasons", [])) | set(socks_config.get("risk_reasons", []))
@@ -6451,13 +6491,16 @@ def collect_container(
     )
     auto_block_vmess = os.getenv("SECURITY_AUTO_BLOCK_VMESS", "true").strip().lower() not in ("0", "false", "no", "off")
     host_or_shared_network = network_mode == "host" or network_mode.startswith(("container:", "ns:"))
-    vmess_scan_state = (
-        "complete"
-        if socks_proxy.get("protocol_inventory_state") == "complete"
-        and communication.get("communication_detail_available") is True
+    vmess_listener_inventory_complete = (
+        communication.get("communication_detail_available") is True
         and communication.get("communication_snapshot_truncated") is not True
         and len(communication.get("service_listeners") or []) < 100
         and len(service_inventory) < 100
+    )
+    vmess_scan_state = (
+        "complete"
+        if socks_proxy.get("protocol_inventory_state") == "complete"
+        and vmess_listener_inventory_complete
         else "partial"
     )
     vmess_plan = vmess_guard.plan(
@@ -6466,6 +6509,8 @@ def collect_container(
         service_inventory,
         network_exposure,
         vmess_scan_state,
+        process_scan_states=socks_proxy.get("protocol_process_scan_states"),
+        listener_inventory_complete=vmess_listener_inventory_complete,
     )
     vmess_status = dict(vmess_plan)
     should_reconcile_vmess = (
@@ -6475,6 +6520,7 @@ def collect_container(
         and (
             not auto_block_vmess
             or vmess_scan_state == "complete"
+            or (vmess_listener_inventory_complete and vmess_plan.get("detected") is True)
         )
     )
     if should_reconcile_vmess:
@@ -6487,7 +6533,7 @@ def collect_container(
             release_if_absent=auto_block_vmess and vmess_plan.get("release_eligible") is True,
             live_listeners=service_inventory,
             preserve_existing=auto_block_vmess and vmess_plan.get("detected") is True
-                and vmess_plan.get("state") == "unverified",
+                and bool(vmess_plan.get("pending_endpoints")),
         )
         if auto_block_vmess and vmess_plan.get("release_eligible") is True:
             if enforcement.get("state") == "cleared":

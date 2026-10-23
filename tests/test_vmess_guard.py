@@ -37,11 +37,54 @@ class VmessPlanTests(unittest.TestCase):
             "proto": "tcp", "port": 443, "pid": 120, "process": "xray",
         }])
 
+    def test_vless_inbound_is_never_a_vmess_block_target(self):
+        vless = [{**self.config[0], "protocol": "vless"}]
+        listener = {
+            **self.listener,
+            "application_protocols": ["vless"],
+        }
+        result = vmess_guard.plan("incus", vless, [listener], [], "complete")
+        self.assertFalse(result["detected"])
+        self.assertEqual(result["blocked_endpoints"], [])
+        self.assertTrue(result["release_eligible"])
+
     def test_truncated_listener_inventory_never_becomes_a_block_target(self):
         result = vmess_guard.plan("podman", self.config, [self.listener], [], "partial")
         self.assertEqual(result["state"], "unverified")
         self.assertEqual(result["blocked_endpoints"], [])
         self.assertEqual(result["pending_endpoints"][0]["reason"], "configuration_scan_incomplete")
+
+    def test_complete_vmess_process_can_be_blocked_when_unrelated_config_scan_is_partial(self):
+        result = vmess_guard.plan(
+            "incus", self.config, [self.listener], [], "partial",
+            process_scan_states=[
+                {"pid": 120, "process": "xray", "state": "complete"},
+                {"pid": 121, "process": "v2ray", "state": "partial"},
+            ],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(result["state"], "candidate")
+        self.assertEqual(result["blocked_endpoints"][0]["port"], 443)
+
+    def test_partial_config_for_same_vmess_process_prevents_block(self):
+        result = vmess_guard.plan(
+            "incus", self.config, [self.listener], [], "partial",
+            process_scan_states=[{"pid": 120, "process": "xray", "state": "partial"}],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(result["state"], "unverified")
+        self.assertEqual(result["blocked_endpoints"], [])
+        self.assertEqual(result["pending_endpoints"][0]["reason"], "configuration_scan_incomplete")
+
+    def test_incomplete_listener_inventory_prevents_per_process_block(self):
+        result = vmess_guard.plan(
+            "incus", self.config, [self.listener], [], "complete",
+            process_scan_states=[{"pid": 120, "process": "xray", "state": "complete"}],
+            listener_inventory_complete=False,
+        )
+        self.assertEqual(result["state"], "unverified")
+        self.assertEqual(result["blocked_endpoints"], [])
+        self.assertEqual(result["pending_endpoints"][0]["reason"], "listener_inventory_incomplete")
 
     def test_unknown_or_shared_listener_owner_is_not_blocked(self):
         shared = {**self.listener, "pid": 121, "process": "other", "application_protocols": ["vless"]}
@@ -71,6 +114,27 @@ class VmessPlanTests(unittest.TestCase):
         unsupported = vmess_guard.plan("docker", [], [], [], "complete")
         self.assertFalse(unsupported["release_eligible"])
 
+    def test_absence_does_not_release_if_explicit_listener_inventory_is_incomplete(self):
+        result = vmess_guard.plan(
+            "incus", [], [], [], "complete", process_scan_states=[],
+            listener_inventory_complete=False,
+        )
+        self.assertFalse(result["release_eligible"])
+        self.assertEqual(result["state"], "unverified")
+
+    def test_nft_failure_diagnostics_are_categorized_without_leaking_raw_output(self):
+        denied = mock.Mock(stdout="", stderr="Operation not permitted at /secret/container/path")
+        unsupported = mock.Mock(stdout="", stderr="Operation not supported by kernel")
+        invalid = mock.Mock(stdout="", stderr="syntax error near /private/config")
+        self.assertEqual(vmess_guard._firewall_failure_reason(denied, "firewall_apply_failed"), "firewall_permission_denied")
+        self.assertEqual(vmess_guard._firewall_failure_reason(unsupported, "firewall_apply_failed"), "firewall_kernel_unsupported")
+        self.assertEqual(vmess_guard._firewall_failure_reason(invalid, "firewall_apply_failed"), "firewall_rule_validation_failed")
+        self.assertNotIn("secret", json.dumps([
+            vmess_guard._firewall_failure_reason(denied, "firewall_apply_failed"),
+            vmess_guard._firewall_failure_reason(unsupported, "firewall_apply_failed"),
+            vmess_guard._firewall_failure_reason(invalid, "firewall_apply_failed"),
+        ]))
+
     def test_config_parser_reports_protocol_without_secrets(self):
         xray = socks_detector.parse_inbound_protocols(
             '{"inbounds":[{"protocol":"vmess","port":443,"streamSettings":{"network":"tcp"},"settings":{"clients":[{"id":"secret"}]}}]}',
@@ -95,6 +159,28 @@ class VmessPlanTests(unittest.TestCase):
             )
         self.assertEqual(result["protocol_inventory_state"], "complete")
         self.assertEqual(result["configured_inbound_protocols"], [])
+        self.assertEqual(result["protocol_process_scan_states"], [
+            {"pid": 120, "process": "xray", "state": "complete"},
+        ])
+
+    def test_scan_states_are_scoped_to_each_supported_engine_process(self):
+        process_output = (
+            "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
+            "121 S v2ray /usr/bin/v2ray -config /etc/v2ray/config.json\n"
+        )
+        with mock.patch.object(agent, "run", side_effect=[
+            '{"inbounds":[{"protocol":"vmess","port":443,"streamSettings":{"network":"tcp"}}]}',
+            '{invalid',
+        ]):
+            result = agent._collect_socks_config_evidence(
+                "incus", "fixture", "default", False, process_output
+            )
+        self.assertEqual(result["protocol_inventory_state"], "partial")
+        self.assertEqual(result["protocol_process_scan_states"], [
+            {"pid": 120, "process": "xray", "state": "complete"},
+            {"pid": 121, "process": "v2ray", "state": "partial"},
+        ])
+        self.assertEqual(result["configured_inbound_protocols"][0]["port"], 443)
 
     def test_customer_banner_copy_says_only_port_is_blocked(self):
         title, detail, extra, advice = security_banner.customer_copy({

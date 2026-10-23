@@ -1420,7 +1420,7 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(
             socks['configured_inbound_protocols'],
             [
-                {'pid': 12, 'process': 'xray', 'protocol': 'socks', 'port': 1080, 'listen': '*'},
+                {'pid': 12, 'process': 'xray', 'protocol': 'socks', 'port': 1080, 'listen': '*', 'transports': ['tcp']},
             ],
         )
         self.assertEqual(
