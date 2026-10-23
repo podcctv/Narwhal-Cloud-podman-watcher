@@ -1833,6 +1833,140 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
     return result
 
 
+def _build_service_inventory(
+    socket_security: Dict[str, object],
+    communication: Dict[str, object],
+    configured_protocols: List[Dict[str, object]] | None = None,
+) -> Tuple[List[Dict[str, object]], str]:
+    """Combine kernel listener evidence with process owners and safe config labels."""
+    configured_protocols = configured_protocols if isinstance(configured_protocols, list) else []
+    owned = communication.get("service_listeners")
+    owned = owned if isinstance(owned, list) else []
+    inventory: List[Dict[str, object]] = []
+    covered: set[Tuple[str, int]] = set()
+
+    def valid_port(value: object) -> int:
+        if isinstance(value, bool):
+            return 0
+        try:
+            port = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return port if 0 < port < 65536 else 0
+
+    transports_by_owner_port: Dict[Tuple[int, str, int], set[str]] = {}
+    for item in owned[:100]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            owner_pid = int(item.get("pid") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        owner_process = str(item.get("process") or "").lower()
+        owner_port = valid_port(item.get("port"))
+        owner_proto = str(item.get("proto") or "").lower()
+        if owner_pid > 1 and owner_process and owner_port and owner_proto in {"tcp", "udp"}:
+            transports_by_owner_port.setdefault((owner_pid, owner_process, owner_port), set()).add(owner_proto)
+
+    for raw in owned[:100]:
+        if not isinstance(raw, dict):
+            continue
+        proto = str(raw.get("proto") or "").lower()
+        port = valid_port(raw.get("port"))
+        if proto not in {"tcp", "udp"} or not port:
+            continue
+        try:
+            pid = int(raw.get("pid") or 0)
+        except (TypeError, ValueError, OverflowError):
+            pid = 0
+        if pid < 0:
+            pid = 0
+        process = str(raw.get("process") or "")[:120]
+        row: Dict[str, object] = {
+            "process": process,
+            "pid": pid,
+            "proto": proto,
+            "local": str(raw.get("local") or "")[:160],
+            "port": port,
+            "source": str(raw.get("source") or "ss_process_owner")[:40],
+            "process_attribution": "attributed" if pid > 1 and process else "unavailable",
+        }
+        matches = set()
+        for item in configured_protocols:
+            if not isinstance(item, dict):
+                continue
+            try:
+                configured_pid = int(item.get("pid") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            protocol_name = str(item.get("protocol") or "").lower()
+            configured_transports = item.get("transports")
+            if "transports" in item:
+                if not isinstance(configured_transports, list) or proto not in configured_transports:
+                    continue
+            elif len(transports_by_owner_port.get((pid, process.lower(), port), {proto})) > 1:
+                # With TCP and UDP on the same process/port, an implicit
+                # transport in config is not enough to identify this listener.
+                continue
+            configured_listen = str(item.get("listen") or "*").lower()
+            observed_address, _ = _parse_socket_endpoint(str(raw.get("local") or ""))
+            if configured_listen not in {"*", "0.0.0.0", "::", "::0"} and configured_listen != str(observed_address or "").lower():
+                continue
+            if (
+                configured_pid == pid
+                and valid_port(item.get("port")) == port
+                and str(item.get("process") or "").lower() == process.lower()
+                and re.fullmatch(r"[a-z0-9_-]{1,32}", protocol_name)
+            ):
+                matches.add(protocol_name)
+        if matches:
+            row["application_protocols"] = sorted(matches)
+            row["application_protocol_evidence"] = "config_matches_live_pid_and_port"
+        inventory.append(row)
+        covered.add((proto, port))
+
+    tcp_ports = {valid_port(port) for port in socket_security.get("listening_ports", []) if valid_port(port)}
+    udp_ports = {valid_port(port) for port in socket_security.get("udp_listening_ports", []) if valid_port(port)}
+    tcp_addresses: Dict[int, set[str]] = {}
+    raw_endpoints = socket_security.get("listening_endpoints")
+    if isinstance(raw_endpoints, list):
+        for endpoint in raw_endpoints:
+            address, port = _parse_socket_endpoint(str(endpoint))
+            if port in tcp_ports:
+                tcp_addresses.setdefault(port, set()).add(address or "*")
+    for proto, ports in (("tcp", tcp_ports), ("udp", udp_ports)):
+        for port in sorted(ports):
+            if (proto, port) in covered:
+                continue
+            addresses = sorted(tcp_addresses.get(port, set())) if proto == "tcp" else []
+            if not addresses:
+                addresses = ["?"]
+            for address in addresses:
+                local = f"[{address}]:{port}" if ":" in address and address != "?" else f"{address}:{port}"
+                inventory.append({
+                    "process": "",
+                    "pid": 0,
+                    "proto": proto,
+                    "local": local,
+                    "port": port,
+                    "source": "container_proc_net",
+                    "process_attribution": "unavailable",
+                })
+    inventory.sort(key=lambda item: (int(item.get("port") or 0), str(item.get("proto") or ""), str(item.get("process") or "")))
+    inventory = inventory[:100]
+    metrics = socket_security.get("connection_metrics")
+    metrics_valid = isinstance(metrics, dict) and metrics.get("valid") is True
+    detail_available = communication.get("communication_detail_available") is True
+    truncated = communication.get("communication_snapshot_truncated") is True
+    if metrics_valid and not truncated and (detail_available or not inventory):
+        state = "complete"
+    elif metrics_valid or detail_available or inventory:
+        state = "partial"
+    else:
+        state = "unavailable"
+    return inventory, state
+
+
 def _parse_conntrack_line(line: str) -> Dict[str, object] | None:
     """Parse the original and reply tuples from one conntrack record."""
     proto = next((token.lower() for token in line.split()[:8] if token.lower() in ("tcp", "udp")), "")
@@ -4757,6 +4891,7 @@ def _collect_socks_config_evidence(
         "auth_mode": "unknown",
         "risk_reasons": [],
         "json_processes": [],
+        "configured_inbound_protocols": [],
     }
     if not enabled:
         return result
@@ -4810,6 +4945,7 @@ def _collect_socks_config_evidence(
             modes.add("configured")
     json_processes = []
     review_processes = []
+    configured_inbound_protocols = []
     scan_deadline = time.monotonic() + 8
     for proc in socks_detector.process_configs(process_output):
         if time.monotonic() >= scan_deadline:
@@ -4826,6 +4962,14 @@ def _collect_socks_config_evidence(
             # Raw JSON is local-only and bounded; it never enters a report/log.
             raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
             document = socks_detector.parse_config(raw, proc['process'])
+            protocol_document = socks_detector.parse_inbound_protocols(raw, proc['process'])
+            for endpoint in protocol_document.get('endpoints', []):
+                configured_inbound_protocols.append({
+                    'pid': int(proc['pid']), 'process': proc['process'],
+                    'protocol': endpoint['protocol'], 'port': endpoint['port'],
+                    'listen': endpoint['listen'],
+                    **({'transports': endpoint['transports']} if 'transports' in endpoint else {}),
+                })
             metadata = run(_runtime_exec_cmd(runtime, name,
                 f"stat -Lc '%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null", project), timeout=2).strip()
             if raw and metadata:
@@ -4868,6 +5012,7 @@ def _collect_socks_config_evidence(
             else "unknown",
             "risk_reasons": sorted(reasons),
             "json_processes": json_processes,
+            "configured_inbound_protocols": configured_inbound_protocols[:100],
             "review_processes": review_processes,
         }
     )
@@ -5089,6 +5234,7 @@ def collect_panel_pairing_indicators(
         "inbound_endpoints": endpoints,
         "review_processes": socks_config.get('review_processes', []),
         "direction_verified": any(p['parsed'] for p in json_processes),
+        "configured_inbound_protocols": socks_config.get("configured_inbound_protocols", []),
         "risk_reasons": sorted(
             set(socks_process.get("risk_reasons", [])) | set(socks_config.get("risk_reasons", []))
         ),
@@ -6109,6 +6255,9 @@ def collect_container(
             "outbound_unique_ips",
         )
     )
+    has_listening_ports = bool(
+        socket_security.get("listening_ports") or socket_security.get("udp_listening_ports")
+    )
     communication = (
         _collect_socket_process_details(
             runtime,
@@ -6118,13 +6267,14 @@ def collect_container(
             if isinstance(socket_security.get("listening_ports"), list)
             else [],
         )
-        if has_remote_connections or socks_proxy.get('detected') or panel_pairing.get('detected') or panel_pairing.get('standalone_panels')
+        if has_remote_connections or has_listening_ports or socks_proxy.get('detected') or panel_pairing.get('detected') or panel_pairing.get('standalone_panels')
         else {
             "communication_detail_available": True,
             "communication_snapshot_count": 0,
             "communication_snapshot_truncated": False,
             "communication_processes": [],
             "communication_sockets": [],
+            "service_listeners": [],
         }
     )
     _enrich_communication_with_original_sources(
@@ -6144,6 +6294,11 @@ def collect_container(
                                   runtime, name, project, pid,
                                   scope_complete=communication.get('communication_detail_available') is True
                                       and not communication.get('communication_snapshot_truncated'))
+    service_inventory, service_inventory_state = _build_service_inventory(
+        socket_security,
+        communication,
+        socks_proxy.get("configured_inbound_protocols", []),
+    )
     socket_security.update(
         {
             "net_rx_pps": net_rx_pps,
@@ -6161,6 +6316,8 @@ def collect_container(
             "network_exposure": network_exposure,
             "pid": pid,
             **communication,
+            "service_listeners": service_inventory,
+            "service_inventory_state": service_inventory_state,
         }
     )
     if cpu_percent <= 0 and float(top_cpu_process.get("cpu_percent") or 0) > 0:

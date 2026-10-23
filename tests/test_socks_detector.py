@@ -54,6 +54,36 @@ class DirectionTests(unittest.TestCase):
         result=detector.parse_config(cfg,'xray')
         self.assertTrue(result['parsed']); self.assertEqual(result['endpoints'],[])
 
+    def test_inbound_protocol_inventory_contains_only_safe_labels(self):
+        cfg = json.dumps({
+            'inbounds': [
+                {'protocol': 'vless', 'port': 443, 'settings': {'clients': [{'id': 'private-id'}]}},
+                {'protocol': 'trojan', 'port': 8443, 'network': 'tcp', 'settings': {'password': 'never-report-this'}},
+            ],
+            'outbounds': [{'protocol': 'socks', 'settings': {'servers': [{'address': 'secret.example'}]}}],
+        })
+        result = detector.parse_inbound_protocols(cfg, 'xray')
+        self.assertTrue(result['parsed'])
+        self.assertEqual(
+            result['endpoints'],
+            [
+                {'protocol': 'vless', 'port': 443, 'listen': '*'},
+                {'protocol': 'trojan', 'port': 8443, 'listen': '*', 'transports': ['tcp']},
+            ],
+        )
+        self.assertNotIn('private-id', json.dumps(result))
+        self.assertNotIn('never-report-this', json.dumps(result))
+        self.assertNotIn('secret.example', json.dumps(result))
+
+    def test_sing_box_inbound_protocol_inventory_uses_live_listener_fields(self):
+        result = detector.parse_inbound_protocols(json.dumps({
+            'inbounds': [{'type': 'hysteria2', 'listen': '0.0.0.0', 'listen_port': 443}],
+            'outbounds': [{'type': 'wireguard', 'server': 'private.example'}],
+        }), 'sing-box')
+        self.assertEqual(result['endpoints'], [
+            {'protocol': 'hysteria2', 'port': 443, 'listen': '0.0.0.0'},
+        ])
+
     def test_bad_or_oversized_input_is_unverified_not_negative_proof(self):
         for raw in ('{','[]','{"inbounds":{}}','{"inbounds":[5]}',' '*262145):
             self.assertFalse(detector.parse_config(raw,'xray')['parsed'])

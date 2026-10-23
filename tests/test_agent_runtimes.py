@@ -329,6 +329,39 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(result["communication_processes"][0]["process"], "nginx")
         self.assertEqual(result["communication_processes"][0]["inbound_connections"], 1)
 
+    def test_service_inventory_correlates_config_protocol_and_preserves_unknown_listeners(self):
+        socket_security = {
+            'connection_metrics': {'valid': True},
+            'listening_ports': [443, 8443],
+            'listening_endpoints': ['0.0.0.0:443', '[::]:443'],
+            'udp_listening_ports': [443],
+        }
+        communication = {
+            'communication_detail_available': True,
+            'communication_snapshot_truncated': False,
+            'service_listeners': [{
+                'process': 'xray', 'pid': 120000, 'proto': 'tcp',
+                'local': '0.0.0.0:443', 'port': 443, 'source': 'ss_process_owner',
+            }],
+        }
+        configured = [{
+            'process': 'xray', 'pid': 120000, 'protocol': 'vless',
+            'port': 443, 'listen': '0.0.0.0', 'transports': ['tcp'],
+        }]
+
+        inventory, state = agent._build_service_inventory(socket_security, communication, configured)
+
+        self.assertEqual(state, 'complete')
+        tcp = next(item for item in inventory if item['proto'] == 'tcp' and item['port'] == 443)
+        self.assertEqual(tcp['process'], 'xray')
+        self.assertEqual(tcp['application_protocols'], ['vless'])
+        self.assertEqual(tcp['application_protocol_evidence'], 'config_matches_live_pid_and_port')
+        udp = next(item for item in inventory if item['proto'] == 'udp' and item['port'] == 443)
+        self.assertNotIn('application_protocols', udp)
+        fallback = next(item for item in inventory if item['proto'] == 'tcp' and item['port'] == 8443)
+        self.assertEqual(fallback['process_attribution'], 'unavailable')
+        self.assertEqual(fallback['source'], 'container_proc_net')
+
     def test_socket_origin_uses_tcp_handshake_state_and_listener_evidence(self):
         listeners = {443}
         self.assertEqual(
@@ -1384,6 +1417,12 @@ class SecurityTelemetryTests(unittest.TestCase):
         socks = result["socks_proxy"]
         self.assertTrue(socks["detected"])
         self.assertEqual(socks["auth_mode"], "no_auth")
+        self.assertEqual(
+            socks['configured_inbound_protocols'],
+            [
+                {'pid': 12, 'process': 'xray', 'protocol': 'socks', 'port': 1080, 'listen': '*'},
+            ],
+        )
         self.assertEqual(
             socks["process_matches"],
             [{"pid": 12, "process": "xray", "auth_state": "unknown", 'action_safe': True, 'config_scoped': True}],

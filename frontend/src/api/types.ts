@@ -120,6 +120,18 @@ export interface ContainerSecurity {
   };
   configuration_risks?: { message?: string; code?: string }[];
   communication_detail_available?: boolean;
+  service_inventory_state?: 'complete' | 'partial' | 'unavailable' | string;
+  service_listeners?: {
+    process?: string;
+    pid?: number;
+    proto?: 'tcp' | 'udp' | string;
+    local?: string;
+    port?: number;
+    source?: 'ss_process_owner' | 'container_proc_net' | string;
+    process_attribution?: 'attributed' | 'unavailable' | string;
+    application_protocols?: string[];
+    application_protocol_evidence?: 'config_matches_live_pid_and_port' | string;
+  }[];
   communication_processes?: {
     process?: string;
     pid?: number;

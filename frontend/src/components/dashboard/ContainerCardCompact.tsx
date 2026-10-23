@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Box,
   Cpu,
   HardDrive,
+  ChevronDown,
   ArrowDownLeft,
   ArrowUpRight,
   AlertTriangle,
@@ -12,11 +13,51 @@ import {
   Sparkles,
   Ban,
   Gauge,
+  Network,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity } from '../../api/types';
 import { fmtBytes, fmtMbps } from '../../api/client';
 import { ContainerRiskInfo } from './HostContainerList';
 import { AdmissionStatus } from '../container/AdmissionStatus';
+
+const PROXY_SOFTWARE_LABELS: Record<string, string> = {
+  xray: 'Xray-core',
+  v2ray: 'V2Ray',
+  'sing-box': 'sing-box',
+  hysteria: 'Hysteria',
+  'hysteria-server': 'Hysteria',
+  mihomo: 'Mihomo / Clash Meta',
+  clash: 'Clash',
+  gost: 'GOST',
+  trojan: 'Trojan',
+  'trojan-go': 'Trojan-Go',
+  'ss-server': 'Shadowsocks',
+  shadowsocks: 'Shadowsocks',
+  microsocks: 'MicroSocks',
+  danted: 'Dante SOCKS',
+  sockd: 'Dante SOCKS',
+  '3proxy': '3proxy',
+  'x-ui': 'X-ui',
+  's-ui': 'S-ui',
+};
+
+const APP_PROTOCOL_LABELS: Record<string, string> = {
+  vless: 'VLESS',
+  vmess: 'VMess',
+  trojan: 'Trojan',
+  shadowsocks: 'Shadowsocks',
+  socks: 'SOCKS',
+  mixed: 'Mixed',
+  http: 'HTTP',
+  hysteria: 'Hysteria',
+  hysteria2: 'Hysteria 2',
+  tuic: 'TUIC',
+  naive: 'NaiveProxy',
+  wireguard: 'WireGuard',
+  tun: 'TUN',
+  'dokodemo-door': 'Dokodemo-door',
+  anytls: 'AnyTLS',
+};
 
 interface ContainerCardCompactProps {
   container: ContainerItem;
@@ -41,6 +82,55 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
   const rxMbps = fmtMbps(c.net_rx_bps);
   const txMbps = fmtMbps(c.net_tx_bps);
   const sec = c.security || {};
+  const [servicesExpanded, setServicesExpanded] = useState(false);
+  const serviceListeners = useMemo(() => {
+    const seen = new Set<string>();
+    return (Array.isArray(sec.service_listeners) ? sec.service_listeners : []).filter((item) => {
+      const key = `${item.proto || ''}|${item.port || 0}|${item.pid || 0}|${item.process || ''}|${item.local || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [sec.service_listeners]);
+
+  const applicationProtocolsFor = (listener: (typeof serviceListeners)[number]) => {
+    const configured = Array.isArray(listener.application_protocols)
+      ? listener.application_protocols.map((protocol) => APP_PROTOCOL_LABELS[protocol] || protocol.toUpperCase())
+      : [];
+    if (configured.length > 0) return { labels: configured, evidence: '进程配置与当前 PID/端口匹配' };
+
+    const hy2 = sec.hy2_protocol;
+    const hy2Ports = Array.isArray(hy2?.listening_udp_ports) ? hy2.listening_udp_ports.map(Number) : [];
+    if (
+      hy2?.detected &&
+      String(hy2.process || '').toLowerCase() === String(listener.process || '').toLowerCase() &&
+      hy2Ports.includes(Number(listener.port))
+    ) {
+      return { labels: ['Hysteria 2'], evidence: `流量特征检测（${hy2.confidence || '未分级'}）` };
+    }
+
+    const socksListener = Array.isArray(sec.socks_proxy?.service_listeners)
+      ? sec.socks_proxy.service_listeners.find((item: any) =>
+          Number(item.pid || 0) === Number(listener.pid || 0) &&
+          Number(item.port || 0) === Number(listener.port || 0) &&
+          String(item.proto || '').toLowerCase() === String(listener.proto || '').toLowerCase()
+        )
+      : null;
+    if (socksListener) {
+      return { labels: ['SOCKS'], evidence: socksListener.verification === 'greeting_only' ? '实时 SOCKS 握手探测' : '进程/配置线索' };
+    }
+
+    return { labels: [], evidence: '未从安全配置证据中确认应用协议' };
+  };
+
+  const serviceInventoryState = sec.service_inventory_state || 'unavailable';
+  const serviceSummary = serviceListeners.length
+    ? `${serviceListeners.length} 个监听端点`
+    : serviceInventoryState === 'complete'
+    ? '未发现监听服务'
+    : serviceInventoryState === 'partial'
+    ? '采集不完整'
+    : '等待客户端采集';
 
   const identity: ContainerIdentity = {
     host_id: c.host_id,
@@ -261,6 +351,80 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
               <span className="text-violet-400/90">U:</span> {fmtMbps(c.udp_rx_bps)}/{fmtMbps(c.udp_tx_bps)}M
             </span>
           </div>
+        </div>
+
+        {/* Service inventory: process-owned listener ports, with conservative protocol labels. */}
+        <div className="mt-1.5 rounded-lg border border-slate-800/80 bg-slate-950/50 px-2 py-1.5">
+          <button
+            type="button"
+            aria-expanded={servicesExpanded}
+            onClick={(event) => {
+              event.stopPropagation();
+              setServicesExpanded((expanded) => !expanded);
+            }}
+            className="flex w-full items-center gap-1.5 text-left text-[10px] text-slate-300 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 rounded"
+            title="展开查看容器监听服务、所属进程、端口与协议证据"
+          >
+            <Network className="h-3 w-3 shrink-0 text-cyan-400" />
+            <span className="font-semibold text-slate-200">服务 / 代理</span>
+            <span className="min-w-0 flex-1 truncate text-right font-mono text-slate-400 tabular-nums">
+              {serviceSummary}
+            </span>
+            <ChevronDown className={`h-3 w-3 shrink-0 text-slate-500 transition-transform ${servicesExpanded ? 'rotate-180' : ''}`} />
+          </button>
+
+          {servicesExpanded && (
+            <div className="mt-1.5 space-y-1 border-t border-slate-800/70 pt-1.5">
+              {serviceListeners.length > 0 ? (
+                <>
+                  {serviceListeners.slice(0, 6).map((listener, index) => {
+                    const processName = String(listener.process || '').toLowerCase();
+                    const software = PROXY_SOFTWARE_LABELS[processName] || listener.process || '进程未归属';
+                    const application = applicationProtocolsFor(listener);
+                    const transport = String(listener.proto || 'unknown').toUpperCase();
+                    return (
+                      <div key={`${listener.proto}-${listener.port}-${listener.pid}-${index}`} className="rounded-md bg-slate-900/80 px-1.5 py-1">
+                        <div className="flex min-w-0 flex-wrap items-center gap-1">
+                          <span className="max-w-full truncate text-[10px] font-semibold text-slate-200" title={listener.process || '内核监听表已发现端口，但未能归属到进程'}>
+                            {software}
+                          </span>
+                          <span className="rounded border border-sky-800/70 bg-sky-950/50 px-1 py-0.5 font-mono text-[9px] text-sky-300">
+                            {transport} · {listener.port || '?'}
+                          </span>
+                          {application.labels.length > 0 ? (
+                            application.labels.map((label) => (
+                              <span key={label} className="rounded border border-violet-800/70 bg-violet-950/40 px-1 py-0.5 text-[9px] text-violet-300" title={application.evidence}>
+                                {label}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-[9px] text-slate-500" title={application.evidence}>应用协议未核实</span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[9px] font-mono text-slate-500">
+                          <span>{listener.local || '监听地址未采集'}</span>
+                          {listener.pid ? <span>PID {listener.pid}</span> : <span>进程归属未知</span>}
+                          {application.labels.length > 0 && <span>{application.evidence}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {serviceListeners.length > 6 && (
+                    <p className="text-[9px] text-slate-500">另有 {serviceListeners.length - 6} 个端点未在卡片展开区显示；点击卡片可进入容器详情。</p>
+                  )}
+                </>
+              ) : serviceInventoryState === 'complete' ? (
+                <p className="text-[9px] text-slate-400">本轮采样未发现 TCP/UDP 监听端口。</p>
+              ) : serviceInventoryState === 'partial' ? (
+                <p className="text-[9px] text-amber-300">本轮服务采集不完整；请更新 Agent 或检查容器内 ss/进程权限。</p>
+              ) : (
+                <p className="text-[9px] text-slate-500">客户端尚未提供服务清单数据，升级 Agent 后会显示。</p>
+              )}
+              <p className="pt-0.5 text-[9px] leading-4 text-slate-500">
+                TCP/UDP 是传输协议；VLESS、VMess 等仅在配置协议与实时 PID/端口对应时展示，否则不猜测。
+              </p>
+            </div>
+          )}
         </div>
       </div>
 

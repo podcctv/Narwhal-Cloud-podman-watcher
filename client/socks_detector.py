@@ -203,6 +203,67 @@ def parse_config(raw, process):
     return result
 
 
+def parse_inbound_protocols(raw, process):
+    """Return only non-secret inbound protocol, bind address, and port facts."""
+    result = {'parsed': False, 'endpoints': []}
+    process = str(process or '').lower()
+    if process not in {'xray', 'v2ray', 'sing-box'} or not isinstance(raw, str) or len(raw.encode('utf-8')) > MAX_CONFIG_BYTES:
+        return result
+    # Match the JSONC handling used by parse_config. Keep quoted values intact.
+    document = re.sub(r'"(?:\\.|[^"\\])*"|//[^\r\n]*|/\*.*?\*/',
+                      lambda m: m[0] if m[0].startswith('"') else ' ', raw, flags=re.S)
+    try:
+        data = json.loads(document)
+    except (ValueError, RecursionError):
+        return result
+    if not isinstance(data, dict):
+        return result
+    inbounds = data.get('inbounds', [])
+    if not isinstance(inbounds, list) or len(inbounds) > 100 or any(not isinstance(item, dict) for item in inbounds):
+        return result
+    result['parsed'] = True
+    for inbound in inbounds:
+        protocol_key = 'type' if process == 'sing-box' else 'protocol'
+        port_key = 'listen_port' if process == 'sing-box' else 'port'
+        protocol = inbound.get(protocol_key)
+        port = inbound.get(port_key)
+        if not isinstance(protocol, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', protocol):
+            continue
+        if isinstance(port, bool) or isinstance(port, float):
+            continue
+        try:
+            port = int(port)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not 0 < port < 65536:
+            continue
+        listen = inbound.get('listen', '*')
+        if not isinstance(listen, str) or len(listen) > 128 or any(ord(char) < 32 for char in listen):
+            listen = '*'
+        endpoint = {
+            'protocol': protocol.lower(),
+            'port': port,
+            'listen': listen or '*',
+        }
+        # A configured port can have both TCP and UDP listeners. Only report
+        # an application protocol on a transport when the config explicitly
+        # declares that transport; otherwise the caller treats dual-transport
+        # matches as ambiguous rather than guessing.
+        if 'network' in inbound:
+            network = inbound.get('network')
+            if isinstance(network, str):
+                networks = [item.strip().lower() for item in network.split(',') if item.strip()]
+            elif isinstance(network, list) and all(isinstance(item, str) for item in network):
+                networks = [item.strip().lower() for item in network if item.strip()]
+            else:
+                networks = []
+            endpoint['transports'] = sorted(set(networks)) if networks and all(
+                item in {'tcp', 'udp'} for item in networks
+            ) else []
+        result['endpoints'].append(endpoint)
+    return result
+
+
 def process_configs(output):
     """Exact executable + explicit config paths, not arbitrary words in argv."""
     rows = []
