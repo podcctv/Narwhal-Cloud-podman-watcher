@@ -761,6 +761,11 @@ def process_security_alerts(
         alert_type = str(raw_alert.get("type") or "unknown")[:80]
         if alert_type == "ops_traffic_quota":
             continue  # Usage accounting remains available; never notify quota usage.
+        if alert_type == "admission_unverified":
+            # The current protection state is delivered separately through
+            # /api/v1/admission/status and rendered on each container. It is
+            # not a security incident and should not create active alerts.
+            continue
         severity = str(raw_alert.get("severity") or "warning").lower()
         if severity not in _SEVERITY_RANK:
             severity = "warning"
@@ -5180,6 +5185,7 @@ def security_alerts(active_only: bool = True, limit: int = 200) -> JSONResponse:
             SELECT a.* FROM security_alerts a
             LEFT JOIN hosts h ON h.host_id=a.host_id
             WHERE a.status='active'
+              AND a.alert_type<>'admission_unverified'
               AND (a.container_name<>'' OR h.host_id IS NULL OR h.last_seen>=?)
             ORDER BY a.last_seen DESC, a.id DESC LIMIT ?
             """,

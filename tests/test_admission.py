@@ -8,6 +8,7 @@ import subprocess
 import json
 import socket
 import struct
+import threading
 import tempfile
 import time
 import unittest
@@ -245,6 +246,38 @@ class ReceiptTests(unittest.TestCase):
         value['runtime']='docker'
         with self.assertRaises(HTTPException):admission_api.normalized_alert(value)
 
+
+class GuardAlertTests(unittest.TestCase):
+    def setUp(self):
+        self.container={'runtime':'incus','project':'default','name':'customer'}
+        self.subject=guard.Guard.__new__(guard.Guard)
+        self.subject.lock=threading.RLock()
+        self.subject.results={}
+
+    def test_unverified_receipt_keeps_concrete_failure_without_security_alert(self):
+        key=('incus','default','customer')
+        receipt={'state':'unverified','observed_at':int(time.time())-120,
+                 'failure_code':'firewall_apply_failed','failure_stage':'enforcement',
+                 'error':'nftables/NFQUEUE 规则应用或内核读回失败'}
+        self.subject.results[key]=receipt
+
+        status=self.subject.status(self.container)
+
+        self.assertEqual(status['failure_code'],'firewall_apply_failed')
+        self.assertEqual(status['failure_stage'],'enforcement')
+        self.assertEqual(status['error'],receipt['error'])
+        self.assertEqual(self.subject.alerts(self.container),[])
+
+    def test_expired_enforced_receipt_becomes_unverified_without_security_alert(self):
+        key=('incus','default','customer')
+        self.subject.results[key]={'state':'enforced','observed_at':int(time.time())-120}
+
+        status=self.subject.status(self.container)
+
+        self.assertEqual(status['state'],'unverified')
+        self.assertEqual(status['failure_code'],'stale_sample')
+        self.assertEqual(self.subject.alerts(self.container),[])
+
     def test_unverified_alert_explains_bounded_failure_without_raw_error(self):
         value={'type':'admission_unverified','runtime':'incus','project':'default','container_name':'customer',
             'admission':{'state':'unverified','observed_at':int(time.time()),'failure_stage':'enforcement',
@@ -291,6 +324,38 @@ class APITests(unittest.TestCase):
         with closing(self.server.db()) as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM admission_states').fetchone()[0],1)
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM security_alerts').fetchone()[0],0)
+
+    def test_unverified_protection_is_not_a_security_incident(self):
+        raw={'type':'admission_unverified','runtime':'incus','project':'default',
+             'container_name':'customer','severity':'warning','title':'容器网络保护未确认生效'}
+        with closing(self.server.db()) as conn:
+            self.server.process_security_alerts(conn,'fixture',int(time.time()),[raw])
+            conn.commit()
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM security_alerts WHERE alert_type='admission_unverified'"
+            ).fetchone()[0],0)
+
+    def test_admission_status_resolves_legacy_active_security_incident(self):
+        now=int(time.time())
+        with closing(self.server.db()) as conn:
+            conn.execute('''INSERT INTO security_alerts(
+                fingerprint,host_id,runtime,project,container_name,alert_type,severity,title,message,
+                first_seen,last_seen,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'active')''',
+                ('legacy-unverified','fixture','incus','default','customer','admission_unverified',
+                 'warning','容器网络保护未确认生效','legacy warning',now,now))
+            conn.commit()
+
+        self.call('/api/v1/admission/status',{'host_id':'fixture','node_id':'node','items':[self.value()]})
+
+        with closing(self.server.db()) as conn:
+            row=conn.execute("SELECT status FROM security_alerts WHERE fingerprint='legacy-unverified'").fetchone()
+            self.assertEqual(row['status'],'resolved')
+        active=json.loads(self.server.security_alerts().body)
+        history=json.loads(self.server.security_alerts(active_only=False).body)
+        self.assertNotIn('admission_unverified',[item['type'] for item in active['items']])
+        historic=next(item for item in history['items'] if item['type']=='admission_unverified')
+        self.assertEqual(historic['status'],'resolved')
 
     def test_events_deduplicate_and_delivery_failure_keeps_receipt(self):
         payload={'host_id':'fixture','node_id':'node','alert':self.value()}

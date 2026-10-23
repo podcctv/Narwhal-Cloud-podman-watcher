@@ -230,7 +230,10 @@ class Guard:
     def status(self, container):
         with self.lock:
             result=copy.deepcopy(self.results.get((container['runtime'],container.get('project') or '',container['name']),{}))
-        if result and time.time()-result.get('observed_at',0)>30:
+        # Expiry applies to a previously verified policy. Preserve a concrete
+        # failure receipt so a persistent sampling/apply error is not rewritten
+        # as a generic stale-sample error after 30 seconds.
+        if result and result.get('state')=='enforced' and time.time()-result.get('observed_at',0)>30:
             result.update(state='unverified',error='本地保护采样已过期，不能确认当前状态',
                           failure_code='stale_sample',failure_stage='sampling')
         return result
@@ -243,8 +246,10 @@ class Guard:
               'container_name':container['name'],'instance_id':status.get('instance_id',''),
               'admission':status}
         if status['state']!='enforced':
-            return [{**base,'type':'admission_unverified','severity':'warning','title':'容器准入保护待核实',
-                     'message':status.get('error','保护执行未确认'),'value':0,'threshold':1}]
+            # This is a protection-health state, not a security incident. It is
+            # shown by the container's AdmissionStatus panel and must not inflate
+            # or repeatedly notify through the active security-alert stream.
+            return []
         result=[]
         if status.get('limited'):
             result.append({**base,'type':'tcp_concurrency_limited','severity':'warning','title':'TCP 并发已限制为 500',

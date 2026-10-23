@@ -62,6 +62,7 @@ def normalized_alert(value):
         stage=source.get('failure_stage')
         data['failure_code']=code if code in ADMISSION_FAILURES else 'unknown'
         data['failure_stage']=stage if stage in ADMISSION_STAGES else 'unknown'
+        data['error']=f"{ADMISSION_STAGES[data['failure_stage']]}未通过：{ADMISSION_FAILURES[data['failure_code']]}"
     # Older agents enforced the first-five source rule and do not send this
     # field. Keep their actual status visible; new agents explicitly report
     # observation-only source handling.
@@ -115,6 +116,12 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
                     instance_id=excluded.instance_id,observed_at=excluded.observed_at,payload=excluded.payload
                     WHERE excluded.observed_at>admission_states.observed_at''',
                     (host_id,value['runtime'],value['project'],value['container_name'],value['instance_id'],stamp,json.dumps(data)))
+            # Legacy Agents may have written protection-health states into the
+            # security incident table. Close those rows; the current state stays
+            # available from admission_states and the container status panel.
+            conn.execute("UPDATE security_alerts SET status='resolved',last_seen=? "
+                         "WHERE host_id=? AND alert_type='admission_unverified' AND status='active'",
+                         (now,host_id))
             # A current-state table, not an append-only telemetry log.
             conn.execute('DELETE FROM admission_states WHERE observed_at<?',(now-86400,))
             conn.commit()
