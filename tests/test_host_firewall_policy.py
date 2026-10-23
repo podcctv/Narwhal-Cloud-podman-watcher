@@ -100,6 +100,23 @@ class HostFirewallPolicyTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def install_rfw_rule_readback(self, rule, observed_at=None):
+        observed_at = self.now if observed_at is None else observed_at
+        snapshot = {
+            "status": "in_sync", "observed_at": observed_at, "policy_revision": 0,
+            "rule_count": 1, "managed_rule_count": 0, "drift_count": 0, "missing_count": 0,
+            "rfw_api_version": "0.1.0", "capabilities_known": False,
+            "supported_protocols": [], "rules": [rule], "expected_rules": [],
+        }
+        conn = server.db()
+        server._store_host_firewall_readback(
+            conn, "host-a",
+            {"host_firewall": {"readback": {"status": "ready", "observed_at": observed_at, "snapshot": snapshot}}},
+            observed_at,
+        )
+        conn.commit()
+        conn.close()
+
     @staticmethod
     def mtproto_policy():
         return {
@@ -129,6 +146,58 @@ class HostFirewallPolicyTests(unittest.TestCase):
         state = json.loads(server.get_host_firewall_policy("host-a").body)
         self.assertEqual(state["latest_action"]["status"], "queued")
         self.assertTrue(state["agent_ready"])
+
+    def test_manual_rule_delete_is_admin_only_fresh_and_bound_to_exact_readback(self):
+        rule = {
+            "id": 7, "priority": 100, "direction": "in", "protocol": "tcp", "action": "block",
+            "enabled": True, "port_start": 443, "port_end": 443, "ip_type": "any",
+            "origin": "manual", "sync_state": "manual",
+        }
+        self.install_rfw_rule_readback(rule)
+        response = asyncio.run(server.delete_host_firewall_rule("host-a", 7, Request(None)))
+        self.assertEqual(response.status_code, 202)
+        result = json.loads(response.body)
+        self.assertTrue(result["queued"])
+
+        conn = server.db()
+        action = conn.execute("SELECT * FROM security_actions WHERE action_type='delete_host_firewall_rule'").fetchone()
+        params = json.loads(action["params_json"])
+        self.assertEqual(params["expected_node_id"], "watcher-node-a")
+        self.assertEqual(params["rule"], rule)
+        self.assertEqual(server._action_item(action)["params"], {"rule_id": 7})
+        conn.close()
+
+        duplicate = asyncio.run(server.delete_host_firewall_rule("host-a", 7, Request(None)))
+        self.assertEqual(json.loads(duplicate.body)["action_id"], result["action_id"])
+        conn = server.db()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM security_actions WHERE action_type='delete_host_firewall_rule'").fetchone()[0], 1)
+        conn.close()
+
+    def test_manual_rule_delete_rejects_viewer_stale_and_platform_owned_rules(self):
+        manual = {
+            "id": 7, "priority": 100, "direction": "in", "protocol": "tcp", "action": "block",
+            "enabled": True, "port_start": 443, "port_end": 443, "ip_type": "any",
+            "origin": "manual", "sync_state": "manual",
+        }
+        self.install_rfw_rule_readback(manual)
+        with self.assertRaises(HTTPException) as viewer:
+            asyncio.run(server.delete_host_firewall_rule("host-a", 7, Request(None, role="viewer")))
+        self.assertEqual(viewer.exception.status_code, 403)
+
+        self.install_rfw_rule_readback(manual, observed_at=self.now - server.STALE_SECONDS - 1)
+        with self.assertRaises(HTTPException) as stale:
+            asyncio.run(server.delete_host_firewall_rule("host-a", 7, Request(None)))
+        self.assertEqual(stale.exception.status_code, 409)
+
+        platform_rule = {**manual, "origin": "platform", "sync_state": "in_sync", "managed_key": "platform-rule"}
+        self.install_rfw_rule_readback(platform_rule)
+        with self.assertRaises(HTTPException) as managed:
+            asyncio.run(server.delete_host_firewall_rule("host-a", 7, Request(None)))
+        self.assertEqual(managed.exception.status_code, 409)
+
+        conn = server.db()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM security_actions WHERE action_type='delete_host_firewall_rule'").fetchone()[0], 0)
+        conn.close()
 
     def test_host_firewall_api_includes_sanitized_interface_inventory(self):
         payload = {
@@ -1056,6 +1125,62 @@ class HostFirewallPolicyTests(unittest.TestCase):
             action["runtime"] = "incus"
             self.assertFalse(agent._execute_host_firewall_policy(action, "watcher-node-a")[0])
             send.assert_not_called()
+
+    def test_client_deletes_only_confirmed_manual_rule_on_matching_host(self):
+        rule = {
+            "id": 7, "priority": 100, "direction": "in", "protocol": "tcp", "action": "block",
+            "enabled": True, "port_start": 443, "port_end": 443, "ip_type": "any",
+            "origin": "manual", "sync_state": "manual",
+        }
+        action = {
+            "runtime": "host", "container_name": "__host__",
+            "params": {"expected_node_id": "watcher-node-a", "rule": rule},
+        }
+        with mock.patch.object(agent, "_runman_host_firewall_delete_rule", return_value=(True, "deleted")) as send:
+            self.assertEqual(agent._execute_host_firewall_rule_delete(action, "watcher-node-a"), (True, "deleted"))
+            send.assert_called_once_with(rule)
+
+        with mock.patch.object(agent, "_runman_host_firewall_delete_rule") as send:
+            self.assertFalse(agent._execute_host_firewall_rule_delete(action, "different-node")[0])
+            action["runtime"] = "incus"
+            self.assertFalse(agent._execute_host_firewall_rule_delete(action, "watcher-node-a")[0])
+            action["runtime"] = "host"
+            action["params"]["rule"] = {**rule, "origin": "platform", "sync_state": "in_sync", "managed_key": "managed"}
+            self.assertFalse(agent._execute_host_firewall_rule_delete(action, "watcher-node-a")[0])
+            send.assert_not_called()
+
+    def test_client_sends_exact_manual_rule_to_runman_local_socket(self):
+        rule = {
+            "id": 7, "priority": 100, "direction": "in", "protocol": "tcp", "action": "block",
+            "enabled": True, "port_start": 443, "port_end": 443, "ip_type": "any",
+            "origin": "manual", "sync_state": "manual",
+        }
+
+        class Response:
+            status = 200
+
+            def read(self, _limit):
+                return b'{"ok":true,"message":"deleted"}'
+
+        class Connection:
+            timeout = 0
+
+            def request(self, method, path, **kwargs):
+                self.requested = (method, path, kwargs)
+
+            def getresponse(self):
+                return Response()
+
+            def close(self):
+                pass
+
+        connection = Connection()
+        with mock.patch.object(agent.network_quarantine, "_UnixHTTP", return_value=connection) as unix_http:
+            self.assertEqual(agent._runman_host_firewall_delete_rule(rule), (True, "deleted"))
+        unix_http.assert_called_once_with("/run/narwhal-agent/firewall.sock")
+        method, path, kwargs = connection.requested
+        self.assertEqual((method, path), ("DELETE", "/v1/firewall/rules/7"))
+        self.assertEqual(json.loads(kwargs["body"]), rule)
 
 
 if __name__ == "__main__":

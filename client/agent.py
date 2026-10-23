@@ -7051,6 +7051,34 @@ def _runman_host_firewall_request(policy: Dict[str, object]) -> Tuple[bool, str]
         connection.close()
 
 
+def _runman_host_firewall_delete_rule(rule: Dict[str, object]) -> Tuple[bool, str]:
+    rule_id = rule.get('id')
+    if type(rule_id) is not int or rule_id < 1:
+        return False, 'manual RFW rule ID is invalid'
+    connection = network_quarantine._UnixHTTP('/run/narwhal-agent/firewall.sock')
+    try:
+        connection.request(
+            'DELETE', f'/v1/firewall/rules/{rule_id}', body=json.dumps(rule, separators=(',', ':')),
+            headers={'Content-Type': 'application/json', 'Connection': 'close'},
+        )
+        response = connection.getresponse()
+        raw = response.read(8193)
+        if len(raw) > 8192:
+            return False, 'Runman local firewall response was oversized'
+        try:
+            body = json.loads(raw.decode('utf-8')) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            body = {}
+        if response.status != 200 or not isinstance(body, dict) or body.get('ok') is not True:
+            message = str(body.get('message') or 'Runman local firewall rejected the rule deletion') if isinstance(body, dict) else 'Runman local firewall rejected the rule deletion'
+            return False, message[:500]
+        return True, str(body.get('message') or 'RFW manual rule deleted')[:500]
+    except (OSError, ValueError, http.client.HTTPException):
+        return False, 'Runman firewall socket unavailable; no RFW rule deletion was confirmed'
+    finally:
+        connection.close()
+
+
 def _host_firewall_json_list(raw: str) -> List[Dict[str, object]]:
     try:
         parsed = json.loads(raw)
@@ -7497,6 +7525,20 @@ def _execute_host_firewall_policy(action: Dict, node_id: str) -> Tuple[bool, str
     if not isinstance(policy.get('rules'), list) or not isinstance(policy.get('abuse'), dict):
         return False, 'host firewall policy data is invalid'
     return _runman_host_firewall_request(policy)
+
+
+def _execute_host_firewall_rule_delete(action: Dict, node_id: str) -> Tuple[bool, str]:
+    params = action.get('params') if isinstance(action.get('params'), dict) else {}
+    rule = params.get('rule')
+    if str(action.get('runtime') or '') != 'host' or str(action.get('container_name') or '') != '__host__':
+        return False, 'host firewall rule deletion action has an invalid scope'
+    if not node_id or str(params.get('expected_node_id') or '') != node_id:
+        return False, 'host firewall rule deletion belongs to another Watcher node'
+    if not isinstance(rule, dict) or type(rule.get('id')) is not int or rule.get('id', 0) < 1:
+        return False, 'manual RFW rule identity is missing or invalid'
+    if rule.get('origin') != 'manual' or rule.get('sync_state') != 'manual' or rule.get('managed_key'):
+        return False, 'only a confirmed manual RFW rule can be deleted directly'
+    return _runman_host_firewall_delete_rule(rule)
 
 
 def _execute_container_connlimit(action: Dict) -> Tuple[bool, str]:
@@ -8575,6 +8617,8 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
             ok, message = False, "action belongs to another watcher node; no local firewall request sent"
         elif action_type == "apply_host_firewall_policy":
             ok, message = _execute_host_firewall_policy(action, node_id)
+        elif action_type == "delete_host_firewall_rule":
+            ok, message = _execute_host_firewall_rule_delete(action, node_id)
         elif action_type == "discover_access_logs":
             params = action.get("params", {})
             ok = bool(node_id) and params.get("expected_node_id") == node_id

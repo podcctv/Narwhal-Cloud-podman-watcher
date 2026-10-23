@@ -2135,4 +2135,3 @@ def commit_report() -> None:
         _STATE["seen_ssh_logins"] = logins
     _STATE.pop("_pending_report", None)
     _save_state()
-
