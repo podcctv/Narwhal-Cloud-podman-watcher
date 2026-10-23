@@ -104,7 +104,8 @@ def customer_copy(entry, english=False):
                  'container_connection_count':'容器连接数偏高','connections':'容器连接数偏高',
                  'cpu':'CPU 占用偏高','memory':'内存占用偏高','malicious_process':'可疑程序',
                  'outbound_fanout':'外部连接偏多','port_scan':'疑似端口扫描',
-                 'vmess_port_blocked':'VMess 入站端口已自动阻断','vmess_block_unverified':'VMess 入站保护待核实'}.get(entry.get('type'), title or '运行异常')
+                 'vmess_port_blocked':'VMess 入站端口已自动阻断','vmess_block_unverified':'VMess 入站保护待核实',
+                 'vmess_block_release_unverified':'VMess 端口恢复待核实'}.get(entry.get('type'), title or '运行异常')
     details = entry.get('customer') if isinstance(entry.get('customer'), dict) else {}
     extra = []
     advice = 'Please check the related settings and background tasks.' if english else '请检查相关设置和后台任务；需要协助时请联系管理员。'
@@ -129,9 +130,11 @@ def customer_copy(entry, english=False):
     elif entry.get('type') in {'socks_weak_auth', 'socks_auth_unknown'}:
         advice = 'Please secure the proxy authentication or disable the unwanted service.' if english else '请检查代理认证，设置安全密码，或关闭不需要的代理。'
     elif entry.get('type') == 'vmess_port_blocked':
-        advice = 'VMess inbound traffic on the listed ports was blocked without stopping other services. Please migrate the service to VLESS + Reality + Vision.' if english else '系统只阻断了列出的 VMess 入站端口，没有停止进程、容器或其他端口。建议迁移到 VLESS + Reality + Vision。'
+        advice = 'This is a platform network-policy notice, not an abuse finding. VMess inbound traffic on the listed ports was blocked without stopping other services. Please migrate the service to VLESS + Reality + Vision.' if english else '这是平台网络策略提醒，不代表认定您有滥用行为。系统只阻断了列出的 VMess 入站端口，没有停止进程、容器或其他端口。建议迁移到 VLESS + Reality + Vision。'
     elif entry.get('type') == 'vmess_block_unverified':
         advice = 'The service was not stopped because the port or network ownership could not be verified. Please review the listed port and migrate to VLESS + Reality + Vision.' if english else '由于端口或网络归属无法确认，系统没有自动阻断。请核对提示的端口；确认后可迁移到 VLESS + Reality + Vision。'
+    elif entry.get('type') == 'vmess_block_release_unverified':
+        advice = 'The previous network rule is being kept because the service stop or rule removal could not be verified. Please contact the administrator to review the listed port.' if english else '由于尚不能确认服务已停止或规则已删除，系统暂时保留了原端口阻断。请联系管理员核实提示的端口；其他服务和容器未停止。'
     elif entry.get('type') in {'malicious_process', 'confirmed_abuse'}:
         advice = 'Please review the program source and startup tasks; contact the administrator before restoring access.' if english else '请检查程序来源及启动任务；如已隔离，请联系管理员复核后恢复。'
     elif entry.get('type') in {'cpu', 'memory', 'process_fanout_abuse'}:

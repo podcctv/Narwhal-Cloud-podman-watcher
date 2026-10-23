@@ -35,7 +35,7 @@ class BuyerTests(unittest.TestCase):
         server.init_db()
         self.now=int(time.time())
         self.alert={"type":"socks_weak_auth","severity":"critical","runtime":"incus","project":"default","container_name":"c1","title":"SOCKS 认证风险","message":"Detected, password=secret-value"}
-        self.c={"runtime":"incus","project":"default","name":"c1","security":{"socks_proxy":{"detected":False}}}
+        self.c={"runtime":"incus","project":"default","name":"c1","id":"container-id-1","security":{"socks_proxy":{"detected":False}}}
         with server.db() as conn:
             server._set_system_setting(conn,"narwhal_api_key","fake-key")
             server._set_system_setting(conn,"narwhal_api_url","https://api.example.com/v1")
@@ -48,9 +48,12 @@ class BuyerTests(unittest.TestCase):
     def ingest(self, alerts=None, when=None, container=None):
         alerts=[self.alert] if alerts is None else alerts
         ts=when or self.now
+        observed=container or self.c
         with server.db() as conn:
+            conn.execute("INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,podman_network_ok_v4,podman_network_ok_v6,ts,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("host",observed.get("name","c1"),observed.get("runtime","incus"),observed.get("project","default"),0,0,0,0,0,0,0,0,ts,json.dumps(observed)))
             server.process_security_alerts(conn,"host",ts,alerts)
-            buyer.observe(conn,"host",ts,[container or self.c],alerts)
+            buyer.observe(conn,"host",ts,[observed],alerts)
             buyer.reconcile(conn,"host",ts)
 
     def mapping(self,name="c1",user="user-1",scope="user",**kw):
@@ -99,17 +102,75 @@ class BuyerTests(unittest.TestCase):
             self.assertTrue(preview['protection_only'])
             self.assertFalse(preview['can_submit'])
 
-    def test_vmess_port_protection_is_not_a_customer_abuse_notice(self):
+    def test_confirmed_vmess_block_sends_scoped_policy_advice_not_abuse_notice(self):
         self.mapping()
         self.alert.update(type='vmess_port_blocked', title='VMess 入站端口已自动阻断',
-            message='仅阻断 TCP/443，未停止其他服务', value=1, threshold=0)
+            message='仅阻断 TCP/443，未停止其他服务', value=1, threshold=0,
+            instance_id='container-id-1',
+            vmess_guard={'state':'blocked','blocked_endpoints':[
+                {'proto':'tcp','port':443,'process':'xray','pid':120}], 'pending_endpoints':[]},
+            automatic_remediation={'attempted':True,'succeeded':True})
         self.ingest()
-        self.assertEqual(self.rows(), [])
+        row=self.rows()[0]
+        self.assertEqual(row['status'],'queued')
+        self.assertEqual(row['scope'],'user')
+        self.assertEqual(row['user_id'],'user-1')
+        self.assertIn('incus/default/c1',row['message'])
+        self.assertIn('实例 ID container-id',row['message'])
+        self.assertIn('xray（容器内 PID 120）监听 TCP/443',row['message'])
+        self.assertIn('VLESS + Reality + Vision',row['message'])
+        self.assertIn('不是对您进行滥用定性',row['message'])
         with server.db() as conn:
             alert_id=conn.execute("SELECT id FROM security_alerts WHERE alert_type='vmess_port_blocked'").fetchone()[0]
             preview=buyer.notice_preview(conn,alert_id)
             self.assertTrue(preview['protection_only'])
             self.assertFalse(preview['can_submit'])
+            with self.assertRaisesRegex(ValueError, '未通过应用或代理认证日志'):
+                buyer.queue_user_notice(conn,alert_id,{
+                    'request_id':'b'*32,'confirm':True,'preview_token':preview['preview_token']
+                },'dashboard')
+
+    def test_vmess_unverified_or_machine_scope_never_queues_customer_notice(self):
+        self.mapping(scope='machine',confirm_broadcast=True)
+        self.alert.update(type='vmess_port_blocked',title='VMess pending',message='pending',
+            instance_id='container-id-1',
+            vmess_guard={'state':'partial','blocked_endpoints':[
+                {'proto':'tcp','port':443,'process':'xray','pid':120}], 'pending_endpoints':[{'port':8443}]},
+            automatic_remediation={'attempted':True,'succeeded':False})
+        self.ingest()
+        self.assertEqual(self.rows(), [])
+
+        self.alert.update(type='vmess_block_unverified', title='VMess unverified',
+            vmess_guard={'state':'unverified','blocked_endpoints':[], 'pending_endpoints':[{'port':8443}]})
+        self.ingest(when=self.now+1)
+        self.assertEqual(self.rows(), [])
+
+    def test_vmess_policy_notice_expires_before_customer_delivery(self):
+        self.mapping()
+        self.alert.update(type='vmess_port_blocked',title='VMess blocked',message='blocked',
+            instance_id='container-id-1',
+            vmess_guard={'state':'blocked','blocked_endpoints':[
+                {'proto':'udp','port':443,'process':'sing-box','pid':122}], 'pending_endpoints':[]},
+            automatic_remediation={'attempted':True,'succeeded':True})
+        self.ingest()
+        sender=mock.Mock(return_value=('succeeded',200))
+        buyer.work_once(server.db,self.now+901,sender)
+        sender.assert_not_called()
+        self.assertEqual(self.rows()[0]['status'],'cancelled')
+
+    def test_vmess_policy_notice_is_cancelled_if_container_identity_changes(self):
+        self.mapping()
+        self.alert.update(type='vmess_port_blocked',title='VMess blocked',message='blocked',
+            instance_id='container-id-1',
+            vmess_guard={'state':'blocked','blocked_endpoints':[
+                {'proto':'tcp','port':443,'process':'xray','pid':120}], 'pending_endpoints':[]},
+            automatic_remediation={'attempted':True,'succeeded':True})
+        self.ingest()
+        self.ingest([self.alert],self.now+10,{**self.c,'id':'replacement-id'})
+        sender=mock.Mock(return_value=('succeeded',200))
+        buyer.work_once(server.db,self.now+10,sender)
+        sender.assert_not_called()
+        self.assertEqual(self.rows()[0]['status'],'cancelled')
 
     def test_connection_guard_notice_is_neutral_and_not_cancelled_as_abuse(self):
         self.mapping()

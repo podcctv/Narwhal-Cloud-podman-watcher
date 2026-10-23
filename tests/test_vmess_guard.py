@@ -7,6 +7,7 @@ from client import socks_detector
 from client import vmess_guard
 from client import security_banner
 from client import agent
+from server import buyer_notifications
 
 
 class VmessPlanTests(unittest.TestCase):
@@ -61,6 +62,15 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(result["reason"], "runtime_not_supported")
         self.assertEqual(result["blocked_endpoints"], [])
 
+    def test_release_requires_a_complete_absence_scan(self):
+        complete = vmess_guard.plan("incus", [], [], [], "complete")
+        incomplete = vmess_guard.plan("incus", [], [], [], "partial")
+        self.assertTrue(complete["release_eligible"])
+        self.assertFalse(incomplete["release_eligible"])
+        self.assertEqual(incomplete["state"], "unverified")
+        unsupported = vmess_guard.plan("docker", [], [], [], "complete")
+        self.assertFalse(unsupported["release_eligible"])
+
     def test_config_parser_reports_protocol_without_secrets(self):
         xray = socks_detector.parse_inbound_protocols(
             '{"inbounds":[{"protocol":"vmess","port":443,"streamSettings":{"network":"tcp"},"settings":{"clients":[{"id":"secret"}]}}]}',
@@ -90,16 +100,66 @@ class VmessPlanTests(unittest.TestCase):
         title, detail, extra, advice = security_banner.customer_copy({
             "type": "vmess_port_blocked",
             "title": "VMess 入站端口已自动阻断",
-            "detail": "已阻断 TCP/443",
+            "detail": "已核实 VMess 进程 xray（容器内 PID 120）监听 TCP/443；已阻断该端口",
         })
         self.assertIn("VMess", title)
+        self.assertIn("xray（容器内 PID 120）", detail)
         self.assertIn("TCP/443", detail)
         self.assertEqual(extra, [])
         self.assertIn("没有停止进程、容器或其他端口", advice)
+        self.assertIn("不代表认定您有滥用行为", advice)
         self.assertIn("VLESS + Reality + Vision", advice)
+
+    def test_release_pending_is_operator_only_and_banner_does_not_claim_recovery(self):
+        title, detail, _, advice = security_banner.customer_copy({
+            "type": "vmess_block_release_unverified",
+            "title": "VMess 端口恢复待核实",
+            "detail": "原受保护端口仍有进程监听：TCP/443",
+        })
+        self.assertEqual(title, "VMess 端口恢复待核实")
+        self.assertIn("仍有进程监听", detail)
+        self.assertIn("暂时保留了原端口阻断", advice)
+        self.assertTrue(buyer_notifications.is_protection_only_alert({"type": "vmess_block_release_unverified"}))
+        self.assertNotIn("vmess_block_release_unverified", agent._MOTD_THREAT_TYPES)
+
+    def test_confirmed_vmess_alert_label_identifies_container_process_pid_and_port(self):
+        label = agent._vmess_endpoint_label({"process":"xray","pid":120,"proto":"tcp","port":443})
+        self.assertEqual(label, "xray（容器内 PID 120）监听 TCP/443")
+        pending = agent._vmess_endpoint_label({"process":"xray","pid":120,"proto":"tcp","port":443}, pending=True)
+        self.assertEqual(pending, "xray（容器内 PID 120），待核实 TCP/443")
+        self.assertEqual(agent._vmess_endpoint_label({"process":"gost","pid":121,"proto":"udp","port":53}), "UDP/53")
 
 
 class VmessReconcileTests(unittest.TestCase):
+    def _reconcile_release(self, live_listeners, remaining_table=False):
+        identity = "incus\0default\0fixture\0container-id"
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
+        marker = f"narwhal-vmess-guard-v1-{digest}"
+        table = f"narwhal_vmess_{digest}"
+        calls = []
+
+        def runner(args, **kwargs):
+            command = args[4:]
+            calls.append(command)
+            if command == ["-a", "list", "table", "inet", table]:
+                return mock.Mock(returncode=0, stdout=marker + "-tcp-443", stderr="")
+            if command == ["delete", "table", "inet", table]:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if command == ["-j", "list", "tables"]:
+                tables = [{"table": {"family": "inet", "name": table}}] if remaining_table else []
+                return mock.Mock(returncode=0, stdout=json.dumps({"nftables": tables}), stderr="")
+            return mock.Mock(returncode=2, stdout="", stderr="unexpected command")
+
+        with mock.patch.object(vmess_guard, "_pid_epoch", return_value="epoch"), \
+                mock.patch.object(vmess_guard, "_open_namespace_fd", return_value=17), \
+                mock.patch.object(vmess_guard.os, "close"), \
+                mock.patch.object(vmess_guard.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+            result = vmess_guard.reconcile(
+                120, identity, "epoch", [], runner=runner,
+                release_if_absent=True, live_listeners=live_listeners,
+            )
+        return result, calls
+
     def test_namespace_fd_is_closed_if_pid_identity_changes_while_opening(self):
         with mock.patch.object(vmess_guard, "_pid_epoch", side_effect=["epoch", "changed"]), \
                 mock.patch.object(vmess_guard.os, "open", return_value=23), \
@@ -147,6 +207,39 @@ class VmessReconcileTests(unittest.TestCase):
         self.assertIn("add chain inet narwhal_vmess_", script)
         self.assertIn("meta l4proto tcp tcp dport 443 drop", script)
         self.assertIn(marker + "-tcp-443", script)
+
+    def test_complete_absence_removes_owned_rule_and_reads_back_absence(self):
+        result, calls = self._reconcile_release([])
+        self.assertEqual(result["state"], "cleared")
+        self.assertIn(["delete", "table", "inet", calls[0][-1]], calls)
+        self.assertEqual(calls[-1], ["-j", "list", "tables"])
+
+    def test_live_listener_keeps_old_rule_and_reports_pending_release(self):
+        result, calls = self._reconcile_release([{"proto": "tcp", "port": 443}])
+        self.assertEqual(result["state"], "release_pending")
+        self.assertEqual(result["reason"], "guarded_port_still_has_listener")
+        self.assertEqual(result["pending_removal_endpoints"], [{"proto": "tcp", "port": 443}])
+        self.assertNotIn("delete", calls)
+
+    def test_failed_rule_removal_readback_is_not_reported_as_recovered(self):
+        result, _ = self._reconcile_release([], remaining_table=True)
+        self.assertEqual(result["state"], "release_pending")
+        self.assertEqual(result["reason"], "firewall_remove_readback_failed")
+
+    def test_full_listener_inventory_cap_prevents_release_eligibility(self):
+        listeners = [
+            {"pid": index + 2, "process": "test", "proto": "tcp", "port": index + 1,
+             "local": f"0.0.0.0:{index + 1}"}
+            for index in range(100)
+        ]
+        inventory, state = agent._build_service_inventory(
+            {"connection_metrics": {"valid": True}, "listening_ports": [], "udp_listening_ports": []},
+            {"communication_detail_available": True, "communication_snapshot_truncated": False,
+             "service_listeners": listeners},
+            [],
+        )
+        self.assertEqual(len(inventory), 100)
+        self.assertEqual(state, "partial")
 
     def test_namespace_mismatch_fails_closed_before_running_commands(self):
         with mock.patch.object(vmess_guard, "_pid_epoch", return_value="changed"):

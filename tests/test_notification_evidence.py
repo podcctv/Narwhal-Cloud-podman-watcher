@@ -96,6 +96,35 @@ class NotificationEvidenceTests(unittest.TestCase):
         self.assertIn('旧版来源数量规则曾拒绝新连接', text)
         self.assertIn('当前版本不会仅按来源数量封禁', text)
 
+    def test_vmess_notice_names_the_exact_container_process_and_blocked_endpoint(self):
+        alert = self.alert('vmess_port_blocked', runtime='incus', project='default')
+        alert['details_json'] = json.dumps({
+            'instance_id':'container-id-1',
+            'vmess_guard': {'state':'blocked','blocked_endpoints':[
+                {'process':'xray','pid':120,'proto':'tcp','port':443}], 'pending_endpoints':[]},
+            'automatic_remediation': {'attempted':True,'succeeded':True},
+        })
+        subject, text = content.render(alert, 'active', node='香港节点')
+        self.assertEqual(subject, '服务器服务策略提醒')
+        self.assertIn('incus/default/A1B2', text)
+        self.assertIn('实例 ID container-id', text)
+        self.assertIn('xray（容器内 PID 120）监听 TCP/443', text)
+        self.assertIn('没有停止进程、容器或其他端口', text)
+        self.assertIn('不是对您进行滥用定性', text)
+        self.assertIn('VLESS + Reality + Vision', text)
+
+    def test_vmess_notice_will_not_infer_process_or_port_from_invalid_evidence(self):
+        details = {'vmess_guard': {'state':'blocked','blocked_endpoints':[
+            {'process':'unknown','pid':120,'proto':'tcp','port':443}]},
+            'automatic_remediation': {'attempted':True}}
+        self.assertIsNone(content.vmess_block_evidence(details))
+
+    def test_vmess_fully_blocked_notice_requires_confirmed_remediation(self):
+        details = {'vmess_guard': {'state':'blocked','blocked_endpoints':[
+            {'process':'xray','pid':120,'proto':'tcp','port':443}]},
+            'automatic_remediation': {'attempted':True,'succeeded':False}}
+        self.assertIsNone(content.vmess_block_evidence(details))
+
     def test_service_listeners_do_not_use_instance_all_ports(self):
         details = {'listening_ports':[22,80,1080], 'service_listeners':[
             {'process':'danted','pid':21,'local':'0.0.0.0:1080','port':1080}]}

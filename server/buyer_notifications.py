@@ -25,7 +25,7 @@ MAX_ATTEMPTS = 5
 PROTECTION_ONLY_ALERT_TYPES = frozenset({
     "container_connection_count", "inbound_ip_fanout", "socks_inbound_fanout",
     "inbound_source_blocked", "tcp_concurrency_limited", "admission_unverified",
-    "vmess_port_blocked", "vmess_block_unverified",
+    "vmess_port_blocked", "vmess_block_unverified", "vmess_block_release_unverified",
     "ddos_bandwidth", "ddos_packets", "ddos_syn", "cc_total_rps", "cc_single_ip",
     "cc_4xx_ratio", "http_5xx_ratio", "http_abuse", "web_scan", "port_scan",
     "outbound_fanout", "outbound_sensitive_ports", "outbound_bandwidth_abuse",
@@ -107,6 +107,60 @@ def is_protection_only_alert(alert):
     # Never trust client/node-supplied flags such as verified=true. The current
     # product has no server-side application-auth-log correlation store yet.
     return True
+
+
+def _confirmed_vmess_policy_evidence(alert):
+    """VMess policy notices need a verified node-side block, not just detection."""
+    try:
+        kind = str(alert["alert_type"] or "")
+        details = buyer_content.loads(alert["details_json"])
+    except (KeyError, IndexError, TypeError):
+        return None
+    if kind != "vmess_port_blocked":
+        return None
+    return buyer_content.vmess_block_evidence(details)
+
+
+def _vmess_alert_matches_live_container(conn, alert):
+    details = buyer_content.loads(alert["details_json"])
+    expected = str(details.get("instance_id") or "")[:200]
+    if not expected:
+        return False
+    return container_id(conn, alert) == expected
+
+
+def _reconcile_vmess_policy_notice(conn, alert, now, cfg):
+    """Queue a protocol-policy advisory only to a live, exact user mapping."""
+    event_key = f"{alert['id']}:{alert['first_seen']}:vmess-policy"
+    evidence = _confirmed_vmess_policy_evidence(alert)
+    state = current_state(conn, alert)
+    age = now - int(alert["last_seen"] or 0)
+    t = target(conn, alert, now)
+    eligible = bool(
+        evidence
+        and _vmess_alert_matches_live_container(conn, alert)
+        and state in {"active", "recurring", "awaiting_report"}
+        and -30 <= age <= 900
+        and alert["severity"] in {"warning", "critical"}
+        and cfg["enabled"]
+        and cfg["api_key"]
+        and t
+        and t["scope"] == "user"
+        and t["user_id"]
+    )
+    if not eligible:
+        reason = "VMess 策略通知要求新鲜封禁证据和精确的单用户收件映射；未广播"
+        conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error=? WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, reason, alert["id"]))
+        return
+    conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='VMess 策略通知快照已更新' WHERE alert_id=? AND event_key<>? AND status IN ('queued','retrying','blocked')", (now, alert["id"], event_key))
+    if conn.execute("SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')").fetchone()[0] >= 10000:
+        return
+    subject, message = render(alert, state, t["node_name"], conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO buyer_outbox(event_key,alert_id,host_id,runtime,project,container_name,state,severity,subject,message,machine_id,user_id,scope,status,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (event_key, alert["id"], *(alert[k] for k in ("host_id", "runtime", "project", "container_name")), state,
+         alert["severity"], subject, message, t["machine_id"], t["user_id"], "user", "queued", now, now, now),
+    )
 
 
 def valid_uuid(value):
@@ -239,6 +293,9 @@ def reconcile(conn, host, now):
             conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
             continue
         if is_protection_only_alert(alert):
+            if alert["alert_type"] == "vmess_port_blocked":
+                _reconcile_vmess_policy_notice(conn, alert, now, cfg)
+                continue
             # Preserve the operator alert and its protection policy, but do not
             # present unattributed network activity as buyer misconduct.
             conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='网络保护信号未关联到用户身份，不作为用户滥用通知' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
@@ -549,7 +606,20 @@ def work_once(db, now=None, sender=deliver):
             if buyer_content.loads(a["details_json"]).get("data_stale") and row['state'] not in {'verified','resolved'}:
                 conn.execute("UPDATE buyer_outbox SET status='blocked',last_error='异常采样已过期，等待新鲜证据',due_at=?,updated_at=? WHERE id=?", (now+300,now,row['id']))
                 continue
+            vmess_policy_event = row["event_key"] == f"{a['id']}:{a['first_seen']}:vmess-policy"
+            if vmess_policy_event:
+                age = now - int(a["last_seen"] or 0)
+                if (not _confirmed_vmess_policy_evidence(a)
+                        or not _vmess_alert_matches_live_container(conn, a)
+                        or current_state(conn, a) not in {"active", "recurring", "awaiting_report"}
+                        or not -30 <= age <= 900
+                        or a["severity"] not in {"warning", "critical"}):
+                    conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='VMess 封禁证据已过期或状态变化；未发送' WHERE id=?", (now, row["id"]))
+                    continue
             t=target(conn,row,now)
+            if vmess_policy_event and (not t or t["scope"] != "user" or not t["user_id"]):
+                conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='单用户收件映射已失效；未向整机广播' WHERE id=?", (now, row["id"]))
+                continue
             if not t:
                 issue=conn.execute("SELECT reason FROM buyer_mapping_issues WHERE host_id=? AND runtime=? AND project=? AND container_name=?",tuple(row[k] for k in buyer_mapping.IDENTITY)).fetchone()
                 reason=issue[0] if issue else '收件映射缺失、已停用或上游关联已过期'

@@ -1845,6 +1845,7 @@ def _build_service_inventory(
     owned = communication.get("service_listeners")
     owned = owned if isinstance(owned, list) else []
     inventory: List[Dict[str, object]] = []
+    inventory_truncated = len(owned) >= 100
     covered: set[Tuple[str, int]] = set()
 
     def valid_port(value: object) -> int:
@@ -1955,11 +1956,12 @@ def _build_service_inventory(
                     "process_attribution": "unavailable",
                 })
     inventory.sort(key=lambda item: (int(item.get("port") or 0), str(item.get("proto") or ""), str(item.get("process") or "")))
+    inventory_truncated = inventory_truncated or len(inventory) > 100
     inventory = inventory[:100]
     metrics = socket_security.get("connection_metrics")
     metrics_valid = isinstance(metrics, dict) and metrics.get("valid") is True
     detail_available = communication.get("communication_detail_available") is True
-    truncated = communication.get("communication_snapshot_truncated") is True
+    truncated = communication.get("communication_snapshot_truncated") is True or inventory_truncated
     if metrics_valid and not truncated and (detail_available or not inventory):
         state = "complete"
     elif metrics_valid or detail_available or inventory:
@@ -2964,6 +2966,27 @@ def _security_alert(
     }
 
 
+def _vmess_endpoint_label(item: Dict[str, object], pending: bool = False) -> str:
+    """Describe the exact container process and transport port proven by the guard."""
+    if not isinstance(item, dict):
+        return ""
+    try:
+        port = int(item.get("port") or 0)
+        pid = int(item.get("pid") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    proto = str(item.get("proto") or "").lower()
+    process = str(item.get("process") or "").lower()
+    if not 1 <= port <= 65535:
+        return ""
+    endpoint = f"{proto.upper()}/{port}" if proto in {"tcp", "udp"} else f"端口/{port}"
+    if process in vmess_guard.SUPPORTED_ENGINES and 1 < pid <= 4194304:
+        if pending:
+            return f"{process}（容器内 PID {pid}），待核实 {endpoint}"
+        return f"{process}（容器内 PID {pid}）监听 {endpoint}"
+    return f"待核实 {endpoint}" if pending else endpoint
+
+
 def _http_security_alerts(
     access: Dict[str, object], container: Dict[str, object] | None = None
 ) -> List[Dict[str, object]]:
@@ -3521,23 +3544,51 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         enforce_socks_auth_policy(container, socks_enforcement_entries)
         vmess = security.get("vmess_guard") if isinstance(security.get("vmess_guard"), dict) else {}
-        if container.get("runtime") in {"incus", "podman"} and vmess.get("detected") and vmess.get("state") in {"blocked", "partial", "unverified"}:
+        if container.get("runtime") in {"incus", "podman"} and vmess.get("state") == "release_pending":
+            pending = vmess.get("pending_endpoints") if isinstance(vmess.get("pending_endpoints"), list) else []
+            labels = [label for label in (_vmess_endpoint_label(item, pending=True) for item in pending) if label]
+            reason_labels = {
+                "guarded_port_still_has_listener": "原受保护端口仍有进程监听，无法确认 VMess 服务已停止",
+                "release_evidence_unavailable": "缺少完整监听证据",
+                "firewall_remove_failed": "删除防火墙规则失败",
+                "firewall_remove_readback_failed": "删除后无法读回验证",
+                "firewall_remove_readback_invalid": "删除后的防火墙读回数据无效",
+                "firewall_remove_unverified": "无法确认防火墙规则已删除",
+                "container_namespace_changed": "容器网络命名空间发生变化，无法确认规则状态",
+                "shared_network_namespace": "容器与其他服务共用网络命名空间，不能安全修改端口规则",
+                "container_namespace_unavailable": "容器网络命名空间当前不可用",
+            }
+            reason = reason_labels.get(str(vmess.get("reason") or ""), "恢复条件尚未全部验证")
+            if vmess.get("detected"):
+                detail = f"当前只发现本地回环 VMess 监听，但无法确认旧端口阻断已解除：{reason}。"
+            else:
+                detail = f"当前完整扫描未发现 VMess 入站，但无法确认旧端口阻断已解除：{reason}。"
+            if labels:
+                detail += f"待核实端口：{'、'.join(labels)}。"
+            detail += "只有确认端口无残留监听且规则删除后读回为空，Agent 才会报告恢复；未停止进程或容器。"
+            vmess_alert = _security_alert("vmess_block_release_unverified", "warning", "VMess 端口恢复待核实", detail, len(labels), 0, container)
+            vmess_alert.update(alert_key="vmess:release:" + ",".join(labels), vmess_guard=vmess,
+                               instance_id=str(container.get("id") or "")[:200],
+                               automatic_remediation={"attempted": True, "succeeded": False, "message": "未确认规则已移除，旧规则保留"})
+            alerts.append(vmess_alert)
+        elif container.get("runtime") in {"incus", "podman"} and vmess.get("detected") and vmess.get("state") in {"blocked", "partial", "unverified"}:
             blocked = vmess.get("blocked_endpoints") if isinstance(vmess.get("blocked_endpoints"), list) else []
             pending = vmess.get("pending_endpoints") if isinstance(vmess.get("pending_endpoints"), list) else []
-            blocked_labels = [f"{str(item.get('proto') or '').upper()}/{int(item.get('port') or 0)}" for item in blocked if isinstance(item, dict) and int(item.get("port") or 0) > 0]
-            pending_labels = [f"{str(item.get('proto') or '').upper()}/{int(item.get('port') or 0)}" for item in pending if isinstance(item, dict) and int(item.get("port") or 0) > 0]
+            blocked_labels = [label for label in (_vmess_endpoint_label(item) for item in blocked) if label]
+            pending_labels = [label for label in (_vmess_endpoint_label(item, pending=True) for item in pending) if label]
             if vmess.get("state") in {"blocked", "partial"} and blocked_labels:
                 title = "VMess 入站端口已自动阻断" if vmess.get("state") == "blocked" else "VMess 入站已部分阻断，仍有端口待核实"
                 message = (
-                    f"已在此容器独立网络命名空间阻断 VMess 入站端口：{'、'.join(blocked_labels)}。"
+                    f"已核实此容器内以下进程提供 VMess 入站，并在该容器独立网络命名空间阻断对应协议/端口：{'、'.join(blocked_labels)}。"
                     "未停止进程、容器或其他端口；建议迁移到 VLESS + Reality + Vision。"
                 )
-                if pending_labels:
-                    message += f" 以下端口因配置或监听归属不唯一而未自动阻断：{'、'.join(pending_labels)}。"
+                if pending_labels or vmess.get("state") == "partial":
+                    message += f" 另有入口待核实，未阻断：{'、'.join(pending_labels) if pending_labels else '具体端口暂无法确认'}。"
                 vmess_alert = _security_alert("vmess_port_blocked", "warning", title, message, len(blocked_labels), 0, container)
                 vmess_alert.update(
                     alert_key="vmess:" + ",".join(blocked_labels + pending_labels),
                     vmess_guard=vmess,
+                    instance_id=str(container.get("id") or "")[:200],
                     service_listeners=[item for item in security.get("service_listeners", []) if isinstance(item, dict) and item.get("vmess_block_state") == "blocked"][:20],
                     automatic_remediation={"attempted": True, "succeeded": vmess.get("state") == "blocked", "message": "仅阻断已确认的 VMess 入站端口，未停止其他服务"},
                 )
@@ -3556,6 +3607,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "firewall_dependency_unavailable": "主机缺少 nftables 或 nsenter",
                     "firewall_apply_failed": "防火墙规则应用失败",
                     "firewall_readback_failed": "防火墙读回未确认规则生效",
+                    "previous_guard_rule_preserved": "当前证据不足以确认旧 VMess 入口已消失，因此保留原端口阻断",
                 }
                 labels = pending_labels or [str(item.get("port")) for item in pending if isinstance(item, dict) and item.get("port")]
                 reason = reason_labels.get(str(vmess.get("reason") or ""), "端口归属或规则生效状态未能确认")
@@ -3564,7 +3616,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     detail += f"待核实端口：{'、'.join(labels)}。"
                 detail += "建议迁移到 VLESS + Reality + Vision。"
                 vmess_alert = _security_alert("vmess_block_unverified", "warning", "VMess 入站保护待核实", detail, len(labels), 0, container)
-                vmess_alert.update(alert_key="vmess:unverified:" + ",".join(labels), vmess_guard=vmess)
+                vmess_alert.update(alert_key="vmess:unverified:" + ",".join(labels), vmess_guard=vmess,
+                                   instance_id=str(container.get("id") or "")[:200])
             alerts.append(vmess_alert)
         rx_bps = float(container.get("net_rx_bps") or 0)
         tx_bps = float(container.get("net_tx_bps") or 0)
@@ -6403,6 +6456,8 @@ def collect_container(
         if socks_proxy.get("protocol_inventory_state") == "complete"
         and communication.get("communication_detail_available") is True
         and communication.get("communication_snapshot_truncated") is not True
+        and len(communication.get("service_listeners") or []) < 100
+        and len(service_inventory) < 100
         else "partial"
     )
     vmess_plan = vmess_guard.plan(
@@ -6429,10 +6484,32 @@ def collect_container(
             f"{runtime_name}\0{project}\0{name}\0{container_id or name}",
             namespace_epoch,
             desired,
+            release_if_absent=auto_block_vmess and vmess_plan.get("release_eligible") is True,
+            live_listeners=service_inventory,
+            preserve_existing=auto_block_vmess and vmess_plan.get("detected") is True
+                and vmess_plan.get("state") == "unverified",
         )
-        if auto_block_vmess and vmess_plan.get("detected"):
+        if auto_block_vmess and vmess_plan.get("release_eligible") is True:
+            if enforcement.get("state") == "cleared":
+                vmess_status.update(state="not_detected", reason="", blocked_endpoints=[], pending_endpoints=[])
+            else:
+                vmess_status.update(
+                    state="release_pending",
+                    reason=enforcement.get("reason") or "firewall_remove_unverified",
+                    blocked_endpoints=[],
+                    pending_endpoints=enforcement.get("pending_removal_endpoints", []),
+                )
+        elif auto_block_vmess and vmess_plan.get("detected"):
             if vmess_plan.get("state") == "internal_only":
-                vmess_status.update(state="internal_only", reason="loopback_only_listener", blocked_endpoints=[])
+                if enforcement.get("state") == "cleared":
+                    vmess_status.update(state="internal_only", reason="loopback_only_listener", blocked_endpoints=[])
+                else:
+                    vmess_status.update(
+                        state="release_pending",
+                        reason=enforcement.get("reason") or "firewall_remove_unverified",
+                        blocked_endpoints=[],
+                        pending_endpoints=enforcement.get("pending_removal_endpoints", []),
+                    )
             elif enforcement.get("state") == "blocked":
                 vmess_status["state"] = "partial" if vmess_plan.get("pending_endpoints") else "blocked"
                 vmess_status["blocked_endpoints"] = [
@@ -6442,10 +6519,31 @@ def collect_container(
                 ]
                 if vmess_status["state"] == "partial":
                     vmess_status["reason"] = "some_endpoints_are_ambiguous"
+                if vmess_plan.get("state") == "unverified":
+                    vmess_status["state"] = "unverified"
+                    vmess_status["reason"] = "previous_guard_rule_preserved" if enforcement.get("blocked_endpoints") else (vmess_plan.get("reason") or "firewall_apply_failed")
+                    vmess_status["blocked_endpoints"] = []
+                    preserved = [
+                        {"proto": item.get("proto"), "port": item.get("port"), "reason": "previous_guard_rule_preserved"}
+                        for item in enforcement.get("blocked_endpoints", []) if isinstance(item, dict)
+                    ]
+                    vmess_status["pending_endpoints"] = list(vmess_plan.get("pending_endpoints") or [])[:20]
+                    for item in preserved:
+                        if not any(existing.get("proto") == item["proto"] and existing.get("port") == item["port"]
+                                   for existing in vmess_status["pending_endpoints"] if isinstance(existing, dict)):
+                            vmess_status["pending_endpoints"].append(item)
             else:
                 vmess_status.update(state="unverified", reason=enforcement.get("reason") or "firewall_apply_failed", blocked_endpoints=[])
         elif not auto_block_vmess:
-            vmess_status.update(state="disabled", reason="automatic_block_disabled", blocked_endpoints=[])
+            if enforcement.get("state") == "cleared":
+                vmess_status.update(state="disabled", reason="automatic_block_disabled", blocked_endpoints=[])
+            else:
+                vmess_status.update(
+                    state="release_pending",
+                    reason=enforcement.get("reason") or "firewall_remove_unverified",
+                    blocked_endpoints=[],
+                    pending_endpoints=enforcement.get("pending_removal_endpoints", []),
+                )
         elif socks_proxy.get("protocol_inventory_state") == "complete" and not vmess_plan.get("detected"):
             vmess_status.update(state="not_detected", reason="", blocked_endpoints=[])
     elif vmess_plan.get("detected") and auto_block_vmess:
@@ -6453,6 +6551,9 @@ def collect_container(
             vmess_status.update(state="unverified", reason="shared_network_namespace", blocked_endpoints=[])
         elif not namespace_epoch:
             vmess_status.update(state="unverified", reason="container_namespace_unavailable", blocked_endpoints=[])
+    elif auto_block_vmess and runtime_name in {"incus", "podman"} and vmess_plan.get("release_eligible") is True:
+        reason = "shared_network_namespace" if host_or_shared_network else "container_namespace_unavailable"
+        vmess_status.update(state="release_pending", reason=reason, blocked_endpoints=[], pending_endpoints=[])
 
     blocked_vmess = {
         (str(item.get("proto") or "").lower(), int(item.get("port") or 0))

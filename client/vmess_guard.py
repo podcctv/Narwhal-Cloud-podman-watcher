@@ -8,6 +8,7 @@ it never signals or restarts a process or container.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -58,9 +59,16 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         if pid and port and process in SUPPORTED_ENGINES:
             vmess.append({"pid": pid, "process": process, "port": port, "listen": str(item.get("listen") or "*")})
     detected = bool(vmess)
-    result = {"detected": detected, "state": "not_detected", "blocked_endpoints": [], "pending_endpoints": []}
+    result = {
+        "detected": detected,
+        "state": "not_detected",
+        "blocked_endpoints": [],
+        "pending_endpoints": [],
+        "release_eligible": False,
+    }
     if not detected:
         if scan_state == "complete":
+            result["release_eligible"] = runtime in SUPPORTED_RUNTIMES
             return result
         result.update(state="unverified", reason="configuration_scan_incomplete")
         return result
@@ -190,7 +198,19 @@ def _open_namespace_fd(pid, expected_epoch):
     return namespace_fd
 
 
-def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_epoch, runner, namespace_fd):
+def _owned_endpoints(readback, marker):
+    """Extract only protocol/port tuples from this guard's owned nft comments."""
+    pattern = re.compile(re.escape(marker) + r'-(tcp|udp)-([0-9]{1,5})(?=[^0-9]|$)')
+    endpoints = set()
+    for transport, raw_port in pattern.findall(str(readback or "")):
+        port = _integer(raw_port)
+        if port:
+            endpoints.add((transport, port))
+    return endpoints
+
+
+def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_epoch, runner, namespace_fd,
+                           *, release_if_absent=False, live_listeners=None, preserve_existing=False):
     result = {"state": "unverified", "blocked_endpoints": [], "reason": "firewall_apply_failed"}
 
     def call(args, data=None):
@@ -220,16 +240,57 @@ def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_ep
             result["reason"] = "firewall_table_ownership_unverified"
             return result
 
+    existing_endpoints = _owned_endpoints(current.stdout, marker) if exists else set()
+    requested_endpoints = set(endpoint_map)
+    live = {
+        (str(item.get("proto") or "").lower(), _integer(item.get("port")))
+        for item in live_listeners if isinstance(item, dict)
+    } if isinstance(live_listeners, list) else set()
+    if preserve_existing and exists:
+        for transport, port in existing_endpoints - requested_endpoints:
+            if not isinstance(live_listeners, list) or (transport, port) in live:
+                endpoint_map[(transport, port)] = {"proto": transport, "port": port}
+
     if not endpoint_map:
+        if exists and release_if_absent:
+            if not isinstance(live_listeners, list):
+                result["reason"] = "release_evidence_unavailable"
+                return result
+            remaining = sorted(existing_endpoints & live)
+            if remaining:
+                result.update(
+                    state="release_pending",
+                    reason="guarded_port_still_has_listener",
+                    pending_removal_endpoints=[{"proto": proto, "port": port} for proto, port in remaining],
+                )
+                return result
         if exists:
             removed = call(prefix + ["delete", "table", "inet", table])
-            if removed is None or removed.returncode != 0:
-                result["reason"] = "firewall_remove_failed"
+            tables = call(prefix + ["-j", "list", "tables"])
+            if tables is None or tables.returncode != 0:
+                result["reason"] = "firewall_remove_readback_failed"
+                return result
+            try:
+                parsed = json.loads(tables.stdout or "{}")
+                names = {str(item.get("table", {}).get("name") or "") for item in parsed.get("nftables", []) if isinstance(item, dict)}
+            except (TypeError, ValueError):
+                result["reason"] = "firewall_remove_readback_invalid"
+                return result
+            if table in names:
+                result.update(
+                    state="release_pending" if release_if_absent else "unverified",
+                    reason="firewall_remove_failed" if removed is None or removed.returncode != 0 else "firewall_remove_readback_failed",
+                    pending_removal_endpoints=[{"proto": proto, "port": port} for proto, port in sorted(existing_endpoints)],
+                )
                 return result
         if _pid_epoch(pid) != expected_epoch:
             result["reason"] = "container_namespace_changed"
             return result
         return {"state": "cleared", "blocked_endpoints": [], "reason": ""}
+
+    if len(endpoint_map) > MAX_ENDPOINTS:
+        result["reason"] = "endpoint_limit_exceeded"
+        return result
 
     lines = []
     if exists:
@@ -266,7 +327,8 @@ def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_ep
     return {"state": "blocked", "blocked_endpoints": [endpoint_map[key] for key in sorted(endpoint_map)], "reason": ""}
 
 
-def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, runner=None, nsenter_path=None, nft_path=None):
+def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, runner=None, nsenter_path=None,
+              nft_path=None, release_if_absent=False, live_listeners=None, preserve_existing=False):
     """Atomically reconcile an owned nft table in one isolated network namespace."""
     result = {"state": "unverified", "blocked_endpoints": [], "reason": "firewall_apply_failed"}
     if type(pid) is not int or pid <= 1 or not isinstance(identity, str) or not identity:
@@ -306,7 +368,8 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
         prefix = [nsenter_path, f"--net=/proc/self/fd/{namespace_fd}", "--", nft_path]
         return _reconcile_owned_table(
             prefix, table, marker, endpoint_map, pid, expected_epoch,
-            runner or subprocess.run, namespace_fd,
+            runner or subprocess.run, namespace_fd, release_if_absent=release_if_absent,
+            live_listeners=live_listeners, preserve_existing=preserve_existing,
         )
     finally:
         try:

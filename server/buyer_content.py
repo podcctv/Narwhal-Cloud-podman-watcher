@@ -44,6 +44,44 @@ def names(items):
     return "、".join(clean(v, 80) for v in items[:4] if isinstance(v, str) and v) if isinstance(items, list) else ""
 
 
+def vmess_block_evidence(details):
+    """Return only process/port tuples backed by a confirmed node-side block."""
+    guard = details.get("vmess_guard") if isinstance(details, dict) else None
+    if not isinstance(guard, dict) or guard.get("state") not in {"blocked", "partial"}:
+        return None
+    remediation = details.get("automatic_remediation")
+    if not isinstance(remediation, dict) or remediation.get("attempted") is not True:
+        return None
+    # A fully-blocked notice is valid only when the Agent explicitly confirms
+    # the firewall readback. Partial state may still carry individually
+    # confirmed endpoints while other ports remain pending.
+    if guard.get("state") == "blocked" and remediation.get("succeeded") is not True:
+        return None
+    raw = guard.get("blocked_endpoints")
+    if not isinstance(raw, list) or not raw or len(raw) > 32:
+        return None
+    endpoints = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        process = str(item.get("process") or "").lower()
+        pid, port, proto = item.get("pid"), item.get("port"), str(item.get("proto") or "").lower()
+        if (process not in {"xray", "v2ray", "sing-box"}
+                or type(pid) is not int or not 1 < pid <= 4194304
+                or type(port) is not int or not 1 <= port <= 65535
+                or proto not in {"tcp", "udp"}):
+            return None
+        endpoints.append({"process": process, "pid": pid, "port": port, "proto": proto})
+    endpoints = sorted({(e["process"], e["pid"], e["proto"], e["port"]) for e in endpoints})
+    if not endpoints:
+        return None
+    return {
+        "state": guard["state"],
+        "blocked_endpoints": [dict(process=p, pid=pid, proto=proto, port=port) for p, pid, proto, port in endpoints],
+        "pending_count": len(guard.get("pending_endpoints", [])) if isinstance(guard.get("pending_endpoints"), list) else 0,
+    }
+
+
 METRICS = {
     "container_connection_count": ("连接数量达到保护观察线", "当前连接", "个", "这是连接数量保护信号，未关联到具体用户身份，不代表用户滥用；系统仅按预设策略保护实例。"),
     "socks_inbound_fanout": ("代理接入来源 IP 较多", "不同来源 IP", "个", "IP 数量不能证明账号共享、客户本人操作或恶意行为；可能来自正常用户、NAT、监控或扫描器。请结合连接状态和应用访问日志核查；本提醒不会自动处罚客户。"),
@@ -58,6 +96,7 @@ METRICS = {
     "web_scan": ("网站出现疑似敏感路径探测", "命中敏感路径规则", "次", "请保护网站后台，并检查访问记录。"),
     "http_abuse": ("同一来源反复访问失败，可能存在异常接口请求", "该来源失败请求", "次", "请检查访问记录，并加强后台及接口的访问限制。"),
     "port_scan": ("发现疑似探测服务器开放端口的访问", "不同被探测端口", "个", "请关闭不需要的端口，并检查防火墙设置。"),
+    "vmess_block_release_unverified": ("VMess 端口恢复待核实", "待核实端口", "个", "旧端口阻断暂时保留；请联系管理员确认服务已停止后再恢复端口。"),
     "outbound_fanout": ("同时连接较多外部地址，需要确认是否为正常业务", "不同外部地址", "个", "请检查代理使用情况及后台程序。"),
     "outbound_sensitive_ports": ("需要重点关注的对外连接异常增多", "敏感端口连接", "个", "请检查发起连接的程序及用途。"),
     "outbound_bandwidth_abuse": ("对外发送流量明显偏高", "上传速度", "Mbps", "请核对上传、备份和代理任务，停止不需要的任务。"),
@@ -73,6 +112,25 @@ METRICS = {
 def issue(alert, details):
     kind = alert.get("alert_type", alert.get("type", ""))
     obs = details.get("observation") or details
+    if kind == "vmess_port_blocked":
+        evidence = vmess_block_evidence(details)
+        if evidence:
+            runtime = clean(alert.get("runtime") or "容器", 40)
+            project = clean(alert.get("project") or "default", 100)
+            container = clean(alert.get("container_name") or "未命名", 120)
+            instance_id = clean(details.get("instance_id") or "", 200)
+            endpoints = evidence["blocked_endpoints"]
+            targets = "；".join(
+                f"{item['process']}（容器内 PID {item['pid']}）监听 {item['proto'].upper()}/{item['port']}"
+                for item in endpoints
+            )
+            identity = f"容器 {runtime}/{project}/{container}"
+            if instance_id:
+                identity += f"（实例 ID {instance_id[:12]}）"
+            facts = f"已确认 {identity} 内 VMess 进程及监听：{targets}；系统只在该容器网络命名空间阻断列出的协议/端口，没有停止进程、容器或其他端口。"
+            if evidence["state"] == "partial" or evidence["pending_count"]:
+                facts += "另有 VMess 入口仍待核实，不能据此认为全部入口都已阻断。"
+            return "已按平台网络策略限制 VMess 入站", facts, "这不是对您进行滥用定性。建议将服务迁移到 VLESS + Reality + Vision；迁移前请确认新端口不会与其他服务冲突。如需协助，请发工单。"
     if kind in {'inbound_source_blocked','tcp_concurrency_limited','admission_unverified'}:
         data=details.get('admission') or {}
         if kind=='inbound_source_blocked':
@@ -241,7 +299,9 @@ def render(alert, state, node="", action=None):
     instance = clean(alert.get("container_name"), 200)
     identity = f"您的 {name} 服务器（实例 {instance}）"
     outcome = execution_text(details, action)
-    subject = "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
+    if alert.get("alert_type") == "vmess_port_blocked" and vmess_block_evidence(details):
+        outcome = ""
+    subject = "服务器服务策略提醒" if alert.get("alert_type") == "vmess_port_blocked" else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
     if state == "verified":
         subject = "服务器安全复查通知"
         text = f"{identity}此前{description}。\n本次复查未再发现该问题。请保持安全设置，并留意后续使用情况。"
