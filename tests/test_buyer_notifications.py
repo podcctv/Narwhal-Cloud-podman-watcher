@@ -99,6 +99,18 @@ class BuyerTests(unittest.TestCase):
             self.assertTrue(preview['protection_only'])
             self.assertFalse(preview['can_submit'])
 
+    def test_vmess_port_protection_is_not_a_customer_abuse_notice(self):
+        self.mapping()
+        self.alert.update(type='vmess_port_blocked', title='VMess 入站端口已自动阻断',
+            message='仅阻断 TCP/443，未停止其他服务', value=1, threshold=0)
+        self.ingest()
+        self.assertEqual(self.rows(), [])
+        with server.db() as conn:
+            alert_id=conn.execute("SELECT id FROM security_alerts WHERE alert_type='vmess_port_blocked'").fetchone()[0]
+            preview=buyer.notice_preview(conn,alert_id)
+            self.assertTrue(preview['protection_only'])
+            self.assertFalse(preview['can_submit'])
+
     def test_connection_guard_notice_is_neutral_and_not_cancelled_as_abuse(self):
         self.mapping()
         self.alert.update(type='container_connection_count', title='连接过多', value=2100, threshold=1000)

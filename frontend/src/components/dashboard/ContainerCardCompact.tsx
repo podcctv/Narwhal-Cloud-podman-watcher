@@ -400,6 +400,11 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
                           ) : (
                             <span className="text-[9px] text-slate-500" title={application.evidence}>应用协议未核实</span>
                           )}
+                          {listener.vmess_block_state === 'blocked' && application.labels.some((label) => label.toLowerCase() === 'vmess') && (
+                            <span className="rounded border border-rose-800/70 bg-rose-950/50 px-1 py-0.5 text-[9px] font-semibold text-rose-300" title={listener.vmess_block_message || '只阻断此容器内已确认的 VMess 入站端口，未停止其他服务'}>
+                              VMess 已阻断
+                            </span>
+                          )}
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[9px] font-mono text-slate-500">
                           <span>{listener.local || '监听地址未采集'}</span>

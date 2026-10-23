@@ -251,6 +251,11 @@ def parse_inbound_protocols(raw, process):
         # matches as ambiguous rather than guessing.
         if 'network' in inbound:
             network = inbound.get('network')
+        elif process in {'xray', 'v2ray'} and isinstance(inbound.get('streamSettings'), dict):
+            network = inbound['streamSettings'].get('network')
+        else:
+            network = None
+        if network is not None:
             if isinstance(network, str):
                 networks = [item.strip().lower() for item in network.split(',') if item.strip()]
             elif isinstance(network, list) and all(isinstance(item, str) for item in network):
@@ -279,21 +284,31 @@ def process_configs(output):
         if process not in FAMILIES | {'danted', 'sockd', '3proxy'} or not tokens or posixpath.basename(tokens[0]).lower() != process:
             continue
         paths = []
+        unparsed_config_path = False
         for index, token in enumerate(tokens):
             value = ''
             if token in {'-c', '-C', '-f', '-config', '--config', '-conf', '--config-file'} and index + 1 < len(tokens):
                 value = tokens[index + 1]
-            elif token.startswith(('--config=', '-config=')):
+            elif token.startswith(('--config=', '-config=', '--config-file=')):
                 value = token.split('=', 1)[1]
-            if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', value) and value.endswith(('.json', '.yaml', '.yml', '.conf', '.cfg')) and '..' not in value.split('/'):
-                paths.append(value)
+            if value:
+                if (re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', value)
+                        and value.endswith(('.json', '.yaml', '.yml', '.conf', '.cfg'))
+                        and '..' not in value.split('/')):
+                    paths.append(value)
+                else:
+                    unparsed_config_path = True
         if process == '3proxy':
             paths += [t for t in tokens[1:] if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}\.cfg', t) and '..' not in t.split('/')]
         if not paths and not any(t.startswith(('-c', '-C', '-f', '--config', '-config', '-confdir')) for t in tokens):
             paths = {'danted': ['/etc/danted.conf'], 'sockd': ['/etc/sockd.conf'],
                      '3proxy': ['/etc/3proxy/3proxy.cfg'], 'gost': ['/etc/gost/config.json', '/etc/gost/config.yaml']}.get(process, [f'/etc/{process}/config.json'])
-        rows.append({'pid': int(parts[0]), 'process': process, 'paths': list(dict.fromkeys(paths))[:4],
-                     'additional_configs': any(t.startswith(('-confdir', '--config-dir')) for t in tokens)})
+        elif not paths:
+            unparsed_config_path = True
+        unique_paths = list(dict.fromkeys(paths))
+        rows.append({'pid': int(parts[0]), 'process': process, 'paths': unique_paths[:4],
+                     'additional_configs': (any(t.startswith(('-confdir', '--config-dir')) for t in tokens)
+                                            or unparsed_config_path or len(unique_paths) > 4)})
         if len(rows) >= 8:
             break
     return rows

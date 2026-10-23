@@ -16,5 +16,6 @@ COPY pasarguard_guard.py ./
 COPY tcp_probe.py .
 COPY socks_detector.py .
 COPY host_security_audit.py .
+COPY vmess_guard.py .
 
 CMD ["python", "agent.py"]

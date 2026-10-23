@@ -23,7 +23,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit
+    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard
 except ImportError:
     import operations as node_operations
     import security_banner
@@ -31,6 +31,7 @@ except ImportError:
     import disk_cleanup
     import socks_detector
     import host_security_audit
+    import vmess_guard
 
 try:
     import maxminddb
@@ -3087,6 +3088,8 @@ _MOTD_THREAT_TYPES = {
     "udp_outbound_flood",
     "process_fanout_abuse",
     "container_connection_count",
+    "vmess_port_blocked",
+    "vmess_block_unverified",
 }
 
 _container_motd_incidents = security_banner.incidents
@@ -3517,6 +3520,52 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             alerts.append(abuse_state['alert'])
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         enforce_socks_auth_policy(container, socks_enforcement_entries)
+        vmess = security.get("vmess_guard") if isinstance(security.get("vmess_guard"), dict) else {}
+        if container.get("runtime") in {"incus", "podman"} and vmess.get("detected") and vmess.get("state") in {"blocked", "partial", "unverified"}:
+            blocked = vmess.get("blocked_endpoints") if isinstance(vmess.get("blocked_endpoints"), list) else []
+            pending = vmess.get("pending_endpoints") if isinstance(vmess.get("pending_endpoints"), list) else []
+            blocked_labels = [f"{str(item.get('proto') or '').upper()}/{int(item.get('port') or 0)}" for item in blocked if isinstance(item, dict) and int(item.get("port") or 0) > 0]
+            pending_labels = [f"{str(item.get('proto') or '').upper()}/{int(item.get('port') or 0)}" for item in pending if isinstance(item, dict) and int(item.get("port") or 0) > 0]
+            if vmess.get("state") in {"blocked", "partial"} and blocked_labels:
+                title = "VMess 入站端口已自动阻断" if vmess.get("state") == "blocked" else "VMess 入站已部分阻断，仍有端口待核实"
+                message = (
+                    f"已在此容器独立网络命名空间阻断 VMess 入站端口：{'、'.join(blocked_labels)}。"
+                    "未停止进程、容器或其他端口；建议迁移到 VLESS + Reality + Vision。"
+                )
+                if pending_labels:
+                    message += f" 以下端口因配置或监听归属不唯一而未自动阻断：{'、'.join(pending_labels)}。"
+                vmess_alert = _security_alert("vmess_port_blocked", "warning", title, message, len(blocked_labels), 0, container)
+                vmess_alert.update(
+                    alert_key="vmess:" + ",".join(blocked_labels + pending_labels),
+                    vmess_guard=vmess,
+                    service_listeners=[item for item in security.get("service_listeners", []) if isinstance(item, dict) and item.get("vmess_block_state") == "blocked"][:20],
+                    automatic_remediation={"attempted": True, "succeeded": vmess.get("state") == "blocked", "message": "仅阻断已确认的 VMess 入站端口，未停止其他服务"},
+                )
+            else:
+                reason_labels = {
+                    "configuration_scan_incomplete": "配置文件未能完整读取",
+                    "live_listener_not_confirmed": "未找到配置对应的实时监听端口",
+                    "listener_protocol_or_owner_ambiguous": "实时监听的进程或协议归属不唯一",
+                    "shared_configured_port": "该端口还配置了其他协议",
+                    "shared_live_listener": "该端口还被其他监听服务共用",
+                    "shared_network_namespace": "容器与其他服务共用网络命名空间",
+                    "container_namespace_unavailable": "容器网络命名空间不可用",
+                    "container_namespace_changed_or_unavailable": "网络命名空间身份变化或无法固定",
+                    "container_namespace_changed_or_shared": "容器网络命名空间身份无法确认",
+                    "container_namespace_changed_cleanup_failed": "网络命名空间身份变化，规则清理未能确认",
+                    "firewall_dependency_unavailable": "主机缺少 nftables 或 nsenter",
+                    "firewall_apply_failed": "防火墙规则应用失败",
+                    "firewall_readback_failed": "防火墙读回未确认规则生效",
+                }
+                labels = pending_labels or [str(item.get("port")) for item in pending if isinstance(item, dict) and item.get("port")]
+                reason = reason_labels.get(str(vmess.get("reason") or ""), "端口归属或规则生效状态未能确认")
+                detail = f"已从运行配置发现 VMess 入站，但未能安全确认端口保护：{reason}。未停止进程或容器。"
+                if labels:
+                    detail += f"待核实端口：{'、'.join(labels)}。"
+                detail += "建议迁移到 VLESS + Reality + Vision。"
+                vmess_alert = _security_alert("vmess_block_unverified", "warning", "VMess 入站保护待核实", detail, len(labels), 0, container)
+                vmess_alert.update(alert_key="vmess:unverified:" + ",".join(labels), vmess_guard=vmess)
+            alerts.append(vmess_alert)
         rx_bps = float(container.get("net_rx_bps") or 0)
         tx_bps = float(container.get("net_tx_bps") or 0)
         rx_pps = float(security.get("net_rx_pps") or 0)
@@ -4909,8 +4958,9 @@ def _collect_socks_config_evidence(
         "risk_reasons": [],
         "json_processes": [],
         "configured_inbound_protocols": [],
+        "protocol_inventory_state": "unavailable",
     }
-    if not enabled:
+    if not process_output.strip() and not enabled:
         return result
     raw_paths = os.getenv(
         "SECURITY_SOCKS_CONFIG_PATHS",
@@ -4940,7 +4990,7 @@ def _collect_socks_config_evidence(
         f"head -c 262144 \"$p\" 2>/dev/null | grep -Eiq {shlex.quote(weak_pattern)} && echo \"@@WEAK:$p\"; "
         f"head -c 262144 \"$p\" 2>/dev/null | grep -Eiq {shlex.quote(auth_pattern)} && echo \"@@AUTH:$p\"; done"
     )
-    output = run(_runtime_exec_cmd(runtime, name, command, project)) if paths else ''
+    output = run(_runtime_exec_cmd(runtime, name, command, project)) if paths and enabled else ''
     files = set()
     modes = set()
     reasons = set()
@@ -4963,59 +5013,82 @@ def _collect_socks_config_evidence(
     json_processes = []
     review_processes = []
     configured_inbound_protocols = []
+    has_process_snapshot = bool(process_output.strip())
+    protocol_complete = has_process_snapshot
     scan_deadline = time.monotonic() + 8
-    for proc in socks_detector.process_configs(process_output):
+    configured_processes = socks_detector.process_configs(process_output)
+    protocol_processes = [proc for proc in configured_processes if proc['process'] in vmess_guard.SUPPORTED_ENGINES]
+    if len(configured_processes) >= 8:
+        protocol_complete = False
+    for proc in configured_processes:
+        if not enabled and proc['process'] not in vmess_guard.SUPPORTED_ENGINES:
+            continue
         if time.monotonic() >= scan_deadline:
+            protocol_complete = False
             break
         documents = []
         sources = []
         password_facts = []
         start_ticks = run(_runtime_exec_cmd(runtime, name,
-            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip()
+            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if enabled else ''
         for path in proc['paths']:
             if time.monotonic() >= scan_deadline:
                 documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
+                if proc['process'] in vmess_guard.SUPPORTED_ENGINES:
+                    protocol_complete = False
                 break
             # Raw JSON is local-only and bounded; it never enters a report/log.
             raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
-            document = socks_detector.parse_config(raw, proc['process'])
-            protocol_document = socks_detector.parse_inbound_protocols(raw, proc['process'])
-            for endpoint in protocol_document.get('endpoints', []):
-                configured_inbound_protocols.append({
-                    'pid': int(proc['pid']), 'process': proc['process'],
-                    'protocol': endpoint['protocol'], 'port': endpoint['port'],
-                    'listen': endpoint['listen'],
-                    **({'transports': endpoint['transports']} if 'transports' in endpoint else {}),
-                })
-            metadata = run(_runtime_exec_cmd(runtime, name,
-                f"stat -Lc '%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null", project), timeout=2).strip()
-            if raw and metadata:
-                sources.append({'path': path, 'generation': metadata[:180]})
-                password_facts.extend(socks_detector.legacy_profiles(raw, proc['process'])
-                                      if proc['process'] not in socks_detector.FAMILIES else [])
+            protocol_document = socks_detector.parse_inbound_protocols(raw, proc['process']) if proc['process'] in vmess_guard.SUPPORTED_ENGINES else {'parsed': True, 'endpoints': []}
+            if proc['process'] in vmess_guard.SUPPORTED_ENGINES:
+                if not protocol_document.get('parsed'):
+                    protocol_complete = False
+                for endpoint in protocol_document.get('endpoints', []):
+                    configured_inbound_protocols.append({
+                        'pid': int(proc['pid']), 'process': proc['process'],
+                        'protocol': endpoint['protocol'], 'port': endpoint['port'],
+                        'listen': endpoint['listen'],
+                        **({'transports': endpoint['transports']} if 'transports' in endpoint else {}),
+                    })
+                if proc.get('additional_configs'):
+                    protocol_complete = False
+            document = socks_detector.parse_config(raw, proc['process']) if enabled else {'parsed': False, 'endpoints': [], 'single_purpose': False}
+            if enabled:
+                metadata = run(_runtime_exec_cmd(runtime, name,
+                    f"stat -Lc '%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null", project), timeout=2).strip()
+                if raw and metadata:
+                    sources.append({'path': path, 'generation': metadata[:180]})
+                    password_facts.extend(socks_detector.legacy_profiles(raw, proc['process'])
+                                          if proc['process'] not in socks_detector.FAMILIES else [])
             for entry in document['endpoints']:
                 entry['config_path'] = path
-            documents.append(document)
-            if document['endpoints']:
+            if enabled:
+                documents.append(document)
+            if enabled and document['endpoints']:
                 files.add(path)
-        cli = socks_detector.gost_cli(process_output, proc['pid']) if proc['process'] == 'gost' else None
+        cli = socks_detector.gost_cli(process_output, proc['pid']) if enabled and proc['process'] == 'gost' else None
         if cli:
             # -L is inbound, -F chains are deliberately excluded. A config plus CLI
             # is not single-purpose proof unless no readable config was discovered.
             if not sources:
                 documents = [cli]
-        if not password_facts:
+        if enabled and not password_facts:
             password_facts = socks_detector.legacy_profiles('', proc['process'])
-        review_processes.append({'pid': proc['pid'], 'process': proc['process'],
+        if enabled:
+            review_processes.append({'pid': proc['pid'], 'process': proc['process'],
             'start_ticks': start_ticks if start_ticks.isdigit() else '', 'sources': sources,
             'password_profiles': password_facts})
         if proc['process'] not in socks_detector.FAMILIES:
             continue
-        parsed = bool(documents) and all(d['parsed'] for d in documents)
-        endpoints = [e for d in documents for e in d['endpoints']]
-        json_processes.append({**{k: proc[k] for k in ('pid', 'process')}, 'parsed': parsed,
-                               'endpoints': endpoints,
-                               'single_purpose': parsed and not proc['additional_configs'] and len(documents) == 1 and documents[0]['single_purpose']})
+        if enabled:
+            parsed = bool(documents) and all(d['parsed'] for d in documents)
+            endpoints = [e for d in documents for e in d['endpoints']]
+            json_processes.append({**{k: proc[k] for k in ('pid', 'process')}, 'parsed': parsed,
+                                   'endpoints': endpoints,
+                                   'single_purpose': parsed and not proc['additional_configs'] and len(documents) == 1 and documents[0]['single_purpose']})
+    if protocol_processes and any(proc.get('additional_configs') for proc in protocol_processes):
+        protocol_complete = False
+    protocol_state = 'complete' if protocol_complete else ('partial' if has_process_snapshot else 'unavailable')
     result.update(
         {
             "detected": bool(files),
@@ -5031,6 +5104,7 @@ def _collect_socks_config_evidence(
             "json_processes": json_processes,
             "configured_inbound_protocols": configured_inbound_protocols[:100],
             "review_processes": review_processes,
+            "protocol_inventory_state": protocol_state,
         }
     )
     return result
@@ -5252,6 +5326,7 @@ def collect_panel_pairing_indicators(
         "review_processes": socks_config.get('review_processes', []),
         "direction_verified": any(p['parsed'] for p in json_processes),
         "configured_inbound_protocols": socks_config.get("configured_inbound_protocols", []),
+        "protocol_inventory_state": socks_config.get("protocol_inventory_state", "unavailable"),
         "risk_reasons": sorted(
             set(socks_process.get("risk_reasons", [])) | set(socks_config.get("risk_reasons", []))
         ),
@@ -6146,6 +6221,7 @@ def collect_container(
     configuration_risks = list(precomputed_security_risks or [])
     network_exposure = list(precomputed_network_exposure or [])
     network_addresses = list(precomputed_network_addresses or [])
+    network_mode = ""
     if runtime_name == "incus":
         if pid <= 0:
             pid = _incus_instance_pid(runtime, name, project)
@@ -6156,6 +6232,8 @@ def collect_container(
             d = json.loads(inspect)[0]
             pid = int(d.get("State", {}).get("Pid", 0) or 0)
             configuration_risks = _oci_security_risks(d)
+            host_config = d.get("HostConfig") if isinstance(d.get("HostConfig"), dict) else {}
+            network_mode = str(host_config.get("NetworkMode") or "").strip().lower()
             network_exposure = _oci_network_exposure(d)
             network_settings = d.get("NetworkSettings") if isinstance(d.get("NetworkSettings"), dict) else {}
             networks = network_settings.get("Networks") if isinstance(network_settings.get("Networks"), dict) else {}
@@ -6173,6 +6251,8 @@ def collect_container(
         if conn_count <= 0:
             conn_out = run(["sh", "-lc", f"ss -Hantup | grep -c 'pid={pid},'"])
             conn_count = int(conn_out.strip() or 0)
+
+    namespace_epoch = _connection_metric_epoch(pid) if pid > 1 else ""
 
     if pid > 0:
         proc_rx, proc_tx, proc_rx_packets, proc_tx_packets = _read_net_stats_from_pid(pid)
@@ -6316,6 +6396,73 @@ def collect_container(
         communication,
         socks_proxy.get("configured_inbound_protocols", []),
     )
+    auto_block_vmess = os.getenv("SECURITY_AUTO_BLOCK_VMESS", "true").strip().lower() not in ("0", "false", "no", "off")
+    host_or_shared_network = network_mode == "host" or network_mode.startswith(("container:", "ns:"))
+    vmess_scan_state = (
+        "complete"
+        if socks_proxy.get("protocol_inventory_state") == "complete"
+        and communication.get("communication_detail_available") is True
+        and communication.get("communication_snapshot_truncated") is not True
+        else "partial"
+    )
+    vmess_plan = vmess_guard.plan(
+        runtime_name,
+        socks_proxy.get("configured_inbound_protocols", []),
+        service_inventory,
+        network_exposure,
+        vmess_scan_state,
+    )
+    vmess_status = dict(vmess_plan)
+    should_reconcile_vmess = (
+        runtime_name in {"incus", "podman"}
+        and not host_or_shared_network
+        and bool(namespace_epoch)
+        and (
+            not auto_block_vmess
+            or vmess_scan_state == "complete"
+        )
+    )
+    if should_reconcile_vmess:
+        desired = vmess_plan.get("blocked_endpoints", []) if auto_block_vmess else []
+        enforcement = vmess_guard.reconcile(
+            pid,
+            f"{runtime_name}\0{project}\0{name}\0{container_id or name}",
+            namespace_epoch,
+            desired,
+        )
+        if auto_block_vmess and vmess_plan.get("detected"):
+            if vmess_plan.get("state") == "internal_only":
+                vmess_status.update(state="internal_only", reason="loopback_only_listener", blocked_endpoints=[])
+            elif enforcement.get("state") == "blocked":
+                vmess_status["state"] = "partial" if vmess_plan.get("pending_endpoints") else "blocked"
+                vmess_status["blocked_endpoints"] = [
+                    endpoint for endpoint in vmess_plan.get("blocked_endpoints", [])
+                    if any(endpoint.get("proto") == live.get("proto") and endpoint.get("port") == live.get("port")
+                           for live in enforcement.get("blocked_endpoints", []))
+                ]
+                if vmess_status["state"] == "partial":
+                    vmess_status["reason"] = "some_endpoints_are_ambiguous"
+            else:
+                vmess_status.update(state="unverified", reason=enforcement.get("reason") or "firewall_apply_failed", blocked_endpoints=[])
+        elif not auto_block_vmess:
+            vmess_status.update(state="disabled", reason="automatic_block_disabled", blocked_endpoints=[])
+        elif socks_proxy.get("protocol_inventory_state") == "complete" and not vmess_plan.get("detected"):
+            vmess_status.update(state="not_detected", reason="", blocked_endpoints=[])
+    elif vmess_plan.get("detected") and auto_block_vmess:
+        if host_or_shared_network:
+            vmess_status.update(state="unverified", reason="shared_network_namespace", blocked_endpoints=[])
+        elif not namespace_epoch:
+            vmess_status.update(state="unverified", reason="container_namespace_unavailable", blocked_endpoints=[])
+
+    blocked_vmess = {
+        (str(item.get("proto") or "").lower(), int(item.get("port") or 0))
+        for item in vmess_status.get("blocked_endpoints", []) if isinstance(item, dict)
+    }
+    for listener in service_inventory:
+        if str(listener.get("proto") or "").lower() == "tcp" or str(listener.get("proto") or "").lower() == "udp":
+            if (str(listener.get("proto") or "").lower(), int(listener.get("port") or 0)) in blocked_vmess:
+                listener["vmess_block_state"] = "blocked"
+                listener["vmess_block_message"] = "该容器网络命名空间内仅阻断了此 VMess 传输协议和端口"
     socket_security.update(
         {
             "net_rx_pps": net_rx_pps,
@@ -6335,6 +6482,7 @@ def collect_container(
             **communication,
             "service_listeners": service_inventory,
             "service_inventory_state": service_inventory_state,
+            "vmess_guard": vmess_status,
         }
     )
     if cpu_percent <= 0 and float(top_cpu_process.get("cpu_percent") or 0) > 0:

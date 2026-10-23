@@ -399,6 +399,7 @@ class ServerRuntimeTests(unittest.TestCase):
         conn = server.db()
         server.process_security_alerts(conn, "host", int(time.time()), [
             {"type": "container_connection_count", "severity": "warning", "title": "connections", "message": "connections"},
+            {"type": "vmess_port_blocked", "severity": "warning", "title": "vmess", "message": "vmess"},
             {"type": "socks_weak_auth", "severity": "critical", "title": "weak auth", "message": "weak auth"},
         ])
         conn.commit()
@@ -407,6 +408,7 @@ class ServerRuntimeTests(unittest.TestCase):
         items = json.loads(server.security_alerts().body)["items"]
         by_type = {item["type"]: item for item in items}
         self.assertTrue(by_type["container_connection_count"]["protection_only"])
+        self.assertTrue(by_type["vmess_port_blocked"]["protection_only"])
         self.assertFalse(by_type["socks_weak_auth"]["protection_only"])
 
     def test_dashboard_basic_auth_validates_generated_credentials(self):

@@ -103,7 +103,8 @@ def customer_copy(entry, english=False):
         title = {'cc_attack':'HTTP 访问异常','socks_weak_auth':'代理认证风险','socks_auth_unknown':'代理认证待确认',
                  'container_connection_count':'容器连接数偏高','connections':'容器连接数偏高',
                  'cpu':'CPU 占用偏高','memory':'内存占用偏高','malicious_process':'可疑程序',
-                 'outbound_fanout':'外部连接偏多','port_scan':'疑似端口扫描'}.get(entry.get('type'), title or '运行异常')
+                 'outbound_fanout':'外部连接偏多','port_scan':'疑似端口扫描',
+                 'vmess_port_blocked':'VMess 入站端口已自动阻断','vmess_block_unverified':'VMess 入站保护待核实'}.get(entry.get('type'), title or '运行异常')
     details = entry.get('customer') if isinstance(entry.get('customer'), dict) else {}
     extra = []
     advice = 'Please check the related settings and background tasks.' if english else '请检查相关设置和后台任务；需要协助时请联系管理员。'
@@ -127,6 +128,10 @@ def customer_copy(entry, english=False):
         advice = 'Please check shared proxy accounts, background tasks and unexpected connections.' if english else '请检查代理账号共享、后台任务及异常连接。'
     elif entry.get('type') in {'socks_weak_auth', 'socks_auth_unknown'}:
         advice = 'Please secure the proxy authentication or disable the unwanted service.' if english else '请检查代理认证，设置安全密码，或关闭不需要的代理。'
+    elif entry.get('type') == 'vmess_port_blocked':
+        advice = 'VMess inbound traffic on the listed ports was blocked without stopping other services. Please migrate the service to VLESS + Reality + Vision.' if english else '系统只阻断了列出的 VMess 入站端口，没有停止进程、容器或其他端口。建议迁移到 VLESS + Reality + Vision。'
+    elif entry.get('type') == 'vmess_block_unverified':
+        advice = 'The service was not stopped because the port or network ownership could not be verified. Please review the listed port and migrate to VLESS + Reality + Vision.' if english else '由于端口或网络归属无法确认，系统没有自动阻断。请核对提示的端口；确认后可迁移到 VLESS + Reality + Vision。'
     elif entry.get('type') in {'malicious_process', 'confirmed_abuse'}:
         advice = 'Please review the program source and startup tasks; contact the administrator before restoring access.' if english else '请检查程序来源及启动任务；如已隔离，请联系管理员复核后恢复。'
     elif entry.get('type') in {'cpu', 'memory', 'process_fanout_abuse'}:

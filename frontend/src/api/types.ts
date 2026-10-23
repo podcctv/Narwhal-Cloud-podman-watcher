@@ -131,6 +131,8 @@ export interface ContainerSecurity {
     process_attribution?: 'attributed' | 'unavailable' | string;
     application_protocols?: string[];
     application_protocol_evidence?: 'config_matches_live_pid_and_port' | string;
+    vmess_block_state?: 'blocked' | 'unverified' | string;
+    vmess_block_message?: string;
   }[];
   communication_processes?: {
     process?: string;

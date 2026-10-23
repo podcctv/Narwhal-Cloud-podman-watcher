@@ -96,6 +96,15 @@ class DirectionTests(unittest.TestCase):
         output='12 S xray /usr/bin/xray run -config /etc/xray/config.json -confdir /etc/xray/conf.d'
         self.assertTrue(detector.process_configs(output)[0]['additional_configs'])
 
+    def test_unreadable_or_truncated_config_paths_make_inventory_incomplete(self):
+        toml = detector.process_configs('12 S xray /usr/bin/xray run -c /etc/xray/config.toml')[0]
+        self.assertEqual(toml['paths'], [])
+        self.assertTrue(toml['additional_configs'])
+        paths = ' '.join(f'-c /etc/xray/{index}.json' for index in range(5))
+        truncated = detector.process_configs(f'12 S xray /usr/bin/xray run {paths}')[0]
+        self.assertEqual(len(truncated['paths']), 4)
+        self.assertTrue(truncated['additional_configs'])
+
     def test_invalid_and_non_integer_ports_remain_unverified(self):
         for port in (float('inf'),1080.5,True,{},'1080-1085',70000):
             result=detector.parse_config(json.dumps({'inbounds':[{'protocol':'socks','port':port}]}),'xray')
@@ -234,9 +243,11 @@ class LiveEvidenceTests(unittest.TestCase):
         updater=(root/'scripts/managed-client-update.sh').read_text(encoding='utf-8')
         self.assertIn('COPY socks_detector.py .',dockerfile)
         self.assertIn('COPY host_security_audit.py .',dockerfile)
+        self.assertIn('COPY vmess_guard.py .',dockerfile)
         self.assertIn('client/socks_detector.py',installer)
         self.assertIn('client/host_security_audit.py',installer)
-        self.assertEqual(updater.count('disk_cleanup_worker socks_detector host_security_audit; do'),3)
+        self.assertIn('client/vmess_guard.py',installer)
+        self.assertEqual(updater.count('disk_cleanup_worker socks_detector host_security_audit vmess_guard; do'),3)
 
 
 if __name__=='__main__': unittest.main()
