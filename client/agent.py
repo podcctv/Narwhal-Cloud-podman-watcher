@@ -23,13 +23,14 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector
+    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit
 except ImportError:
     import operations as node_operations
     import security_banner
     import tcp_probe
     import disk_cleanup
     import socks_detector
+    import host_security_audit
 
 try:
     import maxminddb
@@ -3294,6 +3295,22 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         if firewall_events.get("events_api") == "ready"
         else _firewall_event_cursor
     )
+    try:
+        host_audit = host_security_audit.prepare_report(country_lookup=_geoip_local_country_batch)
+        summary["host_audit"] = host_audit.get("host_audit") or {}
+        host_audit_alerts = host_audit.get("alerts")
+        if isinstance(host_audit_alerts, list):
+            summary["alerts"].extend(item for item in host_audit_alerts if isinstance(item, dict))
+    except Exception as host_audit_error:
+        summary["host_audit"] = {
+            "enabled": True,
+            "scope": host_security_audit._audit_scope(),
+            "snapshot_status": "unavailable",
+            "ssh_log_status": "unavailable",
+            "vulnerability_scan": {"status": "unavailable", "coverage": "unavailable"},
+            "security_indicator_scan": {"status": "unavailable", "coverage": "unavailable"},
+            "error": str(host_audit_error)[:240],
+        }
 
     ddos_rx_bps = _env_float("ALERT_DDOS_RX_BPS", 100_000_000)
     ddos_rx_pps = _env_float("ALERT_DDOS_RX_PPS", 50_000)
@@ -8621,6 +8638,8 @@ def push(server: str, secret: str, payload: Dict) -> Dict[str, object]:
         if isinstance(data, dict) and isinstance(data.get("motd_states"), list):
             _server_motd_states = data["motd_states"][:1000]
         if isinstance(data, dict):
+            if data.get("ok") is True:
+                host_security_audit.commit_report()
             acknowledged_cursor = data.get("firewall_event_cursor")
             if isinstance(acknowledged_cursor, str) and acknowledged_cursor and acknowledged_cursor == _pending_firewall_event_cursor:
                 _firewall_event_cursor = acknowledged_cursor

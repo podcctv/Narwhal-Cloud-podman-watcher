@@ -251,6 +251,68 @@ export interface SecurityStatusItem {
   interval_seconds?: number;
   thresholds?: Record<string, number>;
   sample_alerts?: Partial<SecurityAlert>[];
+  host_audit?: {
+    enabled?: boolean;
+    scope?: 'host' | 'agent_container' | string;
+    snapshot_status?: 'ready' | 'partial' | 'unavailable' | string;
+    snapshot_at?: number;
+    baseline_at?: number;
+    baseline_pending?: boolean;
+    snapshot_files?: number;
+    user_accounts?: number;
+    ssh_key_count?: number;
+    ssh_log_status?: 'available' | 'partial' | 'unavailable' | string;
+    ssh_events_last_period?: number;
+    new_ssh_login_events?: number;
+    country_lookup?: string;
+    recent_events?: Array<{ type?: string; title?: string; message?: string; severity?: string }>;
+    vulnerability_scan?: {
+      status?: string;
+      coverage?: string;
+      checked_at?: number;
+      last_attempt_at?: number;
+      packages_checked?: number;
+      finding_count?: number;
+      critical_count?: number;
+      error?: string;
+    };
+    security_indicator_scan?: {
+      status?: string;
+      coverage?: string;
+      checked_at?: number;
+      last_attempt_at?: number;
+      finding_count?: number;
+      critical_count?: number;
+      python_site_roots?: number;
+      python_packages_checked?: number;
+      config_files_checked?: number;
+      ca_certificates_checked?: number;
+      runtime_inventory?: { status?: string; engines?: string[]; images_checked?: number };
+      error?: string;
+    };
+    recent_findings?: Array<{
+      id?: string;
+      cve?: string;
+      package?: string;
+      version?: string;
+      ecosystem?: string;
+      source?: string;
+      severity?: string;
+      summary?: string;
+    }>;
+    recent_indicators?: Array<{
+      id?: string;
+      rule?: string;
+      severity?: string;
+      component?: string;
+      title?: string;
+      evidence?: string[];
+      guidance?: string;
+      reference?: string;
+      finding_ids?: string[];
+      instance_count?: number;
+    }>;
+  };
   access_sources?: AccessSource[];
   today_peak_container_conn_count?: number;
   host_id: string;
