@@ -199,9 +199,14 @@ class LiveEvidenceTests(unittest.TestCase):
 
     def test_packaging_and_installers_include_detector(self):
         root=Path(__file__).resolve().parents[1]
-        self.assertIn('COPY socks_detector.py .',(root/'client/Dockerfile').read_text(encoding='utf-8'))
-        self.assertIn('client/socks_detector.py',(root/'scripts/install-client.sh').read_text(encoding='utf-8'))
-        self.assertEqual((root/'scripts/managed-client-update.sh').read_text(encoding='utf-8').count('disk_cleanup_worker socks_detector; do'),3)
+        dockerfile=(root/'client/Dockerfile').read_text(encoding='utf-8')
+        installer=(root/'scripts/install-client.sh').read_text(encoding='utf-8')
+        updater=(root/'scripts/managed-client-update.sh').read_text(encoding='utf-8')
+        self.assertIn('COPY socks_detector.py .',dockerfile)
+        self.assertIn('COPY host_security_audit.py .',dockerfile)
+        self.assertIn('client/socks_detector.py',installer)
+        self.assertIn('client/host_security_audit.py',installer)
+        self.assertEqual(updater.count('disk_cleanup_worker socks_detector host_security_audit; do'),3)
 
 
 if __name__=='__main__': unittest.main()
