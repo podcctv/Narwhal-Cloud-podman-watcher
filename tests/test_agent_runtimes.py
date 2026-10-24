@@ -1409,9 +1409,15 @@ class SecurityTelemetryTests(unittest.TestCase):
         def proc_exists(path):
             return path in {"/proc/100", "/proc/101"}
 
+        def proc_stat(path):
+            if path == "/proc/10":
+                raise FileNotFoundError(path)
+            return mock.Mock()
+
         with mock.patch.object(agent, "_read_host_proc_text", side_effect=read_proc), \
              mock.patch.object(agent.os, "listdir", return_value=["10", "100", "101"]), \
              mock.patch.object(agent.os.path, "isdir", side_effect=proc_exists), \
+             mock.patch.object(agent.os, "stat", side_effect=proc_stat), \
              mock.patch.object(agent.os, "sysconf", return_value=100, create=True), \
              mock.patch.object(agent, "open", side_effect=lambda *_args, **_kwargs: io.BytesIO(b"worker\0"), create=True):
             result, host_processes = agent._collect_host_proc_process_snapshot(100, 20)
@@ -1428,9 +1434,15 @@ class SecurityTelemetryTests(unittest.TestCase):
                 return ""
             return ""
 
+        def proc_stat(path):
+            if path == "/proc/101":
+                raise PermissionError(path)
+            return mock.Mock()
+
         with mock.patch.object(agent, "_read_host_proc_text", side_effect=read_proc), \
              mock.patch.object(agent.os, "listdir", return_value=["100", "101"]), \
-             mock.patch.object(agent.os.path, "isdir", side_effect=lambda path: path in {"/proc/100", "/proc/101"}):
+             mock.patch.object(agent.os.path, "isdir", side_effect=lambda path: path in {"/proc/100", "/proc/101"}), \
+             mock.patch.object(agent.os, "stat", side_effect=proc_stat):
             result, _host_processes = agent._collect_host_proc_process_snapshot(100, 20)
 
         self.assertFalse(result["scope_complete"])

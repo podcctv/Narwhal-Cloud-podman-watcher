@@ -6896,7 +6896,12 @@ def _collect_host_proc_process_snapshot(
             # processes prevent exact VMess listener attribution. If the proc
             # entry still exists, keep failing closed (for example, on hidepid or
             # permission/read errors) because it may be a relevant process.
-            if not os.path.isdir(f"/proc/{host_pid}"):
+            try:
+                os.stat(f"/proc/{host_pid}")
+            except FileNotFoundError:
+                continue
+            except OSError:
+                status_scan_complete = False
                 continue
             status_scan_complete = False
             continue
