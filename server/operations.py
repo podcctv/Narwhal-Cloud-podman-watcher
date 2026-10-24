@@ -8,7 +8,9 @@ import os
 import secrets
 import sqlite3
 import statistics
+import shutil
 import threading
+import tempfile
 import time
 try:
     from server import disk_cleanup
@@ -25,6 +27,7 @@ PROFILES = {
     "hy2": {"connections": 1500, "rx_bps": 150_000_000, "http_rps": 100, "baseline_factor": 6},
 }
 _backup_lock = threading.Lock()
+_restore_drill_lock = threading.Lock()
 
 
 def initialize(conn):
@@ -66,6 +69,21 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS ops_settings(key TEXT PRIMARY KEY,payload TEXT);
     CREATE TABLE IF NOT EXISTS ops_disk_cleanup_policies(node TEXT PRIMARY KEY,host_id TEXT,payload TEXT);
     CREATE TABLE IF NOT EXISTS ops_disk_cleanup_runs(node TEXT,run_id TEXT,host_id TEXT,ts INTEGER,payload TEXT,PRIMARY KEY(node,run_id));
+    CREATE TABLE IF NOT EXISTS ops_backup_drills(
+      id INTEGER PRIMARY KEY,backup_name TEXT NOT NULL,started_at INTEGER NOT NULL,finished_at INTEGER NOT NULL,
+      duration_ms INTEGER NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL DEFAULT '',bytes INTEGER NOT NULL DEFAULT 0,
+      sha256 TEXT NOT NULL DEFAULT '',details_json TEXT NOT NULL DEFAULT '{}');
+    CREATE INDEX IF NOT EXISTS idx_ops_backup_drills_started ON ops_backup_drills(started_at DESC);
+    CREATE TABLE IF NOT EXISTS ops_alert_replays(
+      id INTEGER PRIMARY KEY,host_id TEXT NOT NULL,runtime TEXT NOT NULL,project TEXT NOT NULL DEFAULT '',
+      container_name TEXT NOT NULL,created_at INTEGER NOT NULL,lookback_minutes INTEGER NOT NULL,
+      input_digest TEXT NOT NULL,report_count INTEGER NOT NULL,assessment_json TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_ops_alert_replays_target ON ops_alert_replays(host_id,runtime,project,container_name,created_at DESC);
+    CREATE TABLE IF NOT EXISTS ops_alert_feedback(
+      id INTEGER PRIMARY KEY,replay_id INTEGER,alert_id INTEGER,host_id TEXT NOT NULL,runtime TEXT NOT NULL,
+      project TEXT NOT NULL DEFAULT '',container_name TEXT NOT NULL,source_ip TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',requested_by TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_ops_alert_feedback_target ON ops_alert_feedback(host_id,runtime,project,container_name,created_at DESC);
     """)
 
 
@@ -386,9 +404,30 @@ def ingest(conn, host_id, node_id, ts, data):
         healthy_scan = data.get("security",{}).get("enabled") is True and bool(core_health) and all(x.get("status") in {"healthy","idle"} for x in core_health) and all(x.get("status")=="healthy" for x in operations.get("services",[]))
         action=conn.execute('SELECT params_json,created_at FROM security_actions WHERE id=?',(upgrade['action_id'],)).fetchone()
         bound=action and loads(action['params_json']).get('expected_node_id')==node_id and ts>=action['created_at']
-        if bound and data.get("agent_version") == upgrade["version"] and healthy_scan:
-            conn.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
-            conn.execute("UPDATE security_actions SET status='succeeded',result_message='target version reported',updated_at=? WHERE id=?", (ts, upgrade["action_id"]))
+        if bound and data.get("agent_version") == upgrade["version"]:
+            if healthy_scan:
+                conn.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
+                conn.execute("UPDATE security_actions SET status='succeeded',result_message='target version reported with healthy checks',updated_at=? WHERE id=?", (ts, upgrade["action_id"]))
+            else:
+                failed_sources = [str(x.get("source") or "unknown") for x in core_health if x.get("status") not in {"healthy", "idle"}]
+                if not core_health:
+                    failed_sources.append("core health data unavailable")
+                if data.get("security",{}).get("enabled") is not True:
+                    failed_sources.append("security sampling disabled")
+                if any(x.get("status") != "healthy" for x in operations.get("services",[])):
+                    failed_sources.append("service health check failed")
+                reason = "升级后健康检查未通过：" + "、".join(dict.fromkeys(failed_sources))
+                conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
+                conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?", (reason[:400], ts, upgrade["action_id"]))
+                campaign_row = conn.execute("SELECT status,payload FROM ops_upgrades WHERE id=?", (upgrade["campaign"],)).fetchone()
+                if campaign_row and campaign_row["status"] in {"canary", "rollout"}:
+                    metadata = loads(campaign_row["payload"])
+                    metadata.update(paused_at=ts, paused_host=host_id, pause_kind="health_check", paused_from_status=campaign_row["status"], paused_reason=reason[:400])
+                    conn.execute("UPDATE ops_upgrades SET status='paused',payload=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False), upgrade["campaign"]))
+                elif campaign_row and campaign_row["status"] == "paused":
+                    metadata = loads(campaign_row["payload"])
+                    metadata.update(paused_at=ts, paused_host=host_id, pause_kind="health_check", paused_reason=reason[:400])
+                    conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False), upgrade["campaign"]))
     result = operations.get("upgrade_result",{})
     # The previous Client may predate operations-v1, so its signed version report
     # (not a new operations payload) must be sufficient to confirm a rollback.
@@ -396,6 +435,8 @@ def ingest(conn, host_id, node_id, ts, data):
         params=loads(action["params_json"])
         if params.get("expected_node_id")==node_id and params.get("version")==data.get("agent_version"):
             conn.execute("UPDATE security_actions SET status='succeeded',result_message='previous version reported after rollback',updated_at=? WHERE id=?",(ts,action["id"]))
+            if params.get("campaign_id"):
+                conn.execute("UPDATE ops_upgrade_nodes SET status='rolled_back' WHERE campaign=? AND host_id=? AND status='rollback_queued'", (params["campaign_id"], host_id))
     if isinstance(result,dict) and result.get("action_id"):
         action = conn.execute("SELECT action_type,params_json,status FROM security_actions WHERE id=? AND host_id=?", (result["action_id"],host_id)).fetchone()
         if action and action[0] in {"managed_upgrade","managed_rollback"} and action[2] in {"running","dispatched"} and loads(action[1]).get("expected_node_id")==node_id:
@@ -403,9 +444,26 @@ def ingest(conn, host_id, node_id, ts, data):
                 failure = str(result.get("message") or result.get("error") or "托管升级任务失败；请检查节点升级日志")
                 failure = ''.join(ch for ch in failure if ch >= ' ' or ch == '\t')[:400]
                 conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?",(failure,ts,result["action_id"]))
-                conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE action_id=?",(result["action_id"],))
+                if action[0] == "managed_upgrade":
+                    conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE action_id=?",(result["action_id"],))
+                    params = loads(action[1])
+                    campaign_id = params.get("campaign_id")
+                    campaign_row = conn.execute("SELECT status,payload FROM ops_upgrades WHERE id=?", (campaign_id,)).fetchone() if campaign_id else None
+                    if campaign_row and campaign_row["status"] in {"canary", "rollout", "paused"}:
+                        metadata = loads(campaign_row["payload"])
+                        if campaign_row["status"] != "paused":
+                            metadata["paused_from_status"] = campaign_row["status"]
+                        metadata.update(paused_at=ts, paused_host=host_id, pause_kind="install_failure", paused_reason=failure[:400])
+                        conn.execute("UPDATE ops_upgrades SET status='paused',payload=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False), campaign_id))
+                else:
+                    params = loads(action[1])
+                    if params.get("campaign_id"):
+                        conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=? AND status='rollback_queued'", (params["campaign_id"], host_id))
             elif action[0]=="managed_rollback" and result.get("status")=="installed" and result.get("version")==data.get("agent_version"):
                 conn.execute("UPDATE security_actions SET status='succeeded',result_message='rollback version reported',updated_at=? WHERE id=?",(ts,result["action_id"]))
+                params = loads(action[1])
+                if params.get("campaign_id"):
+                    conn.execute("UPDATE ops_upgrade_nodes SET status='rolled_back' WHERE campaign=? AND host_id=? AND status IN ('failed','verified','rollback_queued')", (params["campaign_id"], host_id))
     for campaign in conn.execute("SELECT id FROM ops_upgrades WHERE status IN ('canary','rollout')").fetchall():
         states=[r[0] for r in conn.execute("SELECT status FROM ops_upgrade_nodes WHERE campaign=?",(campaign[0],))]
         if states and all(s=="verified" for s in states):
@@ -544,10 +602,10 @@ def purge_host(conn,host_id):
 
 
 def maintain(conn, now):
-    for table, column, days in (("ops_rollups", "bucket", 400), ("ops_events", "ts", 90), ("ops_incidents", "last_seen", 90), ("ops_audit", "ts", 180), ("ops_rechecks", "ts", 90),('ops_disk_cleanup_runs','ts',30),('ops_service_inventory_changes','ts',90)):
+    for table, column, days in (("ops_rollups", "bucket", 400), ("ops_events", "ts", 90), ("ops_incidents", "last_seen", 90), ("ops_audit", "ts", 180), ("ops_rechecks", "ts", 90),('ops_disk_cleanup_runs','ts',30),('ops_service_inventory_changes','ts',90),('ops_backup_drills','started_at',180),('ops_alert_replays','created_at',90),('ops_alert_feedback','created_at',180)):
         conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {column}<? LIMIT 5000)", (now-days*86400,))
     conn.execute("DELETE FROM ops_rollups WHERE rowid IN (SELECT rowid FROM ops_rollups WHERE period='hour' AND bucket<? LIMIT 5000)", (now-30*86400,))
-    for table, cap in (("ops_rollups", 200000), ("ops_events", 20000), ("ops_incidents", 5000), ("ops_audit", 20000),('ops_disk_cleanup_runs',20000),('ops_service_inventory_changes',20000),('ops_service_inventory',100000)):
+    for table, cap in (("ops_rollups", 200000), ("ops_events", 20000), ("ops_incidents", 5000), ("ops_audit", 20000),('ops_disk_cleanup_runs',20000),('ops_service_inventory_changes',20000),('ops_service_inventory',100000),('ops_backup_drills',2000),('ops_alert_replays',5000),('ops_alert_feedback',20000)):
         conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} ORDER BY rowid DESC LIMIT 5000 OFFSET ?)", (cap,))
     conn.execute("UPDATE ops_rechecks SET status='unverified',message='主机未上报，无法确认处置效果' WHERE status IN ('awaiting_report','retrying') AND ts<?", (now-3600,))
     conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE status='dispatched' AND action_id IN (SELECT id FROM security_actions WHERE status='failed' OR created_at<?)", (now-1800,))
@@ -595,3 +653,92 @@ def backup(database_path, retention=7):
         raise
     finally:
         _backup_lock.release()
+
+
+def _restore_drill(backup_path, *, timeout_seconds=1800):
+    """Copy one backup into an isolated directory and verify it can be reopened."""
+    source_path = Path(backup_path).resolve(strict=True)
+    started_at = int(time.time())
+    started = time.monotonic()
+    size = source_path.stat().st_size
+    if not source_path.is_file() or size <= 0:
+        return {"backup_name": source_path.name, "started_at": started_at, "finished_at": int(time.time()),
+                "duration_ms": int((time.monotonic()-started)*1000), "status": "failed",
+                "message": "backup file is empty or unavailable", "bytes": max(0, size), "sha256": "", "details": {}}
+    scratch_root = Path(tempfile.gettempdir())
+    reserve = max(64 * 1024 * 1024, size // 20)
+    if shutil.disk_usage(scratch_root).free < size + reserve:
+        return {"backup_name": source_path.name, "started_at": started_at, "finished_at": int(time.time()),
+                "duration_ms": int((time.monotonic()-started)*1000), "status": "failed",
+                "message": "临时目录剩余空间不足，未复制备份", "bytes": size, "sha256": "", "details": {}}
+    digest = hashlib.sha256()
+    try:
+        with tempfile.TemporaryDirectory(prefix="narwhal-restore-drill-") as directory:
+            restored = Path(directory) / "monitor.db"
+            deadline = started + max(30, min(int(timeout_seconds), 1800))
+            with source_path.open("rb") as source, restored.open("xb") as destination:
+                os.chmod(restored, 0o600)
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("isolated restore copy exceeded the time budget")
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    digest.update(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+            # Reopen the isolated copy read/write, as a restored server database
+            # would be opened, while leaving the source backup untouched.
+            conn = sqlite3.connect(restored, timeout=5)
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
+                result = conn.execute("PRAGMA integrity_check").fetchall()
+                if len(result) != 1 or result[0][0] != "ok":
+                    raise ValueError("isolated database integrity_check failed")
+                tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                required = {"reports", "hosts", "security_alerts", "ops_settings"}
+                missing = sorted(required - tables)
+                if missing:
+                    raise ValueError("backup is missing required tables: " + ", ".join(missing))
+                foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchmany(10)
+                if foreign_key_errors:
+                    raise ValueError("isolated database foreign_key_check found inconsistencies")
+                row_counts = {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                              for table in ("reports", "hosts", "security_alerts")}
+            finally:
+                conn.close()
+            return {
+                "backup_name": source_path.name, "started_at": started_at,
+                "finished_at": int(time.time()), "duration_ms": int((time.monotonic() - started) * 1000),
+                "status": "succeeded", "message": "备份已复制到隔离目录并重新打开；SQLite 完整性与核心表检查通过。",
+                "bytes": size, "sha256": digest.hexdigest(), "details": {"row_counts": row_counts},
+            }
+    except Exception as exc:
+        return {
+            "backup_name": source_path.name, "started_at": started_at,
+            "finished_at": int(time.time()), "duration_ms": int((time.monotonic() - started) * 1000),
+            "status": "failed", "message": str(exc)[:400] or type(exc).__name__,
+            "bytes": size, "sha256": digest.hexdigest(), "details": {},
+        }
+
+
+def restore_drill(backup_path, *, timeout_seconds=1800):
+    if not _restore_drill_lock.acquire(False):
+        raise RuntimeError("a backup restore drill is already running")
+    try:
+        return _restore_drill(backup_path, timeout_seconds=timeout_seconds)
+    finally:
+        _restore_drill_lock.release()
+
+
+def record_backup_drill(conn, result):
+    conn.execute(
+        "INSERT INTO ops_backup_drills(backup_name,started_at,finished_at,duration_ms,status,message,bytes,sha256,details_json) VALUES(?,?,?,?,?,?,?,?,?)",
+        (result["backup_name"], result["started_at"], result["finished_at"], result["duration_ms"],
+         result["status"], result["message"], result["bytes"], result["sha256"],
+         json.dumps(result.get("details") or {}, ensure_ascii=False)),
+    )
+    result["id"] = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return result

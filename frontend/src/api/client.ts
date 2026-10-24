@@ -218,12 +218,19 @@ export const api = {
   previewUserNotice: (alertId: number) => request<{
     subject: string; message: string; preview_token: string; can_submit: boolean;
     audience: string; telegram: string; telegram_note: string; banner: string; banner_note: string;
-    latest: { id: string; telegram_status: string; banner_status: string; last_error: string }[];
+    latest: { id: string; telegram_status: string; banner_status: string; last_error: string; telegram_error: string; banner_error: string;
+      telegram_attempts: number; banner_attempts: number; can_retry_telegram: boolean; can_retry_banner: boolean;
+      events: { channel: string; status: string; attempt: number; ts: number; detail: string }[] }[];
   }>(`/api/v1/security/alerts/${alertId}/notify-user`),
 
   sendUserNotice: (alertId: number, previewToken: string, requestId: string) =>
     request<{ id: string; duplicate: boolean; telegram: string; banner: string }>(`/api/v1/security/alerts/${alertId}/notify-user`, {
       method: 'POST', body: JSON.stringify({ confirm: true, preview_token: previewToken, request_id: requestId }),
+    }),
+
+  retryUserNotice: (noticeId: string, channel: 'telegram' | 'banner') =>
+    request<{ ok: boolean; notice_id: string; channel: string; status: string }>(`/api/v1/security/user-notices/${noticeId}/retry`, {
+      method: 'POST', body: JSON.stringify({ channel }),
     }),
 
   dispositionContainer: (

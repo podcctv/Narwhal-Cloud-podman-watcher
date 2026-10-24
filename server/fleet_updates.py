@@ -54,6 +54,12 @@ def reconcile(conn, version, revision, now=None):
     if campaign and not json.loads(campaign['payload']).get('automatic'):
         conn.rollback()
         return
+    # A paused campaign is an explicit operator safety boundary. Do not let a
+    # later coordinator tick silently restart it or send more nodes.
+    if campaign and campaign['status'] == 'paused':
+        save(conn, {**cfg, 'last_checked': now, 'target_version': version, 'campaign': campaign['id']})
+        conn.commit()
+        return
     if not campaign:
         candidates = [h for h in eligible.values() if re.fullmatch(r'\d+\.\d+\.\d+',h['agent_version'] or '') and tuple(map(int,h['agent_version'].split('.'))) < tuple(map(int,version.split('.'))) and now-h['last_seen'] <= 900]
         if not candidates:
@@ -80,11 +86,21 @@ def reconcile(conn, version, revision, now=None):
     for n in nodes:
         if n['status'] not in {'dispatched','failed'}:
             continue
-        a = conn.execute('SELECT status,created_at FROM security_actions WHERE id=?', (n['action_id'],)).fetchone()
+        a = conn.execute('SELECT status,created_at,result_message FROM security_actions WHERE id=?', (n['action_id'],)).fetchone()
         if a and (a['status'] == 'failed' or now-a['created_at'] > 1800):
             conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (ident, n['host_id']))
-            conn.execute("UPDATE security_actions SET status='failed',result_message='fleet upgrade timed out',updated_at=? WHERE id=? AND status IN ('queued','dispatched','running')", (now, n['action_id']))
-            meta['retry_at'].setdefault(n['host_id'],now + 300 * 2**min(3, meta['attempts'].get(n['host_id'], 1)-1))
+            reason = str(a['result_message'] or 'fleet upgrade timed out')[:400]
+            if a['status'] != 'failed':
+                reason = 'Client 未在 30 分钟内回报升级结果'
+                conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=? AND status IN ('queued','dispatched','running')", (reason, now, n['action_id']))
+            if int(meta['attempts'].get(n['host_id'], 0)) >= 3:
+                meta.update(paused_at=now, paused_host=n['host_id'], pause_kind='install_failure', paused_from_status=campaign['status'], paused_reason=reason)
+                conn.execute("UPDATE ops_upgrades SET status='paused',payload=? WHERE id=?", (json.dumps(meta), ident))
+                save(conn, {**cfg, 'last_checked': now, 'target_version': version, 'campaign': ident,
+                            'error': f"节点 {n['host_id']} 升级失败三次，自动发布已暂停"})
+                conn.commit()
+                return
+            meta['retry_at'].setdefault(n['host_id'], now + 300 * 2**min(3, meta['attempts'].get(n['host_id'], 1)-1))
     canary = conn.execute('SELECT n.status,a.updated_at FROM ops_upgrade_nodes n LEFT JOIN security_actions a ON a.id=n.action_id WHERE n.campaign=? AND n.host_id=?', (ident, meta['canary'])).fetchone()
     h = eligible.get(meta['canary'])
     promote = bool(canary and canary['status'] == 'verified' and h and h['agent_version'] == version and 0<=now-h['ops_ts']<=900 and canary['updated_at'] and now>=canary['updated_at']+120 and h['ops_ts'] >= canary['updated_at']+120)

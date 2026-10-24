@@ -541,6 +541,8 @@ def database_status() -> JSONResponse:
 
 
 def operations_maintenance():
+    drill_path = None
+    drill_attempted_at = 0
     conn = db()
     try:
         now = int(time.time())
@@ -561,8 +563,36 @@ def operations_maintenance():
                 logging.exception("Scheduled backup failed")
             conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)", (json.dumps(settings),))
             conn.commit()
+        drill_due = settings.get("enabled") and settings.get("drill_enabled") and now-settings.get("last_drill_attempt", 0) >= 7*86400
+        if drill_due:
+            folder = Path(DB_PATH).parent / "backups"
+            candidates = sorted(folder.glob("monitor-*.db"), key=lambda item: item.stat().st_mtime, reverse=True)
+            if candidates:
+                drill_path = str(candidates[0])
+                drill_attempted_at = now
+                settings["last_drill_attempt"] = now
+                conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)", (json.dumps(settings),))
+                conn.commit()
     finally:
         conn.close()
+    if drill_path:
+        try:
+            result = operations.restore_drill(drill_path)
+        except Exception as exc:
+            result = {"backup_name": Path(drill_path).name, "started_at": drill_attempted_at,
+                      "finished_at": int(time.time()), "duration_ms": 0, "status": "failed",
+                      "message": str(exc)[:400] or type(exc).__name__, "bytes": 0, "sha256": "", "details": {}}
+        conn = db()
+        try:
+            operations.record_backup_drill(conn, result)
+            row = conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
+            settings = operations.loads(row[0]) if row else {}
+            settings["last_drill"] = {key: result[key] for key in ("backup_name", "started_at", "finished_at", "duration_ms", "status", "message", "bytes", "sha256")}
+            settings["last_drill_at"] = result["finished_at"]
+            conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)", (json.dumps(settings, ensure_ascii=False),))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:

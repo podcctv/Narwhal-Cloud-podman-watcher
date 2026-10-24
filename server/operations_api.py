@@ -1,5 +1,6 @@
 """Authenticated operations API; all mutation targets are bounded and explicit."""
 import asyncio
+import hashlib
 import json
 import re
 import sqlite3
@@ -42,6 +43,10 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
     def require_admin(request):
         if getattr(request.state, "dashboard_role", "admin") != "admin":
             raise HTTPException(403, "只有管理员可以执行此运维操作")
+
+    def require_operator(request):
+        if getattr(request.state, "dashboard_role", "admin") not in {"admin", "operator"}:
+            raise HTTPException(403, "只有管理员或运维人员可以查看此数据")
 
     @router.get("/session")
     def session(request: Request):
@@ -206,7 +211,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             conn.close()
 
     @router.get("/service-inventory")
-    def service_inventory(host_id: str = "", runtime: str = "", limit: int = 200):
+    def service_inventory(request: Request, host_id: str = "", runtime: str = "", limit: int = 200):
         limit = max(1, min(500, int(limit)))
         conn = db()
         try:
@@ -220,13 +225,119 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 params.append(runtime)
             where = " WHERE " + " AND ".join(filters) if filters else ""
             current = rows(conn, "SELECT * FROM ops_service_inventory" + where + " ORDER BY observed_at DESC LIMIT ?", (*params, limit))
+            can_view_owner = getattr(request.state, "dashboard_role", "admin") in {"admin", "operator"}
             for item in current:
                 item["listeners"] = ops.loads(item.pop("inventory_json", "[]"), [])
                 item["coverage"] = item.pop("inventory_state", "unavailable")
+                report = conn.execute(
+                    "SELECT payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
+                    (item["host_id"], item["runtime"], item["project"], item["container_name"]),
+                ).fetchone()
+                payload = ops.loads(report[0] if report else "{}")
+                container_id = str(payload.get("id") or "")[:200]
+                owner = conn.execute(
+                    "SELECT user_email,user_note,updated_at FROM container_user_notes WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND container_id=?",
+                    (item["host_id"], item["runtime"], item["project"], item["container_name"], container_id),
+                ).fetchone() if container_id else None
+                item["container_id"] = container_id
+                item["owner"] = {"user_email": owner["user_email"], "user_note": owner["user_note"], "updated_at": owner["updated_at"]} if can_view_owner and owner else {"user_email": "", "user_note": "", "updated_at": 0}
             changes = rows(conn, "SELECT * FROM ops_service_inventory_changes" + where + " ORDER BY ts DESC,id DESC LIMIT ?", (*params, min(1000, limit * 2)))
             for item in changes:
                 item["data"] = ops.loads(item.pop("payload", "{}"))
+                item["owner"] = next(({
+                    "user_email": current_item["owner"]["user_email"],
+                    "user_note": current_item["owner"]["user_note"],
+                    "updated_at": current_item["owner"]["updated_at"],
+                } for current_item in current if (current_item["host_id"], current_item["runtime"], current_item["project"], current_item["container_name"]) == (item["host_id"], item["runtime"], item["project"], item["container_name"])), {"user_email": "", "user_note": "", "updated_at": 0})
             return {"items": current, "changes": changes, "retention_days": 90}
+        finally:
+            conn.close()
+
+    @router.get("/alerts/replays")
+    def alert_replays(request: Request):
+        require_operator(request)
+        conn = db()
+        try:
+            items = rows(conn, "SELECT * FROM ops_alert_replays ORDER BY created_at DESC,id DESC LIMIT 50")
+            for item in items:
+                item["assessment"] = ops.loads(item.pop("assessment_json", "{}"), {})
+                item["feedback"] = rows(conn, "SELECT id,replay_id,source_ip,category,note,requested_by,created_at FROM ops_alert_feedback WHERE replay_id=? ORDER BY id DESC LIMIT 50", (item["id"],))
+            return {"items": items, "feedback_categories": ["likely_external_scan", "legitimate_business", "false_positive", "confirmed_abuse", "insufficient_evidence"], "enforcement_effect": "none"}
+        finally:
+            conn.close()
+
+    @router.post("/alerts/replay")
+    async def replay_alert(request: Request):
+        require_operator(request)
+        try:
+            payload = await request.json()
+            host_id = str(payload.get("host_id") or "").strip()[:200]
+            runtime = str(payload.get("runtime") or "")
+            project = str(payload.get("project") or "")[:100]
+            container_name = str(payload.get("container_name") or "").strip()[:200]
+            minutes = int(payload.get("minutes", 60))
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(400, "请提供有效的目标容器和回放时间窗") from None
+        if not host_id or not container_name or runtime not in {"incus", "podman"} or not 15 <= minutes <= 60:
+            raise HTTPException(400, "回放仅支持 Incus / Podman，时间窗为 15-60 分钟")
+        now = int(time.time())
+        conn = db()
+        try:
+            sampled = conn.execute(
+                "SELECT id,ts,payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND ts BETWEEN ? AND ? ORDER BY ts DESC,id DESC LIMIT 60",
+                (host_id, runtime, project, container_name, now-minutes*60, now),
+            ).fetchall()
+            if not sampled:
+                raise HTTPException(409, "所选时间窗内没有采样记录；没有足够数据可回放")
+            digest = hashlib.sha256()
+            for row in sampled:
+                digest.update(f"{row['id']}:{row['ts']}:".encode())
+                digest.update(str(row["payload_json"] or "").encode())
+                digest.update(b"\n")
+            assessment = inbound_assessment.assess(sampled, now=now, lookback_seconds=minutes*60)
+            cursor = conn.execute(
+                "INSERT INTO ops_alert_replays(host_id,runtime,project,container_name,created_at,lookback_minutes,input_digest,report_count,assessment_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                (host_id, runtime, project, container_name, now, minutes, digest.hexdigest(), len(sampled), json.dumps(assessment, ensure_ascii=False)),
+            )
+            replay_id = int(cursor.lastrowid)
+            conn.commit()
+            return {"id": replay_id, "host_id": host_id, "runtime": runtime, "project": project,
+                    "container_name": container_name, "created_at": now, "lookback_minutes": minutes,
+                    "input_digest": digest.hexdigest(), "report_count": len(sampled), "assessment": assessment,
+                    "feedback": [], "enforcement_effect": "none"}
+        finally:
+            conn.close()
+
+    @router.post("/alerts/replays/{replay_id}/feedback")
+    async def alert_replay_feedback(replay_id: int, request: Request):
+        require_operator(request)
+        allowed = {"likely_external_scan", "legitimate_business", "false_positive", "confirmed_abuse", "insufficient_evidence"}
+        try:
+            payload = await request.json()
+            source_ip = str(payload.get("source_ip") or "").strip()[:64]
+            category = str(payload.get("category") or "")
+            note = "".join(ch for ch in str(payload.get("note") or "") if ch >= " " and ch != "\x7f")[:500]
+            note = re.sub(r"(?i)(password|passwd|token|secret|authorization|api[_-]?key)(\s*[:=]\s*)\S+", r"\1\2[REDACTED]", note)
+        except (TypeError, AttributeError):
+            raise HTTPException(400, "反馈内容格式无效") from None
+        if category not in allowed:
+            raise HTTPException(400, "反馈类别无效")
+        conn = db()
+        try:
+            replay = conn.execute("SELECT assessment_json FROM ops_alert_replays WHERE id=?", (replay_id,)).fetchone()
+            if not replay:
+                raise HTTPException(404, "找不到这次回放记录")
+            assessment = ops.loads(replay["assessment_json"], {})
+            known_ips = {str(item.get("ip") or "") for item in assessment.get("assessments", []) if isinstance(item, dict)}
+            if source_ip and source_ip not in known_ips:
+                raise HTTPException(400, "来源 IP 不属于这次回放的采样结果")
+            cursor = conn.execute(
+                "INSERT INTO ops_alert_feedback(replay_id,alert_id,host_id,runtime,project,container_name,source_ip,category,note,requested_by,created_at) SELECT ?,0,host_id,runtime,project,container_name,?,?,?,?,? FROM ops_alert_replays WHERE id=?",
+                (replay_id, source_ip, category, note, str(request.state.dashboard_user)[:100], int(time.time()), replay_id),
+            )
+            conn.commit()
+            return {"id": int(cursor.lastrowid), "replay_id": replay_id, "source_ip": source_ip,
+                    "category": category, "note": note, "enforcement_effect": "none"}
         finally:
             conn.close()
 
@@ -377,7 +488,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 item["latest_update"] = dict(action) if action else None
             progress = rows(conn,"SELECT n.*,u.version,u.revision,u.status AS campaign_status,u.payload AS campaign_payload FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign ORDER BY n.campaign DESC LIMIT 500")
             for item in progress:
-                action = conn.execute("SELECT status,result_message,updated_at,attempts FROM security_actions WHERE id=?", (item.get("action_id"),)).fetchone() if item.get("action_id") else None
+                action = conn.execute("SELECT action_type,status,result_message,updated_at,attempts FROM security_actions WHERE id=?", (item.get("action_id"),)).fetchone() if item.get("action_id") else None
                 item["action"] = dict(action) if action else None
                 metadata = ops.loads(item.pop("campaign_payload", "{}"))
                 item["manual_attempts"] = int((metadata.get("attempts") or {}).get(item["host_id"], 0))
@@ -472,14 +583,15 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         try:
             row = conn.execute("SELECT * FROM ops_upgrades WHERE id=?", (campaign,)).fetchone()
             node = conn.execute("SELECT * FROM ops_upgrade_nodes WHERE campaign=? AND host_id=?", (campaign, host_id)).fetchone()
-            if not row or not node or node["status"] != "failed" or row["status"] not in {"canary", "rollout"}:
-                raise HTTPException(409, "只有仍处于灰度/分批发布中的失败节点可重试")
+            if not row or not node or node["status"] != "failed" or row["status"] not in {"canary", "rollout", "paused"}:
+                raise HTTPException(409, "只有灰度、分批发布或已暂停发布中的失败节点可重试")
+            failed_action = conn.execute("SELECT action_type FROM security_actions WHERE id=?", (node["action_id"],)).fetchone() if node["action_id"] else None
+            if failed_action and failed_action["action_type"] != "managed_upgrade":
+                raise HTTPException(409, "该节点最近失败的是回滚操作；请从回滚入口重新核对后操作")
             metadata = ops.loads(row["payload"])
-            if metadata.get("automatic"):
-                raise HTTPException(409, "自动升级由协调器重试；此处不重复下发")
             attempts = metadata.setdefault("attempts", {})
             if int(attempts.get(host_id, 0)) >= 3:
-                raise HTTPException(409, "该发布对节点的手动尝试已达 3 次上限，请先回滚或创建新版本")
+                raise HTTPException(409, "该发布对节点的尝试已达 3 次上限，请先回滚或创建新版本")
             host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
             if not host or not host["node_id"] or time.time() - int(host["last_seen"] or 0) > 900:
                 raise HTTPException(409, "节点离线或上报过期，未重试")
@@ -499,10 +611,62 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 raise HTTPException(409, "该提交已不是当前 main；为避免部署旧代码，未重试")
             action = queue(conn, host_id, "managed_upgrade", {"revision": row["revision"], "version": row["version"], "campaign_id": campaign}, request.state.dashboard_user)
             attempts[host_id] = int(attempts.get(host_id, 0)) + 1
+            if row["status"] == "paused":
+                # A manual retry is not approval to resume the rollout. Keep the
+                # campaign paused until an administrator rechecks health and resumes it.
+                metadata["last_retry_at"] = int(time.time())
+                metadata["last_retry_host"] = host_id
             conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(metadata), campaign))
             conn.execute("UPDATE ops_upgrade_nodes SET status='dispatched',action_id=? WHERE campaign=? AND host_id=?", (action, campaign, host_id))
             conn.commit()
             return {"action_id": action, "attempt": attempts[host_id]}
+        finally:
+            conn.close()
+
+    @router.post("/upgrades/{campaign}/resume")
+    def resume_upgrade(campaign: int, request: Request):
+        require_admin(request)
+        conn = db()
+        try:
+            row = conn.execute("SELECT * FROM ops_upgrades WHERE id=?", (campaign,)).fetchone()
+            if not row or row["status"] != "paused":
+                raise HTTPException(409, "该发布当前未处于暂停状态")
+            metadata = ops.loads(row["payload"])
+            canary_host = str(metadata.get("canary") or "")
+            canary = conn.execute("SELECT n.status,n.action_id,a.action_type,a.status AS action_status,a.params_json FROM ops_upgrade_nodes n LEFT JOIN security_actions a ON a.id=n.action_id WHERE n.campaign=? AND n.host_id=?", (campaign, canary_host)).fetchone()
+            if not canary or canary["status"] != "verified":
+                raise HTTPException(409, "灰度节点尚未通过新版健康检查")
+            if canary["action_type"] != "managed_upgrade" or canary["action_status"] != "succeeded":
+                raise HTTPException(409, "灰度升级回执尚未成功确认")
+            blocked = conn.execute("SELECT host_id,status FROM ops_upgrade_nodes WHERE campaign=? AND status IN ('failed','rollback_queued') LIMIT 1", (campaign,)).fetchone()
+            if blocked:
+                raise HTTPException(409, f"节点 {blocked['host_id']} 状态为 {blocked['status']}；请先人工重试或回滚")
+            host = conn.execute("SELECT node_id,last_seen,agent_version FROM hosts WHERE host_id=?", (canary_host,)).fetchone()
+            action_params = ops.loads(canary["params_json"], {})
+            if not host or host["agent_version"] != row["version"] or action_params.get("expected_node_id") != host["node_id"]:
+                raise HTTPException(409, "灰度节点当前身份或 Agent 版本与本次发布不一致")
+            ops_report = conn.execute("SELECT ts,payload FROM ops_hosts WHERE host_id=? AND node=?", (canary_host, host["node_id"] if host else "")).fetchone()
+            latest_report = conn.execute("SELECT ts,payload_json FROM reports WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1", (canary_host,)).fetchone()
+            if not host or not ops_report or not latest_report or int(ops_report["ts"] or 0) < int(time.time())-900 or int(latest_report["ts"] or 0) < int(time.time())-900:
+                raise HTTPException(409, "灰度节点上报已过期，暂不能恢复发布")
+            operation_data = ops.loads(ops_report["payload"], {})
+            core = [item for item in operation_data.get("health", []) if item.get("source") in {"network_counters", "security"}]
+            services = operation_data.get("services", [])
+            security = ops.loads(latest_report["payload_json"], {}).get("security", {})
+            healthy = security.get("enabled") is True and bool(core) and all(item.get("status") in {"healthy", "idle"} for item in core) and all(item.get("status") == "healthy" for item in services)
+            if not healthy:
+                raise HTTPException(409, "最新主机审计或安全采样仍未通过；发布保持暂停")
+            next_status = metadata.get("paused_from_status") if metadata.get("paused_from_status") in {"canary", "rollout"} else "canary"
+            metadata["last_resume_at"] = int(time.time())
+            metadata["last_resume_by"] = request.state.dashboard_user
+            metadata.pop("paused_at", None)
+            metadata.pop("paused_host", None)
+            metadata.pop("pause_kind", None)
+            metadata.pop("paused_from_status", None)
+            metadata.pop("paused_reason", None)
+            conn.execute("UPDATE ops_upgrades SET status=?,payload=? WHERE id=?", (next_status, json.dumps(metadata), campaign))
+            conn.commit()
+            return {"ok": True, "status": next_status}
         finally:
             conn.close()
 
@@ -534,10 +698,19 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         conn=db()
         try:
             host=str(p.get("host_id",""))
-            previous=conn.execute("SELECT previous_version FROM ops_upgrade_nodes WHERE host_id=? AND action_id IS NOT NULL ORDER BY campaign DESC LIMIT 1",(host,)).fetchone()
-            if not previous:
+            previous=conn.execute("SELECT n.previous_version,n.campaign,n.status,u.version,u.status AS campaign_status FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign WHERE n.host_id=? AND n.action_id IS NOT NULL ORDER BY n.campaign DESC LIMIT 1",(host,)).fetchone()
+            current=conn.execute("SELECT agent_version FROM hosts WHERE host_id=?",(host,)).fetchone()
+            if not previous or not current:
                 raise HTTPException(409,"没有该节点受管升级记录，无法确认回滚目标")
-            action=queue(conn,host,"managed_rollback",{"version":previous[0]},request.state.dashboard_user)
+            if current[0] != previous["version"]:
+                raise HTTPException(409,"节点当前版本不等于此发布目标，不能盲目回滚")
+            if previous["status"] == "rollback_queued":
+                raise HTTPException(409,"该节点已有回滚任务等待回报")
+            action=queue(conn,host,"managed_rollback",{"version":previous["previous_version"],"campaign_id":previous["campaign"]},request.state.dashboard_user)
+            metadata=ops.loads(conn.execute("SELECT payload FROM ops_upgrades WHERE id=?",(previous["campaign"],)).fetchone()[0])
+            metadata.update(paused_at=int(time.time()),paused_host=host,pause_kind="manual_rollback",paused_from_status=previous["campaign_status"],paused_reason="管理员已请求回滚；自动发布保持暂停")
+            conn.execute("UPDATE ops_upgrades SET status='paused',payload=? WHERE id=?",(json.dumps(metadata),previous["campaign"]))
+            conn.execute("UPDATE ops_upgrade_nodes SET status='rollback_queued',action_id=? WHERE campaign=? AND host_id=?",(action,previous["campaign"],host))
             cfg=fleet_updates.settings(conn)
             fleet_updates.save(conn,{**cfg,'holds':sorted(set(cfg['holds']+[host]))})
             conn.commit()
@@ -546,26 +719,42 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             conn.close()
 
     @router.get("/backups")
-    def backups():
+    def backups(request: Request):
+        require_admin(request)
         conn=db()
         try:
             row=conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
             folder=Path(database_path()).parent/"backups"
-            return {"settings":ops.loads(row[0]) if row else {"enabled":False,"interval_hours":24,"retention":7},"items":[{"name":p.name,"bytes":p.stat().st_size,"ts":int(p.stat().st_mtime)} for p in sorted(folder.glob("monitor-*.db"),reverse=True)[:30]]}
+            drills=rows(conn,"SELECT id,backup_name,started_at,finished_at,duration_ms,status,message,bytes,sha256,details_json FROM ops_backup_drills ORDER BY started_at DESC,id DESC LIMIT 50")
+            for drill in drills:
+                drill["details"] = ops.loads(drill.pop("details_json", "{}"), {})
+            latest={}
+            for drill in drills:
+                latest.setdefault(drill["backup_name"],drill)
+            items=[]
+            for path in sorted(folder.glob("monitor-*.db"),key=lambda item:item.stat().st_mtime,reverse=True)[:30]:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                items.append({"name":path.name,"bytes":path.stat().st_size,"ts":int(path.stat().st_mtime),"last_drill":latest.get(path.name)})
+            settings=ops.loads(row[0]) if row else {"enabled":False,"interval_hours":24,"retention":7,"drill_enabled":False}
+            return {"settings":settings,"items":items,"drills":drills}
         finally:
             conn.close()
 
     @router.post("/backups/settings")
     async def backup_settings(request:Request):
+        require_admin(request)
         p=await request.json()
         interval=int(ops.number(p.get("interval_hours",24)))
         retention=int(ops.number(p.get("retention",7)))
         if not 1<=interval<=168 or not 1<=retention<=30 or not isinstance(p.get("enabled"),bool):
             raise HTTPException(400,"interval 1-168 hours, retention 1-30")
+        if "drill_enabled" in p and not isinstance(p["drill_enabled"],bool):
+            raise HTTPException(400,"drill_enabled must be boolean")
         conn=db()
         try:
             old=conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
-            settings={**ops.loads(old[0] if old else None),"enabled":p["enabled"],"interval_hours":interval,"retention":retention}
+            settings={**ops.loads(old[0] if old else None),"enabled":p["enabled"],"interval_hours":interval,"retention":retention,"drill_enabled":p.get("drill_enabled",ops.loads(old[0] if old else None).get("drill_enabled",False))}
             conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)",(json.dumps(settings),))
             conn.commit()
             return {"ok":True}
@@ -573,7 +762,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             conn.close()
 
     @router.post("/backups")
-    async def make_backup():
+    async def make_backup(request: Request):
+        require_admin(request)
         conn=db()
         try:
             row=conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
@@ -584,6 +774,39 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             return await asyncio.to_thread(ops.backup,database_path(),retention)
         except (ValueError,TimeoutError) as e:
             raise HTTPException(409,str(e))
+
+    @router.post("/backups/{name}/drill")
+    async def drill_backup(name: str, request: Request):
+        require_admin(request)
+        if not re.fullmatch(r"monitor-\d{8}-\d{6}-[0-9a-f]{6}\.db", name):
+            raise HTTPException(400,"备份名称无效")
+        folder=(Path(database_path()).parent/"backups").resolve()
+        candidate=folder/name
+        if candidate.is_symlink():
+            raise HTTPException(400,"不接受符号链接备份")
+        try:
+            source=candidate.resolve(strict=True)
+        except OSError:
+            raise HTTPException(404,"备份文件不存在") from None
+        if source.parent!=folder or not source.is_file():
+            raise HTTPException(400,"备份路径无效")
+        try:
+            result=await asyncio.to_thread(ops.restore_drill,source)
+        except (RuntimeError,TimeoutError,ValueError) as exc:
+            raise HTTPException(409,str(exc)) from None
+        conn=db()
+        try:
+            ops.record_backup_drill(conn,result)
+            settings_row=conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
+            settings=ops.loads(settings_row[0]) if settings_row else {"enabled":False,"interval_hours":24,"retention":7,"drill_enabled":False}
+            settings["last_drill_attempt"]=result["started_at"]
+            settings["last_drill"]={key:result[key] for key in ("backup_name","started_at","finished_at","duration_ms","status","message","bytes","sha256")}
+            settings["last_drill_at"]=result["finished_at"]
+            conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)",(json.dumps(settings,ensure_ascii=False),))
+            conn.commit()
+            return result
+        finally:
+            conn.close()
 
     @router.get("/users")
     def users():
