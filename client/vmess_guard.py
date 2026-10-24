@@ -90,8 +90,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
     process_states = None
     if has_scoped_scan_states:
         process_states = {
-            (_integer(item.get("pid"), 2, 4194304), str(item.get("process") or "").lower()):
-                str(item.get("state") or "partial").lower()
+            (_integer(item.get("pid"), 2, 4194304), str(item.get("process") or "").lower()): item
             for item in process_scan_states if isinstance(item, dict)
         }
     if process_states is None and scan_state != "complete":
@@ -106,9 +105,15 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
     saw_loopback_only = False
     for configured in vmess:
         pid, process, port = configured["pid"], configured["process"], configured["port"]
-        if process_states is not None and process_states.get((pid, process)) != "complete":
-            pending.append({"port": port, "process": process, "reason": "configuration_scan_incomplete"})
-            continue
+        if process_states is not None:
+            process_state = process_states.get((pid, process))
+            if (
+                not isinstance(process_state, dict)
+                or str(process_state.get("state") or "partial").lower() != "complete"
+                or not str(process_state.get("start_ticks") or "").isdigit()
+            ):
+                pending.append({"port": port, "process": process, "reason": "configuration_scan_incomplete"})
+                continue
         configured_transports = None
         for item in configured_protocols:
             if not isinstance(item, dict):
@@ -233,6 +238,39 @@ def _owned_endpoints(readback, marker):
     return endpoints
 
 
+def _confirmed_vmess_live_endpoints(live_listeners):
+    """Return only exclusive live endpoints proven to belong to a VMess config.
+
+    A listener on a previously guarded port is not enough to keep a VMess rule:
+    VLESS, unknown owners, and mixed protocol evidence must remain reachable.
+    """
+    grouped = {}
+    for item in live_listeners if isinstance(live_listeners, list) else []:
+        if not isinstance(item, dict):
+            continue
+        transport = str(item.get("proto") or "").lower()
+        port = _integer(item.get("port"))
+        if transport not in {"tcp", "udp"} or not port:
+            continue
+        grouped.setdefault((transport, port), []).append(item)
+
+    confirmed = set()
+    for endpoint, listeners in grouped.items():
+        if not listeners:
+            continue
+        if all(
+            isinstance(item.get("application_protocols"), list)
+            and {str(value).lower() for value in item["application_protocols"]} == {"vmess"}
+            and item.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
+            and item.get("vmess_process_scan_complete") is True
+            and _integer(item.get("pid"), 2, 4194304) > 0
+            and str(item.get("process") or "").lower() in SUPPORTED_ENGINES
+            for item in listeners
+        ):
+            confirmed.add(endpoint)
+    return confirmed
+
+
 def _firewall_failure_reason(completed, fallback):
     """Map nft errors to safe diagnostic codes; never return command output."""
     if completed is None:
@@ -284,13 +322,13 @@ def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_ep
 
     existing_endpoints = _owned_endpoints(current.stdout, marker) if exists else set()
     requested_endpoints = set(endpoint_map)
-    live = {
-        (str(item.get("proto") or "").lower(), _integer(item.get("port")))
-        for item in live_listeners if isinstance(item, dict)
-    } if isinstance(live_listeners, list) else set()
+    # Only preserve/release-check a guard against an exclusive, positively
+    # attributed VMess listener. A VLESS or ambiguous listener on the same
+    # port must never inherit a VMess block.
+    live = _confirmed_vmess_live_endpoints(live_listeners)
     if preserve_existing and exists:
         for transport, port in existing_endpoints - requested_endpoints:
-            if not isinstance(live_listeners, list) or (transport, port) in live:
+            if (transport, port) in live:
                 endpoint_map[(transport, port)] = {"proto": transport, "port": port}
 
     if not endpoint_map:

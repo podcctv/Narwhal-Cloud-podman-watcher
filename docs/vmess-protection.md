@@ -13,8 +13,11 @@ containers when it can prove all of the following in the same collection:
   `nsenter` and `nft` to apply and read back the rule.
 
 This policy is VMess-only. VLESS inbounds are deliberately excluded and are
-never blocked by this guard; a VLESS listener on another port does not inherit
-the VMess rule.
+never targeted by this guard. A rule is retained only while a live endpoint is
+still exclusively and completely matched to VMess; a VLESS or mixed-protocol
+listener does not inherit the old VMess port rule. When a complete inventory
+shows that a guarded port now serves VLESS or a shared service, the Agent removes
+its own VMess rule and verifies that it is gone.
 
 For Xray/V2Ray, the Agent maps the configured transport method to the actual
 TCP/UDP listener before associating a protocol with a socket. It handles both
@@ -48,16 +51,18 @@ snapshot, and a non-truncated service-listener inventory. In contrast, a
 positively identified VMess process may be protected when an unrelated process'
 configuration could not be read: the Agent evaluates completeness per exact
 PID and engine for adding a rule, while retaining the global-completeness gate
-for deciding that VMess is absent and releasing old rules. If another process
-or endpoint remains incomplete, its endpoints stay pending and any existing
-owned rules are preserved. The Agent checks the
+for deciding that VMess is absent and releasing old rules. Existing rules are
+preserved only for endpoints whose current listener still has exclusive,
+complete VMess evidence. VLESS, mixed, or unattributed listeners cannot keep a
+VMess rule alive. The Agent checks the
 previously guarded TCP/UDP ports against that live listener inventory before
 removing the uniquely owned nftables table, then reads the table list back and
 confirms that the table is absent. It never flushes unrelated firewall rules.
 
-If a previously guarded port still has a listener, the Agent keeps the rule and
-reports “VMess 端口恢复待核实” with the affected port. This avoids exposing a
-VMess process that may still be serving from an already-loaded configuration.
+If a previously guarded port still has an exclusively confirmed VMess listener,
+the Agent keeps the rule and reports “VMess 端口恢复待核实” with the affected
+port. A VLESS, mixed, or unattributed listener does not satisfy this condition
+and will not remain blocked by a VMess rule.
 If the scan is incomplete, the container namespace is unavailable/shared, or
 rule deletion cannot be read back, the Agent does not claim recovery; it
 preserves protection where possible and raises an operator-side verification
@@ -73,8 +78,8 @@ This is a port-level network rule, not a process-level filter. If a different
 service later reuses that exact transport/port before the next complete scan,
 that service would also be blocked on the port. The Agent refuses ambiguous
 initial matches and reconciles the rule on subsequent complete collections.
-If collection is incomplete, it reports that protection is unverified and
-preserves the last confirmed rule rather than claiming it was removed.
+If collection is incomplete, it reports that protection is unverified; it never
+describes an ambiguous listener as confirmed VMess.
 
 No rule is installed when VMess is loopback-only, when the configuration or
 listener owner cannot be verified, or when the container shares the host or

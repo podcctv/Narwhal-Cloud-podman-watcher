@@ -414,7 +414,8 @@ class SecurityTelemetryTests(unittest.TestCase):
              mock.patch.object(agent.os, "listdir", return_value=["3", "4", "5"]), \
              mock.patch.object(agent.os, "readlink", side_effect=readlink):
             result = agent._collect_host_proc_socket_details(
-                123, [{"host_pid": 123, "pid": 1, "process": "worker"}], [], 20
+                123, [{"host_pid": 123, "pid": 1, "process": "worker"}], [], 20,
+                process_scope_complete=True,
             )
 
         self.assertEqual(
@@ -428,6 +429,63 @@ class SecurityTelemetryTests(unittest.TestCase):
             "process": "worker", "pid": 1, "proto": "tcp", "local": "10.0.0.2:443",
             "port": 443, "source": "host_proc_fd_inode",
         }])
+        self.assertTrue(result["listener_inventory_complete"])
+
+    def test_host_proc_listener_inventory_requires_exact_process_generation(self):
+        configured = [{
+            "pid": 120, "process": "xray", "protocol": "vmess", "port": 443,
+            "transports": ["tcp"],
+        }]
+        states = [{
+            "pid": 120, "process": "xray", "state": "complete", "start_ticks": "900",
+        }]
+        host_process = {"host_pid": 3200, "pid": 120, "process": "xray", "start_ticks": "900"}
+        listener = {
+            "process": "xray", "pid": 120, "proto": "tcp", "local": "0.0.0.0:443",
+            "port": 443, "source": "host_proc_fd_inode",
+        }
+        with mock.patch.object(
+            agent, "_collect_host_proc_process_snapshot",
+            return_value=({"scope_complete": True}, [host_process]),
+        ), mock.patch.object(
+            agent, "_collect_host_proc_socket_details",
+            return_value={"listener_inventory_complete": True, "service_listeners": [listener]},
+        ) as socket_scan:
+            result = agent._collect_vmess_host_proc_listener_inventory(999, configured, states, [443])
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["listeners"], [listener])
+        socket_scan.assert_called_once()
+        self.assertTrue(socket_scan.call_args.kwargs["process_scope_complete"])
+
+        stale_process = {**host_process, "start_ticks": "901"}
+        with mock.patch.object(
+            agent, "_collect_host_proc_process_snapshot",
+            return_value=({"scope_complete": True}, [stale_process]),
+        ), mock.patch.object(agent, "_collect_host_proc_socket_details") as socket_scan:
+            result = agent._collect_vmess_host_proc_listener_inventory(999, configured, states, [443])
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["reason"], "candidate_process_owner_unverified")
+        socket_scan.assert_not_called()
+
+    def test_complete_proc_inventory_confirms_only_vmess_process_in_service_rows(self):
+        inventory, state = agent._build_service_inventory(
+            {"connection_metrics": {"valid": True}, "listening_ports": [], "udp_listening_ports": []},
+            {
+                "communication_detail_available": True,
+                "communication_snapshot_truncated": False,
+                "service_listeners": [{
+                    "process": "xray", "pid": 120, "proto": "tcp",
+                    "local": "0.0.0.0:443", "port": 443, "source": "host_proc_fd_inode",
+                }],
+            },
+            [{"pid": 120, "process": "xray", "protocol": "vmess", "port": 443,
+              "transports": ["tcp"]}],
+            [{"pid": 120, "process": "xray", "state": "complete", "start_ticks": "900"}],
+        )
+        self.assertEqual(state, "complete")
+        vmess = next(item for item in inventory if item["proto"] == "tcp" and item["port"] == 443)
+        self.assertEqual(vmess["application_protocols"], ["vmess"])
+        self.assertTrue(vmess["vmess_process_scan_complete"])
 
     def test_conntrack_restores_original_sources_hidden_by_incus_proxy(self):
         entries = []
@@ -1410,7 +1468,7 @@ class SecurityTelemetryTests(unittest.TestCase):
     def test_config_confirmed_xray_socks_keeps_safe_process_target(self):
         process_output = "12 S xray /usr/bin/xray run -config /etc/xray/config.json\n"
         config = json.dumps({'inbounds':[{'protocol':'socks','port':1080,'settings':{'auth':'noauth'}}]})
-        with mock.patch.object(agent, "run", side_effect=[process_output, '', '12345', config, 'fixture-generation', ""]):
+        with mock.patch.object(agent, "run", side_effect=[process_output, '', '12345', config, '12345', 'fixture-generation', ""]):
             result = agent.collect_panel_pairing_indicators(
                 "proxy", "incus", "default", "xray:latest"
             )
@@ -1431,7 +1489,7 @@ class SecurityTelemetryTests(unittest.TestCase):
     def test_config_confirmed_sockd_uses_config_auth_for_safe_process_target(self):
         process_output = "14 S sockd /usr/sbin/sockd -f /etc/sockd.conf\n"
         markers = "@@SOCKS:/etc/sockd.conf\n@@NOAUTH:/etc/sockd.conf\n"
-        with mock.patch.object(agent, "run", side_effect=[process_output, markers, '12345', 'socksmethod: none', 'fixture-generation', ""]):
+        with mock.patch.object(agent, "run", side_effect=[process_output, markers, '12345', 'socksmethod: none', '12345', 'fixture-generation', ""]):
             result = agent.collect_panel_pairing_indicators(
                 "proxy", "incus", "default", "debian:latest"
             )

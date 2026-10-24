@@ -1839,9 +1839,13 @@ def _build_service_inventory(
     socket_security: Dict[str, object],
     communication: Dict[str, object],
     configured_protocols: List[Dict[str, object]] | None = None,
+    process_scan_states: List[Dict[str, object]] | None = None,
+    authoritative_listener_ports: set[int] | None = None,
 ) -> Tuple[List[Dict[str, object]], str]:
     """Combine kernel listener evidence with process owners and safe config labels."""
     configured_protocols = configured_protocols if isinstance(configured_protocols, list) else []
+    process_scan_states = process_scan_states if isinstance(process_scan_states, list) else []
+    authoritative_listener_ports = authoritative_listener_ports if isinstance(authoritative_listener_ports, set) else set()
     owned = communication.get("service_listeners")
     owned = owned if isinstance(owned, list) else []
     inventory: List[Dict[str, object]] = []
@@ -1856,6 +1860,23 @@ def _build_service_inventory(
         except (TypeError, ValueError, OverflowError):
             return 0
         return port if 0 < port < 65536 else 0
+
+    def valid_pid(value: object) -> int:
+        if isinstance(value, bool):
+            return 0
+        try:
+            pid = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return pid if 1 < pid <= 4194304 else 0
+
+    complete_protocol_processes = {
+        (valid_pid(item.get("pid")), str(item.get("process") or "").lower())
+        for item in process_scan_states
+        if isinstance(item, dict) and str(item.get("state") or "").lower() == "complete"
+        and str(item.get("start_ticks") or "").isdigit()
+        and valid_pid(item.get("pid")) > 0 and str(item.get("process") or "").strip()
+    }
 
     transports_by_owner_port: Dict[Tuple[int, str, int], set[str]] = {}
     for item in owned[:100]:
@@ -1925,6 +1946,8 @@ def _build_service_inventory(
         if matches:
             row["application_protocols"] = sorted(matches)
             row["application_protocol_evidence"] = "config_matches_live_pid_and_port"
+            if matches == {"vmess"} and (pid, process.lower()) in complete_protocol_processes:
+                row["vmess_process_scan_complete"] = True
         inventory.append(row)
         covered.add((proto, port))
 
@@ -1940,6 +1963,10 @@ def _build_service_inventory(
     for proto, ports in (("tcp", tcp_ports), ("udp", udp_ports)):
         for port in sorted(ports):
             if (proto, port) in covered:
+                continue
+            if port in authoritative_listener_ports:
+                # A complete targeted /proc listener scan supersedes the
+                # earlier aggregate kernel snapshot for this candidate port.
                 continue
             addresses = sorted(tcp_addresses.get(port, set())) if proto == "tcp" else []
             if not addresses:
@@ -5087,6 +5114,7 @@ def _collect_socks_config_evidence(
         (int(proc['pid']), str(proc['process'])): 'partial'
         for proc in protocol_processes
     }
+    protocol_process_start_ticks: Dict[Tuple[int, str], str] = {}
     if len(configured_processes) >= 8:
         protocol_complete = False
     for proc in configured_processes:
@@ -5102,8 +5130,8 @@ def _collect_socks_config_evidence(
         process_protocol_complete = is_protocol_process and bool(proc['paths']) and not proc['additional_configs']
         if is_protocol_process and not process_protocol_complete:
             protocol_complete = False
-        start_ticks = run(_runtime_exec_cmd(runtime, name,
-            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if enabled else ''
+        start_ticks_before = run(_runtime_exec_cmd(runtime, name,
+            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if (enabled or is_protocol_process) else ''
         for path in proc['paths']:
             if time.monotonic() >= scan_deadline:
                 documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
@@ -5149,6 +5177,18 @@ def _collect_socks_config_evidence(
                 documents.append(document)
             if enabled and document['endpoints']:
                 files.add(path)
+        start_ticks_after = run(_runtime_exec_cmd(runtime, name,
+            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if (enabled or is_protocol_process) else ''
+        start_ticks = (
+            start_ticks_before
+            if start_ticks_before.isdigit() and start_ticks_after == start_ticks_before
+            else ''
+        )
+        if is_protocol_process:
+            protocol_process_start_ticks[(int(proc['pid']), str(proc['process']))] = start_ticks
+            if not start_ticks:
+                process_protocol_complete = False
+                protocol_complete = False
         cli = socks_detector.gost_cli(process_output, proc['pid']) if enabled and proc['process'] == 'gost' else None
         if cli:
             # -L is inbound, -F chains are deliberately excluded. A config plus CLI
@@ -5192,7 +5232,8 @@ def _collect_socks_config_evidence(
             "json_processes": json_processes,
             "configured_inbound_protocols": configured_inbound_protocols[:100],
             "protocol_process_scan_states": [
-                {"pid": pid, "process": process, "state": state}
+                {"pid": pid, "process": process, "state": state,
+                 "start_ticks": protocol_process_start_ticks.get((pid, process), "")}
                 for (pid, process), state in sorted(protocol_process_scan_states.items())
             ],
             "review_processes": review_processes,
@@ -6473,6 +6514,104 @@ def collect_container(
         if isinstance(socket_security.get("inbound_public_flows"), list)
         else [],
     )
+    configured_protocols = socks_proxy.get("configured_inbound_protocols", [])
+    configured_protocols = configured_protocols if isinstance(configured_protocols, list) else []
+    process_scan_states = socks_proxy.get("protocol_process_scan_states", [])
+    process_scan_states = process_scan_states if isinstance(process_scan_states, list) else []
+    service_inventory, service_inventory_state = _build_service_inventory(
+        socket_security,
+        communication,
+        configured_protocols,
+        process_scan_states,
+    )
+    vmess_plan_inventory = service_inventory
+    regular_listener_inventory_complete = (
+        communication.get("communication_detail_available") is True
+        and communication.get("communication_snapshot_truncated") is not True
+        and len(communication.get("service_listeners") or []) < 100
+        and len(service_inventory) < 100
+    )
+    vmess_candidates = [
+        item for item in configured_protocols[:100]
+        if isinstance(item, dict) and str(item.get("protocol") or "").lower() == "vmess"
+    ]
+    vmess_listener_source = str(communication.get("communication_source") or "container_ss")
+    vmess_target_inventory_complete = regular_listener_inventory_complete
+    vmess_candidate_ports = {
+        int(item.get("port") or 0) for item in vmess_candidates
+        if str(item.get("port") or "").isdigit() and 0 < int(item.get("port") or 0) <= 65535
+    }
+    vmess_candidate_listener_missing = False
+    for candidate in vmess_candidates:
+        try:
+            candidate_pid = int(candidate.get("pid") or 0)
+            candidate_port = int(candidate.get("port") or 0)
+        except (TypeError, ValueError, OverflowError):
+            vmess_candidate_listener_missing = True
+            break
+        candidate_process = str(candidate.get("process") or "").lower()
+        candidate_transports = candidate.get("transports")
+        for listener in service_inventory:
+            protocols = listener.get("application_protocols")
+            if (
+                isinstance(protocols, list) and {str(value).lower() for value in protocols} == {"vmess"}
+                and listener.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
+                and int(listener.get("pid") or 0) == candidate_pid
+                and str(listener.get("process") or "").lower() == candidate_process
+                and int(listener.get("port") or 0) == candidate_port
+                and (not isinstance(candidate_transports, list) or str(listener.get("proto") or "").lower() in candidate_transports)
+            ):
+                break
+        else:
+            vmess_candidate_listener_missing = True
+            break
+
+    vmess_listener_inventory_reason = ""
+    if vmess_candidates and (not regular_listener_inventory_complete or vmess_candidate_listener_missing):
+        proc_listener_snapshot = _collect_vmess_host_proc_listener_inventory(
+            pid,
+            configured_protocols,
+            process_scan_states,
+            sorted({
+                int(port) for port in list(socket_security.get("listening_ports") or [])
+                + list(socket_security.get("udp_listening_ports") or [])
+                if str(port).isdigit() and 0 < int(port) <= 65535
+            }),
+        )
+        if proc_listener_snapshot.get("complete") is True:
+            fallback_listeners = proc_listener_snapshot.get("listeners", [])
+            fallback_listeners = fallback_listeners if isinstance(fallback_listeners, list) else []
+            communication["service_listeners"] = [
+                item for item in (communication.get("service_listeners") or [])
+                if isinstance(item, dict) and int(item.get("port") or 0) not in vmess_candidate_ports
+            ] + fallback_listeners
+            communication["vmess_listener_inventory_source"] = "host_proc_fd_inode"
+            service_inventory, service_inventory_state = _build_service_inventory(
+                socket_security,
+                communication,
+                configured_protocols,
+                process_scan_states,
+                authoritative_listener_ports=vmess_candidate_ports,
+            )
+            scoped_socket_security = dict(socket_security)
+            scoped_socket_security["listening_ports"] = []
+            scoped_socket_security["udp_listening_ports"] = []
+            scoped_communication = dict(communication)
+            scoped_communication["communication_detail_available"] = True
+            scoped_communication["communication_snapshot_truncated"] = False
+            scoped_communication["service_listeners"] = fallback_listeners
+            vmess_plan_inventory, _ = _build_service_inventory(
+                scoped_socket_security,
+                scoped_communication,
+                configured_protocols,
+                process_scan_states,
+                authoritative_listener_ports=vmess_candidate_ports,
+            )
+            vmess_listener_source = "host_proc_fd_inode"
+            vmess_target_inventory_complete = len(vmess_plan_inventory) < 100
+        else:
+            vmess_listener_inventory_reason = str(proc_listener_snapshot.get("reason") or "host_listener_inventory_incomplete")
+
     owned_listeners = communication.get('service_listeners', [])
     for panel in panel_pairing.get('standalone_panels', []):
         panel['service_listeners'] = [l for l in owned_listeners if l.get('pid') == panel.get('pid')][:20]
@@ -6484,19 +6623,9 @@ def collect_container(
                                   runtime, name, project, pid,
                                   scope_complete=communication.get('communication_detail_available') is True
                                       and not communication.get('communication_snapshot_truncated'))
-    service_inventory, service_inventory_state = _build_service_inventory(
-        socket_security,
-        communication,
-        socks_proxy.get("configured_inbound_protocols", []),
-    )
     auto_block_vmess = os.getenv("SECURITY_AUTO_BLOCK_VMESS", "true").strip().lower() not in ("0", "false", "no", "off")
     host_or_shared_network = network_mode == "host" or network_mode.startswith(("container:", "ns:"))
-    vmess_listener_inventory_complete = (
-        communication.get("communication_detail_available") is True
-        and communication.get("communication_snapshot_truncated") is not True
-        and len(communication.get("service_listeners") or []) < 100
-        and len(service_inventory) < 100
-    )
+    vmess_listener_inventory_complete = vmess_target_inventory_complete
     vmess_scan_state = (
         "complete"
         if socks_proxy.get("protocol_inventory_state") == "complete"
@@ -6505,13 +6634,15 @@ def collect_container(
     )
     vmess_plan = vmess_guard.plan(
         runtime_name,
-        socks_proxy.get("configured_inbound_protocols", []),
-        service_inventory,
+        configured_protocols,
+        vmess_plan_inventory,
         network_exposure,
         vmess_scan_state,
         process_scan_states=socks_proxy.get("protocol_process_scan_states"),
         listener_inventory_complete=vmess_listener_inventory_complete,
     )
+    vmess_plan["listener_inventory_source"] = vmess_listener_source
+    vmess_plan["listener_inventory_reason"] = vmess_listener_inventory_reason
     vmess_status = dict(vmess_plan)
     should_reconcile_vmess = (
         runtime_name in {"incus", "podman"}
@@ -6531,7 +6662,7 @@ def collect_container(
             namespace_epoch,
             desired,
             release_if_absent=auto_block_vmess and vmess_plan.get("release_eligible") is True,
-            live_listeners=service_inventory,
+            live_listeners=vmess_plan_inventory,
             preserve_existing=auto_block_vmess and vmess_plan.get("detected") is True
                 and bool(vmess_plan.get("pending_endpoints")),
         )
@@ -6630,6 +6761,9 @@ def collect_container(
             "service_listeners": service_inventory,
             "service_inventory_state": service_inventory_state,
             "vmess_guard": vmess_status,
+            "vmess_listener_inventory_source": vmess_listener_source,
+            "vmess_listener_inventory_reason": vmess_listener_inventory_reason,
+            "vmess_listener_inventory_complete": vmess_listener_inventory_complete,
         }
     )
     if cpu_percent <= 0 and float(top_cpu_process.get("cpu_percent") or 0) > 0:
@@ -6742,14 +6876,21 @@ def _collect_host_proc_process_snapshot(
     scan_limit = max(1000, min(50000, int(_env_float("DEEP_HOST_PROC_SCAN_MAX", 20000))))
     parent_map: Dict[int, int] = {}
     status_map: Dict[int, str] = {}
+    proc_scan_complete = True
     try:
-        proc_ids = sorted(int(value) for value in os.listdir("/proc") if value.isdigit())[:scan_limit]
+        all_proc_ids = sorted(int(value) for value in os.listdir("/proc") if value.isdigit())
     except OSError:
-        proc_ids = []
+        all_proc_ids = []
+        proc_scan_complete = False
+    if len(all_proc_ids) > scan_limit:
+        proc_scan_complete = False
+    proc_ids = all_proc_ids[:scan_limit]
+    status_scan_complete = True
     for host_pid in proc_ids:
         status = _read_host_proc_text(f"/proc/{host_pid}/status")
         parent_match = re.search(r"(?m)^PPid:\s+(\d+)", status)
         if not parent_match:
+            status_scan_complete = False
             continue
         parent_map[host_pid] = int(parent_match.group(1))
         status_map[host_pid] = status
@@ -6762,6 +6903,8 @@ def _collect_host_proc_process_snapshot(
             if host_pid not in descendants and parent_pid in descendants:
                 descendants.add(host_pid)
                 changed = True
+    if len(descendants) > scan_limit:
+        proc_scan_complete = False
     capture_limit = max(20, min(200, int(process_limit)))
     try:
         uptime = float(_read_host_proc_text("/proc/uptime", 128).split()[0])
@@ -6787,6 +6930,7 @@ def _collect_host_proc_process_snapshot(
         stat = _read_host_proc_text(f"/proc/{host_pid}/stat", 4096)
         close_paren = stat.rfind(")")
         stat_fields = stat[close_paren + 2 :].split() if close_paren >= 0 else []
+        start_ticks = stat_fields[19] if len(stat_fields) > 19 and stat_fields[19].isdigit() else ""
         if len(stat_fields) > 19 and uptime > 0 and clock_ticks > 0:
             try:
                 cpu_seconds = (float(stat_fields[11]) + float(stat_fields[12])) / clock_ticks
@@ -6805,6 +6949,7 @@ def _collect_host_proc_process_snapshot(
                 "rss_bytes": int(rss_match.group(1)) * 1024 if rss_match else 0,
                 "process": comm,
                 "command": _redact_process_command(command or comm),
+                "start_ticks": start_ticks,
             }
         )
     namespace_by_host = {
@@ -6813,13 +6958,14 @@ def _collect_host_proc_process_snapshot(
     for item in host_processes:
         item["ppid"] = namespace_by_host.get(int(item.get("ppid") or 0), 0)
     host_processes.sort(key=lambda item: float(item.get("cpu_percent") or 0), reverse=True)
-    public_items = [{key: value for key, value in item.items() if key != "host_pid"} for item in host_processes]
+    public_items = [{key: value for key, value in item.items() if key not in {"host_pid", "start_ticks"}} for item in host_processes]
     return (
         {
             "available": bool(host_processes),
             "source": "host_proc",
             "captured": min(len(public_items), capture_limit),
             "truncated": len(public_items) > capture_limit,
+            "scope_complete": proc_scan_complete and status_scan_complete,
             "items": public_items[:capture_limit],
         },
         host_processes,
@@ -6831,34 +6977,46 @@ def _collect_host_proc_socket_details(
     host_processes: List[Dict[str, object]],
     listening_ports: List[int],
     socket_limit: int,
+    *,
+    process_scope_complete: bool = False,
 ) -> Dict[str, object]:
     """Attribute bounded /proc socket tables to container processes without requiring ss."""
     if init_pid <= 1 or not host_processes:
         return {"communication_detail_available": False, "communication_sockets": [], "communication_processes": []}
-    inode_owners: Dict[str, Tuple[int, str]] = {}
+    inode_owners: Dict[str, set[Tuple[int, str]]] = {}
     fd_budget = max(1000, min(20000, int(_env_float("DEEP_HOST_PROC_FD_MAX", 10000))))
     visited_fds = 0
+    fd_inventory_complete = bool(process_scope_complete)
     for process in host_processes:
         host_pid = int(process.get("host_pid") or 0)
-        try:
-            fd_names = os.listdir(f"/proc/{host_pid}/fd")[:1024]
-        except OSError:
+        if host_pid <= 1:
+            fd_inventory_complete = False
             continue
+        try:
+            all_fd_names = os.listdir(f"/proc/{host_pid}/fd")
+        except OSError:
+            fd_inventory_complete = False
+            continue
+        if len(all_fd_names) > 1024:
+            fd_inventory_complete = False
+        fd_names = all_fd_names[:1024]
         for fd_name in fd_names:
             if visited_fds >= fd_budget:
+                fd_inventory_complete = False
                 break
             visited_fds += 1
             try:
                 target = os.readlink(f"/proc/{host_pid}/fd/{fd_name}")
             except OSError:
+                fd_inventory_complete = False
                 continue
             match = re.fullmatch(r"socket:\[(\d+)\]", target)
             if match:
-                inode_owners.setdefault(
-                    match.group(1),
-                    (int(process.get("pid") or 0), str(process.get("process") or "unknown")[:120]),
+                inode_owners.setdefault(match.group(1), set()).add(
+                    (int(process.get("pid") or 0), str(process.get("process") or "unknown")[:120])
                 )
         if visited_fds >= fd_budget:
+            fd_inventory_complete = False
             break
 
     state_names = {
@@ -6869,15 +7027,20 @@ def _collect_host_proc_socket_details(
     tcp_listening = {int(port) for port in listening_ports if int(port) > 0}
     udp_listening: set[int] = set()
     socket_tables: Dict[str, str] = {}
+    socket_tables_complete = True
+    socket_tables_parse_complete = True
     table_specs = (
         ("tcp", "tcp", False), ("tcp6", "tcp", True), ("udp", "udp", False), ("udp6", "udp", True)
     )
     for filename, proto, _is_v6 in table_specs:
         table = _read_host_proc_text(f"/proc/{init_pid}/net/{filename}", 2_000_000)
         socket_tables[filename] = table
+        if not table or len(table) >= 2_000_000:
+            socket_tables_complete = False
         for line in table.splitlines()[1:]:
             parts = line.split()
             if len(parts) < 4 or ":" not in parts[1] or ":" not in parts[2]:
+                socket_tables_parse_complete = False
                 continue
             _, local_port_hex = parts[1].rsplit(":", 1)
             observed_port = _parse_port(local_port_hex)
@@ -6892,13 +7055,13 @@ def _collect_host_proc_socket_details(
     listener_keys = set()
     snapshot_count = 0
     snapshot_cap = max(500, min(2000, socket_limit * 2))
+    listener_inventory_complete = fd_inventory_complete and socket_tables_complete and socket_tables_parse_complete
     for filename, proto, is_v6 in table_specs:
         table = socket_tables[filename]
         for line in table.splitlines()[1:]:
-            if snapshot_count >= snapshot_cap:
-                break
             parts = line.split()
             if len(parts) < 10 or ":" not in parts[1] or ":" not in parts[2]:
+                listener_inventory_complete = False
                 continue
             snapshot_count += 1
             local_ip_hex, local_port_hex = parts[1].rsplit(":", 1)
@@ -6910,18 +7073,25 @@ def _collect_host_proc_socket_details(
             state = parts[3].upper()
             is_listener = (proto == "tcp" and state == "0A") or (proto == "udp" and remote_port == 0)
             if is_listener and local_port > 0:
-                owner_pid, owner_name = inode_owners.get(parts[9], (0, "unknown"))
-                listener_key = (proto, local_ip, local_port, owner_pid)
-                if owner_pid > 0 and listener_key not in listener_keys and len(service_listeners) < 100:
+                owners = inode_owners.get(parts[9], set())
+                if not owners:
+                    owners = {(0, "")}
+                local_endpoint = f"[{local_ip}]:{local_port}" if ":" in local_ip else f"{local_ip}:{local_port}"
+                for owner_pid, owner_name in sorted(owners):
+                    listener_key = (proto, local_ip, local_port, owner_pid, owner_name)
+                    if listener_key in listener_keys:
+                        continue
+                    if len(service_listeners) >= 100:
+                        listener_inventory_complete = False
+                        continue
                     listener_keys.add(listener_key)
-                    local_endpoint = f"[{local_ip}]:{local_port}" if ":" in local_ip else f"{local_ip}:{local_port}"
                     service_listeners.append({
                         "process": owner_name,
                         "pid": owner_pid,
                         "proto": proto,
                         "local": local_endpoint,
                         "port": local_port,
-                        "source": "host_proc_fd_inode",
+                        "source": "host_proc_fd_inode" if owner_pid > 0 else "host_proc_unattributed",
                     })
             if proto == "tcp" and state not in ("01", "02", "03"):
                 continue
@@ -6929,7 +7099,8 @@ def _collect_host_proc_socket_details(
                 continue
             if not _is_trackable_ip(remote_ip):
                 continue
-            owner_pid, owner_name = inode_owners.get(parts[9], (0, "unknown"))
+            owners = inode_owners.get(parts[9], set())
+            owner_pid, owner_name = sorted(owners)[0] if owners else (0, "unknown")
             state_name = state_names.get(state, state.lower())
             direction, origin, direction_evidence = _classify_socket_origin(
                 proto, state_name, local_port, tcp_listening if proto == "tcp" else udp_listening
@@ -6954,8 +7125,6 @@ def _collect_host_proc_socket_details(
                         "process_attribution": "attributed" if owner_pid > 0 else "unavailable",
                     }
                 )
-        if snapshot_count >= snapshot_cap:
-            break
     totals: Dict[Tuple[int, str], Dict[str, object]] = {}
     for item in sockets:
         key = (int(item.get("pid") or 0), str(item.get("process") or "unknown"))
@@ -6985,8 +7154,91 @@ def _collect_host_proc_socket_details(
         "communication_processes": process_totals[:50],
         "communication_sockets": sockets,
         "service_listeners": service_listeners,
+        "listener_inventory_complete": listener_inventory_complete,
         "communication_owner_attributed_count": _communication_socket_owner_count({"communication_sockets": sockets}),
         "process_attribution_available": _communication_socket_owner_count({"communication_sockets": sockets}) > 0,
+    }
+
+
+def _collect_vmess_host_proc_listener_inventory(
+    init_pid: int,
+    configured_protocols: List[Dict[str, object]],
+    process_scan_states: List[Dict[str, object]],
+    listening_ports: List[int],
+) -> Dict[str, object]:
+    """Use host /proc inode ownership to complete candidate VMess listener evidence."""
+    candidates = [
+        item for item in configured_protocols[:100]
+        if isinstance(item, dict) and str(item.get("protocol") or "").lower() == "vmess"
+    ]
+    if not candidates or len(candidates) > vmess_guard.MAX_ENDPOINTS:
+        return {"complete": False, "reason": "candidate_limit_or_absence", "listeners": []}
+
+    states: Dict[Tuple[int, str], Dict[str, object]] = {}
+    for item in process_scan_states if isinstance(process_scan_states, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            pid = int(item.get("pid") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        process = str(item.get("process") or "").lower()
+        if 1 < pid <= 4194304 and process in vmess_guard.SUPPORTED_ENGINES:
+            states[(pid, process)] = item
+
+    expected_processes: Dict[Tuple[int, str], str] = {}
+    candidate_ports = set()
+    for candidate in candidates:
+        try:
+            pid = int(candidate.get("pid") or 0)
+            port = int(candidate.get("port") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return {"complete": False, "reason": "candidate_identity_invalid", "listeners": []}
+        process = str(candidate.get("process") or "").lower()
+        state = states.get((pid, process))
+        start_ticks = str(state.get("start_ticks") or "") if state else ""
+        if (
+            pid <= 1 or pid > 4194304 or not 0 < port <= 65535
+            or process not in vmess_guard.SUPPORTED_ENGINES
+            or not state or str(state.get("state") or "").lower() != "complete"
+            or not start_ticks.isdigit()
+        ):
+            return {"complete": False, "reason": "candidate_process_scan_incomplete", "listeners": []}
+        expected_processes[(pid, process)] = start_ticks
+        candidate_ports.add(port)
+
+    process_snapshot, host_processes = _collect_host_proc_process_snapshot(init_pid, 200)
+    if process_snapshot.get("scope_complete") is not True or not host_processes:
+        return {"complete": False, "reason": "host_process_scope_incomplete", "listeners": []}
+    for (pid, process), start_ticks in expected_processes.items():
+        matches = [
+            item for item in host_processes
+            if int(item.get("pid") or 0) == pid
+            and str(item.get("process") or "").lower() == process
+            and str(item.get("start_ticks") or "") == start_ticks
+        ]
+        if len(matches) != 1:
+            return {"complete": False, "reason": "candidate_process_owner_unverified", "listeners": []}
+
+    host_communication = _collect_host_proc_socket_details(
+        init_pid,
+        host_processes,
+        listening_ports,
+        500,
+        process_scope_complete=process_snapshot.get("scope_complete") is True,
+    )
+    if host_communication.get("listener_inventory_complete") is not True:
+        return {"complete": False, "reason": "host_listener_inventory_incomplete", "listeners": []}
+    listeners = [
+        item for item in host_communication.get("service_listeners", [])
+        if isinstance(item, dict) and int(item.get("port") or 0) in candidate_ports
+    ]
+    return {
+        "complete": True,
+        "reason": "",
+        "source": "host_proc_fd_inode",
+        "candidate_ports": sorted(candidate_ports),
+        "listeners": listeners,
     }
 
 
@@ -7042,9 +7294,10 @@ def collect_container_deep_sample(
     primary_owner_count = _communication_socket_owner_count(communication)
     if not communication.get("communication_detail_available") or (isinstance(socket_rows, list) and socket_rows and primary_owner_count < len(socket_rows)):
         if not host_processes:
-            _, host_processes = _collect_host_proc_process_snapshot(pid, process_limit)
+            process_snapshot, host_processes = _collect_host_proc_process_snapshot(pid, process_limit)
         host_communication = _collect_host_proc_socket_details(
-            pid, host_processes, listening_ports, socket_limit
+            pid, host_processes, listening_ports, socket_limit,
+            process_scope_complete=process_snapshot.get("scope_complete") is True,
         )
         if host_communication.get("communication_detail_available"):
             if communication.get("communication_detail_available") and isinstance(socket_rows, list) and socket_rows:

@@ -48,6 +48,13 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(result["blocked_endpoints"], [])
         self.assertTrue(result["release_eligible"])
 
+    def test_shared_vmess_and_vless_config_is_never_blocked(self):
+        configured = [self.config[0], {**self.config[0], "protocol": "vless"}]
+        result = vmess_guard.plan("incus", configured, [self.listener], [], "complete")
+        self.assertEqual(result["blocked_endpoints"], [])
+        self.assertEqual(result["state"], "unverified")
+        self.assertEqual(result["pending_endpoints"][0]["reason"], "shared_configured_port")
+
     def test_truncated_listener_inventory_never_becomes_a_block_target(self):
         result = vmess_guard.plan("podman", self.config, [self.listener], [], "partial")
         self.assertEqual(result["state"], "unverified")
@@ -58,8 +65,8 @@ class VmessPlanTests(unittest.TestCase):
         result = vmess_guard.plan(
             "incus", self.config, [self.listener], [], "partial",
             process_scan_states=[
-                {"pid": 120, "process": "xray", "state": "complete"},
-                {"pid": 121, "process": "v2ray", "state": "partial"},
+                {"pid": 120, "process": "xray", "state": "complete", "start_ticks": "900"},
+                {"pid": 121, "process": "v2ray", "state": "partial", "start_ticks": "901"},
             ],
             listener_inventory_complete=True,
         )
@@ -69,11 +76,21 @@ class VmessPlanTests(unittest.TestCase):
     def test_partial_config_for_same_vmess_process_prevents_block(self):
         result = vmess_guard.plan(
             "incus", self.config, [self.listener], [], "partial",
-            process_scan_states=[{"pid": 120, "process": "xray", "state": "partial"}],
+            process_scan_states=[{"pid": 120, "process": "xray", "state": "partial", "start_ticks": "900"}],
             listener_inventory_complete=True,
         )
         self.assertEqual(result["state"], "unverified")
         self.assertEqual(result["blocked_endpoints"], [])
+        self.assertEqual(result["pending_endpoints"][0]["reason"], "configuration_scan_incomplete")
+
+    def test_scoped_complete_state_without_process_generation_is_not_a_block_basis(self):
+        result = vmess_guard.plan(
+            "incus", self.config, [self.listener], [], "complete",
+            process_scan_states=[{"pid": 120, "process": "xray", "state": "complete"}],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(result["blocked_endpoints"], [])
+        self.assertEqual(result["state"], "unverified")
         self.assertEqual(result["pending_endpoints"][0]["reason"], "configuration_scan_incomplete")
 
     def test_incomplete_listener_inventory_prevents_per_process_block(self):
@@ -153,14 +170,14 @@ class VmessPlanTests(unittest.TestCase):
             "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
             "121 S gost /usr/bin/gost -C /etc/gost/config.json\n"
         )
-        with mock.patch.object(agent, "run", return_value='{"inbounds":[]}'):
+        with mock.patch.object(agent, "run", side_effect=["120", '{"inbounds":[]}', "120"]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
             )
         self.assertEqual(result["protocol_inventory_state"], "complete")
         self.assertEqual(result["configured_inbound_protocols"], [])
         self.assertEqual(result["protocol_process_scan_states"], [
-            {"pid": 120, "process": "xray", "state": "complete"},
+            {"pid": 120, "process": "xray", "state": "complete", "start_ticks": "120"},
         ])
 
     def test_scan_states_are_scoped_to_each_supported_engine_process(self):
@@ -169,18 +186,37 @@ class VmessPlanTests(unittest.TestCase):
             "121 S v2ray /usr/bin/v2ray -config /etc/v2ray/config.json\n"
         )
         with mock.patch.object(agent, "run", side_effect=[
+            "120",
             '{"inbounds":[{"protocol":"vmess","port":443,"streamSettings":{"network":"tcp"}}]}',
+            "120",
+            "121",
             '{invalid',
+            "121",
         ]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
             )
         self.assertEqual(result["protocol_inventory_state"], "partial")
         self.assertEqual(result["protocol_process_scan_states"], [
-            {"pid": 120, "process": "xray", "state": "complete"},
-            {"pid": 121, "process": "v2ray", "state": "partial"},
+            {"pid": 120, "process": "xray", "state": "complete", "start_ticks": "120"},
+            {"pid": 121, "process": "v2ray", "state": "partial", "start_ticks": "121"},
         ])
         self.assertEqual(result["configured_inbound_protocols"][0]["port"], 443)
+
+    def test_engine_restart_during_config_scan_invalidates_generation_evidence(self):
+        process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
+        with mock.patch.object(agent, "run", side_effect=[
+            "120",
+            '{"inbounds":[{"protocol":"vmess","port":443}]}',
+            "121",
+        ]):
+            result = agent._collect_socks_config_evidence(
+                "incus", "fixture", "default", False, process_output
+            )
+        self.assertEqual(result["protocol_inventory_state"], "partial")
+        self.assertEqual(result["protocol_process_scan_states"], [
+            {"pid": 120, "process": "xray", "state": "partial", "start_ticks": ""},
+        ])
 
     def test_customer_banner_copy_says_only_port_is_blocked(self):
         title, detail, extra, advice = security_banner.customer_copy({
@@ -217,7 +253,7 @@ class VmessPlanTests(unittest.TestCase):
 
 
 class VmessReconcileTests(unittest.TestCase):
-    def _reconcile_release(self, live_listeners, remaining_table=False):
+    def _reconcile_release(self, live_listeners, remaining_table=False, preserve_existing=False):
         identity = "incus\0default\0fixture\0container-id"
         digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
         marker = f"narwhal-vmess-guard-v1-{digest}"
@@ -243,6 +279,7 @@ class VmessReconcileTests(unittest.TestCase):
             result = vmess_guard.reconcile(
                 120, identity, "epoch", [], runner=runner,
                 release_if_absent=True, live_listeners=live_listeners,
+                preserve_existing=preserve_existing,
             )
         return result, calls
 
@@ -301,11 +338,41 @@ class VmessReconcileTests(unittest.TestCase):
         self.assertEqual(calls[-1], ["-j", "list", "tables"])
 
     def test_live_listener_keeps_old_rule_and_reports_pending_release(self):
-        result, calls = self._reconcile_release([{"proto": "tcp", "port": 443}])
+        result, calls = self._reconcile_release([{
+            "proto": "tcp", "port": 443, "pid": 120, "process": "xray",
+            "application_protocols": ["vmess"],
+            "application_protocol_evidence": "config_matches_live_pid_and_port",
+            "vmess_process_scan_complete": True,
+        }])
         self.assertEqual(result["state"], "release_pending")
         self.assertEqual(result["reason"], "guarded_port_still_has_listener")
         self.assertEqual(result["pending_removal_endpoints"], [{"proto": "tcp", "port": 443}])
         self.assertNotIn("delete", calls)
+
+    def test_vless_listener_on_previously_guarded_port_is_released(self):
+        result, calls = self._reconcile_release([{
+            "proto": "tcp", "port": 443, "pid": 120, "process": "xray",
+            "application_protocols": ["vless"],
+            "application_protocol_evidence": "config_matches_live_pid_and_port",
+        }])
+        self.assertEqual(result["state"], "cleared")
+        self.assertIn(["delete", "table", "inet", calls[0][-1]], calls)
+
+    def test_shared_vmess_vless_endpoint_is_released_not_preserved(self):
+        vmess = {
+            "proto": "tcp", "port": 443, "pid": 120, "process": "xray",
+            "application_protocols": ["vmess"],
+            "application_protocol_evidence": "config_matches_live_pid_and_port",
+            "vmess_process_scan_complete": True,
+        }
+        vless = {
+            **vmess,
+            "application_protocols": ["vless"],
+            "vmess_process_scan_complete": False,
+        }
+        result, calls = self._reconcile_release([vmess, vless], preserve_existing=True)
+        self.assertEqual(result["state"], "cleared")
+        self.assertIn(["delete", "table", "inet", calls[0][-1]], calls)
 
     def test_failed_rule_removal_readback_is_not_reported_as_recovered(self):
         result, _ = self._reconcile_release([], remaining_table=True)
