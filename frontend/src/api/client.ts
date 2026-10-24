@@ -119,6 +119,7 @@ export const api = {
         interval_seconds: Number(item.interval_seconds || 0),
         thresholds: item.thresholds || {},
         sample_alerts: item.sample_alerts || [],
+        host_audit: item.host_audit && typeof item.host_audit === 'object' ? item.host_audit : {},
         access_sources: item.access_sources?.length ? item.access_sources : [{ label: '宿主机日志（旧版采集）', ...access }],
         today_peak_container_conn_count: Number(item.today_peak_container_conn_count || 0),
         host_id: String(item.host_id || ''),

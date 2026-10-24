@@ -230,6 +230,7 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("SYN_RECV", telemetry)
         self.assertIn("http_4xx_rate", client)
         self.assertIn("top_ip_requests_per_second", client)
+        self.assertRegex(client, r"host_audit:\s*item\.host_audit")
 
     def test_telemetry_distinguishes_single_container_and_aggregate_peaks(self):
         now = int(time.time())
