@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -1386,6 +1387,53 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(result["source"], "host_proc")
         self.assertNotIn("host_pid", result["items"][0])
         self.assertIn("host_pid", private_items[0])
+
+    def test_host_proc_snapshot_ignores_pid_that_exited_before_status_read(self):
+        live_status = {
+            100: "Name:\tinit\nState:\tS (sleeping)\nPPid:\t1\nNSpid:\t100 1\nUid:\t0\t0\t0\t0\n",
+            101: "Name:\tworker\nState:\tS (sleeping)\nPPid:\t100\nNSpid:\t101 2\nUid:\t0\t0\t0\t0\n",
+        }
+
+        def read_proc(path, _limit=8192):
+            if path == "/proc/uptime":
+                return "10.0 0.0"
+            if path.endswith("/status"):
+                pid = int(path.split("/")[2])
+                return live_status.get(pid, "")
+            if path.endswith("/comm"):
+                return "worker"
+            if path.endswith("/stat"):
+                return "100 (worker) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1000 0"
+            return ""
+
+        def proc_exists(path):
+            return path in {"/proc/100", "/proc/101"}
+
+        with mock.patch.object(agent, "_read_host_proc_text", side_effect=read_proc), \
+             mock.patch.object(agent.os, "listdir", return_value=["10", "100", "101"]), \
+             mock.patch.object(agent.os.path, "isdir", side_effect=proc_exists), \
+             mock.patch.object(agent.os, "sysconf", return_value=100, create=True), \
+             mock.patch.object(agent, "open", side_effect=lambda *_args, **_kwargs: io.BytesIO(b"worker\0"), create=True):
+            result, host_processes = agent._collect_host_proc_process_snapshot(100, 20)
+
+        self.assertTrue(result["scope_complete"])
+        self.assertEqual([item["host_pid"] for item in host_processes], [100, 101])
+
+    def test_host_proc_snapshot_stays_incomplete_when_live_pid_status_is_unreadable(self):
+        def read_proc(path, _limit=8192):
+            if path.endswith("/status"):
+                pid = int(path.split("/")[2])
+                if pid == 100:
+                    return "Name:\tinit\nState:\tS (sleeping)\nPPid:\t1\nNSpid:\t100 1\nUid:\t0\t0\t0\t0\n"
+                return ""
+            return ""
+
+        with mock.patch.object(agent, "_read_host_proc_text", side_effect=read_proc), \
+             mock.patch.object(agent.os, "listdir", return_value=["100", "101"]), \
+             mock.patch.object(agent.os.path, "isdir", side_effect=lambda path: path in {"/proc/100", "/proc/101"}):
+            result, _host_processes = agent._collect_host_proc_process_snapshot(100, 20)
+
+        self.assertFalse(result["scope_complete"])
 
     def test_socks_process_detection_flags_no_auth_without_exposing_credentials(self):
         no_auth = agent._socks_process_evidence(

@@ -6890,6 +6890,14 @@ def _collect_host_proc_process_snapshot(
         status = _read_host_proc_text(f"/proc/{host_pid}/status")
         parent_match = re.search(r"(?m)^PPid:\s+(\d+)", status)
         if not parent_match:
+            # Processes commonly exit between listing /proc and reading status.
+            # A vanished PID cannot still own a live socket; treating this normal
+            # race as a host-wide inventory failure made unrelated short-lived
+            # processes prevent exact VMess listener attribution. If the proc
+            # entry still exists, keep failing closed (for example, on hidepid or
+            # permission/read errors) because it may be a relevant process.
+            if not os.path.isdir(f"/proc/{host_pid}"):
+                continue
             status_scan_complete = False
             continue
         parent_map[host_pid] = int(parent_match.group(1))
