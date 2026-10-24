@@ -295,10 +295,12 @@ class OperationsTests(unittest.TestCase):
         data["agent_version"]="1.7.0"
         data["operations"]["health"]=[{"source":"network_counters","status":"partial"}]
         self.ingest(self.now,data)
-        self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"dispatched")
+        self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"failed")
+        self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrades WHERE id=1").fetchone()[0],"paused")
         data["operations"]["health"][0]["status"]="healthy"
         self.ingest(self.now+300,data)
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"verified")
+        self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrades WHERE id=1").fetchone()[0],"paused")
 
     def test_signed_report_keeps_usage_but_does_not_notify_quota(self):
         self.conn.execute("INSERT INTO ops_policies VALUES(?,?,?,?)",(self.entity,"general",json.dumps({"monthly_quota_bytes":1000}),self.now))
