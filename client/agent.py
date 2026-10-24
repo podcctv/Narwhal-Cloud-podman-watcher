@@ -9341,6 +9341,17 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
             params = action.get("params", {})
             ok = bool(node_id) and params.get("expected_node_id") == node_id
             message = json.dumps(node_operations.discover_logs(_parse_access_log_line), ensure_ascii=False) if ok else "host action node identity mismatch"
+        elif action_type == "host_security_rescan":
+            params = action.get("params", {})
+            ok = bool(node_id) and params.get("expected_node_id") == node_id
+            if ok:
+                try:
+                    host_security_audit.request_rescan()
+                    message = "read-only host security rescan scheduled for next report"
+                except Exception:
+                    ok, message = False, "security rescan could not be scheduled; existing monitoring continues"
+            else:
+                message = "host action node identity mismatch"
         elif action_type in {'disk_cleanup_scan','disk_cleanup_execute'}:
             try:ok,message=disk_cleanup.controller().action(action,node_id,_abuse_targets,_run_action_command)
             except Exception:ok,message=False,'cleanup safety checks unavailable'

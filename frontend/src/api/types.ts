@@ -268,6 +268,8 @@ export interface SecurityStatusItem {
   host_audit?: {
     enabled?: boolean;
     scope?: 'host' | 'agent_container' | string;
+    os?: { id?: string; version_id?: string };
+    rescan_requested_at?: number;
     snapshot_status?: 'ready' | 'partial' | 'unavailable' | string;
     snapshot_at?: number;
     baseline_at?: number;
@@ -469,6 +471,46 @@ export interface HostFirewallPolicyResponse {
     message: string;
     updated_at_utc8: string;
   };
+  policy_history?: Array<{
+    revision: number;
+    policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy };
+    updated_by: string;
+    updated_at_utc8: string;
+    source_fleet_revision: number;
+  }>;
+}
+
+export interface ConnectionEvidenceResponse {
+  host_id: string;
+  runtime: string;
+  project: string;
+  container_name: string;
+  window_minutes: number;
+  sample_count: number;
+  timeline: Array<{
+    ts: number;
+    connection_count: number;
+    process_attribution: {
+      captured: number;
+      attributed: number;
+      confirmed_local: number;
+      confirmed_remote: number;
+      unknown_direction: number;
+      conntrack_available: boolean;
+    };
+    access_log: Record<string, number>;
+    ips: Array<{
+      ip: string;
+      inbound: number;
+      processes: unknown[];
+      origin_confidence: string;
+      network_evidence: Record<string, unknown>;
+      assessment: Record<string, any>;
+      abuseipdb: Record<string, any>;
+    }>;
+  }>;
+  source_assessment: Record<string, any>;
+  interpretation: string;
 }
 
 export interface FleetFirewallHostStatus {

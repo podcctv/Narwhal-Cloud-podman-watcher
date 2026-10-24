@@ -109,6 +109,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [cnRiskProtocols, setCnRiskProtocols] = useState<CnRiskProtocol[]>(['socks', 'wireguard', 'fet', 'mtproto']);
   const [pendingManualDelete, setPendingManualDelete] = useState<HostFirewallLiveRule | null>(null);
   const [deletingManualRuleId, setDeletingManualRuleId] = useState<number | null>(null);
+  const [recoveryIntent, setRecoveryIntent] = useState<'retry' | 'rollback' | null>(null);
+  const [recoveringPolicy, setRecoveringPolicy] = useState(false);
 
   const selectedHost = hosts.find((host) => host.host_id === hostId);
   const interfaceInventory = snapshot?.interface_inventory;
@@ -160,6 +162,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   );
   const activeAction = snapshot?.latest_action;
   const pending = Boolean(activeAction && ['queued', 'dispatched', 'running'].includes(activeAction.status));
+  const liveReadbackReady = Boolean(snapshot?.live_readback?.status === 'ready' && !snapshot.live_readback.stale);
+  const hostRecoveryEditable = Boolean(snapshot?.agent_ready && snapshot?.runtime_status?.control_api === 'ready'
+    && fleetSnapshot && fleetSnapshot.revision === 0);
+  const canRetryPolicy = Boolean(hostRecoveryEditable && !selectedHost?.stale && liveReadbackReady && !pending
+    && (activeAction?.status === 'failed' || snapshot?.live_readback?.sync_status === 'drifted'));
+  const canRollbackPolicy = Boolean(hostRecoveryEditable && !selectedHost?.stale && liveReadbackReady && !pending
+    && (snapshot?.policy_history?.length || 0) > 0);
 
   useEffect(() => setFleetNodePage(0), [fleetHostFilter, fleetHostSearch]);
   useEffect(() => setFleetNodePage((page) => Math.min(page, fleetPageCount - 1)), [fleetPageCount]);
@@ -417,6 +426,23 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       setSaving(false);
     }
   }, [abuse, eligibleInterfaces, hostId, interfaceInventory, onToast, rules, saving]);
+
+  const confirmPolicyRecovery = useCallback(async () => {
+    if (!hostId || !recoveryIntent || recoveringPolicy) return;
+    setRecoveringPolicy(true);
+    try {
+      const result = await api.recoverHostFirewallPolicy(hostId, recoveryIntent);
+      onToast('success', recoveryIntent === 'retry'
+        ? `策略重试已排队，当前策略版本 #${result.revision}。`
+        : `已将历史版本 #${result.restored_revision} 作为新版本 #${result.revision} 排队回滚。`);
+      setRecoveryIntent(null);
+      await loadPolicy(false);
+    } catch (error: any) {
+      onToast('error', `防火墙策略${recoveryIntent === 'retry' ? '重试' : '回滚'}未能排队：${error.message || error}`);
+    } finally {
+      setRecoveringPolicy(false);
+    }
+  }, [hostId, loadPolicy, onToast, recoveringPolicy, recoveryIntent]);
 
   const confirmFleetApply = useCallback(async () => {
     if (fleetSaving) return;
@@ -877,6 +903,17 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             {activeAction?.updated_at_utc8 && <span className="text-xs font-normal text-slate-400">{activeAction.updated_at_utc8}</span>}
           </div>
           {activeAction?.message && <p className={`mt-1 wrap-break-word text-xs leading-5 ${activeAction.status === 'failed' ? 'text-rose-300' : 'text-slate-400'}`}>{activeAction.message}</p>}
+          {scope === 'host' && <>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="text-[10px] text-slate-500">历史策略 {snapshot?.policy_history?.length || 0} 条</span>
+              <button type="button" onClick={() => setRecoveryIntent('retry')} disabled={!canRetryPolicy || recoveringPolicy} title="仅在主机在线且 RFW 实时读回新鲜时可用" className="min-h-9 rounded-lg border border-amber-800/70 bg-amber-950/30 px-3 text-[10px] font-medium text-amber-200 hover:bg-amber-900/40 disabled:cursor-not-allowed disabled:opacity-40">安全重试当前策略</button>
+              <button type="button" onClick={() => setRecoveryIntent('rollback')} disabled={!canRollbackPolicy || recoveringPolicy} title="回滚会创建新的策略版本并排队，不覆盖历史记录" className="min-h-9 rounded-lg border border-sky-800/70 bg-sky-950/30 px-3 text-[10px] font-medium text-sky-200 hover:bg-sky-900/40 disabled:cursor-not-allowed disabled:opacity-40">回滚到上一版本</button>
+            </div>
+            {!!snapshot?.policy_history?.length && <details className="mt-2 max-w-2xl rounded-lg border border-slate-800 bg-slate-950/40 p-2.5">
+              <summary className="cursor-pointer select-none text-[10px] text-slate-400">查看策略变更记录</summary>
+              <div className="mt-2 space-y-1.5">{snapshot.policy_history.slice(0, 5).map((item) => <div key={`${item.revision}-${item.updated_at_utc8}`} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-slate-500"><span className="font-mono text-slate-300">版本 #{item.revision}</span><span>{item.updated_at_utc8}</span>{item.updated_by && <span>操作者 {item.updated_by}</span>}<span>{item.policy.rules?.length || 0} 条规则</span></div>)}</div>
+            </details>}
+          </>}
         </> : <>
           <div className="text-sm font-semibold text-slate-100">全局模板版本 #{fleetSnapshot?.revision ?? 0} · {fleetSnapshot?.counts.total ?? 0} 台登记母机</div>
           <p className="mt-1 text-xs text-slate-400">已应用 {fleetSnapshot?.counts.last_apply_succeeded ?? 0} · 待处理 {fleetSnapshot?.counts.deferred ?? 0} · 等待网卡 {fleetSnapshot?.counts.network_deferred ?? 0} · 策略偏差 {fleetSnapshot?.counts.drifted_hosts ?? 0}</p>
@@ -889,6 +926,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     <ConfirmDialog open={scopeConfirmOpen} title="切换配置范围？" description="当前草稿尚未保存。切换后会放弃这份草稿，并载入目标范围的已保存策略。" confirmLabel="放弃草稿并切换" tone="primary" onConfirm={() => { if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); setScopeConfirmOpen(false); }} onCancel={() => { setPendingScope(null); setScopeConfirmOpen(false); }} />
     <ConfirmDialog open={pendingManualDelete !== null} title="删除这条手工 RFW 规则？" description={`这只会删除 ${hostId} 上当前读回的 RFW 规则 #${pendingManualDelete?.id ?? ''}。执行前 Runman 会再次核对规则 ID 与完整规则内容；若规则已变化或已被平台接管，删除会被拒绝。`} confirmLabel="确认删除并排队" tone="danger" isSubmitting={deletingManualRuleId !== null} onConfirm={confirmManualRuleDelete} onCancel={() => { if (deletingManualRuleId === null) setPendingManualDelete(null); }}>
       {pendingManualDelete && <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">{pendingManualDelete.direction === 'in' ? '入站' : '出站'} {pendingManualDelete.protocol} · 端口 {pendingManualDelete.port_start === 0 && pendingManualDelete.port_end === 0 ? '任意' : pendingManualDelete.port_start === pendingManualDelete.port_end ? pendingManualDelete.port_start : `${pendingManualDelete.port_start}–${pendingManualDelete.port_end}`} · {pendingManualDelete.ip_type === 'any' ? '任意 IP' : pendingManualDelete.ip_type === 'cidr' ? pendingManualDelete.ip : (pendingManualDelete.countries || []).join(', ')} · {pendingManualDelete.action === 'block' ? '阻断' : '放行'} · P{pendingManualDelete.priority}</div>}
+    </ConfirmDialog>
+    <ConfirmDialog open={recoveryIntent !== null} title={recoveryIntent === 'retry' ? '重试当前母机防火墙策略？' : '回滚到上一条历史策略？'} description={recoveryIntent === 'retry' ? `这会把 ${hostId} 当前保存的策略作为新修订重新排队。执行前系统会检查主机在线状态、RFW 实时读回、接口映射和协议能力。` : `这会把 ${hostId} 最近一条历史策略作为新修订排队应用；如果历史规则引用了当前无法确认的接口，系统会拒绝下发。`} confirmLabel={recoveryIntent === 'retry' ? '确认重试并排队' : '确认回滚并排队'} tone="danger" isSubmitting={recoveringPolicy} onConfirm={confirmPolicyRecovery} onCancel={() => { if (!recoveringPolicy) setRecoveryIntent(null); }}>
+      <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/80">只有管理员可执行。它会发送一个主机范围的 RFW 操作，但不会触碰其他母机；若正在运行全局模板、Agent 离线或读回过期，后端会拒绝请求。</p>
     </ConfirmDialog>
     <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。RFW 协议规则可能影响该母机的全部容器和服务；已启用 ${blockingRules} 条阻断规则与 ${enabledAbuse} 项固定端口防滥用策略。平台只自动删除自身登记的规则；手工规则需在实时读回后逐条确认删除。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
       <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">执行依赖 Watcher Agent、支持 firewall.sock 的 Runman Agent 与运行中的 RFW。Watcher 离线时排队等待；成功回执是 Runman 应用结果，不等同于平台实时读取内核规则。</div>

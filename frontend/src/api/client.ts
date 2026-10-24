@@ -16,6 +16,7 @@ import {
   HostFirewallAbusePolicy,
   IPReputationSettings,
   IPReputationResult,
+  ConnectionEvidenceResponse,
 } from './types';
 
 export class ApiError extends Error {
@@ -165,6 +166,11 @@ export const api = {
       method: 'POST', body: JSON.stringify(policy),
     }),
 
+  recoverHostFirewallPolicy: (hostId: string, action: 'retry' | 'rollback') =>
+    request<{ ok: boolean; revision: number; restored_revision?: number; action_id: number; queued: boolean }>(`/api/v1/firewall/host-policy/${action}`, {
+      method: 'POST', body: JSON.stringify({ host_id: hostId }),
+    }),
+
   deleteHostFirewallRule: (hostId: string, ruleId: number) =>
     request<{ ok: boolean; rule_id: number; action_id: number; queued: boolean }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/firewall-rules/${ruleId}`, {
       method: 'DELETE',
@@ -248,6 +254,17 @@ export const api = {
       container_name: identity.container_name,
     }).toString();
     return request<DiagnosticData>(`/api/v1/containers/diagnostics?${qs}`);
+  },
+
+  getConnectionEvidence: (identity: ContainerIdentity, minutes = 1440) => {
+    const qs = new URLSearchParams({
+      host_id: identity.host_id,
+      runtime: identity.runtime,
+      project: identity.project || '',
+      container_name: identity.container_name,
+      minutes: String(minutes),
+    }).toString();
+    return request<ConnectionEvidenceResponse>(`/api/v1/ops/evidence?${qs}`);
   },
 
   requestContainerDiagnostic: (identity: ContainerIdentity) =>

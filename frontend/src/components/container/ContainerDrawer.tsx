@@ -28,6 +28,7 @@ import { NetworkChart } from './NetworkChart';
 import { DiagnosticPanel } from './DiagnosticPanel';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { AdmissionStatus } from './AdmissionStatus';
+import { ConnectionEvidenceTimeline } from './ConnectionEvidenceTimeline';
 
 interface ContainerDrawerProps {
   identity: ContainerIdentity | null;
@@ -638,6 +639,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                 </div>
               </div>
             </div>
+
+            <ConnectionEvidenceTimeline identity={identity} />
 
             {/* On-Demand Diagnostic Panel */}
             <DiagnosticPanel

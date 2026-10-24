@@ -44,6 +44,19 @@ def initialize(conn):
       attempts INTEGER DEFAULT 0,clean_samples INTEGER DEFAULT 0,ts INTEGER,message TEXT);
     CREATE TABLE IF NOT EXISTS ops_services(id INTEGER PRIMARY KEY,host_id TEXT,name TEXT,payload TEXT,enabled INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS ops_service_results(service_id INTEGER PRIMARY KEY,ts INTEGER,payload TEXT);
+    CREATE TABLE IF NOT EXISTS ops_service_inventory(
+      entity TEXT PRIMARY KEY,host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,
+      observed_at INTEGER NOT NULL DEFAULT 0,inventory_state TEXT NOT NULL DEFAULT 'unavailable',
+      complete_at INTEGER NOT NULL DEFAULT 0,inventory_json TEXT NOT NULL DEFAULT '[]');
+    CREATE INDEX IF NOT EXISTS idx_ops_service_inventory_host ON ops_service_inventory(host_id,runtime,container_name);
+    CREATE TABLE IF NOT EXISTS ops_service_inventory_changes(
+      id INTEGER PRIMARY KEY,entity TEXT NOT NULL,host_id TEXT NOT NULL,runtime TEXT NOT NULL,
+      project TEXT NOT NULL DEFAULT '',container_name TEXT NOT NULL,ts INTEGER NOT NULL,
+      change_type TEXT NOT NULL,confidence TEXT NOT NULL,listener_key TEXT NOT NULL,payload TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_ops_service_inventory_changes_host_ts
+      ON ops_service_inventory_changes(host_id,ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_ops_service_inventory_changes_entity_ts
+      ON ops_service_inventory_changes(entity,ts DESC);
     CREATE TABLE IF NOT EXISTS ops_upgrades(id INTEGER PRIMARY KEY,version TEXT,revision TEXT,status TEXT,created_at INTEGER,payload TEXT);
     CREATE TABLE IF NOT EXISTS ops_upgrade_nodes(campaign INTEGER,host_id TEXT,action_id INTEGER,status TEXT,previous_version TEXT,
       PRIMARY KEY(campaign,host_id));
@@ -150,6 +163,119 @@ def event(conn, entity, kind, ts, payload, active=True):
         conn.execute("INSERT INTO ops_events(incident_id,ts,kind,payload) VALUES(?,?,?,?)", (incident, ts, label, json.dumps(payload)))
 
 
+def _service_inventory_rows(value):
+    """Normalize bounded listener data while keeping PID as evidence, not identity."""
+    if not isinstance(value, list):
+        return []
+    normalized = {}
+    for raw in value[:100]:
+        if not isinstance(raw, dict):
+            continue
+        proto = str(raw.get('proto') or '').lower()
+        process = str(raw.get('process') or '').strip()[:120]
+        local = str(raw.get('local') or '').strip()[:160]
+        try:
+            port = int(raw.get('port') or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if proto not in {'tcp', 'udp'} or not 1 <= port <= 65535:
+            continue
+        app_protocols = sorted({str(x).lower()[:32] for x in raw.get('application_protocols', [])[:16]
+                                if isinstance(x, str) and x.strip()}) if isinstance(raw.get('application_protocols'), list) else []
+        try:
+            pid = max(0, min(4_194_304, int(raw.get('pid') or 0)))
+        except (TypeError, ValueError, OverflowError):
+            pid = 0
+        row = {
+            'process': process, 'pid': pid, 'proto': proto, 'local': local, 'port': port,
+            'source': str(raw.get('source') or '')[:40],
+            'process_attribution': str(raw.get('process_attribution') or 'unavailable')[:24],
+            'application_protocols': app_protocols,
+            'application_protocol_evidence': str(raw.get('application_protocol_evidence') or '')[:64],
+        }
+        # A process restart must not create a fake service addition/removal.
+        binding = json.dumps([proto, port, local], ensure_ascii=False, separators=(',', ':'))
+        normalized.setdefault(binding, []).append(row)
+    return [row for key in sorted(normalized) for row in sorted(normalized[key], key=lambda x: (x['process'].lower(), x['application_protocols']))]
+
+
+def _service_listener_confidence(listener):
+    if listener.get('process_attribution') == 'attributed' and int(listener.get('pid') or 0) > 1:
+        if listener.get('application_protocol_evidence') == 'config_matches_live_pid_and_port':
+            return 'high'
+        return 'medium'
+    return 'low'
+
+
+def _ingest_service_inventory(conn, entity, host_id, runtime, project, name, ts, security):
+    state = str(security.get('service_inventory_state') or 'unavailable')[:24]
+    if state not in {'complete', 'partial', 'unavailable'}:
+        state = 'unavailable'
+    current = conn.execute('SELECT * FROM ops_service_inventory WHERE entity=?', (entity,)).fetchone()
+    previous_rows = loads(current['inventory_json'], []) if current else []
+    if not isinstance(previous_rows, list):
+        previous_rows = []
+    if state == 'complete':
+        observed_rows = _service_inventory_rows(security.get('service_listeners'))
+        old_by_binding = {}
+        new_by_binding = {}
+        for item in previous_rows:
+            if isinstance(item, dict):
+                key = json.dumps([item.get('proto'), item.get('port'), item.get('local')], ensure_ascii=False, separators=(',', ':'))
+                old_by_binding.setdefault(key, []).append(item)
+        for item in observed_rows:
+            key = json.dumps([item.get('proto'), item.get('port'), item.get('local')], ensure_ascii=False, separators=(',', ':'))
+            new_by_binding.setdefault(key, []).append(item)
+        # First complete sample is a baseline, never an alert.
+        if current is not None and int(current['complete_at'] or 0) > 0:
+            for key in sorted(set(old_by_binding) | set(new_by_binding)):
+                old_items = old_by_binding.get(key, [])
+                new_items = new_by_binding.get(key, [])
+                old_owner = {(str(x.get('process') or '').lower(), tuple(x.get('application_protocols') or ())): x for x in old_items}
+                new_owner = {(str(x.get('process') or '').lower(), tuple(x.get('application_protocols') or ())): x for x in new_items}
+                changes = []
+                if not old_items:
+                    changes.extend(('listener_added', item, None) for item in new_items)
+                elif not new_items:
+                    changes.extend(('listener_removed', None, item) for item in old_items)
+                elif set(old_owner) != set(new_owner):
+                    if len(old_owner) == len(new_owner) == 1:
+                        changes.append(('listener_owner_changed', next(iter(new_owner.values()), None), next(iter(old_owner.values()), None)))
+                    else:
+                        changes.extend(('listener_added', item, None) for ident, item in new_owner.items() if ident not in old_owner)
+                        changes.extend(('listener_removed', None, item) for ident, item in old_owner.items() if ident not in new_owner)
+                for change_type, item, old_item in changes[:200]:
+                    listener = item or old_item or {}
+                    confidence = _service_listener_confidence(listener)
+                    detail = {
+                        'change_type': change_type, 'confidence': confidence,
+                        'proto': listener.get('proto'), 'port': listener.get('port'),
+                        'local': listener.get('local'), 'process': listener.get('process') or '',
+                        'pid': listener.get('pid') or 0, 'source': listener.get('source') or '',
+                        'application_protocols': listener.get('application_protocols') or [],
+                        'application_protocol_evidence': listener.get('application_protocol_evidence') or '',
+                        'previous_process': (old_item or {}).get('process') or '',
+                        'previous_pid': (old_item or {}).get('pid') or 0,
+                        'evidence': '完整服务清单采样差异；PID 仅作取证线索，变更判断基于监听地址/协议/端口/进程/配置标签。',
+                    }
+                    conn.execute(
+                        'INSERT INTO ops_service_inventory_changes(entity,host_id,runtime,project,container_name,ts,change_type,confidence,listener_key,payload) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                        (entity, host_id, runtime, project, name, ts, change_type, confidence, key, json.dumps(detail, ensure_ascii=False)),
+                    )
+        conn.execute(
+            'INSERT INTO ops_service_inventory(entity,host_id,runtime,project,container_name,observed_at,inventory_state,complete_at,inventory_json) VALUES(?,?,?,?,?,?,?,?,?) '
+            'ON CONFLICT(entity) DO UPDATE SET host_id=excluded.host_id,runtime=excluded.runtime,project=excluded.project,container_name=excluded.container_name,observed_at=excluded.observed_at,inventory_state=excluded.inventory_state,complete_at=excluded.complete_at,inventory_json=excluded.inventory_json',
+            (entity, host_id, runtime, project, name, ts, state, ts, json.dumps(observed_rows, ensure_ascii=False)),
+        )
+    else:
+        # Keep the last complete inventory, but explicitly surface the latest coverage state.
+        conn.execute(
+            'INSERT INTO ops_service_inventory(entity,host_id,runtime,project,container_name,observed_at,inventory_state,complete_at,inventory_json) VALUES(?,?,?,?,?,?,?,0,?) '
+            'ON CONFLICT(entity) DO UPDATE SET host_id=excluded.host_id,runtime=excluded.runtime,project=excluded.project,container_name=excluded.container_name,observed_at=excluded.observed_at,inventory_state=excluded.inventory_state',
+            (entity, host_id, runtime, project, name, ts, state, '[]'),
+        )
+
+
 def ingest(conn, host_id, node_id, ts, data):
     node = node_id or host_id
     previous = conn.execute("SELECT ts FROM ops_hosts WHERE node=?", (node,)).fetchone()
@@ -164,6 +290,8 @@ def ingest(conn, host_id, node_id, ts, data):
     alerts = data.get("security", {}).get("alerts", [])
     for c in data.get("containers", []):
         entity = identity(node, c.get("runtime", "podman"), c.get("project", ""), c.get("name", "unknown"))
+        security = c.get('security') if isinstance(c.get('security'), dict) else {}
+        _ingest_service_inventory(conn, entity, host_id, c.get('runtime', 'podman'), c.get('project', ''), c.get('name', 'unknown'), ts, security)
         row = conn.execute("SELECT ts,payload FROM ops_meter WHERE entity=?", (entity,)).fetchone()
         old = loads(row["payload"]) if row else {}
         elapsed = ts - row["ts"] if row else 0
@@ -272,7 +400,9 @@ def ingest(conn, host_id, node_id, ts, data):
         action = conn.execute("SELECT action_type,params_json,status FROM security_actions WHERE id=? AND host_id=?", (result["action_id"],host_id)).fetchone()
         if action and action[0] in {"managed_upgrade","managed_rollback"} and action[2] in {"running","dispatched"} and loads(action[1]).get("expected_node_id")==node_id:
             if result.get("status")=="failed":
-                conn.execute("UPDATE security_actions SET status='failed',result_message='managed worker failed; inspect journalctl -u narwhal-managed-*',updated_at=? WHERE id=?",(ts,result["action_id"]))
+                failure = str(result.get("message") or result.get("error") or "托管升级任务失败；请检查节点升级日志")
+                failure = ''.join(ch for ch in failure if ch >= ' ' or ch == '\t')[:400]
+                conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?",(failure,ts,result["action_id"]))
                 conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE action_id=?",(result["action_id"],))
             elif action[0]=="managed_rollback" and result.get("status")=="installed" and result.get("version")==data.get("agent_version"):
                 conn.execute("UPDATE security_actions SET status='succeeded',result_message='rollback version reported',updated_at=? WHERE id=?",(ts,result["action_id"]))
@@ -408,14 +538,16 @@ def purge_host(conn,host_id):
     conn.execute('DELETE FROM ops_disk_cleanup_runs WHERE node=?',(node,))
     conn.execute("DELETE FROM ops_service_results WHERE service_id IN (SELECT id FROM ops_services WHERE host_id=?)",(host_id,))
     conn.execute("DELETE FROM ops_services WHERE host_id=?",(host_id,))
+    conn.execute("DELETE FROM ops_service_inventory WHERE host_id=?",(host_id,))
+    conn.execute("DELETE FROM ops_service_inventory_changes WHERE host_id=?",(host_id,))
     conn.execute("DELETE FROM ops_upgrade_nodes WHERE host_id=?",(host_id,))
 
 
 def maintain(conn, now):
-    for table, column, days in (("ops_rollups", "bucket", 400), ("ops_events", "ts", 90), ("ops_incidents", "last_seen", 90), ("ops_audit", "ts", 180), ("ops_rechecks", "ts", 90),('ops_disk_cleanup_runs','ts',30)):
+    for table, column, days in (("ops_rollups", "bucket", 400), ("ops_events", "ts", 90), ("ops_incidents", "last_seen", 90), ("ops_audit", "ts", 180), ("ops_rechecks", "ts", 90),('ops_disk_cleanup_runs','ts',30),('ops_service_inventory_changes','ts',90)):
         conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {column}<? LIMIT 5000)", (now-days*86400,))
     conn.execute("DELETE FROM ops_rollups WHERE rowid IN (SELECT rowid FROM ops_rollups WHERE period='hour' AND bucket<? LIMIT 5000)", (now-30*86400,))
-    for table, cap in (("ops_rollups", 200000), ("ops_events", 20000), ("ops_incidents", 5000), ("ops_audit", 20000),('ops_disk_cleanup_runs',20000)):
+    for table, cap in (("ops_rollups", 200000), ("ops_events", 20000), ("ops_incidents", 5000), ("ops_audit", 20000),('ops_disk_cleanup_runs',20000),('ops_service_inventory_changes',20000),('ops_service_inventory',100000)):
         conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} ORDER BY rowid DESC LIMIT 5000 OFFSET ?)", (cap,))
     conn.execute("UPDATE ops_rechecks SET status='unverified',message='主机未上报，无法确认处置效果' WHERE status IN ('awaiting_report','retrying') AND ts<?", (now-3600,))
     conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE status='dispatched' AND action_id IN (SELECT id FROM security_actions WHERE status='failed' OR created_at<?)", (now-1800,))

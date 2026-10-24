@@ -11,9 +11,11 @@ from fastapi import APIRouter, HTTPException, Request
 try:
     from . import operations as ops
     from . import fleet_updates
+    from . import inbound_assessment, ip_reputation
 except ImportError:
     import operations as ops
     import fleet_updates
+    import inbound_assessment, ip_reputation
 
 
 def attach(app, db, database_path, storage, cleanup, version, admin_name):
@@ -36,6 +38,10 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         params["expected_node_id"] = row[0]
         now = int(time.time())
         return conn.execute("INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,'host','','__host__',?,?,'queued',?,?,?)", (host, action_type, json.dumps(params), user, now, now)).lastrowid
+
+    def require_admin(request):
+        if getattr(request.state, "dashboard_role", "admin") != "admin":
+            raise HTTPException(403, "只有管理员可以执行此运维操作")
 
     @router.get("/session")
     def session(request: Request):
@@ -199,6 +205,104 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         finally:
             conn.close()
 
+    @router.get("/service-inventory")
+    def service_inventory(host_id: str = "", runtime: str = "", limit: int = 200):
+        limit = max(1, min(500, int(limit)))
+        conn = db()
+        try:
+            filters = []
+            params = []
+            if host_id:
+                filters.append("host_id=?")
+                params.append(host_id[:200])
+            if runtime in {"incus", "podman", "docker"}:
+                filters.append("runtime=?")
+                params.append(runtime)
+            where = " WHERE " + " AND ".join(filters) if filters else ""
+            current = rows(conn, "SELECT * FROM ops_service_inventory" + where + " ORDER BY observed_at DESC LIMIT ?", (*params, limit))
+            for item in current:
+                item["listeners"] = ops.loads(item.pop("inventory_json", "[]"), [])
+                item["coverage"] = item.pop("inventory_state", "unavailable")
+            changes = rows(conn, "SELECT * FROM ops_service_inventory_changes" + where + " ORDER BY ts DESC,id DESC LIMIT ?", (*params, min(1000, limit * 2)))
+            for item in changes:
+                item["data"] = ops.loads(item.pop("payload", "{}"))
+            return {"items": current, "changes": changes, "retention_days": 90}
+        finally:
+            conn.close()
+
+    @router.get("/evidence")
+    def connection_evidence(host_id: str, runtime: str, container_name: str, project: str = "", minutes: int = 1440):
+        if runtime not in {"incus", "podman", "docker"} or not host_id or not container_name:
+            raise HTTPException(400, "需要明确指定主机、运行时与容器")
+        minutes = max(15, min(1440, int(minutes)))
+        now = int(time.time())
+        conn = db()
+        try:
+            raw_rows = conn.execute(
+                "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND ts>=? ORDER BY ts DESC LIMIT 300",
+                (host_id[:200], runtime, project[:100], container_name[:200], now - minutes * 60),
+            ).fetchall()
+            assessment = inbound_assessment.assess(raw_rows, now=now, lookback_seconds=min(minutes * 60, 3600))
+            by_ip = {item["ip"]: item for item in assessment.get("assessments", []) if isinstance(item, dict)}
+            reputation_cache = {}
+            timeline = []
+            for row in reversed(raw_rows[:60]):
+                payload = ops.loads(row["payload_json"])
+                security = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+                signals = security.get("inbound_source_signals") if isinstance(security.get("inbound_source_signals"), list) else []
+                connection_ips = security.get("connection_ips") if isinstance(security.get("connection_ips"), list) else []
+                inbound = security.get("inbound_ips") if isinstance(security.get("inbound_ips"), list) else []
+                if not inbound:
+                    inbound = [item for item in connection_ips if isinstance(item, dict) and ops.number(item.get("inbound")) > 0]
+                observed = {}
+                for item in inbound[:20]:
+                    if isinstance(item, dict) and item.get("ip"):
+                        observed[str(item["ip"])[:64]] = item
+                for item in signals[:20]:
+                    if isinstance(item, dict) and item.get("ip"):
+                        observed.setdefault(str(item["ip"])[:64], item)
+                ips = []
+                for ip, item in list(observed.items())[:20]:
+                    reputation = reputation_cache.get(ip)
+                    if ip not in reputation_cache:
+                        cached = ip_reputation._cached_result(conn, ip, now)
+                        reputation = cached if cached is not None else {"status": "not_cached", "message": "尚未查询 AbuseIPDB；不会在读取时间线时自动提交来源 IP"}
+                        reputation_cache[ip] = reputation
+                    ips.append({
+                        "ip": ip,
+                        "inbound": max(0, min(1_000_000, int(ops.number(item.get("inbound", item.get("flow_count", 0)))))),
+                        "processes": item.get("inbound_processes") or item.get("processes") or [],
+                        "origin_confidence": item.get("inbound_origin_confidence") or item.get("origin_confidence") or "unknown",
+                        "network_evidence": item.get("network_evidence") if isinstance(item.get("network_evidence"), dict) else item,
+                        "assessment": by_ip.get(ip, {"classification": "insufficient_evidence", "identity_confirmed": False}),
+                        "abuseipdb": reputation,
+                    })
+                attribution = security.get("connection_attribution") if isinstance(security.get("connection_attribution"), dict) else {}
+                connection_metrics = security.get("connection_metrics") if isinstance(security.get("connection_metrics"), dict) else {}
+                access = security.get("access_log") if isinstance(security.get("access_log"), dict) else {}
+                timeline.append({
+                    "ts": int(row["ts"]),
+                    "connection_count": max(0, min(10_000_000, int(ops.number(connection_metrics.get("total", payload.get("conn_count", 0)))))),
+                    "process_attribution": {
+                        "captured": int(ops.number(attribution.get("captured_sockets"))),
+                        "attributed": int(ops.number(attribution.get("process_attributed_sockets"))),
+                        "confirmed_local": int(ops.number(attribution.get("confirmed_local_initiated"))),
+                        "confirmed_remote": int(ops.number(attribution.get("confirmed_remote_initiated"))),
+                        "unknown_direction": int(ops.number(attribution.get("unknown_direction"))),
+                        "conntrack_available": attribution.get("conntrack_available") is True,
+                    },
+                    "access_log": {key: access.get(key) for key in ("requests", "requests_per_second", "readable_files", "parse_errors") if key in access},
+                    "ips": ips,
+                })
+            return {
+                "host_id": host_id, "runtime": runtime, "project": project, "container_name": container_name,
+                "window_minutes": minutes, "sample_count": len(raw_rows), "timeline": timeline,
+                "source_assessment": assessment,
+                "interpretation": "TCP 建连、PID 归属或 AbuseIPDB 评分都不能单独证明用户身份或恶意意图；这里只展示对应采样证据。未查询的 IP 不会自动发送给第三方。",
+            }
+        finally:
+            conn.close()
+
     @router.post("/logs/connect")
     async def connect_logs(request: Request):
         p=await request.json()
@@ -261,7 +365,24 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
     def upgrades():
         conn=db()
         try:
-            return {"automatic":fleet_updates.settings(conn),"nodes":rows(conn,"SELECT host_id,node_id,agent_version,last_seen FROM hosts ORDER BY host_id LIMIT 500"),"campaigns":unpack(rows(conn,"SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 50")),"progress":rows(conn,"SELECT * FROM ops_upgrade_nodes ORDER BY campaign DESC LIMIT 500"),"server_version":version()}
+            now = int(time.time())
+            nodes = rows(conn,"SELECT host_id,node_id,agent_version,last_seen FROM hosts ORDER BY host_id LIMIT 500")
+            for item in nodes:
+                report = conn.execute("SELECT ts,payload FROM ops_hosts WHERE host_id=? AND node=?", (item["host_id"], item["node_id"])).fetchone()
+                item["last_report_at"] = int(report["ts"] or 0) if report else 0
+                item["report_stale"] = not report or now - int(report["ts"] or 0) > 900
+                op_data = ops.loads(report["payload"] if report else "{}")
+                item["managed_upgrade"] = bool(op_data.get("managed_upgrade"))
+                action = conn.execute("SELECT id,action_type,status,result_message,updated_at,attempts FROM security_actions WHERE host_id=? AND action_type IN ('managed_upgrade','managed_rollback') ORDER BY id DESC LIMIT 1", (item["host_id"],)).fetchone()
+                item["latest_update"] = dict(action) if action else None
+            progress = rows(conn,"SELECT n.*,u.version,u.revision,u.status AS campaign_status,u.payload AS campaign_payload FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign ORDER BY n.campaign DESC LIMIT 500")
+            for item in progress:
+                action = conn.execute("SELECT status,result_message,updated_at,attempts FROM security_actions WHERE id=?", (item.get("action_id"),)).fetchone() if item.get("action_id") else None
+                item["action"] = dict(action) if action else None
+                metadata = ops.loads(item.pop("campaign_payload", "{}"))
+                item["manual_attempts"] = int((metadata.get("attempts") or {}).get(item["host_id"], 0))
+                item.pop("campaign_status", None)
+            return {"automatic":fleet_updates.settings(conn),"nodes":nodes,"campaigns":unpack(rows(conn,"SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 50")),"progress":progress,"server_version":version()}
         finally:
             conn.close()
 
@@ -284,6 +405,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
 
     @router.post("/upgrades")
     async def create_upgrade(request:Request):
+        require_admin(request)
         p=await request.json()
         revision=str(p.get("revision",""))
         target_version=str(p.get("version",""))
@@ -310,7 +432,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 if not found or not ops.loads(found[0]).get("managed_upgrade"):
                     raise HTTPException(409,f"{host} 未启用管理升级（需要新版主机 Agent）")
             now=int(time.time())
-            campaign=conn.execute("INSERT INTO ops_upgrades(version,revision,status,created_at,payload) VALUES(?,?,'canary',?,?)",(target_version,revision,now,json.dumps({"hosts":hosts}))).lastrowid
+            campaign=conn.execute("INSERT INTO ops_upgrades(version,revision,status,created_at,payload) VALUES(?,?,'canary',?,?)",(target_version,revision,now,json.dumps({"hosts":hosts,"attempts":{h:(1 if i==0 else 0) for i,h in enumerate(hosts)}}))).lastrowid
             for i,host in enumerate(hosts):
                 old=conn.execute("SELECT agent_version FROM hosts WHERE host_id=?",(host,)).fetchone()[0]
                 action=queue(conn,host,"managed_upgrade",{"revision":revision,"version":target_version},request.state.dashboard_user) if i==0 else None
@@ -322,6 +444,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
 
     @router.post("/upgrades/{campaign}/promote")
     def promote(campaign:int,request:Request):
+        require_admin(request)
         conn=db()
         try:
             row=conn.execute("SELECT * FROM ops_upgrades WHERE id=?",(campaign,)).fetchone()
@@ -329,17 +452,84 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 raise HTTPException(409,"灰度节点尚未验证目标版本")
             if ops.loads(row['payload']).get('automatic'):
                 raise HTTPException(409,'自动发布由协调器完成健康观察和分批推广，请勿手动跳过')
+            metadata = ops.loads(row["payload"])
+            attempts = metadata.setdefault("attempts", {})
             for n in conn.execute("SELECT host_id FROM ops_upgrade_nodes WHERE campaign=? AND status='pending'",(campaign,)).fetchall():
-                action=queue(conn,n[0],"managed_upgrade",{"revision":row["revision"],"version":row["version"]},request.state.dashboard_user)
+                action=queue(conn,n[0],"managed_upgrade",{"revision":row["revision"],"version":row["version"],"campaign_id":campaign},request.state.dashboard_user)
                 conn.execute("UPDATE ops_upgrade_nodes SET status='dispatched',action_id=? WHERE campaign=? AND host_id=?",(action,campaign,n[0]))
+                attempts[n[0]] = int(attempts.get(n[0], 0)) + 1
+            conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(metadata), campaign))
             conn.execute("UPDATE ops_upgrades SET status='rollout' WHERE id=?",(campaign,))
             conn.commit()
             return {"ok":True}
         finally:
             conn.close()
 
+    @router.post("/upgrades/{campaign}/{host_id}/retry")
+    async def retry_upgrade(campaign: int, host_id: str, request: Request):
+        require_admin(request)
+        conn = db()
+        try:
+            row = conn.execute("SELECT * FROM ops_upgrades WHERE id=?", (campaign,)).fetchone()
+            node = conn.execute("SELECT * FROM ops_upgrade_nodes WHERE campaign=? AND host_id=?", (campaign, host_id)).fetchone()
+            if not row or not node or node["status"] != "failed" or row["status"] not in {"canary", "rollout"}:
+                raise HTTPException(409, "只有仍处于灰度/分批发布中的失败节点可重试")
+            metadata = ops.loads(row["payload"])
+            if metadata.get("automatic"):
+                raise HTTPException(409, "自动升级由协调器重试；此处不重复下发")
+            attempts = metadata.setdefault("attempts", {})
+            if int(attempts.get(host_id, 0)) >= 3:
+                raise HTTPException(409, "该发布对节点的手动尝试已达 3 次上限，请先回滚或创建新版本")
+            host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+            if not host or not host["node_id"] or time.time() - int(host["last_seen"] or 0) > 900:
+                raise HTTPException(409, "节点离线或上报过期，未重试")
+            previous_action = conn.execute("SELECT params_json FROM security_actions WHERE id=?", (node["action_id"],)).fetchone() if node["action_id"] else None
+            old_node = ops.loads(previous_action["params_json"] if previous_action else "{}").get("expected_node_id")
+            if old_node and old_node != host["node_id"]:
+                raise HTTPException(409, "节点身份已变化，需要重新核对目标")
+            def resolve():
+                req=urllib.request.Request("https://api.github.com/repos/podcctv/Narwhal-Cloud-podman-watcher/git/ref/heads/main",headers={"User-Agent":"Narwhal-Operations"})
+                with urllib.request.urlopen(req,timeout=10) as response:
+                    return json.load(response)["object"]["sha"]
+            try:
+                actual = await asyncio.to_thread(resolve)
+            except Exception:
+                raise HTTPException(503, "无法验证当前 main；未下发重试") from None
+            if actual != row["revision"]:
+                raise HTTPException(409, "该提交已不是当前 main；为避免部署旧代码，未重试")
+            action = queue(conn, host_id, "managed_upgrade", {"revision": row["revision"], "version": row["version"], "campaign_id": campaign}, request.state.dashboard_user)
+            attempts[host_id] = int(attempts.get(host_id, 0)) + 1
+            conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(metadata), campaign))
+            conn.execute("UPDATE ops_upgrade_nodes SET status='dispatched',action_id=? WHERE campaign=? AND host_id=?", (action, campaign, host_id))
+            conn.commit()
+            return {"action_id": action, "attempt": attempts[host_id]}
+        finally:
+            conn.close()
+
+    @router.post("/security/rescan")
+    async def request_security_rescan(request: Request):
+        require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "请求必须是有效 JSON") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "请求必须是 JSON 对象")
+        host_id = str(payload.get("host_id") or "")[:200]
+        conn = db()
+        try:
+            last = conn.execute("SELECT created_at FROM security_actions WHERE host_id=? AND action_type='host_security_rescan' ORDER BY id DESC LIMIT 1", (host_id,)).fetchone()
+            if last and time.time() - int(last[0] or 0) < 900:
+                raise HTTPException(429, "15 分钟内已经请求过复扫")
+            action_id = queue(conn, host_id, "host_security_rescan", {}, request.state.dashboard_user)
+            conn.commit()
+            return {"action_id": action_id, "queued": True}
+        finally:
+            conn.close()
+
     @router.post("/upgrades/rollback")
     async def rollback(request:Request):
+        require_admin(request)
         p=await request.json()
         conn=db()
         try:

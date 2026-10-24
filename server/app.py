@@ -325,6 +325,17 @@ def init_db() -> None:
             updated_at INTEGER NOT NULL,
             source_fleet_revision INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS host_firewall_policy_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            policy_json TEXT NOT NULL,
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL,
+            source_fleet_revision INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_host_firewall_policy_history_host_revision
+            ON host_firewall_policy_history(host_id, revision DESC);
         CREATE TABLE IF NOT EXISTS fleet_firewall_policy (
             id INTEGER PRIMARY KEY CHECK(id=1),
             revision INTEGER NOT NULL,
@@ -2020,7 +2031,7 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
-    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices", "host_firewall_policies", "host_firewall_readbacks"):
+    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices", "host_firewall_policies", "host_firewall_policy_history", "host_firewall_readbacks"):
         conn.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
     conn.execute("DELETE FROM hosts WHERE host_id=?", (host_id,))
 
@@ -2590,11 +2601,20 @@ def _enqueue_host_firewall_policy(
     fleet_revision: int,
 ) -> int:
     existing = conn.execute(
-        "SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
+        "SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
     ).fetchone()
     revision = (int(existing["revision"]) if existing else 0) + 1
     policy_with_revision = {"revision": revision, **policy}
     policy_json = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
+    if existing and str(existing["policy_json"] or "") != policy_json:
+        conn.execute(
+            "INSERT INTO host_firewall_policy_history(host_id,revision,policy_json,updated_by,updated_at,source_fleet_revision) VALUES(?,?,?,?,?,?)",
+            (host_id, int(existing["revision"]), str(existing["policy_json"] or "{}"), str(existing["updated_by"] or ""), int(existing["updated_at"] or 0), int(existing["source_fleet_revision"] or 0)),
+        )
+        conn.execute(
+            "DELETE FROM host_firewall_policy_history WHERE host_id=? AND id NOT IN (SELECT id FROM host_firewall_policy_history WHERE host_id=? ORDER BY revision DESC,id DESC LIMIT 20)",
+            (host_id, host_id),
+        )
     conn.execute(
         "INSERT INTO host_firewall_policies(host_id,revision,policy_json,updated_by,updated_at,source_fleet_revision) "
         "VALUES(?,?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET revision=excluded.revision,"
@@ -3014,7 +3034,7 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
                 conn.execute("UPDATE OR IGNORE security_alert_policies SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
                 conn.execute("DELETE FROM security_alert_policies WHERE fingerprint=?", (old_fingerprint,))
                 conn.execute("UPDATE security_alert_decisions SET fingerprint=? WHERE fingerprint=?", (fingerprint, old_fingerprint))
-            for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "host_firewall_policies", "host_firewall_readbacks"):
+            for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "host_firewall_policies", "host_firewall_readbacks", "ops_service_inventory", "ops_service_inventory_changes"):
                 conn.execute(f"UPDATE {table} SET host_id=? WHERE host_id=?", (host_id, old))
             investigation.rename_host(conn, old, host_id)
             conn.execute("DELETE FROM hosts WHERE host_id=?", (old,))
@@ -4689,7 +4709,133 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
             "updated_by": updated_by,
             "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
             "latest_action": latest,
+            "policy_history": [
+                {
+                    "revision": int(item["revision"]),
+                    "policy": json.loads(item["policy_json"] or "{}"),
+                    "updated_by": str(item["updated_by"] or ""),
+                    "updated_at_utc8": format_utc8(int(item["updated_at"] or 0)),
+                    "source_fleet_revision": int(item["source_fleet_revision"] or 0),
+                }
+                for item in conn.execute(
+                    "SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policy_history WHERE host_id=? ORDER BY revision DESC,id DESC LIMIT 20",
+                    (host_id,),
+                ).fetchall()
+            ],
         })
+    finally:
+        conn.close()
+
+
+def _prepare_host_firewall_recovery(conn: sqlite3.Connection, host_id: str, now: int):
+    """Fail closed unless a single online host has fresh, compatible RFW readback."""
+    host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+    if host is None:
+        raise HTTPException(status_code=404, detail="主机不存在")
+    node_id = str(host["node_id"] or "")
+    if not node_id or now - int(host["last_seen"] or 0) > STALE_SECONDS:
+        raise HTTPException(status_code=409, detail="母机离线或上报过期，未下发防火墙操作")
+    fleet = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
+    if fleet is not None and int(fleet["revision"] or 0) > 0:
+        raise HTTPException(status_code=409, detail="全局策略模板已启用；请从全局策略入口处理，避免单机状态分叉")
+    runtime = _host_firewall_runtime_status(conn, host_id)
+    if runtime.get("control_api") != "ready":
+        raise HTTPException(status_code=409, detail="Runman 防火墙控制接口尚未确认可用")
+    readback = _host_firewall_live_readback(conn, host_id, now)
+    if readback.get("status") != "ready" or readback.get("stale") or not isinstance(readback.get("snapshot"), dict):
+        raise HTTPException(status_code=409, detail="RFW 实时读回缺失或已过期，未下发操作")
+    if conn.execute(
+        "SELECT 1 FROM security_actions WHERE host_id=? AND action_type IN ('apply_host_firewall_policy','delete_host_firewall_rule') AND status IN ('queued','dispatched','running') LIMIT 1",
+        (host_id,),
+    ).fetchone():
+        raise HTTPException(status_code=409, detail="该主机已有防火墙操作正在执行")
+    return node_id, readback
+
+
+@app.post("/api/v1/firewall/host-policy/retry")
+async def retry_host_firewall_policy(request: Request) -> JSONResponse:
+    if getattr(request.state, "dashboard_role", "admin") != "admin":
+        raise HTTPException(status_code=403, detail="只有管理员可以重试母机防火墙策略")
+    try:
+        payload = json.loads(await request.body())
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="请求必须是有效 JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求必须是 JSON 对象")
+    host_id = str(payload.get("host_id") or "")[:200]
+    if not host_id:
+        raise HTTPException(status_code=400, detail="需要指定主机")
+    conn = db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        action = _latest_host_firewall_action(conn, host_id)
+        readback = _host_firewall_live_readback(conn, host_id, int(time.time()))
+        if not action or (action["status"] != "failed" and not (readback.get("sync_status") == "drifted" and not readback.get("stale"))):
+            raise HTTPException(status_code=409, detail="仅当最近应用失败或新鲜读回显示策略偏差时可重试")
+        now = int(time.time())
+        node_id, readback = _prepare_host_firewall_recovery(conn, host_id, now)
+        current = conn.execute("SELECT policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
+        policy = _validate_host_firewall_policy(json.loads(current["policy_json"] or "{}")) if current else _empty_host_firewall_policy()
+        materialized, target_state = _materialize_host_firewall_policy(conn, host_id, policy, now)
+        if materialized is None:
+            raise HTTPException(status_code=409, detail=f"目标网卡/运行时已不可验证（{target_state}），未下发重试")
+        compatibility = _policy_protocol_compatibility(materialized, readback)
+        if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
+            raise HTTPException(status_code=409, detail="RFW 实时协议能力不满足当前策略，未下发重试")
+        requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
+        action_id = _enqueue_host_firewall_policy(conn, host_id, node_id, materialized, requested_by, now, 0)
+        revision = int(conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()[0])
+        conn.commit()
+        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "action_id": action_id, "queued": True})
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/firewall/host-policy/rollback")
+async def rollback_host_firewall_policy(request: Request) -> JSONResponse:
+    if getattr(request.state, "dashboard_role", "admin") != "admin":
+        raise HTTPException(status_code=403, detail="只有管理员可以回滚母机防火墙策略")
+    try:
+        payload = json.loads(await request.body())
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="请求必须是有效 JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求必须是 JSON 对象")
+    host_id = str(payload.get("host_id") or "")[:200]
+    if not host_id:
+        raise HTTPException(status_code=400, detail="需要指定主机")
+    conn = db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        history = conn.execute(
+            "SELECT revision,policy_json FROM host_firewall_policy_history WHERE host_id=? ORDER BY revision DESC,id DESC LIMIT 1",
+            (host_id,),
+        ).fetchone()
+        if not history:
+            raise HTTPException(status_code=409, detail="没有可回滚的历史策略")
+        now = int(time.time())
+        node_id, readback = _prepare_host_firewall_recovery(conn, host_id, now)
+        try:
+            previous = _validate_host_firewall_policy(json.loads(history["policy_json"] or "{}"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="历史策略记录无效，未下发回滚") from None
+        materialized, target_state = _materialize_host_firewall_policy(conn, host_id, previous, now)
+        if materialized is None:
+            raise HTTPException(status_code=409, detail=f"历史策略引用的网卡已无法验证（{target_state}），未下发回滚")
+        compatibility = _policy_protocol_compatibility(materialized, readback)
+        if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
+            raise HTTPException(status_code=409, detail="RFW 实时协议能力不满足历史策略，未下发回滚")
+        requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
+        action_id = _enqueue_host_firewall_policy(conn, host_id, node_id, materialized, requested_by, now, 0)
+        revision = int(conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()[0])
+        conn.commit()
+        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "restored_revision": int(history["revision"]), "action_id": action_id, "queued": True})
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -5054,7 +5200,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
+            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -5112,7 +5258,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if (
             status == "succeeded"

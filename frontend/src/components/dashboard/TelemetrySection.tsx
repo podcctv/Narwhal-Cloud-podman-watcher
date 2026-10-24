@@ -52,6 +52,22 @@ const hostAuditLevel = (t: SecurityStatusItem): Level => {
 const auditTime = (value?: number) => value
   ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
   : '尚无完整扫描记录';
+const vulnerabilityRepair = (finding: { package?: string; source?: string }, osId: string) => {
+  const pkg = finding?.package || '<包名>';
+  if (finding?.source === 'lockfile' || finding?.source === 'manifest') {
+    return { command: '更新项目依赖声明与锁文件，重新构建并部署应用；不要用系统包管理器修复项目锁文件命中。', impact: '会改变应用依赖版本，需按项目流程重新构建/发布。' };
+  }
+  if (finding?.source === 'installed') {
+    return { command: `先检查虚拟环境中的 ${pkg}，再使用项目采用的 pip/uv/Poetry 工具升级并同步锁文件。`, impact: '可能影响依赖该 Python 包的程序；不要用 sudo pip 覆盖系统 Python。' };
+  }
+  const id = (osId || '').toLowerCase();
+  if (['debian', 'ubuntu', 'linuxmint', 'raspbian'].includes(id)) {
+    return { command: `先核对发行版安全公告与已安装版本，再执行：sudo apt update && sudo apt install --only-upgrade <包名>（包名：${pkg}）。`, impact: '更新可能重启相关服务；若是内核/SSH 组件，安排维护窗口并准备控制台访问。' };
+  }
+  if (id === 'alpine') return { command: `核对 Alpine 安全公告与 apk policy 后执行：sudo apk upgrade <包名>（包名：${pkg}）。`, impact: '可能更新依赖包或重启关联服务；更新前检查变更清单。' };
+  if (['rhel', 'rocky', 'almalinux', 'fedora', 'centos'].includes(id)) return { command: `核对发行版公告后执行：sudo dnf upgrade <包名>（包名：${pkg}）。`, impact: '可能更新依赖包或重启服务；内核更新通常需要计划重启。' };
+  return { command: '先根据当前发行版的安全公告确认修复版本，再使用该发行版的包管理器更新对应软件包。', impact: '影响取决于软件包；更新可能重启相关服务。' };
+};
 const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode }> = ({ title, level, children }) =>
   <div className={`min-w-0 rounded-xl border p-3 ${tones[level]}`}>
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-semibold">
@@ -102,6 +118,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const hostAuditEvents = hostAudit?.recent_events || [];
         const hostFindings = hostAudit?.recent_findings || [];
         const securityIndicators = hostAudit?.recent_indicators || [];
+        const hostOsId = hostAudit?.os?.id || '';
         const vulnerabilityCount = Number(vulnerabilityScan?.finding_count || 0);
         const vulnerabilityCriticalCount = Number(vulnerabilityScan?.critical_count || 0);
         const indicatorCount = Number(indicatorScan?.finding_count || 0);
@@ -245,10 +262,12 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                     {!sshOnlyAudit && hostFindings.length > 0 && <div className="rounded-lg border border-slate-700/70 p-2">
                       <p className="font-semibold">漏洞匹配（显示前 {Math.min(hostFindings.length, 12)} 条，共 {fmtNumber(vulnerabilityCount, 0)} 项）</p>
                       <div className="mt-2 space-y-2">
-                        {hostFindings.slice(0, 12).map((finding, index) => <div key={(finding.ecosystem || '') + '-' + (finding.package || '') + '-' + (finding.version || '') + '-' + (finding.id || index)} className="border-t border-slate-700/70 pt-2">
+                        {hostFindings.slice(0, 12).map((finding, index) => { const repair = vulnerabilityRepair(finding, hostOsId); return <div key={(finding.ecosystem || '') + '-' + (finding.package || '') + '-' + (finding.version || '') + '-' + (finding.id || index)} className="border-t border-slate-700/70 pt-2">
                           <p className="break-all font-semibold">{finding.severity === 'critical' ? '严重' : '待复核'} · {finding.cve || finding.id || 'OSV 公告'} · {finding.package}@{finding.version} · {finding.source === 'system' ? '系统软件' : finding.source === 'installed' ? '已安装 Python 包' : finding.source === 'manifest' ? 'Maven 清单（非锁定）' : '依赖锁文件'}</p>
                           {finding.summary && <p className="text-slate-300">{finding.summary}</p>}
-                        </div>)}
+                          <p className="mt-1 break-words text-sky-200">建议步骤：{repair.command}</p>
+                          <p className="text-slate-400">影响：{repair.impact}</p>
+                        </div>; })}
                       </div>
                       <p className="mt-2 text-slate-300">先核对实际安装版本及发行版公告；锁文件命中不代表已安装或运行，发行版也可能回移补丁。确认受影响后更新补丁，再重新扫描。</p>
                     </div>}
@@ -266,6 +285,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                     </div>}
                     {vulnerabilityScan?.error && <p className="text-amber-200">漏洞扫描提示：{vulnerabilityScan.error}</p>}
                     {indicatorScan?.error && <p className="text-amber-200">补充扫描提示：{indicatorScan.error}</p>}
+                    <p className="text-slate-300">系统：{hostOsId || '发行版未知'} {hostAudit.os?.version_id || ''} · 漏洞扫描上次尝试 {auditTime(vulnerabilityScan?.last_attempt_at)}。OSV 匹配仅是待复核项；修复后在运维中心 → 采集健康点击“请求只读复扫”。复扫不会自动安装更新。</p>
                     <p className="text-slate-300">SSH 日志：{hostAudit.ssh_log_status === 'available' ? `可读 · 本周期 ${fmtNumber(hostAudit.ssh_events_last_period || 0, 0)} 次成功登录` : '未完整接入，无法据此排除未知登录来源。'} 完整性问题请先确认 Agent 权限和日志可读性，再等待新一轮采样。</p>
                   </div>
                 </details>

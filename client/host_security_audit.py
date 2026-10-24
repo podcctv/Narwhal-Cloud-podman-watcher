@@ -121,6 +121,24 @@ def load_ssh_cursor() -> str:
     return str(_STATE.get("ssh_cursor") or "")[:4096]
 
 
+def request_rescan(now: Optional[int] = None) -> None:
+    """Invalidate only scan timers; the next report performs a read-only rescan."""
+    global _STATE, _STATE_PATH
+    if not _STATE_PATH:
+        _STATE_PATH = _state_path()
+    if not _STATE:
+        _STATE = _load_state()
+    current = int(time.time() if now is None else now)
+    vulnerability = _STATE.get("vulnerability_scan")
+    if isinstance(vulnerability, dict):
+        vulnerability["last_attempt_at"] = 0
+        _STATE["vulnerability_scan"] = vulnerability
+    _STATE["security_indicator_last_attempt_at"] = 0
+    _STATE.pop("_pending_security_indicator_scan", None)
+    _STATE["rescan_requested_at"] = current
+    _save_state()
+
+
 def commit_ssh_cursor(cursor: str) -> None:
     """Persist a journal cursor only after the server acknowledges the report."""
     global _STATE, _STATE_PATH
@@ -2057,6 +2075,8 @@ def prepare_report(country_lookup=None, now: Optional[int] = None) -> Dict[str, 
     host_audit = {
         "enabled": True,
         "scope": audit_scope,
+        "os": current.get("os") if isinstance(current.get("os"), dict) else {},
+        "rescan_requested_at": _safe_int(_STATE.get("rescan_requested_at")),
         "snapshot_status": current.get("status", "partial"),
         "snapshot_at": current.get("captured_at", captured_at),
         "baseline_at": _safe_int(previous.get("captured_at")) if same_scope_baseline else 0,
