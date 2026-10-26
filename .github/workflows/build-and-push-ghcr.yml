@@ -23,6 +23,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -35,6 +40,11 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r client/requirements.txt -r server/requirements.txt httpx==0.28.1
 
+      - name: Audit Python dependency requirements
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: client/requirements.txt server/requirements.txt
+
       - name: Install frontend dependencies from lockfile
         working-directory: frontend
         run: npm ci --ignore-scripts
@@ -44,7 +54,26 @@ jobs:
         run: |
           npm audit --audit-level=low
           npm run build
-          cd .. && node tests/test_tcping_carriers.cjs
+
+      - name: Install isolated Playwright runtime and Chromium
+        run: |
+          npm install --prefix tests/browser-runtime --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.62.1
+          tests/browser-runtime/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Run synthetic localhost browser regressions
+        env:
+          NARWHAL_UI_OUTPUT_ROOT: ${{ runner.temp }}/narwhal-ui-regressions
+          NODE_PATH: ${{ github.workspace }}/tests/browser-runtime/node_modules
+        run: python tests/run_ui_regressions.py
+
+      - name: Upload browser regression screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: narwhal-ui-regressions
+          path: ${{ runner.temp }}/narwhal-ui-regressions
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Compile Python sources
         run: python -m compileall -q client server scripts tests

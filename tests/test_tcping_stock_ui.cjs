@@ -1,7 +1,7 @@
 /* Synthetic localhost only: python -m tests.tcping_stock_preview. */
 const {chromium}=require('playwright');const assert=require('node:assert/strict');
 (async()=>{
- const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||process.env.CHROMIUM_PATH||undefined});
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1100},reducedMotion:'reduce'}),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.request.get('http://127.0.0.1:8794/api/public/tcping/sources');

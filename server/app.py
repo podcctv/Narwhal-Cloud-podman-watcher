@@ -130,7 +130,7 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy, ip_reputation, inbound_assessment
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy, ip_reputation, inbound_assessment, database_telemetry
 except ImportError:
     import operations
     import connection_policy
@@ -143,6 +143,7 @@ except ImportError:
     import tcping
     import ip_reputation
     import inbound_assessment
+    import database_telemetry
 
 try:
     from server import abuse_api, admission_api
@@ -468,6 +469,7 @@ def init_db() -> None:
     abuse_api.initialize(conn)
     admission_api.initialize(conn)
     ip_reputation.initialize(conn)
+    database_telemetry.initialize(conn)
     conn.commit()
     conn.close()
 
@@ -479,6 +481,9 @@ async def _cleanup_background_loop() -> None:
         try:
             await asyncio.to_thread(cleanup_old_reports, force=True)
             await asyncio.to_thread(operations_maintenance)
+            # Collect hourly growth history even if operators do not open the
+            # storage page; sampling itself is idempotent within each hour.
+            await asyncio.to_thread(database_storage_status)
         except Exception:
             logging.exception("Database retention worker failed")
         await asyncio.sleep(5 if _cleanup_status.get("backlog") else REPORT_CLEANUP_INTERVAL_SECONDS)
@@ -526,6 +531,7 @@ def database_storage_status() -> Dict[str, Any]:
             "live_bytes": (pages - free) * page_size,
             "wal_bytes": os.path.getsize(DB_PATH + "-wal") if os.path.exists(DB_PATH + "-wal") else 0,
             "auto_vacuum": int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]),
+            "growth": database_telemetry.sample_and_summarize(conn, DB_PATH, int(time.time())),
             "cleanup": dict(_cleanup_status),
             "raw_retention_seconds": min(PURGE_SECONDS, RAW_RETENTION_SECONDS),
             "report_max_rows": REPORT_MAX_ROWS,

@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 (async()=>{
- const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||process.env.CHROMIUM_PATH||undefined});
  try{
   const page=await browser.newPage({viewport:{width:800,height:600}}),errors=[];
   page.on('pageerror',error=>errors.push(error.message));

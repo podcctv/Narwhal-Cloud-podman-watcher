@@ -2,10 +2,11 @@
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 (async () => {
-  const output = 'C:/Users/Flanker/AppData/Local/Temp/narwhal-admission-ui';
+  const output = path.resolve(process.env.NARWHAL_UI_OUTPUT || '.codex/tmp/admission-ui');
   fs.mkdirSync(output, { recursive: true });
-  const browser = await chromium.launch({ headless: true, executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.NARWHAL_BROWSER || process.env.CHROMIUM_PATH || undefined });
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1100 }, reducedMotion: 'reduce' });
     const errors = [], mutations = [];

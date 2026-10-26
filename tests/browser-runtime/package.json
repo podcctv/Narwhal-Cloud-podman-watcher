@@ -1,0 +1,8 @@
+{
+  "name": "narwhal-ui-regression-runtime",
+  "private": true,
+  "description": "Isolated Playwright runtime for synthetic localhost UI regression tests",
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

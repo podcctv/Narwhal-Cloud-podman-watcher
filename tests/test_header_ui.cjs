@@ -1,8 +1,8 @@
 /* Synthetic localhost only: python -m tests.tcping_auto_preview. */
-const {chromium}=require('playwright');const assert=require('node:assert/strict');const fs=require('node:fs');
+const {chromium}=require('playwright');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
 (async()=>{
- const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
- const base='http://127.0.0.1:8791',output='C:/Users/Flanker/AppData/Local/Temp/narwhal-header-ui-v1731';fs.mkdirSync(output,{recursive:true});
+ const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||process.env.CHROMIUM_PATH||undefined});
+ const base='http://127.0.0.1:8791',output=path.resolve(process.env.NARWHAL_UI_OUTPUT||'.codex/tmp/header-ui');fs.mkdirSync(output,{recursive:true});
  try {
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base+'/login');await page.getByLabel('用户名',{exact:true}).fill('preview');await page.getByLabel('密码',{exact:true}).fill('local-preview-only');

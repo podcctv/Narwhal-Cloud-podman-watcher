@@ -1,10 +1,10 @@
 /* Run against python -m tests.tcping_auto_preview only; never production. */
-const {chromium}=require('playwright');
+const {chromium}=require('playwright');const path=require('node:path');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 (async()=>{
- const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
- const base='http://127.0.0.1:8791';const output=process.env.NARWHAL_UI_OUTPUT||'C:/Users/Flanker/AppData/Local/Temp/narwhal-tcping-auto-ui-v1729';fs.mkdirSync(output,{recursive:true});
+ const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||process.env.CHROMIUM_PATH||undefined});
+ const base='http://127.0.0.1:8791';const output=path.resolve(process.env.NARWHAL_UI_OUTPUT||'.codex/tmp/tcping-auto-ui');fs.mkdirSync(output,{recursive:true});
  try {
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));

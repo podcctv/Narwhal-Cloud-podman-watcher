@@ -6,7 +6,7 @@ const path = require('node:path');
 (async () => {
   const output = path.resolve(process.env.NARWHAL_UI_OUTPUT || '.codex/tmp/disk-cleanup-ui');
   fs.mkdirSync(output, { recursive: true });
-  const browser = await chromium.launch({ headless: true, executablePath: process.env.NARWHAL_BROWSER || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.NARWHAL_BROWSER || process.env.CHROMIUM_PATH || undefined });
   const errors = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });

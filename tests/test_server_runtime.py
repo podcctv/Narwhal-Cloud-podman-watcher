@@ -72,6 +72,16 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(len(body["items"]), 2)
         self.assertEqual({x["runtime"] for x in body["items"]}, {"docker", "incus"})
 
+    def test_database_status_records_bounded_growth_telemetry(self):
+        status = server.database_storage_status()
+        growth = status["growth"]
+        self.assertIn(growth["status"], {"healthy", "warming_up", "warning", "critical"})
+        self.assertEqual(growth["retention_days"], 45)
+        self.assertEqual(len(growth["history"]), 1)
+        conn = sqlite3.connect(server.DB_PATH)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM database_storage_samples").fetchone()[0], 1)
+        conn.close()
+
     def test_container_user_note_is_searchable_and_bound_to_instance_id(self):
         self._insert("incus", 20, "default")
 

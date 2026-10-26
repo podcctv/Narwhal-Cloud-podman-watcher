@@ -4,8 +4,8 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 (async()=>{
- const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
- const output=process.env.NARWHAL_UI_OUTPUT||'C:/Users/Flanker/AppData/Local/Temp/narwhal-carrier37-ui';fs.mkdirSync(output,{recursive:true});
+ const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||process.env.CHROMIUM_PATH||undefined});
+ const output=process.env.NARWHAL_UI_OUTPUT||require('node:path').resolve('.codex/tmp/tcping-carriers-ui');fs.mkdirSync(output,{recursive:true});
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'}), errors=[],posts=[];
   page.on('pageerror',e=>errors.push(e.stack || e.message));

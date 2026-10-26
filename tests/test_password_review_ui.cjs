@@ -1,10 +1,10 @@
 /* Run tests.password_review_preview first. Synthetic localhost, never production. */
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
-const fs=require('node:fs');
+const fs=require('node:fs');const path=require('node:path');
 (async()=>{
- const output='C:/Users/Flanker/AppData/Local/Temp/narwhal-password-review-ui';fs.mkdirSync(output,{recursive:true});
- const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const output=path.resolve(process.env.NARWHAL_UI_OUTPUT||'.codex/tmp/password-review-ui');fs.mkdirSync(output,{recursive:true});
+ const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||process.env.CHROMIUM_PATH||undefined});
  try {
   const page=await browser.newPage({viewport:{width:1440,height:1100},reducedMotion:'reduce'}), errors=[], posts=[];
   page.on('pageerror',e=>errors.push(e.message));

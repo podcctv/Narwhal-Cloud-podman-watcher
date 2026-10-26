@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import {
   ContainerItem,
   SecurityAlert,
@@ -12,17 +12,18 @@ import { SecurityAlertSection } from './components/dashboard/SecurityAlertSectio
 import { QuarantinePanel } from './components/dashboard/QuarantinePanel';
 import { TelemetrySection } from './components/dashboard/TelemetrySection';
 import { HostContainerList } from './components/dashboard/HostContainerList';
-import { ContainerDrawer } from './components/container/ContainerDrawer';
-import { AlertHistoryView } from './components/alerts/AlertHistoryView';
-import { UserInvestigationView } from './components/alerts/UserInvestigationView';
-import { StatsAnalyticsView } from './components/stats/StatsAnalyticsView';
 import { CommandPalette } from './components/common/CommandPalette';
 import { ToastContainer, ToastMessage } from './components/common/Toast';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
-import { SettingsView } from './components/settings/SettingsView';
-import { OperationsView } from './components/operations/OperationsView';
-import { CommerceView } from './components/commerce/CommerceView';
-import { FirewallView } from './components/firewall/FirewallView';
+
+const ContainerDrawer = lazy(() => import('./components/container/ContainerDrawer').then(module => ({ default: module.ContainerDrawer })));
+const AlertHistoryView = lazy(() => import('./components/alerts/AlertHistoryView').then(module => ({ default: module.AlertHistoryView })));
+const UserInvestigationView = lazy(() => import('./components/alerts/UserInvestigationView').then(module => ({ default: module.UserInvestigationView })));
+const StatsAnalyticsView = lazy(() => import('./components/stats/StatsAnalyticsView').then(module => ({ default: module.StatsAnalyticsView })));
+const SettingsView = lazy(() => import('./components/settings/SettingsView').then(module => ({ default: module.SettingsView })));
+const OperationsView = lazy(() => import('./components/operations/OperationsView').then(module => ({ default: module.OperationsView })));
+const CommerceView = lazy(() => import('./components/commerce/CommerceView').then(module => ({ default: module.CommerceView })));
+const FirewallView = lazy(() => import('./components/firewall/FirewallView').then(module => ({ default: module.FirewallView })));
 
 export const Dashboard: React.FC = () => {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -240,6 +241,7 @@ export const Dashboard: React.FC = () => {
       {/* Main Body */}
       <main className={`mx-auto w-full ${activeTab === 'investigation' ? 'max-w-[1536px]' : 'max-w-7xl'} flex-1 px-4 sm:px-6 pb-16`}>
         <ErrorBoundary fallbackTitle="主界面视图加载异常">
+          <Suspense fallback={<div className="flex min-h-40 items-center justify-center text-sm text-slate-400" role="status">正在载入此页面…</div>}>
           {activeTab === 'dashboard' && (
             <>
               {/* KPI Cards Grid */}
@@ -296,18 +298,19 @@ export const Dashboard: React.FC = () => {
           )}
           {(activeTab === 'settings' || activeTab === 'notifications') && <SettingsView onToast={addToast} />}
           {activeTab === 'operations' && <OperationsView onToast={addToast} isPaused={isPaused} />}
+          </Suspense>
         </ErrorBoundary>
       </main>
 
       {/* Slide-over Container Drawer */}
-      <ContainerDrawer
+      {selectedContainer && <Suspense fallback={null}><ContainerDrawer
         identity={selectedContainer}
         activeAlerts={activeAlerts}
         onClose={() => setSelectedContainer(null)}
         serverVersion={serverVersion}
         onToast={addToast}
         onRefresh={fetchAllData}
-      />
+      /></Suspense>}
 
       {/* Command Palette (Ctrl+K) */}
       <CommandPalette

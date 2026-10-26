@@ -1,7 +1,7 @@
 /* Synthetic localhost only: NARWHAL_PREVIEW_PORT=8793 python -m tests.commerce_preview. */
 const {chromium}=require('playwright');const assert=require('node:assert/strict');
 (async()=>{
- const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const browser=await chromium.launch({headless:true,executablePath:process.env.NARWHAL_BROWSER||process.env.CHROMIUM_PATH||undefined});
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'}),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto('http://127.0.0.1:8793/login');await page.getByLabel('用户名',{exact:true}).fill('preview');await page.getByLabel('密码',{exact:true}).fill('local-preview-only');
