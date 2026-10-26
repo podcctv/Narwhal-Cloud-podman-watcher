@@ -58,7 +58,8 @@ const fs=require('node:fs');const path=require('node:path');
    await recoveredCard.scrollIntoViewIfNeeded();
    await recoveredCard.screenshot({path:`${output}/recovery-history-${width}.png`});
   }
-  assert.equal(await page.getByRole('button',{name:'通知用户',exact:true}).count(),4);
+  assert.equal(await page.getByRole('button',{name:'通知用户',exact:true}).count(),3,
+    'protection-only connection alerts must not offer customer notification');
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({passed:true,widths:[375,768,1440],preview_cancel_no_posts:true,notification_posts:1,manual_stop_posts:1,history:true,screenshots:output}));
  } finally {await browser.close()}
