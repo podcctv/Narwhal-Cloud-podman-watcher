@@ -279,7 +279,7 @@ class ServerRuntimeTests(unittest.TestCase):
         cards = (ROOT / "frontend" / "src" / "components" / "dashboard" / "HostContainerList.tsx").read_text(
             encoding="utf-8"
         )
-        self.assertIn("api.getLatest(false)", app)
+        self.assertIn("api.getLatest(true)", app)
         self.assertIn("!container.alerts?.stale", app)
         self.assertIn("if (container.alerts?.stale)", cards)
         self.assertIn("containers.filter((c) => !c.alerts?.stale)", cards)
