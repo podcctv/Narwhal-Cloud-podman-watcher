@@ -1083,6 +1083,13 @@ def reconcile(
                         target["prefix"], target["interface"], target["owner_key"], direction,
                         rate, owned, filter_prefs.get(direction),
                     )
+                    # Keep persisted state JSON-safe if an older integration
+                    # wrapper reports success without returning the selected
+                    # preference. The production implementation always
+                    # returns an integer after kernel readback.
+                    if type(applied_pref) is not int or not 49150 <= applied_pref < 65535:
+                        previous_pref = filter_prefs.get(direction)
+                        applied_pref = previous_pref if type(previous_pref) is int and 49150 <= previous_pref < 65535 else PREFS[direction]
                     installed.add(direction)
                     rates[direction] = rate
                     filter_prefs[direction] = applied_pref
