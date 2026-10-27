@@ -151,7 +151,9 @@ if NARWHAL_MANAGED_UPDATE=1 NARWHAL_AUTO_UPDATE=1 bash "$stage/scripts/install-c
   echo "installed $version at $revision; wait for signed version report"
 else
   echo 'upgrade failed; restoring previous agent'
-  restore
+  if ! restore; then
+    echo 'automatic rollback failed; inspect the retained snapshot' >&2
+  fi
   deployment_started=0
   write_result failed
   exit 1
