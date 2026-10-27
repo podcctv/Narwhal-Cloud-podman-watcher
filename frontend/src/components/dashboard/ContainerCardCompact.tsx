@@ -94,10 +94,10 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
   }, [sec.service_listeners]);
 
   const applicationProtocolsFor = (listener: (typeof serviceListeners)[number]) => {
-    const configured = Array.isArray(listener.application_protocols)
+    const configured = listener.application_protocol_evidence === 'config_matches_live_pid_and_port' && Array.isArray(listener.application_protocols)
       ? listener.application_protocols.map((protocol) => APP_PROTOCOL_LABELS[protocol] || protocol.toUpperCase())
       : [];
-    if (configured.length > 0) return { labels: configured, evidence: '进程配置与当前 PID/端口匹配' };
+    if (configured.length > 0) return { labels: configured, evidence: '配置与当前进程、监听端口匹配' };
 
     const hy2 = sec.hy2_protocol;
     const hy2Ports = Array.isArray(hy2?.listening_udp_ports) ? hy2.listening_udp_ports.map(Number) : [];
@@ -399,10 +399,11 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             <ChevronDown className={`h-3 w-3 shrink-0 text-slate-500 transition-transform ${servicesExpanded ? 'rotate-180' : ''}`} />
           </button>
 
-          <div className="mt-1 flex min-w-0 flex-wrap gap-1" aria-label="已确认协议及各自使用的端口数">
-            {protocolPortSummary.length ? protocolPortSummary.map(item => <span key={item.label} className="rounded border border-violet-800/70 bg-violet-950/40 px-1.5 py-0.5 text-[9px] font-medium text-violet-200" title={`${item.label}：${item.count} 个不同监听端口；按已确认的协议与 PID/端口证据统计`}>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 rounded-md border border-slate-800/70 bg-slate-950/40 px-1.5 py-1" aria-label="已确认协议及各自使用的端口数">
+            <span className="mr-0.5 shrink-0 text-[9px] font-semibold text-slate-400">协议端口</span>
+            {protocolPortSummary.length ? protocolPortSummary.map(item => <span key={item.label} className="rounded border border-violet-800/70 bg-violet-950/40 px-1.5 py-0.5 text-[9px] font-medium text-violet-200" title={`${item.label}：${item.count} 个不同监听端口；仅展示与实时进程/端口匹配的配置或协议证据`}>
               {item.label} ×{item.count}
-            </span>) : <span className="text-[9px] text-slate-500">{serviceListeners.length ? '协议待核实' : serviceInventoryState === 'complete' ? '未发现已确认代理协议' : '协议信息等待采集'}</span>}
+            </span>) : <span className="text-[9px] text-slate-500">{serviceListeners.length ? '协议待核实' : serviceInventoryState === 'complete' ? '未发现已确认代理协议' : '等待采集'}</span>}
           </div>
 
           {servicesExpanded && (

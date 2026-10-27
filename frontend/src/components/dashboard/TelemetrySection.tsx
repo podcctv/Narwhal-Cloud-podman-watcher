@@ -79,6 +79,15 @@ const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode 
     </div><div className="space-y-1.5 wrap-break-word text-xs leading-5 tabular-nums">{children}</div>
   </div>;
 
+const SummaryTile: React.FC<{ title: string; level: Level; status: string; children: React.ReactNode }> = ({ title, level, status, children }) =>
+  <div className={`flex min-h-[76px] min-w-0 flex-col justify-between rounded-xl border px-3 py-2.5 ${tones[level]}`}>
+    <div className="flex min-w-0 items-center justify-between gap-2 text-[10px]">
+      <span className="truncate opacity-80">{title}</span>
+      <span className="max-w-[62%] shrink-0 truncate text-right font-semibold" title={status}>{status}</span>
+    </div>
+    <div className="mt-1 min-w-0 break-words text-xs font-semibold leading-5 tabular-nums">{children}</div>
+  </div>;
+
 const HttpSource: React.FC<{ source: AccessSource }> = ({ source: s }) => {
   const requests = Number(s.requests || 0);
   const readable = Number(s.readable_files || 0) > 0;
@@ -219,45 +228,52 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-red-400">删除</button>
             </div>
           </div>
-          <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
-            <span className={`rounded-full border px-2 py-1 ${tones[peakLevel]}`}>网络峰值：{labels[peakLevel]}</span>
-            <span className={`rounded-full border px-2 py-1 ${tones[httpLevel]}`}>CC / HTTP：{labels[httpLevel]}</span>
-            <span className={`rounded-full border px-2 py-1 ${tones[auditLevel]}`}>主机审计：{auditLabel}</span>
-            <span className="rounded-full border border-slate-700 px-2 py-1 text-slate-300">最高连接 {fmtNumber(connPeak, 0)} · 事件 {events.length}</span>
+          <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-5" aria-label="主机状态摘要">
+            <SummaryTile title="网络峰值" level={peakLevel} status={labels[peakLevel]}>
+              最高连接 {fmtNumber(connPeak, 0)} · 入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}
+            </SummaryTile>
+            <SummaryTile title="CC / HTTP" level={httpLevel} status={labels[httpLevel]}>
+              {httpEvents.length ? `本次 ${httpEvents.length} 项事件` : readable ? '访问日志已接入' : '等待访问日志'}
+            </SummaryTile>
+            <SummaryTile title="主机审计" level={auditLevel} status={auditLabel}>
+              {sshOnlyAudit ? 'SSH 与主机基线' : '完整性、漏洞与威胁指标'}
+            </SummaryTile>
+            <SummaryTile title="采样事件" level={events.some(event => event.severity === 'critical') ? 'critical' : events.some(event => event.severity === 'warning') ? 'warning' : 'normal'} status={events.length ? `${events.length} 项` : '无事件'}>
+              {events.length ? '展开查看本周期详情' : '本周期采样正常'}
+            </SummaryTile>
+            <SummaryTile title="国内连通性" level={gfwLevel} status={gfwLabels[gfwStatus] || '待评估'}>
+              {gfwDuration}{gfw.blocked_count ? ` · 累计阻断 ${gfw.blocked_count} 次` : ''}
+            </SummaryTile>
           </div>
-          <section className={`mb-3 min-w-0 rounded-xl border p-3 ${tones[gfwLevel]}`} aria-label="国内连通性与 GFW 状态">
-            <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0">
-                <h4 className="font-semibold">国内连通性 <span className="ml-1 text-xs">{gfwLabels[gfwStatus] || '待评估'}</span></h4>
-                <p className="mt-1 text-xs">{gfwDuration}{gfwStatus === 'blocked' && gfw.blocked_count ? ` · 历史阻断 ${gfw.blocked_count} 次` : ''}</p>
-              </div>
-              {gfw.last_sample_at ? <span className="text-[11px] text-slate-400">采样 {auditTime(gfw.last_sample_at)}</span> : null}
-            </div>
-            {comparedEndpoint ? <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5 text-xs">
-              <span className="font-mono text-slate-200">{comparedEndpoint.ip}:{comparedEndpoint.port}</span>
-              {comparedEndpoint.interface && <span className="text-slate-400">网卡 {comparedEndpoint.interface}</span>}
-              <span>国内成功 {comparedEndpoint.mainland?.success || 0}/{comparedEndpoint.mainland?.total || 0}</span>
-              <span>海外成功 {comparedEndpoint.overseas?.success || 0}/{comparedEndpoint.overseas?.total || 0}</span>
-            </div> : null}
-            {gfwStatus === 'blocked' && Number(gfw.last_normal_duration_seconds || 0) > 0 && <p className="mt-2 text-xs">上次恢复后正常运行 {durationDays(gfw.last_normal_duration_seconds)}，之后再次出现国内不可达。</p>}
-            {(gfwStatus === 'stale' || gfwStatus === 'investigating') && <p className="mt-2 text-xs">{gfw.reason || (gfwStatus === 'stale' ? '探测数据已过期；保留上次状态供查看，不把离线或缺少样本算作恢复。' : '本轮证据不足；不确认阻断或恢复，也不把未知样本计入持续时间。')}</p>}
-            {gfwStatus === 'unassessed' && <p className="mt-2 text-xs">{gfw.reason || '需要至少 2 个国内、1 个海外探测点，并发现明确的公网 TCP 端口映射。'}</p>}
-            <p className="mt-2 text-[11px] leading-4 opacity-80">判断依据是同一公网 TCP 端点的跨区域连通性；这是网络信号，不足以单独证明具体封锁来源。</p>
-            {gfw.history && gfw.history.length > 0 && <details className="mt-2 rounded-lg border border-slate-700/70 bg-slate-950/20 px-2 py-1.5">
-              <summary className="cursor-pointer text-xs font-medium">阻断 / 恢复历史（{gfw.history.length} 条）</summary>
-              <div className="mt-2 grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                {gfw.history.slice(0, 6).map((event, index) => <div key={`${event.event_type}-${event.at}-${index}`} className="min-w-0 rounded-md border border-slate-700/70 p-2 text-[11px]">
-                  <p className="font-semibold">{event.event_type === 'blocked' ? '开始阻断' : '确认恢复'} · {auditTime(event.at)}</p>
-                  {event.event_type === 'recovered' && <p>本次持续 {durationDays(event.duration_seconds)}</p>}
-                  {event.event_type === 'blocked' && Number(event.normal_duration_seconds || 0) > 0 && <p>此前正常 {durationDays(event.normal_duration_seconds)}</p>}
-                </div>)}
-              </div>
-            </details>}
-          </section>
           <details className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
             <summary className="cursor-pointer text-xs font-semibold text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-400">展开网络信号、主机安全证据与修复建议</summary>
             <div className="mt-3 space-y-3">
           <div className="grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
+            <Signal title="国内连通性 / GFW 状态" level={gfwLevel}>
+              <p className="text-sm font-semibold">{gfwLabels[gfwStatus] || '待评估'}</p>
+              <p className="text-sm font-bold">{gfwDuration}</p>
+              {gfw.blocked_count ? <p>累计确认阻断 {fmtNumber(gfw.blocked_count, 0)} 次</p> : null}
+              {gfw.last_sample_at ? <p>最近采样 {auditTime(gfw.last_sample_at)}</p> : null}
+              {comparedEndpoint ? <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
+                <span className="font-mono text-slate-200">{comparedEndpoint.ip}:{comparedEndpoint.port}</span>
+                <span>国内成功 {comparedEndpoint.mainland?.success || 0}/{comparedEndpoint.mainland?.total || 0}</span>
+                <span>海外成功 {comparedEndpoint.overseas?.success || 0}/{comparedEndpoint.overseas?.total || 0}</span>
+              </div> : null}
+              {gfwStatus === 'blocked' && Number(gfw.last_normal_duration_seconds || 0) > 0 && <p>上次恢复后正常 {durationDays(gfw.last_normal_duration_seconds)}，之后再次出现国内不可达。</p>}
+              {(gfwStatus === 'stale' || gfwStatus === 'investigating') && <p className="text-slate-300">{gfw.reason || (gfwStatus === 'stale' ? '探测数据已过期；不把离线或缺少样本算作恢复。' : '本轮证据不足；不确认阻断或恢复，也不把未知样本计入持续时间。')}</p>}
+              {gfwStatus === 'unassessed' && <p className="text-slate-300">{gfw.reason || '需要至少 2 个国内、1 个海外探测点，并发现明确的公网 TCP 端口映射。'}</p>}
+              <p className="text-slate-300">比较同一公网 TCP 端点；这是连通性信号，不单独证明封锁来源。</p>
+              {gfw.history && gfw.history.length > 0 && <details className="mt-1 rounded-lg border border-slate-700/70 bg-slate-950/20 px-2 py-1.5">
+                <summary className="cursor-pointer font-semibold">阻断 / 恢复历史（{gfw.history.length} 条）</summary>
+                <div className="mt-2 space-y-2">
+                  {gfw.history.slice(0, 6).map((event, index) => <div key={`${event.event_type}-${event.at}-${index}`} className="min-w-0 rounded-md border border-slate-700/70 p-2">
+                    <p className="font-semibold">{event.event_type === 'blocked' ? '开始阻断' : '确认恢复'} · {auditTime(event.at)}</p>
+                    {event.event_type === 'recovered' && <p>本次阻断持续 {durationDays(event.duration_seconds)}</p>}
+                    {event.event_type === 'blocked' && Number(event.normal_duration_seconds || 0) > 0 && <p>此前正常 {durationDays(event.normal_duration_seconds)}</p>}
+                  </div>)}
+                </div>
+              </details>}
+            </Signal>
             <Signal title="实时速率 / 今日峰值" level={signalLevel(t, /^ddos_(host_)?bandwidth$/)}>
               <p>↓ {fmtNetSpeed(t.rx_bps).mbps} · ↑ {fmtNetSpeed(t.tx_bps).mbps}</p>
               <p>今日峰值 ↓ {fmtNetSpeed(t.today_peak_rx_bps).mbps}</p>
