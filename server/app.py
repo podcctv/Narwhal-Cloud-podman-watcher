@@ -3526,6 +3526,57 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
     return JSONResponse(content=res_content)
 
 
+@app.get("/api/v1/containers/user-note")
+def get_container_user_note(
+    request: Request,
+    host_id: str,
+    runtime: str,
+    container_name: str,
+    container_id: str,
+    project: str = "",
+) -> JSONResponse:
+    """Read private lookup metadata for one exact container instance."""
+    if getattr(request.state, "dashboard_role", "") not in {"admin", "operator"}:
+        raise HTTPException(status_code=403, detail="仅管理员或运维人员可查询用户邮箱与备注")
+
+    host_id = str(host_id or "").strip()
+    runtime = str(runtime or "").strip().lower()
+    project = str(project or "").strip()
+    container_name = str(container_name or "").strip()
+    container_id = str(container_id or "").strip()
+    if runtime not in {"incus", "podman"}:
+        raise HTTPException(status_code=400, detail="仅支持 Incus 和 Podman 容器")
+    if (not host_id or len(host_id) > 255 or not container_name or len(container_name) > 255
+            or not container_id or len(container_id) > 255 or len(project) > 255):
+        raise HTTPException(status_code=400, detail="主机或容器实例标识无效")
+
+    conn = db()
+    try:
+        row = conn.execute(
+            """
+            SELECT user_email, user_note, updated_at
+            FROM container_user_notes
+            WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND container_id=?
+            """,
+            (host_id, runtime, project, container_name, container_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return JSONResponse({
+        "ok": True,
+        "found": row is not None,
+        "host_id": host_id,
+        "runtime": runtime,
+        "project": project,
+        "container_name": container_name,
+        "container_id": container_id,
+        "user_email": row["user_email"] if row else "",
+        "user_note": row["user_note"] if row else "",
+        "updated_at": int(row["updated_at"] or 0) if row else 0,
+    })
+
+
 @app.post("/api/v1/containers/user-note")
 async def save_container_user_note(request: Request) -> JSONResponse:
     """Save private dashboard lookup metadata for the current Incus/Podman instance."""

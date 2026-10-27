@@ -847,6 +847,19 @@ export interface ContainerIdentity {
   alert_id?: number;
 }
 
+export interface ContainerUserNoteResponse {
+  ok: boolean;
+  found: boolean;
+  host_id: string;
+  runtime: string;
+  project: string;
+  container_name: string;
+  container_id: string;
+  user_email: string;
+  user_note: string;
+  updated_at: number;
+}
+
 export interface NotificationBot {
   id: number;
   name: string;

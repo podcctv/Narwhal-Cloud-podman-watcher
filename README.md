@@ -1,6 +1,12 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.101**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.102**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.102：增加容器邮箱备注的精确查询 API
+
+- 新增 `GET /api/v1/containers/user-note?host_id=…&runtime=…&project=…&container_name=…&container_id=…`，按完整容器实例身份精确读取用户邮箱与内部备注；返回 `found`、`user_email`、`user_note` 和 `updated_at`，容器重建后不会串到新实例。
+- 邮箱及备注属于敏感管理信息，查询仅允许管理员和运维角色；只读角色返回 403。现有 `/api/v1/latest` 的授权字段行为保持一致。
+- 前端 API 客户端新增 `getContainerUserNote(identity)` 调用封装。
 
 ### v1.7.101：修复定向处置的已消失目标误报
 

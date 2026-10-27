@@ -6,6 +6,7 @@ import {
   DiagnosticData,
   StatsResponse,
   ContainerIdentity,
+  ContainerUserNoteResponse,
   NotificationBot,
   PushSettingsResponse,
   PushSettingsPayload,
@@ -101,6 +102,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ...identity, ...data }),
     }),
+  getContainerUserNote: (identity: ContainerIdentity & { container_id: string }) => {
+    const query = new URLSearchParams({
+      host_id: identity.host_id,
+      runtime: identity.runtime,
+      project: identity.project || '',
+      container_name: identity.container_name,
+      container_id: identity.container_id,
+    });
+    return request<ContainerUserNoteResponse>(`/api/v1/containers/user-note?${query}`);
+  },
 
   getActiveAlerts: () =>
     request<{ items?: SecurityAlert[]; alerts?: SecurityAlert[]; active_count?: number }>('/api/v1/security/alerts'),

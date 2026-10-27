@@ -566,6 +566,8 @@ def authenticate(conn, authorization):
 def permitted(role, method, path):
     if role == "admin":
         return True
+    if path == "/api/v1/containers/user-note":
+        return role == "operator" and method in {"GET", "HEAD", "POST"}
     # Personal settings are scoped to the authenticated identity inside commerce.
     if path in {"/api/v1/commerce/settings", "/api/v1/commerce/sync"}:
         return method in {"GET", "HEAD", "POST", "DELETE"}
@@ -576,8 +578,6 @@ def permitted(role, method, path):
         return True
     if role != "operator":
         return False
-    if path == "/api/v1/containers/user-note":
-        return method == "POST"
     return ((path.startswith("/api/v1/containers/") or path.startswith("/api/v1/security/alerts/"))
             and (path.endswith("/diagnostics") or path.endswith("/disposition")
                  or path.endswith("/actions") or path.endswith('/notify-user'))
