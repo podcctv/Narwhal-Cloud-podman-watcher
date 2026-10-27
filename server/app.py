@@ -1595,10 +1595,14 @@ def _telegram_alert_status_card(
             return "\n".join(lines) or "-"
         attribution = deep_evidence.get("connection_attribution")
         attribution_text = ""
+        attribution_unavailable = not isinstance(attribution, dict)
         if isinstance(attribution, dict):
             captured_sockets = attribution.get("captured_sockets")
             try:
-                expected_connections = int(deep_evidence.get("connection_count") or 0)
+                expected_connections = max(
+                    int(deep_evidence.get("connection_count") or 0),
+                    int(attribution.get("expected_connection_count") or 0),
+                )
                 captured_count = int(captured_sockets or 0)
             except (TypeError, ValueError, OverflowError):
                 expected_connections, captured_count = 0, 0
@@ -1651,11 +1655,15 @@ def _telegram_alert_status_card(
                 + f"混合/未应答 {signal_counts['mixed_connection_evidence'] + signal_counts['unreplied_tcp_observed']} IP。"
                 "这些只是单次 conntrack 传输线索，需结合应用访问日志判断是否为正常用户请求。"
             )
+        inbound_ip_summary = "未采集" if attribution_unavailable and not inbound_items else str(inbound_ips)
+        outbound_ip_summary = "未采集" if attribution_unavailable and not outbound_items else str(outbound_ips)
+        inbound_process_summary = "未采集" if attribution_unavailable and not inbound_items else str(inbound_processes)
+        outbound_process_summary = "未采集" if attribution_unavailable and not outbound_items else str(outbound_processes)
         evidence_text = (
             f"\n<b>自动深度取证</b>\n"
             f"{html.escape(evidence_note)}\n"
-            f"入站：{inbound_ips} IP / {inbound_processes} 进程\n"
-            f"出站：{outbound_ips} IP / {outbound_processes} 进程\n"
+            f"入站：{inbound_ip_summary} IP / {inbound_process_summary} 进程\n"
+            f"出站：{outbound_ip_summary} IP / {outbound_process_summary} 进程\n"
             f"{attribution_text}{signal_text}\n"
             f"<b>入站 IP（每行一个）</b>\n{ip_lines(inbound_items, 'inbound')}\n"
             f"<b>出站 IP（每行一个）</b>\n{ip_lines(outbound_items, 'outbound')}\n"
@@ -6731,7 +6739,7 @@ function drawChart(id,series){const svg=document.getElementById(id);const values
       const rates=sample.network_rates||{},processes=sample.processes?.items||[],sockets=sample.communication_sockets||[],errors=sample.errors||[];
       const ipMap=new Map();for(const item of [...(sample.connection_ips||[]),...(sample.inbound_ips||[]),...(sample.outbound_ips||[])]){if(!item?.ip)continue;ipMap.set(item.ip,{...(ipMap.get(item.ip)||{}),...item})}const ips=[...ipMap.values()].sort((a,b)=>Math.max(Number(b.connections||0),Number(b.inbound||0),Number(b.outbound||0))-Math.max(Number(a.connections||0),Number(a.inbound||0),Number(a.outbound||0)));
      const metrics=[['报告时间',sample.report_timestamp_utc8||'-'],['瞬时 RX',`${num(mbps(rates.rx_bps))} Mbps`],['瞬时 TX',`${num(mbps(rates.tx_bps))} Mbps`],['RX / TX pps',`${num(rates.rx_pps,1)} / ${num(rates.tx_pps,1)}`],['进程数',Number(sample.process_count||0)],['连接 IP',Number(sample.unique_connection_ips||0)],['连接明细',Number(sample.connection_count||0)],['采样窗口',`${num(rates.sample_seconds,2)} 秒`]];
-     const attribution=sample.connection_attribution||{};const attributionUnavailable=attribution.evidence_status==='unavailable'||(Number(sample.connection_count||0)>0&&Number(attribution.captured_sockets||0)===0);const attributionSummary=Object.keys(attribution).length?`<section class='deep-section'><h3>连接发起方深度核验</h3><div class='comm-note'>${attributionUnavailable?'连接总数非零，但未采集到逐连接来源/PID 数据；发起方向未知，不能按 0 条判断。':`本机发起已确认 ${Number(attribution.confirmed_local_initiated||0)} 条 / 推定 ${Number(attribution.probable_local_initiated||0)} 条；外部发起已确认 ${Number(attribution.confirmed_remote_initiated||0)} 条；方向未知 ${Number(attribution.unknown_direction||0)} 条。进程/PID 已归属 ${Number(attribution.process_attributed_sockets||0)}/${Number(attribution.captured_sockets||0)} 条；conntrack 五元组确认 ${Number(attribution.conntrack_confirmed_sockets||0)} 条。`}${attribution.conntrack_available?'':'本次没有 conntrack 数据，已确认方向可能较少。'}${attribution.conntrack_snapshot_truncated||attribution.socket_snapshot_truncated?'采样达到上限，非全量结果。':''}</div></section>`:'';
+     const attribution=sample.connection_attribution||{};const expectedConnections=Math.max(Number(sample.connection_count||0),Number(attribution.expected_connection_count||0));const capturedSockets=attribution.captured_sockets==null?null:Number(attribution.captured_sockets);const attributionUnavailable=attribution.evidence_status==='unavailable'||(expectedConnections>0&&(capturedSockets===null||capturedSockets===0));const attributionSummary=Object.keys(attribution).length?`<section class='deep-section'><h3>连接发起方深度核验</h3><div class='comm-note'>${attributionUnavailable?'连接总数非零，但未采集到逐连接来源/PID 数据；发起方向未知，不能按 0 条判断。':`本机发起已确认 ${Number(attribution.confirmed_local_initiated||0)} 条 / 推定 ${Number(attribution.probable_local_initiated||0)} 条；外部发起已确认 ${Number(attribution.confirmed_remote_initiated||0)} 条；方向未知 ${Number(attribution.unknown_direction||0)} 条。进程/PID 已归属 ${Number(attribution.process_attributed_sockets||0)}/${Number(attribution.captured_sockets||0)} 条；conntrack 五元组确认 ${Number(attribution.conntrack_confirmed_sockets||0)} 条。`}${attribution.conntrack_available?'':'本次没有 conntrack 数据，已确认方向可能较少。'}${attribution.conntrack_snapshot_truncated||attribution.socket_snapshot_truncated?'采样达到上限，非全量结果。':''}</div></section>`:'';
       const processRows=processes.length?processes.map(x=>`<div class='deep-row'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)}</strong><br/>用户 ${esc(x.user||'-')} · CPU ${num(x.cpu_percent)}% · RSS ${fmtBytes(x.rss_bytes)} · 状态 ${esc(x.state||'-')}<br/>${esc(x.command||'-')}</div>`).join(''):`<div class='deep-row'>未采集到进程明细。</div>`;
       const evidenceLabel=value=>({confirmed_conntrack_original_initiator:'conntrack 原始方向：本机进程发起',confirmed_conntrack_reply_acceptor:'conntrack 回复方向：远端发起',confirmed_syn_sent:'TCP SYN-SENT：本机发起',confirmed_syn_recv:'TCP SYN-RECV：远端发起',probable_local_listener_match:'匹配本地监听端口：推定远端入站',probable_established_non_listener:'已建立且本地非监听：推定本机发起',probable_connected_udp_listener_match:'匹配 UDP 监听端口：推定远端到达',probable_connected_udp_non_listener:'UDP 非监听 socket：推定本机发起'})[value]||value||'方向证据不足';
       const signalLabel=value=>({possible_multiport_probe:'疑似多端口探测（仅行为线索）',mixed_connection_evidence:'已建立与未应答连接并存',bidirectional_tcp_observed:'观察到 TCP 双向数据',unreplied_tcp_observed:'存在未应答 TCP 尝试',insufficient_transport_evidence:'传输层证据不足'})[value]||value||'';

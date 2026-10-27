@@ -1684,6 +1684,34 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn('非恶意定论', text)
         conn.close()
 
+    def test_telegram_deep_evidence_uses_attribution_expected_count_when_socket_rows_are_missing(self):
+        now = int(time.time())
+        conn = server.db()
+        server.process_security_alerts(conn, 'host', now, [{
+            'type': 'container_connection_count', 'severity': 'critical', 'runtime': 'incus',
+            'project': 'default', 'container_name': 'node1', 'value': 3250, 'threshold': 1000,
+        }])
+        row = conn.execute('SELECT * FROM security_alerts').fetchone()
+        evidence = {
+            'sampled_at': now,
+            'connection_attribution': {
+                'evidence_status': 'unavailable',
+                'expected_connection_count': 3250,
+                'captured_sockets': 0,
+                'confirmed_local_initiated': 0,
+                'probable_local_initiated': 0,
+                'confirmed_remote_initiated': 0,
+                'probable_remote_initiated': 0,
+                'unknown_direction': 0,
+                'process_attributed_sockets': 0,
+                'conntrack_available': False,
+            },
+        }
+        text, _ = server._telegram_alert_status_card(row, now, evidence)
+        self.assertIn('未采集到逐连接来源/PID 数据，发起方向未知', text)
+        self.assertNotIn('本机进程发起：已确认 0', text)
+        conn.close()
+
     def test_old_truncated_evidence_never_looks_current_or_complete(self):
         now = int(time.time())
         conn = server.db()

@@ -16,6 +16,7 @@ import { StatusBadge } from '../common/StatusBadge';
 import { SocksPasswordReview } from './SocksPasswordReview';
 import { UserNoticeAction } from './UserNoticeAction';
 import { isProtectionOnlySignal } from './protectionSignals';
+import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from './connectionEvidence';
 
 const elapsed = (seconds: number): string => {
   const units: [number, string][] = [[86400, '天'], [3600, '小时'], [60, '分钟'], [1, '秒']];
@@ -300,8 +301,11 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             const protectionOnly = isProtectionOnlySignal(alert);
             const canRemediate = hasActionEvidence(alert);
             const attribution = alert.deep_evidence?.connection_attribution;
+            const attributionUnavailable = connectionAttributionUnavailable(attribution, alert.deep_evidence?.connection_count);
             const inboundEvidence = alert.deep_evidence?.inbound_ips ||
               (alert.deep_evidence?.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0);
+            const outboundEvidence = alert.deep_evidence?.outbound_ips ||
+              (alert.deep_evidence?.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0);
 
             return (
               <div
@@ -368,8 +372,8 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                         自动深度取证 · {alert.deep_evidence.captured_at_utc8 || '已采集'}
                       </span>
                       <span className="font-mono text-[11px] text-slate-400">
-                        入站 {alert.deep_evidence.inbound_unique_ips || 0} IP / {alert.deep_evidence.inbound_process_count || 0} 进程　
-                        出站 {alert.deep_evidence.outbound_unique_ips || 0} IP / {alert.deep_evidence.outbound_process_count || 0} 进程
+                        入站 {formatConnectionEvidenceCount(alert.deep_evidence.inbound_unique_ips, attributionUnavailable && inboundEvidence.length === 0)} IP / {formatConnectionEvidenceCount(alert.deep_evidence.inbound_process_count, attributionUnavailable)} 进程　
+                        出站 {formatConnectionEvidenceCount(alert.deep_evidence.outbound_unique_ips, attributionUnavailable && outboundEvidence.length === 0)} IP / {formatConnectionEvidenceCount(alert.deep_evidence.outbound_process_count, attributionUnavailable)} 进程
                       </span>
                     </summary>
                     <div className="mt-3 border-t border-sky-900/50 pt-3">
@@ -377,19 +381,22 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                         <section className="mb-3 rounded-lg border border-sky-900/70 bg-slate-950/60 p-3">
                           <h4 className="text-xs font-semibold text-sky-200">连接发起方核验</h4>
                           <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] tabular-nums sm:grid-cols-4">
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 已确认</span><strong className="text-sky-300">{attribution.confirmed_local_initiated || 0}</strong></div>
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 推定</span><strong className="text-amber-300">{attribution.probable_local_initiated || 0}</strong></div>
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">外部远端发起 · 已确认</span><strong className="text-emerald-300">{attribution.confirmed_remote_initiated || 0}</strong></div>
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">方向未知</span><strong className="text-slate-300">{attribution.unknown_direction || 0}</strong></div>
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 已确认</span><strong className="text-sky-300">{formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)}</strong></div>
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 推定</span><strong className="text-amber-300">{formatConnectionEvidenceCount(attribution.probable_local_initiated, attributionUnavailable)}</strong></div>
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">外部远端发起 · 已确认</span><strong className="text-emerald-300">{formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)}</strong></div>
+                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">方向未知</span><strong className="text-slate-300">{formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}</strong></div>
                           </div>
                           <p className="mt-2 text-[10px] leading-4 text-slate-500">
-                            PID/进程归属 {attribution.process_attributed_sockets || 0}/{attribution.captured_sockets || 0} 条 · conntrack 五元组确认 {attribution.conntrack_confirmed_sockets || 0} 条。
-                            {!attribution.conntrack_available && ' conntrack 不可用，部分方向只能推定。'}
+                            {attributionUnavailable
+                              ? `触发时连接总数 ${formatConnectionEvidenceCount(alert.deep_evidence.connection_count, false)} 条，但没有可用的逐连接快照；方向与 PID 归属未知，不能把缺失样本当作 0。`
+                              : `PID/进程归属 ${formatConnectionEvidenceRatio(attribution.process_attributed_sockets, attribution.captured_sockets, false)} 条 · conntrack 五元组确认 ${formatConnectionEvidenceCount(attribution.conntrack_confirmed_sockets, false)} 条。`}
+                            {!attribution.conntrack_available && !attributionUnavailable && ' conntrack 不可用；其它方向依据 socket 状态证据判定。'}
                             {(attribution.conntrack_snapshot_truncated || attribution.socket_snapshot_truncated) && ' 快照达到采集上限，结果非全量。'}
                             {' '}方向和进程只能说明连接路径，不能单独判断客户意图。
                           </p>
                         </section>
                       )}
+                      {!attribution && <p className="mb-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">该历史记录没有发起方向/PID 归属数据；这表示证据未留存，不代表对应计数为 0。</p>}
                       <h4 className="mb-2 text-xs font-semibold text-slate-200">接入容器的公网客户端</h4>
                       <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
                       {inboundEvidence.slice(0, 100).map((entry, index) => (

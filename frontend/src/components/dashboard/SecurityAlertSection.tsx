@@ -17,6 +17,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog';
 import { SocksPasswordReview } from '../alerts/SocksPasswordReview';
 import { UserNoticeAction } from '../alerts/UserNoticeAction';
 import { isProtectionOnlySignal } from '../alerts/protectionSignals';
+import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from '../alerts/connectionEvidence';
 
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
@@ -163,12 +164,17 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           const admissionUnverified = alert.type === 'admission_unverified';
           const deepEvidence = alert.deep_evidence;
           const attribution = deepEvidence?.connection_attribution;
-          const inboundEvidence = deepEvidence?.inbound_ips || [];
+          const attributionUnavailable = connectionAttributionUnavailable(attribution, deepEvidence?.connection_count);
+          const inboundEvidence = deepEvidence?.inbound_ips ||
+            (deepEvidence?.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0);
+          const outboundEvidence = deepEvidence?.outbound_ips ||
+            (deepEvidence?.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0);
+          const inboundEvidenceUnavailable = attributionUnavailable && inboundEvidence.length === 0;
+          const outboundEvidenceUnavailable = attributionUnavailable && outboundEvidence.length === 0;
           const probeIpCount = new Set(inboundEvidence
             .filter((item) => item.network_evidence?.classification === 'possible_multiport_probe')
             .map((item) => item.ip)
             .filter(Boolean)).size;
-          const evidenceCount = (value?: number) => Number.isFinite(value) ? String(value) : '未采集';
           const runtimeText = alert.project
             ? `${alert.runtime}/${alert.project}`
             : alert.runtime;
@@ -234,13 +240,16 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     {deepEvidence ? (
                       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-sky-900/70 pt-2 text-slate-300 tabular-nums">
                         <span>深度快照：{deepEvidence.captured_at_utc8 || '时间未上报'}</span>
-                        <span>入站：{evidenceCount(deepEvidence.inbound_unique_ips)} IP / {evidenceCount(deepEvidence.inbound_process_count)} 进程</span>
-                        <span>出站：{evidenceCount(deepEvidence.outbound_unique_ips)} IP / {evidenceCount(deepEvidence.outbound_process_count)} 进程</span>
+                        <span>入站：{formatConnectionEvidenceCount(deepEvidence.inbound_unique_ips, inboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.inbound_process_count, attributionUnavailable)} 进程</span>
+                        <span>出站：{formatConnectionEvidenceCount(deepEvidence.outbound_unique_ips, outboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.outbound_process_count, attributionUnavailable)} 进程</span>
                         {attribution && <span>
-                          发起方向：本机进程已确认 {evidenceCount(attribution.confirmed_local_initiated)} / 远端发起已确认 {evidenceCount(attribution.confirmed_remote_initiated)} / 未知 {evidenceCount(attribution.unknown_direction)}
+                          发起方向：本机进程已确认 {formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)} / 远端发起已确认 {formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)} / 未知 {formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}
                         </span>}
                         {probeIpCount > 0 && <span className="text-amber-200">多端口探测线索 {probeIpCount} IP（非攻击定论）</span>}
-                        {attribution?.conntrack_available === false && <span className="text-amber-200">conntrack 不可用，连接方向不能视为已确认</span>}
+                        {attribution && (attributionUnavailable
+                          ? <span className="text-amber-200">连接明细未采集，发起方向与进程归属未知，不能按 0 条判断</span>
+                          : <span>进程/PID 归属 {formatConnectionEvidenceRatio(attribution.process_attributed_sockets, attribution.captured_sockets, false)} 条</span>)}
+                        {attribution?.conntrack_available === false && !attributionUnavailable && <span className="text-amber-200">conntrack 不可用；其余方向只按 socket 状态证据判定</span>}
                       </div>
                     ) : (
                       <p className="mt-2 border-t border-sky-900/70 pt-2 text-slate-400">

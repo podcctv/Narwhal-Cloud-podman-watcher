@@ -43,8 +43,15 @@ export const ConnectionEvidenceTimeline: React.FC<{ identity: ContainerIdentity 
 
   const assessments = data?.source_assessment?.assessments || [];
   const timeline = data?.timeline || [];
-  const socketEvidenceSamples = timeline.filter((sample) => ['available', 'partial'].includes(sample.process_attribution.status)).length;
-  const conntrackSamples = timeline.filter((sample) => sample.process_attribution.conntrack_available === true).length;
+  const attributionUnavailable = (sample: ConnectionEvidenceResponse['timeline'][number]) => {
+    const attribution = sample.process_attribution;
+    return attribution.status === 'unavailable'
+      || (sample.connection_count > 0 && (attribution.captured === null || attribution.captured === 0));
+  };
+  const socketEvidenceSamples = timeline.filter((sample) => !attributionUnavailable(sample)
+    && ['available', 'partial'].includes(sample.process_attribution.status)).length;
+  const conntrackSamples = timeline.filter((sample) => !attributionUnavailable(sample)
+    && sample.process_attribution.conntrack_available === true).length;
 
   return <section className="rounded-xl border border-sky-900/60 bg-slate-950/50 p-4" aria-label="连接来源证据时间线">
     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -83,16 +90,22 @@ export const ConnectionEvidenceTimeline: React.FC<{ identity: ContainerIdentity 
           <summary className="cursor-pointer select-none text-[11px] font-medium text-slate-300">展开原始采样时间线（{timeline.length} 条）</summary>
           <div className="mt-2 max-h-80 space-y-2 overflow-auto pr-1">
             {[...timeline].reverse().slice(0, 20).map((sample) => <article key={sample.ts} className="rounded-md border border-slate-800 bg-slate-950/70 p-2.5">
-              <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400"><Clock3 className="h-3 w-3" aria-hidden="true" />{new Date(sample.ts * 1000).toLocaleString()} · 连接 {sample.connection_count} · {sample.process_attribution.status === 'no_connections'
+              <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400"><Clock3 className="h-3 w-3" aria-hidden="true" />{new Date(sample.ts * 1000).toLocaleString()} · 连接 {sample.connection_count} · {attributionUnavailable(sample)
+                ? sample.connection_count > 0
+                  ? '连接总数非零，但逐连接来源/PID 快照未采集'
+                  : '来源与进程归属未采集'
+                : sample.process_attribution.status === 'no_connections'
                 ? '未观察到连接'
                 : sample.process_attribution.status === 'unavailable'
                   ? sample.process_attribution.reason === 'high_connection_count_socket_snapshot_empty'
                     ? '连接数非零，但逐连接来源/PID 快照为空'
                     : '来源与进程归属未采集'
                   : `本机发起 已确认 ${sample.process_attribution.confirmed_local ?? 0} / 推定 ${sample.process_attribution.probable_local ?? 0} · 外部发起 已确认 ${sample.process_attribution.confirmed_remote ?? 0} / 推定 ${sample.process_attribution.probable_remote ?? 0} · 方向未知 ${sample.process_attribution.unknown_direction ?? 0}`}</div>
-              <div className="mt-1 text-[10px] text-slate-500">{sample.process_attribution.captured === null
-                ? '没有逐连接样本'
-                : `逐连接样本 ${sample.process_attribution.captured} 条 · 进程归属 ${sample.process_attribution.attributed ?? 0} 条`}
+              <div className="mt-1 text-[10px] text-slate-500">{attributionUnavailable(sample)
+                ? '逐连接样本、PID 归属和发起方向均未知，不能按 0 条判断'
+                : sample.process_attribution.captured === null
+                  ? '没有逐连接样本'
+                  : `逐连接样本 ${sample.process_attribution.captured} 条 · 进程归属 ${sample.process_attribution.attributed ?? 0} 条`}
                 {' · '}conntrack {sample.process_attribution.conntrack_available === true ? `可用${sample.process_attribution.conntrack_confirmed !== null ? `，五元组确认 ${sample.process_attribution.conntrack_confirmed} 条` : ''}` : sample.process_attribution.conntrack_available === false ? '不可用' : '状态未上报'}
                 {sample.process_attribution.status === 'partial' ? ' · 采样不完整' : ''}
                 {' · '}日志请求 {sample.access_log.requests ?? '未采集'}

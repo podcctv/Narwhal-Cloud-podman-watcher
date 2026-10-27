@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Sparkles, Terminal, Globe, AlertCircle, CheckCircle2, Clock } from 'lucide-react';
 import { DiagnosticData, ContainerIdentity, IPReputationResult } from '../../api/types';
 import { api, fmtBytes, fmtMbps, fmtNumber } from '../../api/client';
+import { connectionAttributionUnavailable } from '../alerts/connectionEvidence';
 
 interface DiagnosticPanelProps {
   identity: ContainerIdentity;
@@ -207,10 +208,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     return () => { active = false; };
   }, [action, automaticReputationCandidates, checkReputation, diagnosticSnapshotId, isStale, reputationConfigured, reputationLookupScope, reputationSampleFresh, sample]);
   const attribution = sample?.connection_attribution;
-  const attributionUnavailable = Boolean(attribution && (
-    attribution.evidence_status === 'unavailable'
-    || (Number(sample?.connection_count || 0) > 0 && Number(attribution.captured_sockets || 0) === 0)
-  ));
+  const attributionUnavailable = connectionAttributionUnavailable(attribution, sample?.connection_count);
   const connectionSockets = sample?.communication_sockets || [];
   const inboundPortEvidence = sample?.inbound_port_evidence || [];
   const originEvidenceLabels: Record<string, string> = {
