@@ -447,6 +447,13 @@ export interface ManualBandwidthLimitResponse {
   };
   reported: {
     revision?: number; state?: string; items?: Array<Record<string, unknown>>; message?: string;
+    updated_at?: number;
+    active_limits?: Array<{
+      scope: 'host' | 'container'; target: string; interface?: string;
+      runtime?: 'incus' | 'podman'; project?: string; container_name?: string;
+      container_id?: string; upload_mbps: number; download_mbps: number;
+      last_confirmed_at?: number;
+    }>;
     auto_throttle?: {
       enabled?: boolean; state?: string; interface?: string; items?: Array<Record<string, unknown>>; message?: string;
       mapped_containers?: number; unmapped_containers?: number; unavailable_samples?: number;

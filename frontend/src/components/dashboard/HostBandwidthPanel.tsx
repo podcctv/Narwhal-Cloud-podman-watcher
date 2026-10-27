@@ -19,6 +19,10 @@ const rateValue = (value: string) => {
 const reportedLabel: Record<string, string> = {
   applied: '节点已应用并读回', failed: '节点应用失败', rejected: '节点拒绝策略', unconfigured: '未配置限速',
 };
+const directionLabel: Record<string, string> = { upload: '上行', download: '下行' };
+const formatBandwidthFailure = (message: string) => /RTNETLINK answers: File exists/i.test(message)
+  ? `${message}。该网卡上已有过滤器占用当前 tc 优先级，此方向未确认生效；新版 Agent 会自动寻找空闲优先级并重试。`
+  : message;
 
 export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, containers, onToast, onRefresh, onClose }) => {
   const [context, setContext] = useState<ManualBandwidthLimitResponse | null>(null);
@@ -67,6 +71,42 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
   }) === newTarget);
   const selectedInterface = context?.interfaces.find((item) => item.name === hostLimit?.interface);
   const reportedAuto = context?.reported?.auto_throttle;
+  const reportedItems = context?.reported?.items || [];
+  const reportedFailures = reportedItems.filter((item) => item.state === 'failed' || item.state === 'cleanup_failed');
+  const activeLimits = useMemo(() => {
+    if (Array.isArray(context?.reported?.active_limits)) return context.reported.active_limits;
+    const grouped = new Map<string, {
+      scope: 'host' | 'container'; target: string; interface: string;
+      runtime: 'incus' | 'podman' | ''; project: string; container_name: string;
+      container_id: string; upload_mbps: number; download_mbps: number; last_confirmed_at: number;
+    }>();
+    for (const item of reportedItems) {
+      if (item.state !== 'applied' || (item.scope !== 'host' && item.scope !== 'container')) continue;
+      const scope = item.scope;
+      const target = String(item.target || item.container_name || item.interface || '');
+      if (!target) continue;
+      const runtime = item.runtime === 'incus' || item.runtime === 'podman' ? item.runtime : '';
+      const project = String(item.project || '');
+      const containerId = String(item.container_id || '');
+      const iface = String(item.interface || '');
+      const key = [scope, runtime, project, containerId || target, iface].join('\0');
+      const current = grouped.get(key) || {
+        scope, target, interface: iface, runtime, project,
+        container_name: String(item.container_name || ''), container_id: containerId,
+        upload_mbps: 0, download_mbps: 0, last_confirmed_at: 0,
+      };
+      if (item.direction === 'upload' || item.direction === 'download') {
+        current[`${item.direction}_mbps`] = Number(item.rate_mbps || 0);
+      } else {
+        current.upload_mbps = Number(item.upload_mbps || 0);
+        current.download_mbps = Number(item.download_mbps || 0);
+      }
+      grouped.set(key, current);
+    }
+    return Array.from(grouped.values()).filter((item) => item.upload_mbps > 0 || item.download_mbps > 0);
+  }, [context?.reported?.active_limits, reportedItems]);
+  const activeContainerLimits = activeLimits.filter((item) => item.scope === 'container');
+  const activeHostLimits = activeLimits.filter((item) => item.scope === 'host');
   const autoActiveItems = (reportedAuto?.items || []).filter((item) => item.state === 'limited'
     || Number(item.upload_high_seconds || 0) > 0 || Number(item.download_high_seconds || 0) > 0
     || Number(item.upload_low_seconds || 0) > 0 || Number(item.download_low_seconds || 0) > 0);
@@ -140,8 +180,22 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
 
     {context?.reported && <p className={`mt-3 text-xs ${context.reported.state === 'applied' ? 'text-emerald-300' : context.reported.state === 'failed' || context.reported.state === 'rejected' ? 'text-rose-300' : 'text-slate-400'}`} role="status">
       节点状态：{reportedLabel[context.reported.state || ''] || '等待节点回报'}{context.reported.revision ? ` · 修订 ${context.reported.revision}` : ''}
+      {context.sample_at ? ` · 最近上报 ${new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'medium' }).format(context.sample_at * 1000)}` : ''}
       {context.reported.message ? ` · ${context.reported.message}` : ''}
     </p>}
+    {reportedFailures.length > 0 && <div className="mt-3 rounded-lg border border-rose-900/70 bg-rose-950/25 p-3" role="alert">
+      <h4 className="text-xs font-semibold text-rose-200">限速未确认成功的项目</h4>
+      <div className="mt-2 space-y-2">
+        {reportedFailures.map((item, index) => {
+          const target = String(item.target || item.container_name || item.interface || '目标');
+          const direction = directionLabel[String(item.direction || '')] || '目标';
+          const message = formatBandwidthFailure(String(item.message || 'Agent 未提供详细错误'));
+          return <div key={`${target}-${String(item.direction || '')}-${index}`} className="break-words text-xs leading-5 text-rose-100/90">
+            <span className="font-semibold">{target}{item.interface ? ` · ${String(item.interface)}` : ''} · {direction}：</span>{message}
+          </div>;
+        })}
+      </div>
+    </div>}
 
     {loading ? <p className="mt-4 text-sm text-slate-400">正在读取在线清单…</p> : loadError ? <p className="mt-4 rounded-lg border border-rose-900/60 p-3 text-sm text-rose-200">{loadError}</p> : <>
       {!context?.host_online && <p className="mt-3 text-sm text-amber-200">母机离线或身份未注册，当前只读，不能保存新策略。</p>}
@@ -207,6 +261,26 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
             })}
             {autoActiveItems.length > 6 && <p className="text-slate-500">另有 {autoActiveItems.length - 6} 个容器处于保护或阶梯观察中</p>}
           </div>}
+        </div>}
+      </div>
+
+      <div className="mt-3 rounded-lg border border-sky-900/60 bg-sky-950/15 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-100">当前已确认生效的限速</h4>
+          <span className="text-[11px] text-slate-500">按 Agent 最近一次内核读回记录 · {activeContainerLimits.length} 个容器</span>
+        </div>
+        {activeContainerLimits.length > 0 ? <div className="mt-2 space-y-2">
+          {activeContainerLimits.map((item) => <div key={`${item.runtime}/${item.project}/${item.container_id || item.target}`} className="grid gap-1 rounded-lg border border-slate-800 bg-slate-950/50 p-2.5 sm:grid-cols-[minmax(180px,1fr)_minmax(220px,auto)] sm:items-center">
+            <div className="min-w-0">
+              <p className="break-words text-xs font-semibold text-slate-100">{item.runtime}/{item.project ? `${item.project}/` : ''}{item.container_name || item.target}</p>
+              <p className="break-all font-mono text-[10px] text-slate-500">{item.container_id}{item.interface ? ` · ${item.interface}` : ''}</p>
+            </div>
+            <p className="tabular-nums text-xs text-sky-100">上行 {item.upload_mbps > 0 ? `${item.upload_mbps} Mbps` : '未限'} · 下行 {item.download_mbps > 0 ? `${item.download_mbps} Mbps` : '未限'}</p>
+          </div>)}
+        </div> : <p className="mt-2 text-xs text-slate-400">当前没有已确认生效的容器限速。策略配置值不代表节点已经应用成功。</p>}
+        {activeHostLimits.length > 0 && <div className="mt-3 border-t border-slate-800 pt-2">
+          <p className="text-[11px] font-semibold text-slate-300">母机网卡限速</p>
+          {activeHostLimits.map((item) => <p key={`${item.interface}-${item.target}`} className="mt-1 tabular-nums text-xs text-sky-100">{item.interface || item.target} · 上行 {item.upload_mbps > 0 ? `${item.upload_mbps} Mbps` : '未限'} · 下行 {item.download_mbps > 0 ? `${item.download_mbps} Mbps` : '未限'}</p>)}
         </div>}
       </div>
 
