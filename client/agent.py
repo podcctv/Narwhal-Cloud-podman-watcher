@@ -8115,28 +8115,64 @@ def _collect_host_firewall_interface_inventory(force: bool = False) -> Dict[str,
 def _runman_firewall_control_status() -> Dict[str, object]:
     observed_at = int(time.time())
     if os.name != "posix":
-        return {"control_api": "unsupported", "observed_at": observed_at}
+        return {
+            "control_api": "unsupported",
+            "control_api_reason": "platform_unsupported",
+            "observed_at": observed_at,
+        }
     connection = network_quarantine._UnixHTTP("/run/narwhal-agent/firewall.sock")
     connection.timeout = 2
+    http_status = None
     try:
         # Runman exposes only a POST policy endpoint. A method probe is read-only:
         # supported builds return 405 for this known path; older builds return 404.
         connection.request("GET", "/v1/firewall/policy", headers={"Connection": "close"})
         response = connection.getresponse()
         response.read(1025)
+        http_status = int(response.status)
         if response.status == 405:
             control_api = "ready"
+            reason = "ok"
         elif response.status == 404:
             control_api = "unsupported"
+            reason = "api_endpoint_missing"
         elif response.status == 200:
             control_api = "ready"
+            reason = "ok"
         else:
             control_api = "unavailable"
-    except (OSError, ValueError, http.client.HTTPException):
+            reason = "unexpected_http"
+    except FileNotFoundError:
         control_api = "unavailable"
+        reason = "socket_missing"
+    except PermissionError:
+        control_api = "unavailable"
+        reason = "socket_permission_denied"
+    except ConnectionRefusedError:
+        control_api = "unavailable"
+        reason = "socket_refused"
+    except (socket.timeout, TimeoutError):
+        control_api = "unavailable"
+        reason = "socket_timeout"
+    except OSError:
+        control_api = "unavailable"
+        reason = "socket_error"
+    except http.client.HTTPException:
+        control_api = "unavailable"
+        reason = "http_error"
+    except ValueError:
+        control_api = "unavailable"
+        reason = "http_error"
     finally:
         connection.close()
-    return {"control_api": control_api, "observed_at": observed_at}
+    result: Dict[str, object] = {
+        "control_api": control_api,
+        "control_api_reason": reason,
+        "observed_at": observed_at,
+    }
+    if http_status is not None:
+        result["control_api_http_status"] = http_status
+    return result
 
 
 def _runman_firewall_readback() -> Dict[str, object]:

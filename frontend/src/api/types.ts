@@ -390,7 +390,10 @@ export interface HostFirewallAbusePolicy {
 
 export interface HostFirewallRuntimeStatus {
   control_api: 'ready' | 'unsupported' | 'unavailable' | 'unknown';
+  control_api_reason?: string;
+  control_api_http_status?: number | null;
   observed_at: number;
+  stale?: boolean;
 }
 
 export interface HostFirewallInterface {
@@ -567,10 +570,13 @@ export interface FleetFirewallHostStatus {
   online: boolean;
   agent_version: string;
   control_api: HostFirewallRuntimeStatus['control_api'];
+  control_api_reason?: string;
+  control_api_http_status?: number | null;
+  control_api_stale?: boolean;
   observed_at: number;
   local_revision: number;
   fleet_revision: number;
-  state: 'unregistered' | 'offline' | 'awaiting_capability' | 'awaiting_rfw_capability' | 'awaiting_interfaces' | 'interfaces_not_found' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
+  state: 'unregistered' | 'offline' | 'awaiting_capability' | 'awaiting_rfw_capability' | 'firewall_status_stale' | 'awaiting_interfaces' | 'interfaces_not_found' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
   required_protocols: string[];
   unsupported_protocols: string[];
   unknown_protocols: string[];

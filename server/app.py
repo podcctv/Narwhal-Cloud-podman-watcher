@@ -2488,26 +2488,61 @@ def _protocol_capability_state(live_readback: Dict[str, Any], protocol: str) -> 
     return "supported" if protocol in supported else "unsupported"
 
 
-def _host_firewall_runtime_status(conn: sqlite3.Connection, host_id: str) -> Dict[str, Any]:
+def _host_firewall_runtime_status(
+    conn: sqlite3.Connection, host_id: str, now: int | None = None
+) -> Dict[str, Any]:
+    now = int(time.time()) if now is None else int(now)
     row = conn.execute(
         "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1",
         (host_id,),
     ).fetchone()
     if row is None:
-        return {"control_api": "unknown", "observed_at": 0}
+        return {
+            "control_api": "unknown",
+            "control_api_reason": "no_report",
+            "control_api_http_status": None,
+            "observed_at": 0,
+            "stale": True,
+        }
     try:
         security = json.loads(row["payload_json"] or "{}")
     except (TypeError, ValueError):
         security = {}
     runtime = security.get("host_firewall") if isinstance(security, dict) else None
     if not isinstance(runtime, dict):
-        return {"control_api": "unknown", "observed_at": int(row["ts"] or 0)}
+        observed_at = int(row["ts"] or 0)
+        return {
+            "control_api": "unknown",
+            "control_api_reason": "no_capability_report",
+            "control_api_http_status": None,
+            "observed_at": observed_at,
+            "stale": observed_at <= 0 or now - observed_at > STALE_SECONDS or observed_at > now + 30,
+        }
     control_api = str(runtime.get("control_api") or "unknown")
     if control_api not in {"ready", "unsupported", "unavailable", "unknown"}:
         control_api = "unknown"
+    observed_at = int(runtime.get("observed_at") or row["ts"] or 0)
+    allowed_reasons = {
+        "ok", "platform_unsupported", "api_endpoint_missing", "unexpected_http", "http_error",
+        "socket_missing", "socket_permission_denied", "socket_refused", "socket_timeout", "socket_error",
+        "no_report", "no_capability_report", "legacy_report",
+    }
+    reason = str(runtime.get("control_api_reason") or "")
+    if reason not in allowed_reasons:
+        if control_api == "ready":
+            reason = "ok"
+        elif control_api in {"unavailable", "unsupported"}:
+            reason = "legacy_report"
+        else:
+            reason = "no_capability_report"
+    raw_http_status = runtime.get("control_api_http_status")
+    http_status = raw_http_status if type(raw_http_status) is int and 100 <= raw_http_status <= 599 else None
     return {
         "control_api": control_api,
-        "observed_at": int(runtime.get("observed_at") or row["ts"] or 0),
+        "control_api_reason": reason,
+        "control_api_http_status": http_status,
+        "observed_at": observed_at,
+        "stale": observed_at <= 0 or now - observed_at > STALE_SECONDS or observed_at > now + 30,
     }
 
 
@@ -2973,7 +3008,7 @@ def _fleet_firewall_node_state(
     node_id = str(host["node_id"] or "")
     last_seen = int(host["last_seen"] or 0)
     online = bool(node_id) and now - last_seen <= STALE_SECONDS
-    runtime = _host_firewall_runtime_status(conn, host_id)
+    runtime = _host_firewall_runtime_status(conn, host_id, now)
     live_readback = _host_firewall_live_readback(conn, host_id, now)
     interface_inventory = _host_firewall_interface_inventory(conn, host_id, now)
     container_interfaces = {
@@ -2998,7 +3033,9 @@ def _fleet_firewall_node_state(
     status = "unregistered"
     if node_id:
         status = "offline" if not online else "awaiting_capability"
-        if online and runtime["control_api"] == "unsupported":
+        if online and runtime["stale"]:
+            status = "firewall_status_stale"
+        elif online and runtime["control_api"] == "unsupported":
             status = "runman_update_required"
         elif online and runtime["control_api"] == "unavailable":
             status = "runman_unavailable"
@@ -3033,6 +3070,9 @@ def _fleet_firewall_node_state(
         "online": online,
         "agent_version": str(host["agent_version"] or "unknown"),
         "control_api": runtime["control_api"],
+        "control_api_reason": runtime["control_api_reason"],
+        "control_api_http_status": runtime["control_api_http_status"],
+        "control_api_stale": runtime["stale"],
         "observed_at": runtime["observed_at"],
         "live_readback": {key: value for key, value in live_readback.items() if key != "snapshot"},
         "local_revision": local_revision,
@@ -4763,7 +4803,7 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
             "revision": revision,
             "source_fleet_revision": source_fleet_revision,
             "policy": policy,
-            "runtime_status": _host_firewall_runtime_status(conn, host_id),
+            "runtime_status": _host_firewall_runtime_status(conn, host_id, now),
             "interface_inventory": _host_firewall_interface_inventory(conn, host_id, now),
             "live_readback": _host_firewall_live_readback(conn, host_id, now),
             "updated_by": updated_by,
@@ -4798,7 +4838,9 @@ def _prepare_host_firewall_recovery(conn: sqlite3.Connection, host_id: str, now:
     fleet = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
     if fleet is not None and int(fleet["revision"] or 0) > 0:
         raise HTTPException(status_code=409, detail="全局策略模板已启用；请从全局策略入口处理，避免单机状态分叉")
-    runtime = _host_firewall_runtime_status(conn, host_id)
+    runtime = _host_firewall_runtime_status(conn, host_id, now)
+    if runtime.get("stale"):
+        raise HTTPException(status_code=409, detail="Runman 防火墙能力状态已过期；等待 Agent 重新上报后再操作")
     if runtime.get("control_api") != "ready":
         raise HTTPException(status_code=409, detail="Runman 防火墙控制接口尚未确认可用")
     readback = _host_firewall_live_readback(conn, host_id, now)
@@ -5080,7 +5122,10 @@ def get_fleet_firewall_policy() -> JSONResponse:
                 "total": len(nodes),
                 "registered": sum(1 for item in nodes if item["registered"]),
                 "online": sum(1 for item in nodes if item["online"]),
-                "control_ready": sum(1 for item in nodes if item["control_api"] == "ready"),
+                "control_ready": sum(
+                    1 for item in nodes
+                    if item["control_api"] == "ready" and item["online"] and not item["control_api_stale"]
+                ),
                 "last_apply_succeeded": sum(1 for item in nodes if item["state"] == "last_apply_succeeded"),
                 "deferred": sum(1 for item in nodes if item["state"] not in {"last_apply_succeeded", "ready"}),
                 "network_deferred": sum(1 for item in nodes if item["state"] in {"awaiting_interfaces", "interfaces_not_found"}),
@@ -5134,8 +5179,8 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
         for host in hosts:
             host_id = str(host["host_id"])
             node_id = str(host["node_id"] or "")
-            runtime = _host_firewall_runtime_status(conn, host_id)
-            if node_id and runtime["control_api"] == "ready":
+            runtime = _host_firewall_runtime_status(conn, host_id, now)
+            if node_id and runtime["control_api"] == "ready" and not runtime["stale"]:
                 if _policy_required_protocols(policy):
                     live_readback = _host_firewall_live_readback(conn, host_id, now)
                     compatibility = _policy_protocol_compatibility(policy, live_readback)
