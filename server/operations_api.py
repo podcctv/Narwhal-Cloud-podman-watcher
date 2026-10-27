@@ -23,6 +23,22 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
     router = APIRouter(prefix="/api/v1/ops")
     table_cache={}
 
+    def bandwidth_auto_settings(saved, has_host_limit):
+        configured = saved.get("auto_throttle") if isinstance(saved, dict) else None
+        enabled = configured.get("enabled") if isinstance(configured, dict) else None
+        if type(enabled) is not bool:
+            enabled = bool(has_host_limit)
+        enabled = bool(enabled and has_host_limit)
+        return {
+            "enabled": enabled,
+            "threshold_percent": 80,
+            "trigger_seconds": 300,
+            "tier_percentages": [50, 25, 5],
+            "minimum_mbps": 1,
+            "recovery_percent": 50,
+            "recovery_seconds": 600,
+        }
+
     def rows(conn, query, params=()):
         return [dict(r) for r in conn.execute(query, params).fetchall()]
 
@@ -62,6 +78,12 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 "name": name, "kind": str(item.get("kind") or "")[:40],
                 "state": str(item.get("state") or "unknown")[:24],
                 "is_default_route": item.get("is_default_route") is True,
+                "runtimes": [runtime for runtime in item.get("runtimes", [])
+                             if runtime in {"incus", "podman"}][:2]
+                    if isinstance(item.get("runtimes"), list) else [],
+                "network_names": [str(network)[:100] for network in item.get("network_names", [])
+                                  if isinstance(network, str)][:16]
+                    if isinstance(item.get("network_names"), list) else [],
             })
         latest_container_rows = conn.execute(
             """SELECT r.runtime,r.project,r.container_name,r.payload_json FROM reports r
@@ -87,6 +109,14 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             })
         settings_row = conn.execute("SELECT payload FROM ops_settings WHERE key=?", (f"manual_bandwidth:{host_id}",)).fetchone()
         saved = ops.loads(settings_row[0], {}) if settings_row else {}
+        if not isinstance(saved, dict):
+            saved = {}
+        saved_limits = saved.get("limits", []) if isinstance(saved.get("limits"), list) else []
+        has_host_limit = any(
+            isinstance(item, dict) and item.get("scope") == "host"
+            and (item.get("upload_mbps", 0) or item.get("download_mbps", 0))
+            for item in saved_limits
+        )
         reported = security.get("manual_bandwidth_limits") if isinstance(security.get("manual_bandwidth_limits"), dict) else {}
         return {
             "host_id": host_id, "expected_node_id": str(host["node_id"] or ""),
@@ -94,7 +124,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             "sample_at": int(report["ts"] or 0) if report else 0,
             "interfaces": interfaces, "containers": containers,
             "policy": {"schema": 1, "revision": int(saved.get("revision") or 0),
-                       "limits": saved.get("limits", []) if isinstance(saved.get("limits"), list) else []},
+                       "limits": saved_limits,
+                       "auto_throttle": bandwidth_auto_settings(saved, has_host_limit)},
             "reported": reported,
         }
 
@@ -288,8 +319,15 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             body = await request.json()
         except Exception:
             raise HTTPException(400, "请求必须是有效 JSON") from None
-        if not isinstance(body, dict) or set(body) != {"limits"} or not isinstance(body["limits"], list) or len(body["limits"]) > 256:
+        if (not isinstance(body, dict) or set(body) - {"limits", "auto_throttle"}
+                or "limits" not in body or not isinstance(body["limits"], list)
+                or len(body["limits"]) > 256):
             raise HTTPException(400, "limits 必须是最多 256 项的列表")
+        auto_payload = body.get("auto_throttle")
+        if auto_payload is not None and (
+                not isinstance(auto_payload, dict) or set(auto_payload) != {"enabled"}
+                or type(auto_payload.get("enabled")) is not bool):
+            raise HTTPException(400, "auto_throttle 仅支持布尔 enabled 字段")
         conn = db()
         try:
             context = bandwidth_context(conn, host_id)
@@ -342,18 +380,26 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 normalized.append(entry)
             if host_limit_count > 1:
                 raise HTTPException(400, "每台母机只可选择一张网卡设置主机总限速")
+            auto_enabled = (
+                bool(auto_payload["enabled"]) if isinstance(auto_payload, dict)
+                else bool(host_limit_count)
+            )
+            if auto_enabled and host_limit_count != 1:
+                raise HTTPException(400, "自动阶梯限速需要先配置一张母机网卡及其上下行带宽")
             saved = context["policy"]
             policy = {
                 "schema": 1, "host_id": host_id,
                 "expected_node_id": context["expected_node_id"],
                 "revision": int(saved.get("revision") or 0) + 1,
-                "limits": normalized, "updated_at": int(time.time()),
+                "limits": normalized, "auto_throttle": {"enabled": auto_enabled},
+                "updated_at": int(time.time()),
                 "updated_by": request.state.dashboard_user,
             }
             conn.execute("INSERT OR REPLACE INTO ops_settings(key,payload) VALUES(?,?)",
                          (f"manual_bandwidth:{host_id}", json.dumps(policy, ensure_ascii=True)))
             conn.commit()
             return {"ok": True, "revision": policy["revision"], "limits": normalized,
+                    "auto_throttle": bandwidth_auto_settings(policy, bool(host_limit_count)),
                     "apply": "主机 Agent 下一次动作轮询时应用；最多等待一个轮询周期"}
         finally:
             conn.close()

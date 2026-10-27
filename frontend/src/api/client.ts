@@ -166,9 +166,9 @@ export const api = {
   getManualBandwidthLimits: (hostId: string) =>
     request<ManualBandwidthLimitResponse>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/bandwidth-limits`),
 
-  updateManualBandwidthLimits: (hostId: string, limits: ManualBandwidthLimit[]) =>
-    request<{ ok: boolean; revision: number; limits: ManualBandwidthLimit[]; apply: string }>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/bandwidth-limits`, {
-      method: 'PUT', body: JSON.stringify({ limits }),
+  updateManualBandwidthLimits: (hostId: string, limits: ManualBandwidthLimit[], autoThrottle: { enabled: boolean }) =>
+    request<{ ok: boolean; revision: number; limits: ManualBandwidthLimit[]; auto_throttle: ManualBandwidthLimitResponse['policy']['auto_throttle']; apply: string }>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/bandwidth-limits`, {
+      method: 'PUT', body: JSON.stringify({ limits, auto_throttle: autoThrottle }),
     }),
 
   updateHostFirewallPolicy: (hostId: string, policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy }) =>

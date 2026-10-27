@@ -22,8 +22,15 @@ STATE_PATH = os.getenv(
     "/var/lib/narwhal-monitor/manual-bandwidth-limits.json",
 )
 PREFS = {"download": 49150, "upload": 49151}
+TC_DIRECTIONS = {"download": "ingress", "upload": "egress"}
 MAX_POLICIES = 256
 MAX_RATE_MBPS = 100_000
+AUTO_THRESHOLD_PERCENT = 80
+AUTO_TRIGGER_SECONDS = 300
+AUTO_TIER_PERCENTAGES = (50, 25, 5)
+AUTO_MINIMUM_MBPS = 1
+AUTO_RECOVERY_PERCENT = 50
+AUTO_RECOVERY_SECONDS = 600
 
 
 class BandwidthPolicyError(ValueError):
@@ -57,6 +64,7 @@ def validate_policy(policy: Any, host_id: str, node_id: str) -> dict[str, Any]:
         raise BandwidthPolicyError("invalid bandwidth policy list")
     normalized: list[dict[str, Any]] = []
     identities: set[str] = set()
+    host_limits = 0
     for item in limits:
         if not isinstance(item, dict):
             raise BandwidthPolicyError("invalid bandwidth policy item")
@@ -71,6 +79,7 @@ def validate_policy(policy: Any, host_id: str, node_id: str) -> dict[str, Any]:
                 raise BandwidthPolicyError("invalid host interface")
             entry = {"scope": "host", "interface": interface}
             key = f"host:{interface}"
+            host_limits += 1
         elif scope == "container":
             runtime = str(item.get("runtime") or "")
             project = str(item.get("project") or "")
@@ -95,10 +104,21 @@ def validate_policy(policy: Any, host_id: str, node_id: str) -> dict[str, Any]:
             raise BandwidthPolicyError("duplicate bandwidth target")
         identities.add(key)
         normalized.append({**entry, "upload_mbps": upload, "download_mbps": download})
+    if host_limits > 1:
+        raise BandwidthPolicyError("only one host interface can be configured")
+    auto_policy = policy.get("auto_throttle")
+    if auto_policy is None:
+        auto_enabled = host_limits == 1
+    elif isinstance(auto_policy, dict) and type(auto_policy.get("enabled")) is bool:
+        auto_enabled = bool(auto_policy["enabled"])
+    else:
+        raise BandwidthPolicyError("invalid automatic bandwidth protection setting")
+    if auto_enabled and host_limits != 1:
+        raise BandwidthPolicyError("automatic container limiting requires one host bandwidth interface")
     return {
         "schema": 1, "host_id": host_id, "expected_node_id": node_id,
         "revision": _valid_int(policy.get("revision", 0), 0, 2**31 - 1),
-        "limits": normalized,
+        "limits": normalized, "auto_throttle": {"enabled": auto_enabled},
     }
 
 
@@ -233,7 +253,10 @@ def _handle(owner_key: str, direction: str) -> str:
 
 
 def _filter_listing(prefix: list[str], interface: str, direction: str) -> str:
-    code, listing = _call(prefix, ["tc", "filter", "show", "dev", interface, direction])
+    tc_direction = TC_DIRECTIONS.get(direction)
+    if not tc_direction:
+        raise BandwidthPolicyError("invalid bandwidth direction")
+    code, listing = _call(prefix, ["tc", "filter", "show", "dev", interface, tc_direction])
     if code != 0:
         raise BandwidthPolicyError("cannot verify existing filters on interface")
     return listing
@@ -251,15 +274,18 @@ def _apply_filter(
     rate_mbps: int, previously_owned: bool,
 ) -> None:
     handle = _handle(owner_key, direction)
+    tc_direction = TC_DIRECTIONS.get(direction)
+    if not tc_direction:
+        raise BandwidthPolicyError("invalid bandwidth direction")
     pref = PREFS[direction]
+    _ensure_clsact(prefix, interface)
     listing = _filter_listing(prefix, interface, direction)
     exists = _filter_present(listing, handle, pref)
     if exists and not previously_owned:
         raise BandwidthPolicyError("reserved filter identity already exists; left unchanged")
-    _ensure_clsact(prefix, interface)
     verb = "replace" if exists and previously_owned else "add"
     code, message = _call(prefix, [
-        "tc", "filter", verb, "dev", interface, direction,
+        "tc", "filter", verb, "dev", interface, tc_direction,
         "protocol", "all", "pref", str(pref), "handle", handle,
         "matchall", "action", "police", "rate", f"{rate_mbps}mbit",
         "burst", "256k", "conform-exceed", "drop",
@@ -273,12 +299,15 @@ def _apply_filter(
 
 def _remove_filter(prefix: list[str], interface: str, owner_key: str, direction: str) -> bool:
     handle = _handle(owner_key, direction)
+    tc_direction = TC_DIRECTIONS.get(direction)
+    if not tc_direction:
+        raise BandwidthPolicyError("invalid bandwidth direction")
     pref = PREFS[direction]
     listing = _filter_listing(prefix, interface, direction)
     if not _filter_present(listing, handle, pref):
         return False
     code, message = _call(prefix, [
-        "tc", "filter", "del", "dev", interface, direction,
+        "tc", "filter", "del", "dev", interface, tc_direction,
         "protocol", "all", "pref", str(pref), "handle", handle,
     ])
     if code != 0:
@@ -312,8 +341,10 @@ def _resolve_entry(
     try:
         links = json.loads(output)
         interface_index = int(links[0]["ifindex"]) if links and isinstance(links[0], dict) else 0
+        peer_index = int(links[0].get("link_index") or links[0].get("iflink") or 0) if links and isinstance(links[0], dict) else 0
     except (TypeError, ValueError, KeyError, IndexError):
         interface_index = 0
+        peer_index = 0
     if interface_index <= 0:
         raise BandwidthPolicyError("container interface index could not be verified")
     return {
@@ -321,7 +352,7 @@ def _resolve_entry(
         "runtime": item["runtime"], "project": item["project"],
         "container_name": item["container_name"], "container_id": item["container_id"],
         "prefix": prefix, "pid": pid, "process_generation": generation.split(":", 1)[0],
-        "interface": interface, "interface_index": interface_index,
+        "interface": interface, "interface_index": interface_index, "peer_index": peer_index,
         "namespace_inode": namespace_inode,
     }
 
@@ -361,6 +392,418 @@ def _remove_entry(entry: dict[str, Any], expected_host: str, actual_host: str, a
     return removed
 
 
+def _identity(item: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(item.get("runtime") or ""), str(item.get("project") or ""),
+        str(item.get("name") or item.get("container_name") or ""),
+        str(item.get("id") or item.get("container_id") or ""),
+    )
+
+
+def _container_identity_key(identity: tuple[str, str, str, str]) -> str:
+    return "\0".join(identity)
+
+
+def _finite_rate(value: Any) -> float | None:
+    try:
+        rate = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return rate if rate >= 0 and rate < 1e15 else None
+
+
+def _auto_tier_rates(base_mbps: int) -> list[int]:
+    """Return descending per-container caps, ending at 1 Mbps where possible."""
+    rates: list[int] = []
+    for percentage in AUTO_TIER_PERCENTAGES:
+        rate = max(AUTO_MINIMUM_MBPS, int(base_mbps * percentage / 100))
+        if rate < base_mbps and (not rates or rate < rates[-1]):
+            rates.append(rate)
+    if base_mbps > AUTO_MINIMUM_MBPS and (not rates or rates[-1] > AUTO_MINIMUM_MBPS):
+        rates.append(AUTO_MINIMUM_MBPS)
+    return rates
+
+
+def _host_link_snapshot() -> tuple[dict[int, dict[str, Any]], set[str]]:
+    code, output = _runner(["ip", "-j", "link", "show"])
+    if code != 0:
+        return {}, set()
+    try:
+        raw_links = json.loads(output)
+    except (TypeError, ValueError):
+        return {}, set()
+    links: dict[int, dict[str, Any]] = {}
+    if isinstance(raw_links, list):
+        for item in raw_links[:512]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("ifindex") or 0)
+            except (TypeError, ValueError):
+                continue
+            name = str(item.get("ifname") or "")
+            if index > 0 and re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name):
+                links[index] = item
+    code, output = _runner(["ip", "-j", "route", "show", "default"])
+    defaults: set[str] = set()
+    if code == 0:
+        try:
+            routes = json.loads(output)
+        except (TypeError, ValueError):
+            routes = []
+        for route in routes if isinstance(routes, list) else []:
+            if isinstance(route, dict):
+                name = str(route.get("dev") or "")
+                if re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name):
+                    defaults.add(name)
+    return links, defaults
+
+
+def _uses_selected_host_interface(
+    selected: str, target: dict[str, Any], host_links: dict[int, dict[str, Any]],
+    default_routes: set[str], bridge_inventory: list[dict[str, Any]],
+) -> bool:
+    try:
+        peer_index = int(target.get("peer_index") or 0)
+    except (TypeError, ValueError):
+        peer_index = 0
+    peer = host_links.get(peer_index)
+    if not peer:
+        return False
+    peer_name = str(peer.get("ifname") or "")
+    master = peer.get("master")
+    if isinstance(master, int):
+        master_link = host_links.get(master) or {}
+        master = master_link.get("ifname")
+    master_name = str(master or "")
+    if peer_name == selected or master_name == selected:
+        return True
+    if selected not in default_routes:
+        return False
+    runtime_bridges = {
+        str(item.get("name") or "")
+        for item in bridge_inventory
+        if isinstance(item, dict) and item.get("kind") == "bridge"
+        and isinstance(item.get("runtimes"), list)
+        and any(runtime in {"incus", "podman"} for runtime in item.get("runtimes", []))
+    }
+    # A selected default-route NIC also covers containers attached to a
+    # runtime-owned bridge, whose external route is forwarded by the host.
+    return bool(master_name and master_name in runtime_bridges)
+
+
+def _auto_sample_map(samples: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    result: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        identity = _identity(sample)
+        if identity[0] in {"incus", "podman"} and identity[2] and identity[3]:
+            result[identity] = sample
+    return result
+
+
+def _advance_direction(
+    record: dict[str, Any], base_mbps: int, usage_mbps: float,
+    sample_at: int, sample_window_seconds: int,
+) -> None:
+    tiers = _auto_tier_rates(base_mbps)
+    if record.get("base_mbps") is not None and int(record.get("base_mbps") or 0) != base_mbps:
+        record.update(stage=0, high_seconds=0, low_seconds=0)
+    record["base_mbps"] = base_mbps
+    if not tiers:
+        record.update(stage=0, high_seconds=0, low_seconds=0, last_sample_at=sample_at)
+        return
+    stage = max(0, min(int(record.get("stage") or 0), len(tiers)))
+    window = max(1, min(86_400, int(sample_window_seconds or 1)))
+    current_limit = tiers[stage - 1] if stage else base_mbps
+    high_threshold = current_limit * AUTO_THRESHOLD_PERCENT / 100.0
+    recovery_threshold = current_limit * AUTO_RECOVERY_PERCENT / 100.0
+    if stage < len(tiers) and usage_mbps >= high_threshold:
+        high_seconds = max(0, int(record.get("high_seconds") or 0)) + window
+        record["low_seconds"] = 0
+        if high_seconds >= AUTO_TRIGGER_SECONDS:
+            record["stage"] = stage + 1
+            record["high_seconds"] = 0
+            record["low_seconds"] = 0
+        else:
+            record["high_seconds"] = high_seconds
+    elif stage > 0 and usage_mbps < recovery_threshold:
+        low_seconds = max(0, int(record.get("low_seconds") or 0)) + window
+        record["high_seconds"] = 0
+        if low_seconds >= AUTO_RECOVERY_SECONDS:
+            record["stage"] = stage - 1
+            record["low_seconds"] = 0
+        else:
+            record["low_seconds"] = low_seconds
+    else:
+        record.update(high_seconds=0, low_seconds=0)
+    record["last_sample_at"] = sample_at
+    record["last_usage_mbps"] = round(usage_mbps, 3)
+
+
+def _automatic_limits(
+    auto_policy: dict[str, Any], host_limit: dict[str, Any] | None,
+    host_id: str, node_id: str, containers: list[dict[str, Any]],
+    traffic_samples: list[dict[str, Any]], sample_at: int,
+    sample_interval_seconds: int, bridge_inventory: list[dict[str, Any]],
+    state: dict[str, Any], resolve: Callable[..., dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    enabled = bool(auto_policy.get("enabled")) and isinstance(host_limit, dict)
+    interface = str(host_limit.get("interface") or "") if enabled else ""
+    auto_state = state.get("auto_throttle_state")
+    if not isinstance(auto_state, dict) or auto_state.get("interface") != interface:
+        auto_state = {"interface": interface, "last_sample_at": 0, "containers": {}}
+    tracked = auto_state.get("containers")
+    if not isinstance(tracked, dict):
+        tracked = {}
+    if not enabled:
+        auto_state = {"interface": "", "last_sample_at": sample_at,
+                      "containers": {}, "status": "disabled"}
+        state["auto_throttle_state"] = auto_state
+        return [], {
+            "enabled": False, "state": "disabled", "interface": "",
+            "threshold_percent": AUTO_THRESHOLD_PERCENT,
+            "trigger_seconds": AUTO_TRIGGER_SECONDS,
+            "tier_percentages": list(AUTO_TIER_PERCENTAGES),
+            "minimum_mbps": AUTO_MINIMUM_MBPS,
+            "recovery_percent": AUTO_RECOVERY_PERCENT,
+            "recovery_seconds": AUTO_RECOVERY_SECONDS,
+            "items": [],
+        }
+
+    candidates = {
+        _identity(item): item for item in containers if isinstance(item, dict)
+        and _identity(item)[0] in {"incus", "podman"}
+        and _identity(item)[2] and _identity(item)[3]
+    }
+    current_sample = max(0, int(sample_at or 0))
+    previous_sample = int(auto_state.get("last_sample_at") or 0)
+    new_sample = current_sample > previous_sample
+    if new_sample:
+        samples = _auto_sample_map(traffic_samples)
+        host_links, default_routes = _host_link_snapshot()
+        mapping_reason = "host_link_inventory_unavailable" if not host_links else ""
+        mapped_identities: set[tuple[str, str, str, str]] = set()
+        unmapped_identities: set[tuple[str, str, str, str]] = set()
+        unavailable_samples = 0
+        namespace_owners: dict[str, list[tuple[str, str, str, str]]] = {}
+        try:
+            host_namespace_inode = str(os.stat("/proc/1/ns/net").st_ino)
+        except OSError:
+            host_namespace_inode = ""
+            mapping_reason = "host_namespace_unavailable"
+        for identity, candidate in candidates.items():
+            item = {
+                "scope": "container", "runtime": identity[0], "project": identity[1],
+                "container_name": identity[2], "container_id": identity[3],
+                "upload_mbps": 1, "download_mbps": 1,
+            }
+            key = _container_identity_key(identity)
+            previous = tracked.get(key) if isinstance(tracked.get(key), dict) else {}
+            try:
+                target = resolve(host_id, item, containers)
+            except (BandwidthPolicyError, OSError, ValueError) as exc:
+                unmapped_identities.add(identity)
+                if previous:
+                    previous["sampling_state"] = "target_unavailable"
+                    previous["message"] = str(exc)[:180]
+                    tracked[key] = previous
+                continue
+            namespace_inode = str(target.get("namespace_inode") or "")
+            if not namespace_inode or not host_namespace_inode or namespace_inode == host_namespace_inode:
+                unmapped_identities.add(identity)
+                if previous:
+                    previous.update(state="unmapped", sampling_state="unsafe_shared_namespace",
+                                    upload_stage=0, download_stage=0,
+                                    directions={"upload": {}, "download": {}})
+                    if not host_namespace_inode:
+                        previous["sampling_state"] = "host_namespace_unavailable"
+                    tracked[key] = previous
+                continue
+            shared_with = namespace_owners.setdefault(namespace_inode, [])
+            if shared_with:
+                shared_identities = [*shared_with, identity]
+                for shared_identity in shared_identities:
+                    mapped_identities.discard(shared_identity)
+                    unmapped_identities.add(shared_identity)
+                    shared_key = _container_identity_key(shared_identity)
+                    shared_record = tracked.get(shared_key)
+                    if isinstance(shared_record, dict):
+                        shared_record.update(state="unmapped", sampling_state="shared_network_namespace",
+                                             directions={"upload": {}, "download": {}})
+                        tracked[shared_key] = shared_record
+                shared_with.append(identity)
+                continue
+            shared_with.append(identity)
+            if not _uses_selected_host_interface(interface, target, host_links, default_routes, bridge_inventory):
+                unmapped_identities.add(identity)
+                if previous:
+                    previous.update(state="unmapped", sampling_state="interface_unmapped",
+                                    upload_stage=0, download_stage=0,
+                                    directions={"upload": {}, "download": {}})
+                    tracked[key] = previous
+                continue
+            mapped_identities.add(identity)
+            sample = samples.get(identity)
+            sample_rates = sample.get("traffic_counters") if isinstance(sample, dict) and isinstance(sample.get("traffic_counters"), dict) else {}
+            if sample_rates.get("available") is not True:
+                unavailable_samples += 1
+                if previous:
+                    previous["sampling_state"] = "unavailable"
+                    tracked[key] = previous
+                continue
+            generation = str(target.get("process_generation") or "")
+            interface_index = int(target.get("interface_index") or 0)
+            same_process = bool(previous and previous.get("process_generation") == generation
+                                and previous.get("namespace_inode") == namespace_inode
+                                and previous.get("interface_index") == interface_index)
+            record = previous if same_process else {
+                "identity": list(identity), "process_generation": generation,
+                "namespace_inode": namespace_inode, "interface_index": interface_index,
+                "network_interface": target.get("interface"),
+                "directions": {"upload": {}, "download": {}},
+            }
+            for direction, rate_key, base_key in (
+                ("upload", "net_tx_bps", "upload_mbps"),
+                ("download", "net_rx_bps", "download_mbps"),
+            ):
+                base = int(host_limit.get(base_key) or 0)
+                rate = _finite_rate(sample.get(rate_key))
+                if base <= 0 or rate is None:
+                    record.setdefault("directions", {}).pop(direction, None)
+                    continue
+                direction_state = record.setdefault("directions", {}).setdefault(direction, {})
+                if int(direction_state.get("last_sample_at") or 0) >= current_sample:
+                    continue
+                _advance_direction(
+                    direction_state, base, rate * 8 / 1_000_000,
+                    current_sample, sample_interval_seconds,
+                )
+            record.update(
+                identity=list(identity), process_generation=generation,
+                namespace_inode=namespace_inode, interface_index=interface_index,
+                network_interface=target.get("interface"), state="limited" if any(
+                    int(value.get("stage") or 0) > 0
+                    for value in record.get("directions", {}).values() if isinstance(value, dict)
+                ) else "monitoring", sampling_state="healthy", last_sample_at=current_sample,
+            )
+            tracked[key] = record
+        auto_state["last_sample_at"] = current_sample
+        auto_state["status"] = "monitoring"
+        auto_state["mapped_containers"] = len(mapped_identities)
+        auto_state["unmapped_containers"] = len(unmapped_identities)
+        auto_state["unavailable_samples"] = unavailable_samples
+        auto_state["mapping_reason"] = mapping_reason
+    # Prune long-departed identities, but keep recent ones so a transient runtime
+    # inventory failure cannot remove a limiter that is already protecting a container.
+    for key, record in list(tracked.items()):
+        if not isinstance(record, dict):
+            tracked.pop(key, None)
+            continue
+        last_sample = int(record.get("last_sample_at") or 0)
+        if current_sample and last_sample and current_sample - last_sample > 86_400:
+            tracked.pop(key, None)
+    auto_state["containers"] = tracked
+    state["auto_throttle_state"] = auto_state
+
+    auto_limits: list[dict[str, Any]] = []
+    status_items: list[dict[str, Any]] = []
+    for key, record in tracked.items():
+        identity_value = record.get("identity")
+        if not isinstance(identity_value, list) or len(identity_value) != 4:
+            continue
+        identity = tuple(str(value) for value in identity_value)
+        directions = record.get("directions") if isinstance(record.get("directions"), dict) else {}
+        rates: dict[str, int] = {}
+        base_rates = {"upload": int(host_limit.get("upload_mbps") or 0),
+                      "download": int(host_limit.get("download_mbps") or 0)}
+        for direction in ("upload", "download"):
+            direction_state = directions.get(direction) if isinstance(directions.get(direction), dict) else {}
+            stage = int(direction_state.get("stage") or 0)
+            tiers = _auto_tier_rates(base_rates[direction])
+            if 1 <= stage <= len(tiers):
+                rates[direction] = tiers[stage - 1]
+        if rates and identity[0] in {"incus", "podman"}:
+            auto_limits.append({
+                "scope": "container", "runtime": identity[0], "project": identity[1],
+                "container_name": identity[2], "container_id": identity[3],
+                "upload_mbps": rates.get("upload", 0),
+                "download_mbps": rates.get("download", 0),
+            })
+        if identity[0] in {"incus", "podman"}:
+            upload_state = directions.get("upload") if isinstance(directions.get("upload"), dict) else {}
+            download_state = directions.get("download") if isinstance(directions.get("download"), dict) else {}
+            status_items.append({
+                "runtime": identity[0], "project": identity[1],
+                "container_name": identity[2], "container_id": identity[3],
+                "state": str(record.get("state") or "monitoring"),
+                "sampling_state": str(record.get("sampling_state") or "unknown"),
+                "network_interface": str(record.get("network_interface") or ""),
+                "upload_mbps": rates.get("upload", 0),
+                "download_mbps": rates.get("download", 0),
+                "upload_current_mbps": float(upload_state.get("last_usage_mbps") or 0),
+                "download_current_mbps": float(download_state.get("last_usage_mbps") or 0),
+                "upload_baseline_mbps": base_rates["upload"],
+                "download_baseline_mbps": base_rates["download"],
+                "upload_high_seconds": max(0, int(upload_state.get("high_seconds") or 0)),
+                "download_high_seconds": max(0, int(download_state.get("high_seconds") or 0)),
+                "upload_low_seconds": max(0, int(upload_state.get("low_seconds") or 0)),
+                "download_low_seconds": max(0, int(download_state.get("low_seconds") or 0)),
+            })
+    status_state = "limited" if auto_limits else "monitoring"
+    if auto_state.get("mapping_reason"):
+        status_state = "verification_unavailable"
+    elif not auto_limits and int(auto_state.get("mapped_containers") or 0) == 0:
+        status_state = "no_mapped_containers"
+    elif not auto_limits and int(auto_state.get("unavailable_samples") or 0) > 0:
+        status_state = "sampling_unavailable"
+    status = {
+        "enabled": True, "state": status_state, "interface": interface,
+        "threshold_percent": AUTO_THRESHOLD_PERCENT,
+        "trigger_seconds": AUTO_TRIGGER_SECONDS,
+        "tier_percentages": list(AUTO_TIER_PERCENTAGES),
+        "minimum_mbps": AUTO_MINIMUM_MBPS,
+        "recovery_percent": AUTO_RECOVERY_PERCENT,
+        "recovery_seconds": AUTO_RECOVERY_SECONDS,
+        "mapped_containers": int(auto_state.get("mapped_containers") or 0),
+        "unmapped_containers": int(auto_state.get("unmapped_containers") or 0),
+        "unavailable_samples": int(auto_state.get("unavailable_samples") or 0),
+        "items": status_items[:500],
+    }
+    if auto_state.get("mapping_reason") == "host_namespace_unavailable":
+        status["message"] = "宿主机网络命名空间不可读，已跳过自动限速路径核验"
+    elif auto_state.get("mapping_reason") == "host_link_inventory_unavailable":
+        status["message"] = "宿主机网卡清单不可读，已跳过自动限速路径核验"
+    return auto_limits, status
+
+
+def _merge_automatic_limits(
+    manual_limits: list[dict[str, Any]], automatic_limits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = [dict(item) for item in manual_limits]
+    by_identity = {
+        (item.get("runtime"), str(item.get("project") or ""), item.get("container_name"), item.get("container_id")): index
+        for index, item in enumerate(merged) if item.get("scope") == "container"
+    }
+    for automatic in automatic_limits:
+        identity = (automatic.get("runtime"), str(automatic.get("project") or ""),
+                    automatic.get("container_name"), automatic.get("container_id"))
+        index = by_identity.get(identity)
+        if index is None:
+            by_identity[identity] = len(merged)
+            merged.append(dict(automatic))
+            continue
+        current = merged[index]
+        for direction in ("upload", "download"):
+            auto_rate = int(automatic.get(f"{direction}_mbps") or 0)
+            if not auto_rate:
+                continue
+            manual_rate = int(current.get(f"{direction}_mbps") or 0)
+            current[f"{direction}_mbps"] = min(manual_rate, auto_rate) if manual_rate else auto_rate
+    return merged
+
+
 def reconcile(
     policy: Any,
     host_id: str,
@@ -369,6 +812,10 @@ def reconcile(
     *,
     state_path: str = STATE_PATH,
     resolve: Callable[..., dict[str, Any]] = _resolve_entry,
+    traffic_samples: list[dict[str, Any]] | None = None,
+    sample_at: int | float = 0,
+    sample_interval_seconds: int = 300,
+    bridge_inventory: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Apply the current server policy and remove only filters recorded as ours."""
     state = _read_state(state_path)
@@ -383,10 +830,20 @@ def reconcile(
         status.update(state="rejected", message=str(exc))
         return status
     status["revision"] = normalized["revision"]
+    host_limit = next((item for item in normalized["limits"] if item.get("scope") == "host"), None)
+    automatic_limits, automatic_status = _automatic_limits(
+        normalized.get("auto_throttle") or {}, host_limit, host_id, node_id,
+        containers if isinstance(containers, list) else [],
+        traffic_samples if isinstance(traffic_samples, list) else [],
+        int(sample_at or 0), max(1, int(round(float(sample_interval_seconds or 1)))),
+        bridge_inventory if isinstance(bridge_inventory, list) else [], state, resolve,
+    )
+    effective_limits = _merge_automatic_limits(normalized["limits"], automatic_limits)
+    status["auto_throttle"] = automatic_status
     desired: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     requested_keys = set()
     failures = False
-    for item in normalized["limits"]:
+    for item in effective_limits:
         if item["scope"] == "host":
             requested_keys.add(f"host:{item['interface']}")
         else:

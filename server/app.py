@@ -5276,7 +5276,8 @@ async def poll_security_actions(
         ops_services = [{"id": r["id"], **operations.loads(r["payload"])} for r in conn.execute("SELECT id,payload FROM ops_services WHERE host_id=? AND enabled=1 LIMIT 20", (host_id,)).fetchall()]
         cleanup_policy=disk_cleanup.node_config(conn,node_id)
         bandwidth_row = conn.execute("SELECT payload FROM ops_settings WHERE key=?", (f"manual_bandwidth:{host_id}",)).fetchone()
-        bandwidth_policy = operations.loads(bandwidth_row[0], {}) if bandwidth_row else {}
+        saved_bandwidth_policy = operations.loads(bandwidth_row[0], {}) if bandwidth_row else {}
+        bandwidth_policy = saved_bandwidth_policy
         if (not isinstance(bandwidth_policy, dict)
                 or bandwidth_policy.get("host_id") != host_id
                 or bandwidth_policy.get("expected_node_id") != node_id):
@@ -5285,6 +5286,32 @@ async def poll_security_actions(
         else:
             bandwidth_policy = {key: bandwidth_policy.get(key) for key in
                                 ("schema", "host_id", "expected_node_id", "revision", "limits")}
+        bandwidth_limits = bandwidth_policy.get("limits")
+        if not isinstance(bandwidth_limits, list):
+            bandwidth_limits = []
+            bandwidth_policy["limits"] = bandwidth_limits
+        host_bandwidth_configured = any(
+            isinstance(item, dict) and item.get("scope") == "host"
+            and (item.get("upload_mbps", 0) or item.get("download_mbps", 0))
+            for item in bandwidth_limits
+        )
+        stored_auto_throttle = (
+            saved_bandwidth_policy.get("auto_throttle")
+            if isinstance(saved_bandwidth_policy, dict) else None
+        )
+        auto_throttle_enabled = (
+            stored_auto_throttle.get("enabled") if isinstance(stored_auto_throttle, dict)
+            and type(stored_auto_throttle.get("enabled")) is bool else host_bandwidth_configured
+        )
+        bandwidth_policy["auto_throttle"] = {
+            "enabled": bool(auto_throttle_enabled and host_bandwidth_configured),
+            "threshold_percent": 80,
+            "trigger_seconds": 300,
+            "tier_percentages": [50, 25, 5],
+            "minimum_mbps": 1,
+            "recovery_percent": 50,
+            "recovery_seconds": 600,
+        }
         try:
             conn.execute("BEGIN IMMEDIATE")
             tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)

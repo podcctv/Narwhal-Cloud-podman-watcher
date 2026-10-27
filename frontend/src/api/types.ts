@@ -429,10 +429,28 @@ export interface ManualBandwidthLimitResponse {
   expected_node_id: string;
   host_online: boolean;
   sample_at: number;
-  interfaces: Array<{ name: string; kind: string; state: string; is_default_route: boolean }>;
+  interfaces: Array<{
+    name: string; kind: string; state: string; is_default_route: boolean;
+    runtimes?: Array<'incus' | 'podman'>; network_names?: string[];
+  }>;
   containers: Array<{ runtime: 'incus' | 'podman'; project: string; container_name: string; container_id: string }>;
-  policy: { schema: 1; revision: number; limits: ManualBandwidthLimit[] };
-  reported: { revision?: number; state?: string; items?: Array<Record<string, unknown>>; message?: string };
+  policy: {
+    schema: 1; revision: number; limits: ManualBandwidthLimit[];
+    auto_throttle: {
+      enabled: boolean; threshold_percent: number; trigger_seconds: number;
+      tier_percentages: number[]; minimum_mbps: number;
+      recovery_percent: number; recovery_seconds: number;
+    };
+  };
+  reported: {
+    revision?: number; state?: string; items?: Array<Record<string, unknown>>; message?: string;
+    auto_throttle?: {
+      enabled?: boolean; state?: string; interface?: string; items?: Array<Record<string, unknown>>; message?: string;
+      mapped_containers?: number; unmapped_containers?: number; unavailable_samples?: number;
+      threshold_percent?: number; trigger_seconds?: number; tier_percentages?: number[];
+      minimum_mbps?: number; recovery_percent?: number; recovery_seconds?: number;
+    };
+  };
 }
 
 export interface HostFirewallLiveRule {

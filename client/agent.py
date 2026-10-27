@@ -9463,7 +9463,13 @@ def _schedule_self_uninstall(action: Dict, node_id: str) -> Tuple[bool, str]:
     return True, "self-uninstall scheduled"
 
 
-def process_security_actions(server: str, secret: str, host_id: str, node_id: str = "") -> bool:
+def process_security_actions(
+    server: str, secret: str, host_id: str, node_id: str = "", *,
+    traffic_samples: List[Dict[str, object]] | None = None,
+    sample_at: float = 0,
+    sample_interval_seconds: int = 300,
+    bridge_inventory: List[Dict[str, object]] | None = None,
+) -> bool:
     _schedule_abuse_guard(server, secret, host_id, node_id)
     response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
     node_operations.configure(response.get("operations"))
@@ -9471,6 +9477,9 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
     try:
         limit_status = manual_bandwidth.reconcile(
             operations_payload.get("bandwidth_limits"), host_id, node_id, _abuse_targets,
+            traffic_samples=traffic_samples or [], sample_at=sample_at,
+            sample_interval_seconds=sample_interval_seconds,
+            bridge_inventory=bridge_inventory or [],
         )
         if limit_status.get("state") in {"failed", "rejected"}:
             print("manual bandwidth policy was not fully applied; inspect the dashboard status")
@@ -9709,13 +9718,21 @@ def main() -> None:
         except ValueError:
             action_poll_interval = 10
         deadline = time.monotonic() + report_delay
+        host_firewall = security.get("host_firewall") if isinstance(security.get("host_firewall"), dict) else {}
+        interface_inventory = host_firewall.get("interface_inventory") if isinstance(host_firewall.get("interface_inventory"), dict) else {}
+        bridge_inventory = interface_inventory.get("interfaces") if isinstance(interface_inventory.get("interfaces"), list) else []
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             time.sleep(min(action_poll_interval, remaining))
             try:
-                if process_security_actions(args.server, args.secret, args.host_id, args.node_id):
+                if process_security_actions(
+                    args.server, args.secret, args.host_id, args.node_id,
+                    traffic_samples=collected, sample_at=sample_now,
+                    sample_interval_seconds=max(1, int(round(security_interval))),
+                    bridge_inventory=bridge_inventory,
+                ):
                     break
             except Exception as action_error:
                 print(f"security action poll failed: {action_error}")

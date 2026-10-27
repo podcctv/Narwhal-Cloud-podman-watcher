@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Gauge, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Gauge, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
 import { api } from '../../api/client';
 import { ContainerItem, ManualBandwidthLimit, ManualBandwidthLimitResponse } from '../../api/types';
 
@@ -23,6 +23,7 @@ const reportedLabel: Record<string, string> = {
 export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, containers, onToast, onRefresh, onClose }) => {
   const [context, setContext] = useState<ManualBandwidthLimitResponse | null>(null);
   const [hostLimit, setHostLimit] = useState<ManualBandwidthLimit | null>(null);
+  const [autoThrottleEnabled, setAutoThrottleEnabled] = useState(true);
   const [containerLimits, setContainerLimits] = useState<ManualBandwidthLimit[]>([]);
   const [newTarget, setNewTarget] = useState('');
   const [newUpload, setNewUpload] = useState('0');
@@ -37,7 +38,9 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
     try {
       const result = await api.getManualBandwidthLimits(hostId);
       setContext(result);
-      setHostLimit(result.policy.limits.find((item) => item.scope === 'host') || null);
+      const loadedHostLimit = result.policy.limits.find((item) => item.scope === 'host') || null;
+      setHostLimit(loadedHostLimit);
+      setAutoThrottleEnabled(result.policy.auto_throttle?.enabled ?? Boolean(loadedHostLimit));
       setContainerLimits(result.policy.limits.filter((item) => item.scope === 'container'));
     } catch (error: any) {
       setLoadError(error?.message || '无法读取母机网卡与容器清单');
@@ -62,6 +65,17 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
     runtime: item.runtime as 'incus' | 'podman', project: item.project || '',
     container_name: item.container_name, container_id: item.container_id || '',
   }) === newTarget);
+  const selectedInterface = context?.interfaces.find((item) => item.name === hostLimit?.interface);
+  const reportedAuto = context?.reported?.auto_throttle;
+  const autoActiveItems = (reportedAuto?.items || []).filter((item) => item.state === 'limited'
+    || Number(item.upload_high_seconds || 0) > 0 || Number(item.download_high_seconds || 0) > 0
+    || Number(item.upload_low_seconds || 0) > 0 || Number(item.download_low_seconds || 0) > 0);
+  const autoStateLabel: Record<string, string> = {
+    limited: '已触发阶梯限速', monitoring: '监测中，当前未限速',
+    no_mapped_containers: '未发现可安全映射的容器', disabled: '自动保护已关闭',
+    verification_unavailable: '网卡或网络命名空间无法核实，暂不自动限速',
+    sampling_unavailable: '容器流量采样不可用，暂不推进限速阶梯',
+  };
 
   const updateContainer = (index: number, changes: Partial<ManualBandwidthLimit>) => {
     setContainerLimits((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...changes } : item));
@@ -92,7 +106,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
     }
     setSaving(true);
     try {
-      const result = await api.updateManualBandwidthLimits(hostId, limits);
+      const result = await api.updateManualBandwidthLimits(hostId, limits, { enabled: autoThrottleEnabled && Boolean(hostLimit) });
       onToast?.('success', `限速策略已保存（修订 ${result.revision}）；节点下次动作轮询时生效`);
       await refresh();
       onRefresh?.();
@@ -135,7 +149,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
       <div className="mt-4 rounded-lg border border-slate-800 bg-slate-900/50 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-200">母机总带宽</h4>
-          {!hostLimit && <button type="button" disabled={!context?.interfaces.some((item) => item.state === 'up')} onClick={() => setHostLimit({ scope: 'host', interface: context?.interfaces.find((item) => item.state === 'up')?.name || '', upload_mbps: 20, download_mbps: 20 })} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-sky-800 px-2.5 text-xs text-sky-200 hover:bg-sky-950/50 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />添加母机限速</button>}
+          {!hostLimit && <button type="button" disabled={!context?.interfaces.some((item) => item.state === 'up')} onClick={() => { setHostLimit({ scope: 'host', interface: context?.interfaces.find((item) => item.state === 'up')?.name || '', upload_mbps: 20, download_mbps: 20 }); setAutoThrottleEnabled(true); }} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-sky-800 px-2.5 text-xs text-sky-200 hover:bg-sky-950/50 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />添加母机限速</button>}
         </div>
         {hostLimit ? <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(180px,1.2fr)_1fr_1fr_auto] sm:items-end">
           <label className="block text-xs text-slate-400">采集到的网卡<select className={`${fieldClass} mt-1`} value={hostLimit.interface || ''} onChange={(event) => setHostLimit({ ...hostLimit, interface: event.target.value })}>
@@ -143,9 +157,57 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
           </select></label>
           <label className="block text-xs text-slate-400">上行 Mbps<input aria-label="母机上行限速 Mbps" className={`${fieldClass} mt-1`} type="number" min="0" max="100000" step="1" value={hostLimit.upload_mbps} onChange={(event) => setHostLimit({ ...hostLimit, upload_mbps: rateValue(event.target.value) })} /></label>
           <label className="block text-xs text-slate-400">下行 Mbps<input aria-label="母机下行限速 Mbps" className={`${fieldClass} mt-1`} type="number" min="0" max="100000" step="1" value={hostLimit.download_mbps} onChange={(event) => setHostLimit({ ...hostLimit, download_mbps: rateValue(event.target.value) })} /></label>
-          <button type="button" onClick={() => setHostLimit(null)} className="min-h-9 rounded-lg border border-rose-900/70 px-3 text-xs text-rose-200 hover:bg-rose-950/40">移除</button>
+          <button type="button" onClick={() => { setHostLimit(null); setAutoThrottleEnabled(false); }} className="min-h-9 rounded-lg border border-rose-900/70 px-3 text-xs text-rose-200 hover:bg-rose-950/40">移除</button>
         </div> : <p className="mt-2 text-xs text-slate-500">未配置母机总限速。</p>}
         {!context?.interfaces.some((item) => item.state === 'up') && <p className="mt-2 text-xs text-amber-300">没有已确认的在线网卡清单；请先更新 Agent 并等待上报。</p>}
+      </div>
+
+      <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex min-w-0 gap-2.5">
+            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+            <div className="min-w-0">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-200">容器自动阶梯限速</h4>
+              <p className="mt-1 text-xs leading-5 text-slate-400">上下行分开累计有效采样窗口：平均速率达到当前限额的 80% 累计 5 分钟，先降到母机基准的 50%；之后仍达到当前容器限额的 80%，再累计 5 分钟降到 25%、5%，最低 1 Mbps。低于当前容器限额的 50% 累计 10 分钟，恢复一级。</p>
+            </div>
+          </div>
+          <label className="inline-flex min-h-9 shrink-0 items-center gap-2 rounded-lg border border-slate-700 px-3 text-xs text-slate-200">
+            <input type="checkbox" checked={autoThrottleEnabled} disabled={!hostLimit || !context?.host_online} onChange={(event) => setAutoThrottleEnabled(event.target.checked)} className="h-4 w-4 accent-emerald-500" />
+            启用自动保护
+          </label>
+        </div>
+        <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-[11px] leading-5 text-slate-400">
+          以当前所选网卡的带宽为基准；例如 20 Mbps 的方向，平均速率达到 16 Mbps 并累计覆盖 5 分钟有效采样后触发，随后依次为 10 → 5 → 1 Mbps。之后每级按当前容器限额的 80% 继续判断；低于当前限额的一半并累计 10 分钟后，每次恢复一级。只处理能由 Agent 确认网络归属的 Incus / Podman 容器；共享网络命名空间、网卡路径或采样无法确认时，不启动新的自动限速。超出 policer 的数据包会被丢弃。
+        </div>
+        {selectedInterface && autoThrottleEnabled && <p className="mt-2 text-[11px] leading-5 text-sky-200/80">
+          当前网络范围：{selectedInterface.kind === 'bridge' ? `直接接入 ${selectedInterface.name} 的运行时 bridge 容器` : selectedInterface.is_default_route ? `挂接到运行时 bridge、经默认路由 ${selectedInterface.name} 转发的容器` : `Agent 验证默认网络确实经过 ${selectedInterface.name} 的容器`}。未能确认路径的容器会跳过保护。
+        </p>}
+        {reportedAuto && <div className="mt-3 border-t border-slate-800 pt-2 text-xs" role="status">
+          <p className={reportedAuto.state === 'limited' || reportedAuto.state === 'verification_unavailable' || reportedAuto.state === 'sampling_unavailable' ? 'text-amber-300' : reportedAuto.state === 'no_mapped_containers' ? 'text-slate-400' : 'text-emerald-300'}>
+            节点状态：{autoStateLabel[reportedAuto.state || ''] || '等待 Agent 上报'}{reportedAuto.interface ? ` · 网卡 ${reportedAuto.interface}` : ''}
+          </p>
+          <p className="mt-1 text-[11px] text-slate-500">已映射 {Number(reportedAuto.mapped_containers || 0)} 个 · 路径不匹配 {Number(reportedAuto.unmapped_containers || 0)} 个 · 流量采样不可用 {Number(reportedAuto.unavailable_samples || 0)} 个</p>
+          {reportedAuto.message && <p className="mt-1 text-[11px] text-amber-200">{reportedAuto.message}</p>}
+          {autoActiveItems.length > 0 && <div className="mt-2 space-y-2 text-slate-300">
+            {autoActiveItems.slice(0, 6).map((item, index) => {
+              const uploadHigh = Number(item.upload_high_seconds || 0);
+              const downloadHigh = Number(item.download_high_seconds || 0);
+              const uploadLow = Number(item.upload_low_seconds || 0);
+              const downloadLow = Number(item.download_low_seconds || 0);
+              const progress = [
+                uploadHigh > 0 ? `上行高占用 ${uploadHigh}/300 秒` : '',
+                downloadHigh > 0 ? `下行高占用 ${downloadHigh}/300 秒` : '',
+                uploadLow > 0 ? `上行恢复观察 ${uploadLow}/600 秒` : '',
+                downloadLow > 0 ? `下行恢复观察 ${downloadLow}/600 秒` : '',
+              ].filter(Boolean).join(' · ');
+              return <div key={`${String(item.container_id || item.container_name)}-${index}`} className="break-all">
+                <p>{String(item.runtime || '')}/{String(item.container_name || '')} · 上行 {Number(item.upload_current_mbps || 0).toFixed(2)}/{Number(item.upload_baseline_mbps || 0)} Mbps{Number(item.upload_mbps || 0) ? `（限 ${Number(item.upload_mbps)}）` : ''} · 下行 {Number(item.download_current_mbps || 0).toFixed(2)}/{Number(item.download_baseline_mbps || 0)} Mbps{Number(item.download_mbps || 0) ? `（限 ${Number(item.download_mbps)}）` : ''}</p>
+                {progress && <p className="mt-0.5 text-[11px] text-sky-200/80">{progress}</p>}
+              </div>;
+            })}
+            {autoActiveItems.length > 6 && <p className="text-slate-500">另有 {autoActiveItems.length - 6} 个容器处于保护或阶梯观察中</p>}
+          </div>}
+        </div>}
       </div>
 
       <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3">
