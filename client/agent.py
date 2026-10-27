@@ -3466,7 +3466,6 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     global _pending_firewall_event_cursor
     enabled = os.getenv("SECURITY_MONITOR_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
     access = _collect_access_log_stats(interval_seconds) if enabled else {"enabled": False, "readable_files": 0}
-    alerts: List[Dict[str, object]] = []
     summary: Dict[str, object] = {
         "enabled": enabled,
         "interval_seconds": round(max(1.0, interval_seconds), 3),
@@ -3477,7 +3476,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         "syn_recv_count": 0,
         "access_log": access,
         "access_sources": [{"label": "宿主机日志", **access}],
-        "alerts": alerts,
+        "alerts": [],
         "host_firewall": {
             **_runman_firewall_control_status(),
             "interface_inventory": _collect_host_firewall_interface_inventory(),
@@ -3565,6 +3564,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     auto_remediate_xrayr = os.getenv(
         "SECURITY_AUTO_REMEDIATE_XRAYR", "true"
     ).strip().lower() not in ("0", "false", "no", "off")
+    alerts: List[Dict[str, object]] = []
     container_access_readable_files = 0
     socks_enforcement_entries = _socks_auth_enforcement_entries()
 
@@ -4510,8 +4510,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
 
     alerts.extend(_http_security_alerts(access))
 
-    _collect_cpu_guard(containers, interval_seconds, summary, allow_new_limits=True)
     summary["alerts"] = alerts
+    _collect_cpu_guard(containers, interval_seconds, summary, allow_new_limits=True)
     return summary
 
 
