@@ -3033,7 +3033,9 @@ def _fleet_firewall_node_state(
     status = "unregistered"
     if node_id:
         status = "offline" if not online else "awaiting_capability"
-        if online and runtime["stale"]:
+        if online and container_policy_enabled and target_status == "inventory_unavailable":
+            status = "awaiting_interfaces"
+        elif online and runtime["stale"]:
             status = "firewall_status_stale"
         elif online and runtime["control_api"] == "unsupported":
             status = "runman_update_required"
