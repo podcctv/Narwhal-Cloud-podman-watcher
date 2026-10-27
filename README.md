@@ -1,6 +1,6 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.89**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.90**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 一个轻量级的 **CS 架构多运行时容器监控工具**，可在同一宿主机同时采集 **Podman、Docker 和 Incus 容器**：
 
@@ -12,6 +12,14 @@
 - **多运行时发现**：默认 `auto` 自动发现全部已安装运行时，也可显式指定组合。
 
 ## 主要能力
+
+### v1.7.90：修复离线主机详情与容器网桥识别
+
+- 总览继续展示最近 7 天内未上报母机的最后一次容器样本，单独标注最后上报时间和离线时长；离线样本不计入在线 KPI、不触发实时告警或远程处置。
+- 修复 Linux bridge 在 `ip address` JSON 中显示为 `ether` 时被误判为不可操作网卡的问题；Agent 以 Incus / Podman 明确报告的 bridge 网络与主机接口名匹配为准，并保留内核链路类型供诊断。
+- Incus 网卡清单覆盖所有项目，并兼容不同版本 JSON 字段大小写；旧 Agent 已上报的可信运行时映射也可以正常显示。
+- 启用固定端口策略时，自动把当前采集确认的 Incus / Podman 网桥加入可审阅草稿；管理员仍需检查并点击“保存并应用”才会下发，可按运行时或单网卡取消选择。
+- 将离线主机及其最后样本的清理期限从 24 小时延长至 7 天，便于查找短期离线的节点；不会保留为在线或可操作状态。
 
 ### v1.7.89：回收过期升级动作并恢复分批发布
 
@@ -558,7 +566,7 @@ ALERT_CONN_CRITICAL_THRESHOLD=1000
 CONNECTION_STOP_THRESHOLD=1500
 CONNECTION_STOP_DURATION_SECONDS=3600
 CONNECTION_STOP_MAX_GAP_SECONDS=600
-OFFLINE_HOST_PURGE_SECONDS=86400
+OFFLINE_HOST_PURGE_SECONDS=604800
 DASHBOARD_USERNAME=安装时随机生成
 DASHBOARD_PASSWORD=安装时随机生成
 ```

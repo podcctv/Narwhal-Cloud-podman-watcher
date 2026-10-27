@@ -21,12 +21,10 @@ class HostFirewallInterfaceInventoryTests(unittest.TestCase):
                 },
                 {
                     "ifname": "incusbr0", "link_type": "ether", "operstate": "UP", "mtu": 1500,
-                    "linkinfo": {"info_kind": "bridge"},
                     "addr_info": [{"local": "10.90.0.1", "prefixlen": 24}],
                 },
                 {
-                    "ifname": "podman0", "link_type": "ether", "operstate": "UP", "mtu": 1500,
-                    "linkinfo": {"info_kind": "bridge"},
+                    "ifname": "podman1", "link_type": "ether", "operstate": "UP", "mtu": 1500,
                     "addr_info": [{"local": "10.88.0.1", "prefixlen": 16}],
                 },
                 {
@@ -37,7 +35,7 @@ class HostFirewallInterfaceInventoryTests(unittest.TestCase):
             ]),
             ("ip", "-j", "route", "show", "default"): json.dumps([{"dev": "eth0"}]),
             ("ip", "-j", "-6", "route", "show", "default"): "[]",
-            ("incus", "network", "list", "--format=json"): json.dumps([
+            ("incus", "network", "list", "--all-projects", "--format=json"): json.dumps([
                 {"name": "incusbr0", "type": "bridge", "config": {}},
                 {"name": "incusbr0:1", "type": "bridge", "config": {"bridge.name": "incusbr0:1"}},
                 {"name": "ens3", "type": "physical", "config": {}},
@@ -46,7 +44,7 @@ class HostFirewallInterfaceInventoryTests(unittest.TestCase):
                 {"name": "podman"}, {"name": "macvlan-net"},
             ]),
             ("podman", "network", "inspect", "podman", "macvlan-net"): json.dumps([
-                {"name": "podman", "driver": "bridge", "network_interface": "podman0"},
+                {"name": "podman", "driver": "bridge", "network_interface": "podman1"},
                 {"name": "macvlan-net", "driver": "macvlan", "network_interface": "eth0"},
             ]),
         }
@@ -66,12 +64,43 @@ class HostFirewallInterfaceInventoryTests(unittest.TestCase):
         self.assertTrue(by_name["eth0"]["is_default_route"])
         self.assertEqual(by_name["eth0"]["runtimes"], [])
         self.assertEqual(by_name["incusbr0"]["runtimes"], ["incus"])
-        self.assertEqual(by_name["podman0"]["runtimes"], ["podman"])
+        self.assertEqual(by_name["podman1"]["runtimes"], ["podman"])
+        self.assertEqual(by_name["incusbr0"]["kind"], "bridge")
+        self.assertEqual(by_name["podman1"]["kind"], "bridge")
+        self.assertEqual(by_name["podman1"]["kernel_kind"], "ether")
         self.assertTrue(by_name["incusbr0"]["firewall_eligible"])
-        self.assertTrue(by_name["podman0"]["firewall_eligible"])
+        self.assertTrue(by_name["podman1"]["firewall_eligible"])
         self.assertEqual(by_name["incusbr0:1"]["runtimes"], [])
         self.assertFalse(by_name["incusbr0:1"]["firewall_eligible"])
-        self.assertEqual(by_name["podman0"]["addresses"], ["10.88.0.1/16"])
+        self.assertEqual(by_name["podman1"]["addresses"], ["10.88.0.1/16"])
+
+    def test_incus_network_interface_from_project_scoped_json_is_mapped(self):
+        outputs = {
+            ("ip", "-j", "address", "show"): json.dumps([
+                {"ifname": "incusbr7", "link_type": "ether", "operstate": "UP", "mtu": 1500, "addr_info": []},
+            ]),
+            ("ip", "-j", "route", "show", "default"): "[]",
+            ("ip", "-j", "-6", "route", "show", "default"): "[]",
+            ("incus", "network", "list", "--all-projects", "--format=json"): json.dumps([
+                {"Name": "private-net", "Type": "bridge", "NetworkInterface": "incusbr7", "Config": {"user.project": "isolated"}},
+            ]),
+        }
+
+        def fake_run(command, timeout=None):
+            return outputs.get(tuple(command), "")
+
+        with (
+            mock.patch.object(agent.os, "name", "posix"),
+            mock.patch.object(agent, "run", side_effect=fake_run),
+            mock.patch.object(agent, "get_runtime_bins", return_value={"incus": "incus"}),
+        ):
+            result = agent._collect_host_firewall_interface_inventory(force=True)
+
+        item = result["interfaces"][0]
+        self.assertEqual(item["name"], "incusbr7")
+        self.assertEqual(item["runtimes"], ["incus"])
+        self.assertEqual(item["network_names"], ["private-net"])
+        self.assertTrue(item["firewall_eligible"])
 
     def test_invalid_ip_json_marks_inventory_unavailable(self):
         with (

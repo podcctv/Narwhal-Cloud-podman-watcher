@@ -1276,6 +1276,16 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(len(stale_items), 1)
         self.assertTrue(stale_items[0]["alerts"]["host_stale"])
 
+    def test_latest_keeps_offline_host_details_for_seven_days(self):
+        stale_ts = int(time.time()) - 2 * 24 * 3600
+        self._insert("incus", 20, "default", timestamp=stale_ts)
+
+        items = json.loads(server.latest(include_stale=True).body)["items"]
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["alerts"]["host_stale"])
+        self.assertEqual(items[0]["host_last_seen"], stale_ts)
+        self.assertGreaterEqual(items[0]["host_offline_seconds"], 2 * 24 * 3600)
+
     def test_latest_removes_expired_container_even_when_stale_items_are_requested(self):
         now = int(time.time())
         expired_ts = now - server.OFFLINE_HIDE_SECONDS - 1

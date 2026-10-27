@@ -86,9 +86,10 @@ export const Dashboard: React.FC = () => {
     setIsRefreshing(true);
     try {
       const [latestRes, alertsRes, secStatusRes] = await Promise.all([
-        // The dashboard is a live operations view. Stale samples are retained
-        // server-side for history/detail diagnostics, not shown as live risk.
-        api.getLatest(false),
+        // Include the short offline-retention window so operators can still
+        // find a host and inspect its last known containers. Offline samples
+        // are separated from live metrics and cannot trigger live actions.
+        api.getLatest(true),
         api.getActiveAlerts(),
         api.getSecurityStatus(),
       ]);
@@ -113,7 +114,8 @@ export const Dashboard: React.FC = () => {
           container.runtime === alert.runtime &&
           (container.project || '') === (alert.project || '') &&
           container.container_name === alert.container_name &&
-          !container.alerts?.stale
+          !container.alerts?.stale &&
+          !container.alerts?.host_stale
         );
       }));
       setSecurityStatus(liveSecurityStatus);
@@ -213,10 +215,12 @@ export const Dashboard: React.FC = () => {
   }, [isSearchOpen, selectedContainer]);
 
   // KPI computations
-  const onlineHostsCount = new Set(containers.map((c) => c.host_id)).size;
-  const totalContainersCount = containers.length;
+  const currentHostContainers = containers.filter((c) => !c.alerts?.host_stale);
+  const actionableContainers = currentHostContainers.filter((c) => !c.alerts?.stale);
+  const onlineHostsCount = new Set(currentHostContainers.map((c) => c.host_id)).size;
+  const totalContainersCount = currentHostContainers.length;
   const activeAlertsCount = activeAlerts.length;
-  const staleContainersCount = containers.filter((c) => c.alerts?.stale).length;
+  const staleContainersCount = currentHostContainers.filter((c) => c.alerts?.stale).length;
 
   return (
     <div className="min-h-screen bg-dark text-slate-100 flex flex-col selection:bg-sky-500/30">
@@ -287,7 +291,7 @@ export const Dashboard: React.FC = () => {
 
           {activeTab === 'investigation' && <UserInvestigationView />}
           {activeTab === 'commerce' && <CommerceView />}
-          {activeTab === 'firewall' && <FirewallView containers={containers} telemetry={securityStatus} onToast={addToast} />}
+          {activeTab === 'firewall' && <FirewallView containers={actionableContainers} telemetry={securityStatus} onToast={addToast} />}
 
           {activeTab === 'stats' && (
             <StatsAnalyticsView

@@ -189,8 +189,18 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       setSnapshot(result);
       if (replaceDraft) {
         setRules(result.policy?.rules || []);
-        setAbuse({ ...emptyAbuse, ...(result.policy?.abuse || {}) });
-        setDirty(false);
+        const nextAbuse = { ...emptyAbuse, ...(result.policy?.abuse || {}) };
+        const containerPolicyEnabled = nextAbuse.speedtest || nextAbuse.mining || nextAbuse.bt;
+        const inventory = result.interface_inventory;
+        const confirmedInterfaces = inventory?.status === 'ready' && !inventory.stale
+          ? inventory.interfaces.filter((item) => item.firewall_eligible && item.runtimes.length > 0).map((item) => item.name)
+          : [];
+        const autoSelected = containerPolicyEnabled && !nextAbuse.interfaces.length && confirmedInterfaces.length > 0;
+        if (autoSelected) nextAbuse.interfaces = confirmedInterfaces;
+        setAbuse(nextAbuse);
+        // Migrate an enabled legacy policy that had no interfaces into a
+        // reviewable draft. It is never sent until an administrator saves it.
+        setDirty(autoSelected);
       }
     } catch (error: any) {
       onToast('error', `读取母机防火墙配置失败：${error.message || error}`);
@@ -269,6 +279,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     setAbuse((current) => {
       const next = { ...current, [key]: value };
       const hasContainerPolicy = next.speedtest || next.mining || next.bt;
+      const inventoryReady = interfaceInventory?.status === 'ready' && !interfaceInventory.stale;
+      if (hasContainerPolicy && !current.interfaces.length && inventoryReady && eligibleInterfaces.length) {
+        next.interfaces = eligibleInterfaces.map((item) => item.name);
+      }
       return hasContainerPolicy ? next : { ...next, interfaces: [], runtimes: [] };
     });
     setDirty(true);
@@ -818,7 +832,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h4 className="text-xs font-semibold text-slate-200">选择这台母机的容器网卡</h4>
-              <p className="mt-1 text-[10px] leading-4 text-slate-400">只显示已发现且可安全匹配的容器桥接网卡。按运行时筛选或直接勾选；不需要、也不允许手动填写接口名。</p>
+              <p className="mt-1 text-[10px] leading-4 text-slate-400">只显示由 Incus / Podman 明确确认的容器桥接网卡。启用规则后默认加入草稿，可单选或同时选择两个运行时；无需填写接口名。</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <span className={`rounded-full border px-2.5 py-1 text-[10px] ${interfaceInventory?.status === 'ready' && !interfaceInventory.stale ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>
@@ -837,7 +851,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               {runtimeInterfaces.length > 0 && <span className="max-w-[45%] truncate font-mono text-[10px] text-slate-500">{runtimeInterfaces.map((item) => item.name).join(', ')}</span>}
             </label>;
           })}
-          {!anyAbuseEnabled && <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-400">先启用上方至少一项固定端口规则，再选择目标网卡；关闭全部规则时，网卡选择会一并清除，避免显示无效配置。</p>}
+          {anyAbuseEnabled && <p className="mt-3 rounded-lg border border-sky-900/70 bg-sky-950/30 p-3 text-[10px] leading-4 text-sky-100/80">网卡勾选只更新页面草稿；检查目标后点击“保存并应用到这台母鸡”才会下发策略。</p>}
+          {!anyAbuseEnabled && <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-400">先启用上方至少一项固定端口规则；系统会把当前确认的 Incus / Podman 网桥自动加入草稿，可再取消不需要的运行时或网卡。关闭全部规则时，网卡选择会一并清除。</p>}
+          {anyAbuseEnabled && <p className="mt-3 rounded-lg border border-sky-900/70 bg-sky-950/30 p-3 text-[10px] leading-4 text-sky-100/80">已确认网桥可自动加入草稿；可单选 Incus、Podman 或同时选择。勾选不会立即改防火墙，点击“保存并应用到这台母鸡”后才会下发。</p>}
           {eligibleInterfaces.length > 0 && <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap gap-1.5" role="group" aria-label="按容器运行时筛选网卡">
               {([
@@ -853,7 +869,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               <input type="checkbox" checked={abuse.interfaces.includes(item.name)} disabled={interfaceInventory?.stale || !anyAbuseEnabled} onChange={(event) => toggleAbuseInterface(item.name, event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500" aria-label={`在防滥用规则中使用 ${item.name}`} />
               <span className="min-w-0 flex-1">
                 <span className="flex flex-wrap items-center gap-1.5"><code className="text-xs font-semibold text-slate-100">{item.name}</code>{item.runtimes.map((runtime) => <span key={runtime} className="rounded-sm border border-sky-900/70 bg-sky-950/50 px-1.5 py-0.5 text-[9px] uppercase text-sky-200">{runtime}</span>)}<span className={`rounded-sm border px-1.5 py-0.5 text-[9px] ${item.state === 'up' ? 'border-emerald-900 bg-emerald-950/40 text-emerald-200' : 'border-amber-900 bg-amber-950/40 text-amber-200'}`}>{item.state}</span></span>
-                <span className="mt-1 block break-all text-[10px] leading-4 text-slate-500">{item.network_names.length ? item.network_names.join(', ') : item.kind}{item.mtu ? ` · MTU ${item.mtu}` : ''}{item.addresses.length ? ` · ${item.addresses.slice(0, 2).join(', ')}` : ''}</span>
+                <span className="mt-1 block break-all text-[10px] leading-4 text-slate-500">{item.network_names.length ? item.network_names.join(', ') : item.kind}{item.kernel_kind && item.kernel_kind !== item.kind ? ` · 内核 ${item.kernel_kind}` : ''}{item.mtu ? ` · MTU ${item.mtu}` : ''}{item.addresses.length ? ` · ${item.addresses.slice(0, 2).join(', ')}` : ''}</span>
               </span>
             </label>)}
           </div> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[11px] leading-5 text-slate-400">当前筛选下没有已确认的桥接网卡；请选择其他运行时，或改为“全部”。</p> : <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">当前没有已确认的 Incus / Podman bridge。可能是 Agent 尚未更新、运行时未安装，或容器使用 host、pasta、macvlan/ipvlan 等非桥接网络；请刷新等待采集，不要猜测接口名。</p>}
@@ -865,7 +881,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <summary className="cursor-pointer select-none text-[11px] font-medium text-slate-300">查看母机完整网卡清单（{interfaceInventory?.interfaces.length || 0}）</summary>
             {interfaceInventory?.interfaces?.length ? <div className="mt-2 divide-y divide-slate-800">
               {interfaceInventory.interfaces.map((item) => <div key={item.name} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-[10px]">
-                <code className="text-slate-200">{item.name}</code><span className="text-slate-500">{item.kind} · {item.state}{item.mtu ? ` · MTU ${item.mtu}` : ''}</span>
+                <code className="text-slate-200">{item.name}</code><span className="text-slate-500">{item.kind}{item.kernel_kind && item.kernel_kind !== item.kind ? ` · 内核 ${item.kernel_kind}` : ''} · {item.state}{item.mtu ? ` · MTU ${item.mtu}` : ''}</span>
                 {item.is_default_route && <span className="rounded-sm border border-sky-900 bg-sky-950/50 px-1.5 py-0.5 text-sky-200">默认路由</span>}
                 {!!item.addresses.length && <span className="break-all font-mono text-slate-500">{item.addresses.join(', ')}</span>}
                 {!!item.runtimes.length && <span className="text-sky-300">{item.runtimes.join(' / ')}</span>}

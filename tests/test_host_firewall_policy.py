@@ -207,10 +207,15 @@ class HostFirewallPolicyTests(unittest.TestCase):
                     "observed_at": self.now,
                     "interfaces": [
                         {
-                            "name": "incusbr0", "kind": "bridge", "state": "up", "mtu": 1500,
+                            "name": "incusbr0", "kind": "ether", "state": "up", "mtu": 1500,
                             "addresses": ["10.90.0.1/24", "not-an-ip"],
                             "is_default_route": False, "runtimes": ["incus", "unknown"],
-                            "network_names": ["incusbr0"], "firewall_eligible": True,
+                            "network_names": ["incusbr0"], "firewall_eligible": False,
+                        },
+                        {
+                            "name": "podman1", "kind": "ether", "state": "up", "mtu": 1500,
+                            "addresses": ["10.88.0.1/16"], "is_default_route": False,
+                            "runtimes": ["podman"], "network_names": ["podman"], "firewall_eligible": False,
                         },
                         {
                             "name": "eth0;drop", "kind": "bridge", "state": "up",
@@ -230,10 +235,12 @@ class HostFirewallPolicyTests(unittest.TestCase):
 
         self.assertEqual(inventory["status"], "ready")
         self.assertFalse(inventory["stale"])
-        self.assertEqual([item["name"] for item in inventory["interfaces"]], ["incusbr0"])
+        self.assertEqual([item["name"] for item in inventory["interfaces"]], ["incusbr0", "podman1"])
         self.assertEqual(inventory["interfaces"][0]["addresses"], ["10.90.0.1/24"])
         self.assertEqual(inventory["interfaces"][0]["runtimes"], ["incus"])
         self.assertTrue(inventory["interfaces"][0]["firewall_eligible"])
+        self.assertEqual(inventory["interfaces"][1]["kind"], "bridge")
+        self.assertTrue(inventory["interfaces"][1]["firewall_eligible"])
 
     def test_live_rfw_readback_is_latest_only_and_preserves_last_good_snapshot(self):
         rule = {

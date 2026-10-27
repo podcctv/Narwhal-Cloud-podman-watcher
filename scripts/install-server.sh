@@ -1081,7 +1081,7 @@ main() {
     local default_connection_stop_threshold="2000"
     local default_connection_stop_duration_seconds="300"
     local default_connection_stop_max_gap_seconds="360"
-  local default_offline_host_purge_seconds="86400"
+    local default_offline_host_purge_seconds="604800"
   local default_dashboard_username
   local default_dashboard_password
   default_dashboard_username="$(generate_dashboard_username)"

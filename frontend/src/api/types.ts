@@ -18,7 +18,13 @@ export interface ContainerItem {
   udp_rx_bps?: number;
   udp_tx_bps?: number;
   conn_count?: number;
+  host_last_seen?: number;
+  host_last_seen_iso_utc8?: string;
+  host_offline_seconds?: number;
+  timestamp?: number;
   timestamp_iso_utc8?: string;
+  offline_seconds?: number;
+  offline_hours?: number;
   agent_version?: string;
   cpu_effective_cpus?: number;
   container_disk_rw_bytes?: number;
@@ -38,6 +44,7 @@ export interface ContainerItem {
   udp_country_stats?: { country: string; connections: number }[];
   alerts?: {
     stale?: boolean;
+    host_stale?: boolean;
     cpu?: boolean;
     memory?: boolean;
     disk?: boolean;
@@ -389,6 +396,7 @@ export interface HostFirewallRuntimeStatus {
 export interface HostFirewallInterface {
   name: string;
   kind: string;
+  kernel_kind?: string;
   state: string;
   mtu: number | null;
   addresses: string[];

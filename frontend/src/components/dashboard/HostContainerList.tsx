@@ -232,7 +232,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
   // Group by host_id
   const liveContainers = useMemo(
-    () => containers.filter((c) => !c.alerts?.stale),
+    () => containers.filter((c) => !c.alerts?.stale && !c.alerts?.host_stale),
     [containers]
   );
 
@@ -269,6 +269,15 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     return map;
   }, [liveContainers]);
 
+  const offlineHostMap = useMemo(() => {
+    const map: Record<string, ContainerItem[]> = {};
+    containers.filter((container) => container.alerts?.host_stale).forEach((container) => {
+      if (!map[container.host_id]) map[container.host_id] = [];
+      map[container.host_id].push(container);
+    });
+    return map;
+  }, [containers]);
+
   // Sort hosts: hosts with higher risk come first
   const hostIds = useMemo(() => {
     return Object.keys(hostMap).sort((a, b) => {
@@ -281,10 +290,32 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     });
   }, [hostMap, activeAlerts]);
 
+  const offlineHostIds = useMemo(
+    () => Object.keys(offlineHostMap).sort((a, b) => {
+      const lastSeenA = Math.max(...offlineHostMap[a].map((item) => Number(item.host_last_seen || item.timestamp || 0)));
+      const lastSeenB = Math.max(...offlineHostMap[b].map((item) => Number(item.host_last_seen || item.timestamp || 0)));
+      return lastSeenB - lastSeenA || a.localeCompare(b);
+    }),
+    [offlineHostMap]
+  );
+
+  const visibleOfflineHostIds = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return offlineHostIds;
+    return offlineHostIds.filter((hostId) =>
+      hostId.toLowerCase().includes(query) || offlineHostMap[hostId].some((item) =>
+        item.container_name.toLowerCase().includes(query)
+        || item.runtime.toLowerCase().includes(query)
+        || (item.project || '').toLowerCase().includes(query)
+      )
+    );
+  }, [searchQuery, offlineHostIds, offlineHostMap]);
+
   // Keep fleet lists compact; expand only hosts with an active finding by default.
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>(() => {
     return {};
   });
+  const [expandedOfflineHosts, setExpandedOfflineHosts] = useState<Record<string, boolean>>({});
   const [bandwidthOpenHosts, setBandwidthOpenHosts] = useState<Record<string, boolean>>({});
 
   // Keep expandedHosts in sync with new hosts
@@ -334,7 +365,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     ? { title: '确认定向处置？', description: `将仅处理 ${pendingDisposition.target.container_name} 中已识别的违规进程、服务或配置，不会停止容器。`, confirmLabel: '确认处置', tone: 'danger' as const }
     : { title: '确认放行策略？', description: pendingDisposition ? `${pendingDisposition.target.container_name} 的当前风险将被持续放行且不再提醒；可从告警历史撤销。` : '', confirmLabel: '确认放行', tone: 'primary' as const };
 
-  if (hostIds.length === 0) {
+  if (hostIds.length === 0 && offlineHostIds.length === 0) {
     return (
       <section className="rounded-2xl border border-dashed border-slate-800 p-12 text-center bg-slate-950/40">
         <Server className="mx-auto h-10 w-10 text-slate-600 mb-3" />
@@ -902,6 +933,63 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
           );
         })}
       </div>
+
+      {visibleOfflineHostIds.length > 0 && (
+        <section className="space-y-3" aria-label="离线主机与历史容器">
+          <div className="flex flex-wrap items-end justify-between gap-2 border-b border-slate-800 pb-2">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-200">离线主机与历史详情</h2>
+              <p className="mt-1 text-xs text-slate-500">最近 7 天内停止上报的主机。以下仅为最后一次采样，不代表当前运行状态，也不会触发实时风险或远程处置。</p>
+            </div>
+            <span className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-1 text-xs text-amber-300">{visibleOfflineHostIds.length} 台未上报</span>
+          </div>
+          {visibleOfflineHostIds.map((hostId) => {
+            const items = offlineHostMap[hostId].slice().sort((a, b) => a.container_name.localeCompare(b.container_name));
+            const latest = items.reduce((result, item) => Number(item.host_last_seen || item.timestamp || 0) > Number(result.host_last_seen || result.timestamp || 0) ? item : result, items[0]);
+            const offlineSeconds = Math.max(0, ...items.map((item) => Number(item.host_offline_seconds ?? item.offline_seconds ?? 0)));
+            const offlineLabel = offlineSeconds < 3600
+              ? `约 ${Math.max(1, Math.floor(offlineSeconds / 60))} 分钟`
+              : `约 ${Math.floor(offlineSeconds / 3600)} 小时`;
+            const isExpanded = Boolean(expandedOfflineHosts[hostId]);
+            return (
+              <article key={`offline-${hostId}`} className="overflow-hidden rounded-xl border border-amber-900/60 bg-slate-900/70">
+                <button
+                  type="button"
+                  onClick={() => setExpandedOfflineHosts((current) => ({ ...current, [hostId]: !current[hostId] }))}
+                  aria-expanded={isExpanded}
+                  aria-controls={`offline-host-${hostId}`}
+                  className="flex min-h-14 w-full flex-wrap items-center justify-between gap-3 p-3 text-left hover:bg-slate-800/50 focus:outline-hidden focus:ring-2 focus:ring-inset focus:ring-amber-400"
+                >
+                  <span className="flex min-w-0 flex-wrap items-center gap-2">
+                    <Server className="h-4 w-4 shrink-0 text-amber-400" />
+                    <strong className="break-all text-sm text-slate-100">{hostId}</strong>
+                    <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">已停止上报</span>
+                    <span className="font-mono text-[11px] text-slate-400">v{latest.agent_version || '未知'}</span>
+                  </span>
+                  <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
+                    <span>最后上报：{latest.host_last_seen_iso_utc8 || latest.timestamp_iso_utc8 || '未知'}</span>
+                    <span>约 {offlineLabel}</span>
+                    <span>{items.length} 台历史容器</span>
+                    <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                  </span>
+                </button>
+                {isExpanded && (
+                  <div id={`offline-host-${hostId}`} className="border-t border-amber-900/40 bg-slate-950/50 p-3">
+                    <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                      {items.map((item) => (
+                        <li key={`${item.runtime}-${item.project || ''}-${item.container_name}`} className="min-w-0 rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+                          <p className="break-all text-sm font-medium text-slate-200">{item.container_name}</p>
+                          <p className="mt-1 break-all text-xs text-slate-500">{item.runtime}{item.project ? ` / ${item.project}` : ''} · 最后采样 {item.timestamp_iso_utc8 || '未知'}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </article>
+            );
+          })}
+        </section>
+      )}
 
       {/* Global Confirmation Dialog */}
       <ConfirmDialog

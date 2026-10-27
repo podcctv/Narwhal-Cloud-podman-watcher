@@ -7870,15 +7870,30 @@ def _collect_host_firewall_interface_inventory(force: bool = False) -> Dict[str,
     runtimes = get_runtime_bins()
     incus = runtimes.get("incus")
     if incus:
-        incus_networks = _host_firewall_json_list(
-            run(_runtime_base(incus) + ["network", "list", "--format=json"], timeout=5)
-        )
+        incus_prefix = _runtime_base(incus)
+        # Include project-scoped Incus networks as well as the default project;
+        # otherwise a valid bridge used by a non-default project is omitted.
+        incus_networks_raw = run(incus_prefix + ["network", "list", "--all-projects", "--format=json"], timeout=5)
+        incus_networks = _host_firewall_json_list(incus_networks_raw)
+        if not incus_networks and not str(incus_networks_raw or "").strip().startswith("["):
+            # Older Incus builds may not support --all-projects. Fall back to
+            # the default project rather than losing all verified interfaces.
+            incus_networks = _host_firewall_json_list(
+                run(incus_prefix + ["network", "list", "--format=json"], timeout=5)
+            )
         for network in incus_networks:
-            if str(network.get("type") or "").lower() != "bridge":
+            if str(network.get("type") or network.get("Type") or "").lower() != "bridge":
                 continue
-            name = network.get("name")
-            config = network.get("config") if isinstance(network.get("config"), dict) else {}
-            register_network("incus", config.get("bridge.name") or name, name)
+            name = network.get("name") or network.get("Name")
+            raw_config = network.get("config") or network.get("Config")
+            config = raw_config if isinstance(raw_config, dict) else {}
+            interface = (
+                config.get("bridge.name")
+                or network.get("network_interface")
+                or network.get("NetworkInterface")
+                or name
+            )
+            register_network("incus", interface, name)
 
     podman = runtimes.get("podman")
     if podman:
@@ -7917,7 +7932,7 @@ def _collect_host_firewall_interface_inventory(force: bool = False) -> Dict[str,
         if name not in link_names:
             continue
         linkinfo = link.get("linkinfo") if isinstance(link.get("linkinfo"), dict) else {}
-        kind = str(linkinfo.get("info_kind") or link.get("link_type") or "unknown")[:32]
+        kernel_kind = str(linkinfo.get("info_kind") or link.get("link_type") or "unknown")[:32]
         addresses = []
         raw_addresses = link.get("addr_info") if isinstance(link.get("addr_info"), list) else []
         for address in raw_addresses[:16]:
@@ -7937,16 +7952,23 @@ def _collect_host_firewall_interface_inventory(force: bool = False) -> Dict[str,
                 continue
         runtime_info = runtime_networks.get(name, {"runtimes": set(), "networks": set()})
         runtime_labels = sorted(runtime_info["runtimes"])
+        # `ip -j address show` often reports the link-layer type (`ether`) for
+        # Linux bridges and omits linkinfo. Runtime metadata is stronger here:
+        # the interface was matched to an Incus type=bridge or Podman
+        # driver=bridge network, so expose its effective kind as bridge while
+        # retaining the raw kernel-reported kind for diagnostics.
+        kind = "bridge" if runtime_labels else kernel_kind
         inventory.append({
             "name": name,
             "kind": kind,
+            "kernel_kind": kernel_kind,
             "state": str(link.get("operstate") or "unknown")[:16].lower(),
             "mtu": link.get("mtu") if type(link.get("mtu")) is int and 0 < link.get("mtu") <= 65535 else None,
             "addresses": addresses,
             "is_default_route": name in default_route_names,
             "runtimes": runtime_labels,
             "network_names": sorted(runtime_info["networks"])[:16],
-            "firewall_eligible": bool(runtime_labels and kind == "bridge"),
+            "firewall_eligible": bool(runtime_labels),
         })
         if len(inventory) >= 64:
             break

@@ -49,8 +49,8 @@ CONNECTION_STOP_MAX_GAP_SECONDS = max(1, min(600, int(os.getenv("CONNECTION_STOP
 STALE_SECONDS = int(os.getenv("STALE_SECONDS", "900"))
 RFW_APPLICATION_PROTOCOLS = ("http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto")
 RFW_CN_ALERT_PROTOCOLS = {"socks", "fet", "wireguard", "mtproto", "openvpn"}
-OFFLINE_HIDE_SECONDS = int(os.getenv("OFFLINE_HIDE_SECONDS", str(24 * 3600)))
-OFFLINE_HOST_PURGE_SECONDS = int(os.getenv("OFFLINE_HOST_PURGE_SECONDS", str(24 * 3600)))
+OFFLINE_HIDE_SECONDS = int(os.getenv("OFFLINE_HIDE_SECONDS", str(7 * 24 * 3600)))
+OFFLINE_HOST_PURGE_SECONDS = int(os.getenv("OFFLINE_HOST_PURGE_SECONDS", str(7 * 24 * 3600)))
 PURGE_SECONDS = int(os.getenv("PURGE_SECONDS", str(30 * 24 * 3600)))
 DB_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("DB_BUSY_TIMEOUT_MS", "30000")))
 REPORT_CLEANUP_INTERVAL_SECONDS = max(
@@ -2546,6 +2546,8 @@ def _host_firewall_interface_inventory(
                 addresses.append(address)
         raw_runtimes = raw.get("runtimes") if isinstance(raw.get("runtimes"), list) else []
         runtimes = sorted({str(value).lower() for value in raw_runtimes if str(value).lower() in {"incus", "podman"}})
+        raw_kind = str(raw.get("kind") or "unknown")[:32]
+        kernel_kind = str(raw.get("kernel_kind") or raw_kind)[:32]
         raw_networks = raw.get("network_names") if isinstance(raw.get("network_names"), list) else []
         networks = list(dict.fromkeys(
             str(value)[:100] for value in raw_networks[:16]
@@ -2554,14 +2556,19 @@ def _host_firewall_interface_inventory(
         mtu = raw.get("mtu")
         interfaces.append({
             "name": name,
-            "kind": str(raw.get("kind") or "unknown")[:32],
+            "kind": "bridge" if runtimes else raw_kind,
+            "kernel_kind": kernel_kind,
             "state": str(raw.get("state") or "unknown")[:16].lower(),
             "mtu": mtu if type(mtu) is int and 0 < mtu <= 65535 else None,
             "addresses": addresses,
             "is_default_route": raw.get("is_default_route") is True,
             "runtimes": runtimes,
             "network_names": networks,
-            "firewall_eligible": raw.get("firewall_eligible") is True and bool(runtimes) and str(raw.get("kind") or "").lower() == "bridge",
+            # Older agents can label a runtime-confirmed bridge as `ether`
+            # and set firewall_eligible=false because `ip address show`
+            # omits linkinfo. Runtime labels only come from explicit Incus /
+            # Podman bridge metadata, so preserve that verified mapping.
+            "firewall_eligible": bool(runtimes),
         })
     return {
         "status": "ready",
@@ -3430,6 +3437,9 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "timestamp": r["ts"],
             "timestamp_iso": datetime.fromtimestamp(r["ts"], tz=timezone.utc).isoformat(),
             "timestamp_iso_utc8": format_utc8(r["ts"]),
+            "host_last_seen": host_last_seen,
+            "host_last_seen_iso_utc8": format_utc8(host_last_seen),
+            "host_offline_seconds": max(0, now - host_last_seen),
             "offline_seconds": stale_seconds,
             "offline_hours": offline_hours,
             "alerts": {
