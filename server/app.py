@@ -5108,10 +5108,10 @@ async def update_host_firewall_policy(host_id: str, request: Request) -> JSONRes
             compatibility = _policy_protocol_compatibility(policy, live_readback)
             if compatibility["unsupported_protocols"]:
                 names = ", ".join(compatibility["unsupported_protocols"])
-                raise HTTPException(status_code=409, detail=f"该节点当前 RFW 不支持所选应用协议：{names}；请先升级 RFW 并等待能力读回")
+                raise HTTPException(status_code=409, detail=f"该节点运行中的 RFW 能力清单未包含所选应用协议：{names}；请部署包含对应协议检测能力的 RFW 版本并更新节点，等待新鲜能力读回后再应用。仅更新 Watcher Agent 不会增加 RFW 协议支持")
             if compatibility["unknown_protocols"]:
                 names = ", ".join(compatibility["unknown_protocols"])
-                raise HTTPException(status_code=409, detail=f"该节点尚无所选应用协议的新鲜 RFW 能力读回：{names}；请等待节点上报或升级 RFW")
+                raise HTTPException(status_code=409, detail=f"该节点尚无所选应用协议的新鲜 RFW 能力读回：{names}；请先刷新并等待节点上报。若读回仍显示不支持，需部署包含对应协议检测能力的 RFW 版本")
         action_id = _enqueue_host_firewall_policy(conn, host_id, node_id, policy, requested_by, now, 0)
         revision_row = conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
         revision = int(revision_row["revision"])

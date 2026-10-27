@@ -51,7 +51,7 @@ const statusLabel: Record<string, string> = {
 };
 const fleetStateLabel: Record<string, string> = {
   unregistered: '未注册 Agent', offline: '节点离线', awaiting_capability: '等待能力上报',
-  awaiting_rfw_capability: '等待 RFW 协议能力核验', rfw_protocol_update_required: '需升级 RFW 协议支持',
+  awaiting_rfw_capability: '等待 RFW 协议能力核验', rfw_protocol_update_required: '缺少所需 RFW 协议能力',
   firewall_status_stale: '防火墙状态过期', runman_update_required: '需更新 Runman', runman_unavailable: 'Runman 不可用', queued: '策略排队中',
   awaiting_interfaces: '等待网卡清单', interfaces_not_found: '未发现目标网桥',
   apply_failed: '策略应用失败', drifted: '实际规则偏差', last_apply_succeeded: '最近回执成功', not_synced: '待同步', ready: '已就绪',
@@ -136,13 +136,26 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [fleetConfirmOpen, setFleetConfirmOpen] = useState(false);
   const [cnRiskDirection, setCnRiskDirection] = useState<CnRiskDirection>('both');
   const [cnRiskAction, setCnRiskAction] = useState<CnRiskAction>('pass');
-  const [cnRiskProtocols, setCnRiskProtocols] = useState<CnRiskProtocol[]>(['socks', 'wireguard', 'fet', 'mtproto']);
+  const [cnRiskProtocols, setCnRiskProtocols] = useState<CnRiskProtocol[]>(['socks', 'wireguard', 'fet']);
   const [pendingManualDelete, setPendingManualDelete] = useState<HostFirewallLiveRule | null>(null);
   const [deletingManualRuleId, setDeletingManualRuleId] = useState<number | null>(null);
   const [recoveryIntent, setRecoveryIntent] = useState<'retry' | 'rollback' | null>(null);
   const [recoveringPolicy, setRecoveringPolicy] = useState(false);
 
   const selectedHost = hosts.find((host) => host.host_id === hostId);
+  const protocolCapability = (protocol: string): 'supported' | 'unsupported' | 'unknown' => {
+    const readback = snapshot?.live_readback;
+    if (!readback || readback.status !== 'ready' || readback.stale || !readback.capabilities_known) return 'unknown';
+    const capability = readback.protocol_capabilities?.[protocol];
+    if (capability) return capability;
+    return readback.supported_protocols?.includes(protocol) ? 'supported' : 'unsupported';
+  };
+  const protocolCapabilityHelp = (protocol: string) => {
+    const capability = protocolCapability(protocol);
+    if (capability === 'unsupported') return `当前母机运行中的 RFW 未声明支持 ${protocolLabels[protocol] || protocol}；需要带有该协议检测能力的 RFW 构建，单独更新 Watcher Agent 不会增加协议识别能力。`;
+    if (capability === 'unknown') return `尚未拿到当前母机新鲜的 RFW ${protocolLabels[protocol] || protocol} 能力读回；刷新状态并等待节点上报后再配置。`;
+    return '';
+  };
   const interfaceInventory = snapshot?.interface_inventory;
   const eligibleInterfaces = useMemo(
     () => (interfaceInventory?.interfaces || []).filter((item) => item.firewall_eligible && item.runtimes.length > 0),
@@ -275,6 +288,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
   const addRule = () => {
     setFormError('');
+    if (scope === 'host' && ['http', 'tls', 'socks', 'ssh', 'fet', 'wireguard', 'openvpn', 'quic', 'mtproto'].includes(ruleDraft.protocol)) {
+      const capability = protocolCapability(ruleDraft.protocol);
+      if (capability !== 'supported') {
+        setFormError(protocolCapabilityHelp(ruleDraft.protocol));
+        return;
+      }
+    }
     if (ruleDraft.ip_type === 'cidr' && !ruleDraft.ip.trim()) {
       setFormError('请填写 CIDR 网段，例如 192.0.2.0/24。');
       return;
@@ -372,6 +392,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       ? ['in', 'out']
       : [cnRiskDirection];
     const protocols = cnRiskProtocols;
+    if (scope === 'host') {
+      const unavailable = protocols.filter((protocol) => protocolCapability(protocol) !== 'supported');
+      if (unavailable.length) {
+        onToast('error', unavailable.map((protocol) => protocolCapabilityHelp(protocol)).join(' '));
+        return;
+      }
+    }
     if (!protocols.length) {
       onToast('error', '请至少选择一种当前方向支持的协议。');
       return;
@@ -626,6 +653,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         </details>
         {selectedHost?.stale && <p className="mt-3 text-xs leading-5 text-amber-200">母机当前离线。可以保存期望配置，Agent 恢复连接后会自动执行。</p>}
         {snapshot?.agent_ready && !runtimeReady && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/80">{runtimeStatusHelp(snapshot?.runtime_status)} 如果 RFW 读回同时显示不可用或过期，那是另一条链路；先分别检查 Runman 控制 socket 和 RFW API，再刷新状态。</p>}
+        {snapshot?.live_readback?.mtproto_support === 'unsupported' && !snapshot.live_readback.stale && <p className="mt-3 rounded-lg border border-rose-900/70 bg-rose-950/30 p-3 text-xs leading-5 text-rose-100/90">这台母机当前运行的 RFW 能力清单没有 MTProto。需要先发布并安装包含 MTProto 检测能力的 RFW 构建，再刷新并确认能力读回；只升级 Watcher Agent 或 Runman 不会补上 RFW 的协议识别实现。</p>}
+        {snapshot?.live_readback?.mtproto_support === 'unknown' && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/90">这台母机还没有新鲜的 MTProto 能力读回。先刷新状态并等待节点上报；未知状态下系统不会排队应用 MTProto 规则。</p>}
         {fleetAuthoritative && <p className="mt-3 text-xs leading-5 text-sky-200">全局模板版本 #{fleetSnapshot?.revision} 已启用并作为统一期望策略；此处单机编辑已锁定。请在下方编辑并同步全局模板。</p>}
         {!fleetSnapshot && <p className="mt-3 text-xs leading-5 text-slate-400">正在确认全局策略状态；读取完成前暂不开放单机下发。</p>}
       </div>
@@ -717,9 +746,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               <div className={host.unsupported_protocols?.length ? 'text-rose-300' : host.unknown_protocols?.length ? 'text-amber-300' : 'text-emerald-300'}>
                 {host.required_protocols?.length
                   ? host.unsupported_protocols?.length
-                    ? `需升级：${host.unsupported_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
+                    ? `RFW 未声明支持：${host.unsupported_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
                     : host.unknown_protocols?.length
-                      ? `待核验：${host.unknown_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
+                      ? `等待新鲜能力读回：${host.unknown_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
                       : `能力已确认：${host.required_protocols.map((protocol) => protocolLabels[protocol] || protocol).join(', ')}`
                   : '当前策略无需应用层协议能力'}{host.live_readback.rfw_api_version ? ` · RFW API ${host.live_readback.rfw_api_version}` : ''}
               </div>
@@ -786,19 +815,30 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         </div>
         <fieldset className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
           <legend className="mb-2 text-xs font-medium text-slate-300">协议（可多选）</legend>
-          {cnRiskProtocolOptions.map((option) => <label key={option.protocol} className="flex min-h-16 cursor-pointer items-start gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3 hover:border-slate-600">
-            <input type="checkbox" checked={cnRiskProtocols.includes(option.protocol)} onChange={(event) => setCnRiskProtocols((current) => event.target.checked ? [...new Set([...current, option.protocol])] : current.filter((protocol) => protocol !== option.protocol))} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500" />
-            <span className="min-w-0"><span className="block text-xs font-semibold text-slate-100">{option.label}</span><span className="mt-1 block text-[10px] leading-4 text-slate-400">{option.note}</span></span>
-          </label>)}
+          {cnRiskProtocolOptions.map((option) => {
+            const checked = cnRiskProtocols.includes(option.protocol);
+            const capability = scope === 'host' ? protocolCapability(option.protocol) : 'supported';
+            const unavailable = scope === 'host' && capability !== 'supported';
+            const capabilityLabel = capability === 'unsupported' ? '当前 RFW 不支持' : capability === 'unknown' ? '等待 RFW 能力读回' : '';
+            return <label key={option.protocol} title={unavailable ? protocolCapabilityHelp(option.protocol) : undefined} className={`flex min-h-16 items-start gap-2 rounded-lg border p-3 ${unavailable ? 'cursor-not-allowed border-amber-900/60 bg-amber-950/10' : 'cursor-pointer border-slate-800 bg-slate-950/60 hover:border-slate-600'}`}>
+              <input type="checkbox" checked={checked} disabled={unavailable && !checked} onChange={(event) => setCnRiskProtocols((current) => event.target.checked ? [...new Set([...current, option.protocol])] : current.filter((protocol) => protocol !== option.protocol))} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500 disabled:opacity-40" />
+              <span className="min-w-0"><span className="block text-xs font-semibold text-slate-100">{option.label}{capabilityLabel && <span className="ml-1 font-normal text-amber-300">· {capabilityLabel}</span>}</span><span className="mt-1 block text-[10px] leading-4 text-slate-400">{option.note}</span></span>
+            </label>;
+          })}
         </fieldset>
         <p className="mt-3 rounded-lg border border-sky-900/70 bg-sky-950/30 p-3 text-xs leading-5 text-sky-100/80">作用范围：母机 RFW 实例配置的网卡；当前规则 API 没有逐条绑定网卡的字段，因此这里不会伪装成可选网卡。下面“容器转发端口保护”才支持选择已采集的 Incus / Podman 网桥。OpenVPN 只匹配入站，其它勾选协议按上方方向生成规则。</p>
         <p className="mt-3 text-xs leading-5 text-slate-400">入站匹配 CN 来源，出站匹配 CN 目标。FET 只是疑似 SS 的高熵启发式，可能误报其他非 TLS 加密流量；MTProto 依赖已知初始化标记且覆盖不完整；WireGuard 主要能识别初始握手。当前 RFW 仅覆盖 IPv4。命中规则后，节点事件会回传平台并进入安全告警。</p>
-        <p className="mt-1 text-xs leading-5 text-amber-200/80">“仅告警”会放行连接，不是拦截；“阻断并告警”才会拒绝匹配流量。生成后先检查规则，再单机保存或同步全局模板。旧版/能力未知的节点会等待升级或新鲜能力读回，不会盲目下发。</p>
+        <p className="mt-1 text-xs leading-5 text-amber-200/80">“仅告警”会放行连接，不是拦截；“阻断并告警”才会拒绝匹配流量。生成后先检查规则，再单机保存或同步全局模板。单机只开放新鲜读回明确支持的协议；全局模板会让不支持或能力未知的节点等待，不会盲目下发。协议支持必须由节点运行的 RFW 实际实现并上报，更新 Watcher Agent 本身不会增加协议检测能力。</p>
       </div>
       <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 sm:p-5">
         <div><label htmlFor="fw-priority" className="mb-1 block text-xs text-slate-300">优先级</label><input id="fw-priority" type="number" min={0} max={100000} value={ruleDraft.priority} onChange={(e) => updateDraft('priority', Number(e.target.value))} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400" /></div>
         <div><label htmlFor="fw-direction" className="mb-1 block text-xs text-slate-300">方向</label><select id="fw-direction" value={ruleDraft.direction} onChange={(e) => { const direction = e.target.value as 'in' | 'out'; updateDraft('direction', direction); if (direction === 'out' && !outboundProtocols.includes(ruleDraft.protocol)) updateDraft('protocol', 'tcp'); }} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400"><option value="in">入站</option><option value="out">出站</option></select></div>
-        <div><label htmlFor="fw-protocol" className="mb-1 block text-xs text-slate-300">协议</label><select id="fw-protocol" value={ruleDraft.protocol} onChange={(e) => updateDraft('protocol', e.target.value as HostFirewallRule['protocol'])} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400">{protocols.filter((protocol) => ruleDraft.direction === 'in' || outboundProtocols.includes(protocol)).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>
+        <div><label htmlFor="fw-protocol" className="mb-1 block text-xs text-slate-300">协议</label><select id="fw-protocol" value={ruleDraft.protocol} onChange={(e) => updateDraft('protocol', e.target.value as HostFirewallRule['protocol'])} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400">{protocols.filter((protocol) => ruleDraft.direction === 'in' || outboundProtocols.includes(protocol)).map((protocol) => {
+          const isApplicationProtocol = ['http', 'tls', 'socks', 'ssh', 'fet', 'wireguard', 'openvpn', 'quic', 'mtproto'].includes(protocol);
+          const capability = isApplicationProtocol && scope === 'host' ? protocolCapability(protocol) : 'supported';
+          const unavailable = isApplicationProtocol && scope === 'host' && capability !== 'supported';
+          return <option key={protocol} value={protocol} disabled={unavailable && ruleDraft.protocol !== protocol}>{protocol}{capability === 'unsupported' ? '（当前 RFW 不支持）' : capability === 'unknown' ? '（待能力读回）' : ''}</option>;
+        })}</select></div>
         <div><label htmlFor="fw-action" className="mb-1 block text-xs text-slate-300">动作</label><select id="fw-action" value={ruleDraft.action} onChange={(e) => updateDraft('action', e.target.value as 'block' | 'pass')} aria-describedby="fw-action-help" className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400"><option value="block">阻断</option><option value="pass">放行</option></select></div>
         <div><label htmlFor="fw-port-start" className="mb-1 block text-xs text-slate-300">起始端口（0 表示任意）</label><input id="fw-port-start" type="number" min={0} max={65535} value={ruleDraft.port_start} onChange={(e) => updateDraft('port_start', Number(e.target.value))} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400" /></div>
         <div><label htmlFor="fw-port-end" className="mb-1 block text-xs text-slate-300">结束端口（可留空）</label><input id="fw-port-end" type="number" min={0} max={65535} value={ruleDraft.port_end} onChange={(e) => updateDraft('port_end', e.target.value === '' ? '' : Number(e.target.value))} className="min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400" /></div>
@@ -978,7 +1018,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">执行依赖 Watcher Agent、支持 firewall.sock 的 Runman Agent 与运行中的 RFW。Watcher 离线时排队等待；成功回执是 Runman 应用结果，不等同于平台实时读取内核规则。</div>
     </ConfirmDialog>
     <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用阻断规则、${enabledAbuse} 项固定端口策略；容器网络选择：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}。每个节点会按本机网卡清单独立映射；无法安全映射的节点将等待，不会应用错误接口名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>
-      <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">CN GeoIP 规则可按入站来源或出站目标阻断匹配流量，可能影响母机上全部容器与服务。FET 是启发式特征、存在误报；MTProto 仅能识别特定初始化标记，且不做 TCP 重组。老版本 RFW 不支持 MTProto 的节点会延后下发，直到能力确认或完成升级。IPv6 暂不支持。策略应用回执不等于内核规则实时读回，节点事件采集可能因缓冲区覆盖而不完整。</div>
+      <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">CN GeoIP 规则可按入站来源或出站目标阻断匹配流量，可能影响母机上全部容器与服务。FET 是启发式特征、存在误报；MTProto 仅能识别特定初始化标记，且不做 TCP 重组。节点只有在运行中的 RFW 明确报告支持后才会应用 MTProto 规则；若读回不支持，必须先部署含该检测能力的 RFW 构建。IPv6 暂不支持。策略应用回执不等于内核规则实时读回，节点事件采集可能因缓冲区覆盖而不完整。</div>
     </ConfirmDialog>
   </div>;
 };
