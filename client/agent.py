@@ -5252,7 +5252,8 @@ def _collect_socks_config_evidence(
                 process_scan_reason = process_scan_reason or 'config_directory_path_invalid'
                 continue
             find_command = (
-                f"find {shlex.quote(str(directory))} -maxdepth 1 -type f "
+                f"find {shlex.quote(str(directory))} -maxdepth 1 "
+                "\\( -type f -o -type l \\) "
                 "\\( -name '*.json' -o -name '*.yaml' -o -name '*.yml' -o -name '*.conf' -o -name '*.cfg' \\) "
                 "-print 2>/dev/null; rc=$?; [ $rc -eq 0 ] && echo @@CONFIG_DIR_SCAN_OK@@"
             )
@@ -5292,8 +5293,39 @@ def _collect_socks_config_evidence(
                     process_scan_reason = process_scan_reason or 'config_scan_timed_out'
                     inventory_reason = inventory_reason or 'config_scan_timed_out'
                 break
+            protocol_metadata_before = ''
+            if is_protocol_process:
+                protocol_metadata_before = run(_runtime_exec_cmd(
+                    runtime, name,
+                    f"stat -Lc '%d:%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null",
+                    project,
+                ), timeout=2).strip()
+                if not protocol_metadata_before:
+                    process_protocol_complete = False
+                    protocol_complete = False
+                    process_scan_reason = process_scan_reason or 'config_file_metadata_unavailable'
+                    inventory_reason = inventory_reason or process_scan_reason
             # Raw JSON is local-only and bounded; it never enters a report/log.
             raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
+            if is_protocol_process:
+                protocol_metadata_after = run(_runtime_exec_cmd(
+                    runtime, name,
+                    f"stat -Lc '%d:%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null",
+                    project,
+                ), timeout=2).strip()
+                if not protocol_metadata_after:
+                    process_protocol_complete = False
+                    protocol_complete = False
+                    process_scan_reason = process_scan_reason or 'config_file_metadata_unavailable'
+                    inventory_reason = inventory_reason or process_scan_reason
+                elif protocol_metadata_before and protocol_metadata_after != protocol_metadata_before:
+                    # Do not associate a listener with a config document that
+                    # changed while it was being read. A reload may have
+                    # switched the port from VMess to another protocol.
+                    process_protocol_complete = False
+                    protocol_complete = False
+                    process_scan_reason = process_scan_reason or 'config_file_changed_during_scan'
+                    inventory_reason = inventory_reason or process_scan_reason
             protocol_document = socks_detector.parse_inbound_protocols(raw, proc['process']) if is_protocol_process else {'parsed': True, 'endpoints': []}
             if is_protocol_process:
                 if not protocol_document.get('parsed'):

@@ -57,7 +57,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         return conn.execute("INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,'host','','__host__',?,?,'queued',?,?,?)", (host, action_type, json.dumps(params), user, now, now)).lastrowid
 
     def bandwidth_context(conn, host_id):
-        host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        host = conn.execute("SELECT node_id,last_seen,agent_version FROM hosts WHERE host_id=?", (host_id,)).fetchone()
         if not host:
             raise HTTPException(404, "主机不存在")
         report = conn.execute(
@@ -120,6 +120,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         reported = security.get("manual_bandwidth_limits") if isinstance(security.get("manual_bandwidth_limits"), dict) else {}
         return {
             "host_id": host_id, "expected_node_id": str(host["node_id"] or ""),
+            "agent_version": str(host["agent_version"] or "unknown")[:80],
             "host_online": bool(host["node_id"] and int(time.time()) - int(host["last_seen"] or 0) <= 900),
             "sample_at": int(report["ts"] or 0) if report else 0,
             "interfaces": interfaces, "containers": containers,

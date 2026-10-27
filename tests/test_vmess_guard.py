@@ -170,7 +170,10 @@ class VmessPlanTests(unittest.TestCase):
             "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
             "121 S gost /usr/bin/gost -C /etc/gost/config.json\n"
         )
-        with mock.patch.object(agent, "run", side_effect=["120", '{"inbounds":[]}', "120"]):
+        metadata = "1:2:24:2026-10-28:2026-10-28"
+        with mock.patch.object(agent, "run", side_effect=[
+            "120", metadata, '{"inbounds":[]}', metadata, "120",
+        ]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
             )
@@ -188,10 +191,14 @@ class VmessPlanTests(unittest.TestCase):
         )
         with mock.patch.object(agent, "run", side_effect=[
             "120",
+            "1:2:120:2026-10-28:2026-10-28",
             '{"inbounds":[{"protocol":"vmess","port":443,"streamSettings":{"network":"tcp"}}]}',
+            "1:2:120:2026-10-28:2026-10-28",
             "120",
             "121",
+            "1:3:20:2026-10-28:2026-10-28",
             '{invalid',
+            "1:3:20:2026-10-28:2026-10-28",
             "121",
         ]):
             result = agent._collect_socks_config_evidence(
@@ -209,9 +216,14 @@ class VmessPlanTests(unittest.TestCase):
     def test_xray_config_directory_is_scanned_with_bounded_file_list(self):
         process_output = "120 S xray /usr/bin/xray run -confdir /etc/xray/conf.d\n"
         with mock.patch.object(agent, "run", side_effect=[
-            "/etc/xray/conf.d/inbound.json\n@@CONFIG_DIR_SCAN_OK@@",
+            "/etc/xray/conf.d/inbound.json\n/etc/xray/conf.d/inbound-link.json\n@@CONFIG_DIR_SCAN_OK@@",
             "120",
+            "1:4:90:2026-10-28:2026-10-28",
             '{"inbounds":[{"protocol":"vmess","port":8443,"streamSettings":{"network":"tcp"}}]}',
+            "1:4:90:2026-10-28:2026-10-28",
+            "1:2:120:2026-10-28:2026-10-28",
+            '{"inbounds":[{"protocol":"vless","port":443,"streamSettings":{"network":"tcp"}}]}',
+            "1:2:120:2026-10-28:2026-10-28",
             "120",
         ]) as run:
             result = agent._collect_socks_config_evidence(
@@ -221,13 +233,15 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(result["configured_inbound_protocols"][0]["port"], 8443)
         scan = result["protocol_process_scan_states"][0]
         self.assertEqual(scan["state"], "complete")
-        self.assertEqual(scan["config_files"], ["/etc/xray/conf.d/inbound.json"])
+        self.assertEqual(scan["config_files"], [
+            "/etc/xray/conf.d/inbound-link.json", "/etc/xray/conf.d/inbound.json",
+        ])
         self.assertEqual(scan["reason"], "")
-        self.assertEqual(run.call_count, 4)
+        self.assertEqual(run.call_count, 9)
 
     def test_unreadable_xray_config_directory_reports_actionable_reason(self):
         process_output = "120 S xray /usr/bin/xray run -confdir /etc/xray/conf.d\n"
-        with mock.patch.object(agent, "run", side_effect=["", "120", "", "120"]):
+        with mock.patch.object(agent, "run", side_effect=["", "120", "120"]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
             )
@@ -239,7 +253,9 @@ class VmessPlanTests(unittest.TestCase):
         process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
         with mock.patch.object(agent, "run", side_effect=[
             "120",
+            "1:2:120:2026-10-28:2026-10-28",
             '{"inbounds":[{"protocol":"vmess","port":443}]}',
+            "1:2:120:2026-10-28:2026-10-28",
             "121",
         ]):
             result = agent._collect_socks_config_evidence(
@@ -250,6 +266,22 @@ class VmessPlanTests(unittest.TestCase):
             {"pid": 120, "process": "xray", "state": "partial", "start_ticks": "",
              "reason": "process_changed_during_config_scan", "config_files": ["/etc/xray/config.json"]},
         ])
+
+    def test_config_replacement_during_read_invalidates_protocol_evidence(self):
+        process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
+        with mock.patch.object(agent, "run", side_effect=[
+            "120",
+            "1:2:120:2026-10-28:2026-10-28",
+            '{"inbounds":[{"protocol":"vmess","port":443}]}',
+            "1:3:140:2026-10-28:2026-10-28",
+            "120",
+        ]):
+            result = agent._collect_socks_config_evidence(
+                "incus", "fixture", "default", False, process_output
+            )
+        self.assertEqual(result["protocol_inventory_state"], "partial")
+        self.assertEqual(result["protocol_process_scan_states"][0]["reason"],
+                         "config_file_changed_during_scan")
 
     def test_customer_banner_copy_says_only_port_is_blocked(self):
         title, detail, extra, advice = security_banner.customer_copy({

@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Server,
   Box,
   Cpu,
@@ -48,6 +50,31 @@ export interface ContainerRiskInfo {
   reasons: string[];
   sortWeight: number;
 }
+
+const HOSTS_PER_PAGE = 10;
+
+const matchesContainerFilters = (
+  container: ContainerItem,
+  filterState: FilterState,
+  searchQuery: string,
+  activeAlerts: SecurityAlert[],
+) => {
+  const query = searchQuery.trim().toLocaleLowerCase();
+  if (query) {
+    const searchable = [container.container_name, container.host_id, container.runtime,
+      container.project, container.user_email, container.user_note]
+      .filter(Boolean).join(' ').toLocaleLowerCase();
+    if (!searchable.includes(query)) return false;
+  }
+  const risk = evaluateContainerRisk(container, activeAlerts);
+  switch (filterState) {
+    case 'risk': return risk.hasRisk;
+    case 'hy2': return Boolean(container.alerts?.hy2_detected || container.security?.hy2_protocol?.detected);
+    case 'imbalance': return Boolean(container.alerts?.traffic_imbalance);
+    case 'healthy': return !risk.hasRisk;
+    default: return true;
+  }
+};
 
 export function evaluateContainerRisk(
   container: ContainerItem,
@@ -290,6 +317,11 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     });
   }, [hostMap, activeAlerts]);
 
+  const matchingHostIds = useMemo(() => hostIds.filter((hostId) =>
+    (hostMap[hostId] || []).some((container) =>
+      matchesContainerFilters(container, filterState, searchQuery, activeAlerts))),
+  [hostIds, hostMap, filterState, searchQuery, activeAlerts]);
+
   const offlineHostIds = useMemo(
     () => Object.keys(offlineHostMap).sort((a, b) => {
       const lastSeenA = Math.max(...offlineHostMap[a].map((item) => Number(item.host_last_seen || item.timestamp || 0)));
@@ -317,15 +349,28 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   });
   const [expandedOfflineHosts, setExpandedOfflineHosts] = useState<Record<string, boolean>>({});
   const [bandwidthOpenHosts, setBandwidthOpenHosts] = useState<Record<string, boolean>>({});
+  const [hostPage, setHostPage] = useState(0);
+  const hostPageCount = Math.max(1, Math.ceil(matchingHostIds.length / HOSTS_PER_PAGE));
+  const currentHostPage = Math.min(hostPage, hostPageCount - 1);
+  const visibleHostIds = matchingHostIds.slice(
+    currentHostPage * HOSTS_PER_PAGE,
+    (currentHostPage + 1) * HOSTS_PER_PAGE,
+  );
+
+  useEffect(() => setHostPage(0), [searchQuery, filterState]);
+  useEffect(() => setHostPage((page) => Math.min(page, hostPageCount - 1)), [hostPageCount]);
 
   // Keep expandedHosts in sync with new hosts
   useEffect(() => {
+    const priorityRiskHosts = new Set(hostIds.filter((hostId) =>
+      (hostMap[hostId] || []).some((container) => evaluateContainerRisk(container, activeAlerts).hasRisk))
+      .slice(0, 3));
     setExpandedHosts((prev) => {
       let changed = false;
       const next = { ...prev };
       hostIds.forEach((h) => {
         if (next[h] === undefined) {
-          next[h] = (hostMap[h] || []).some((container) => evaluateContainerRisk(container, activeAlerts).hasRisk);
+          next[h] = priorityRiskHosts.has(h);
           changed = true;
         }
       });
@@ -349,16 +394,14 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     setExpandedHosts((prev) => ({ ...prev, [hostId]: !prev[hostId] }));
   };
 
-  const allExpanded = hostIds.length > 0 && hostIds.every((h) => expandedHosts[h]);
+  const allExpanded = visibleHostIds.length > 0 && visibleHostIds.every((h) => expandedHosts[h]);
 
   const handleToggleAll = () => {
-    if (allExpanded) {
-      setExpandedHosts({});
-    } else {
-      const next: Record<string, boolean> = {};
-      hostIds.forEach((h) => (next[h] = true));
-      setExpandedHosts(next);
-    }
+    setExpandedHosts((previous) => {
+      const next = { ...previous };
+      visibleHostIds.forEach((hostId) => { next[hostId] = !allExpanded; });
+      return next;
+    });
   };
 
   const pendingCopy = pendingDisposition?.decision === 'deny'
@@ -387,16 +430,25 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
         onFilterStateChange={setFilterState}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        totalHosts={hostIds.length}
+        totalHosts={matchingHostIds.length}
         totalContainers={liveContainers.length}
         counts={counts}
         allExpanded={allExpanded}
         onToggleAllHosts={handleToggleAll}
       />
 
+      {matchingHostIds.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-400">
+        <span>显示第 <strong className="tabular-nums text-slate-200">{currentHostPage * HOSTS_PER_PAGE + 1}–{Math.min((currentHostPage + 1) * HOSTS_PER_PAGE, matchingHostIds.length)}</strong> 台，共 <strong className="tabular-nums text-slate-200">{matchingHostIds.length}</strong> 台匹配主机</span>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setHostPage((page) => Math.max(0, page - 1))} disabled={currentHostPage === 0} aria-label="上一页主机" className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" />上一页</button>
+          <span className="tabular-nums">{currentHostPage + 1} / {hostPageCount}</span>
+          <button type="button" onClick={() => setHostPage((page) => Math.min(hostPageCount - 1, page + 1))} disabled={currentHostPage >= hostPageCount - 1} aria-label="下一页主机" className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" /></button>
+        </div>
+      </div>}
+
       {/* Host Accordion List */}
       <div className="space-y-3">
-        {hostIds.map((hostId) => {
+        {visibleHostIds.map((hostId) => {
           const hostContainers = hostMap[hostId] || [];
           const isExpanded = Boolean(expandedHosts[hostId]);
 
@@ -420,35 +472,8 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
           ).toFixed(1);
 
           // Filter containers according to filterState and searchQuery
-          const filteredContainers = hostContainers.filter((c) => {
-            // Search query filter
-            if (searchQuery.trim()) {
-              const q = searchQuery.toLowerCase();
-              const matchName = c.container_name.toLowerCase().includes(q);
-              const matchHost = c.host_id.toLowerCase().includes(q);
-              const matchRuntime = c.runtime.toLowerCase().includes(q);
-              const matchProject = (c.project || '').toLowerCase().includes(q);
-              if (!matchName && !matchHost && !matchRuntime && !matchProject) {
-                return false;
-              }
-            }
-
-            // State filter
-            const risk = evaluateContainerRisk(c, activeAlerts);
-            switch (filterState) {
-              case 'risk':
-                return risk.hasRisk;
-              case 'hy2':
-                return Boolean(c.alerts?.hy2_detected || c.security?.hy2_protocol?.detected);
-              case 'imbalance':
-                return Boolean(c.alerts?.traffic_imbalance);
-              case 'healthy':
-                return !risk.hasRisk;
-              case 'all':
-              default:
-                return true;
-            }
-          });
+          const filteredContainers = hostContainers.filter((container) =>
+            matchesContainerFilters(container, filterState, searchQuery, activeAlerts));
 
           // Sort filtered containers: risky first
           filteredContainers.sort((a, b) => {
@@ -932,6 +957,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
             </div>
           );
         })}
+        {matchingHostIds.length === 0 && <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-sm text-slate-500">当前搜索或筛选条件下没有匹配的在线主机。</div>}
       </div>
 
       {visibleOfflineHostIds.length > 0 && (

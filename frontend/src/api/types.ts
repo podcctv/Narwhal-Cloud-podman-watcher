@@ -453,6 +453,7 @@ export interface ManualBandwidthLimit {
 export interface ManualBandwidthLimitResponse {
   host_id: string;
   expected_node_id: string;
+  agent_version?: string;
   host_online: boolean;
   sample_at: number;
   interfaces: Array<{

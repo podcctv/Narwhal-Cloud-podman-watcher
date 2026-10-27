@@ -317,6 +317,47 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     setRuleDraft(defaultDraft());
   };
 
+  const copyManualRuleToPolicy = (source: HostFirewallLiveRule) => {
+    if (scope !== 'host' || !canEdit) {
+      onToast('error', '当前策略不可编辑；先确认母机在线、Runman 可用且没有全局模板锁定。');
+      return;
+    }
+    if (!canDeleteManualRules) {
+      onToast('error', '需要母机在线且 RFW 读回新鲜；当前留存快照不能作为迁移依据。');
+      return;
+    }
+    if (source.direction === 'out' && !outboundProtocols.includes(source.protocol)) {
+      onToast('error', `当前网页策略不支持 ${source.protocol} 出站匹配；原手工规则保持不变。`);
+      return;
+    }
+    if (['http', 'tls', 'socks', 'ssh', 'fet', 'wireguard', 'openvpn', 'quic', 'mtproto'].includes(source.protocol)
+        && protocolCapability(source.protocol) !== 'supported') {
+      onToast('error', protocolCapabilityHelp(source.protocol) + '；原手工规则保持不变。');
+      return;
+    }
+    const sameRule = (item: HostFirewallRule) => item.direction === source.direction
+      && item.protocol === source.protocol && item.action === source.action
+      && item.enabled === source.enabled && item.port_start === source.port_start
+      && (item.port_end ?? item.port_start) === source.port_end
+      && item.ip_type === source.ip_type && (item.ip || '') === (source.ip || '')
+      && [...(item.countries || [])].sort().join(',') === [...(source.countries || [])].sort().join(',');
+    if (rules.some(sameRule)) {
+      onToast('info', '策略草稿里已经有相同规则；可直接编辑草稿，保存并确认读回后再处理原手工规则。');
+      return;
+    }
+    const copy: HostFirewallRule = {
+      key: newRuleKey(), priority: source.priority, direction: source.direction,
+      protocol: source.protocol, action: source.action, enabled: source.enabled,
+      port_start: source.port_start, ip_type: source.ip_type,
+      ...(source.port_end === source.port_start ? {} : { port_end: source.port_end }),
+      ...(source.ip_type === 'cidr' && source.ip ? { ip: source.ip } : {}),
+      ...(source.ip_type === 'geoip' ? { countries: [...(source.countries || [])] } : {}),
+    };
+    setRules((items) => [...items, copy]);
+    setDirty(true);
+    onToast('info', '已复制到网页策略草稿。保存并在 RFW 读回确认新规则生效后，再删除原手工规则；迁移期间原规则会保留。');
+  };
+
   const setAbuseOption = (key: 'speedtest' | 'mining' | 'bt', value: boolean) => {
     setAbuse((current) => ({ ...current, [key]: value }));
     setDirty(true);
@@ -793,7 +834,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <td className="px-4 py-3"><span className={rule.action === 'block' ? 'text-rose-300' : 'text-emerald-300'}>{rule.enabled ? rule.action === 'block' ? '阻断' : '放行' : '停用'}</span> · P{rule.priority}</td>
             <td className="px-4 py-3 font-mono tabular-nums text-slate-400">#{rule.id}</td>
             <td className="px-4 py-2 text-right">
-              {rule.origin === 'manual' ? <button type="button" onClick={() => setPendingManualDelete(rule)} disabled={!canDeleteManualRules || deletingManualRuleId === rule.id} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-rose-800/70 bg-rose-950/40 px-2.5 text-[11px] font-medium text-rose-200 hover:bg-rose-900/50 focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-45" title={canDeleteManualRules ? '确认后只删除当前显示的这条手工 RFW 规则' : '需要母机在线且 RFW 读回新鲜'}>{deletingManualRuleId === rule.id ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />}删除</button>
+              {rule.origin === 'manual' ? <div className="inline-flex flex-wrap justify-end gap-1.5">
+                <button type="button" onClick={() => copyManualRuleToPolicy(rule)} disabled={scope !== 'host' || !canEdit || !canDeleteManualRules} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-sky-800/70 bg-sky-950/30 px-2.5 text-[11px] font-medium text-sky-200 hover:bg-sky-900/40 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-45" title={scope === 'host' && canEdit && canDeleteManualRules ? '复制到网页策略草稿；保存并读回确认前保留原规则' : '需要单机编辑权限和新鲜 RFW 读回'}><Layers className="h-3.5 w-3.5" aria-hidden="true" />复制到策略草稿</button>
+                <button type="button" onClick={() => setPendingManualDelete(rule)} disabled={!canDeleteManualRules || deletingManualRuleId === rule.id} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-rose-800/70 bg-rose-950/40 px-2.5 text-[11px] font-medium text-rose-200 hover:bg-rose-900/50 focus:outline-none focus:ring-2 focus:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-45" title={canDeleteManualRules ? '确认后只删除当前显示的这条手工 RFW 规则' : '需要母机在线且 RFW 读回新鲜'}>{deletingManualRuleId === rule.id ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />}删除</button>
+              </div>
                 : rule.managed_key && rules.some((item) => item.key === rule.managed_key) ? <button type="button" onClick={() => removeRule(rule.managed_key!)} disabled={!canEdit} className="min-h-9 rounded-lg border border-slate-700 px-2.5 text-[11px] text-slate-300 hover:border-rose-800 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-45" title="从当前期望策略草稿中移除；保存并应用后同步删除">从期望策略移除</button>
                   : <span className="text-[10px] text-slate-500">通过期望策略同步</span>}
             </td>

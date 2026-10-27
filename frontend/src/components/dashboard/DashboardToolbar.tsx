@@ -193,17 +193,17 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             type="button"
             onClick={onToggleAllHosts}
             className="flex h-8 items-center gap-1 rounded-lg border border-slate-750 bg-slate-950/70 px-2.5 text-xs font-medium text-slate-300 transition-colors hover:border-slate-600 hover:text-sky-300 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
-            title={allExpanded ? '折叠所有母鸡' : '展开所有母鸡'}
+            title={allExpanded ? '折叠本页母鸡' : '展开本页母鸡'}
           >
             {allExpanded ? (
               <>
                 <ChevronsDownUp className="h-3.5 w-3.5 text-slate-400" />
-                <span className="hidden xs:inline">全部折叠</span>
+                <span className="hidden xs:inline">折叠本页</span>
               </>
             ) : (
               <>
                 <ChevronsUpDown className="h-3.5 w-3.5 text-slate-400" />
-                <span className="hidden xs:inline">全部展开</span>
+                <span className="hidden xs:inline">展开本页</span>
               </>
             )}
           </button>

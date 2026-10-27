@@ -20,9 +20,24 @@ const reportedLabel: Record<string, string> = {
   applied: '节点已应用并读回', failed: '节点应用失败', rejected: '节点拒绝策略', unconfigured: '未配置限速',
 };
 const directionLabel: Record<string, string> = { upload: '上行', download: '下行' };
-const formatBandwidthFailure = (message: string) => /RTNETLINK answers: File exists/i.test(message)
-  ? `${message}。该网卡上已有过滤器占用当前 tc 优先级，此方向未确认生效；新版 Agent 会自动寻找空闲优先级并重试。`
-  : message;
+const bandwidthPriorityFixIsAvailable = (value: string) => {
+  const match = value.match(/(?:^|[^0-9])v?(\d+)\.(\d+)\.(\d+)/i);
+  if (!match) return null;
+  const actual = match.slice(1).map(Number);
+  const minimum = [1, 7, 98];
+  for (let index = 0; index < minimum.length; index += 1) {
+    if (actual[index] !== minimum[index]) return actual[index] > minimum[index];
+  }
+  return true;
+};
+const formatBandwidthFailure = (message: string, agentVersion: string) => {
+  if (!/RTNETLINK answers: File exists/i.test(message)) return message;
+  const hasPriorityRetry = bandwidthPriorityFixIsAvailable(agentVersion);
+  if (hasPriorityRetry === false) {
+    return `${message}。当前 Agent ${agentVersion} 早于 1.7.98，尚无 tc 优先级冲突重试；升级到 1.7.98 或更新版本后重新保存。`;
+  }
+  return `${message}。该方向尚未确认限速生效；请查看 tc 过滤器优先级冲突。Agent 只会选择空闲优先级，不会覆盖已有过滤器。`;
+};
 
 export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, containers, onToast, onRefresh, onClose }) => {
   const [context, setContext] = useState<ManualBandwidthLimitResponse | null>(null);
@@ -73,6 +88,10 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
   const reportedAuto = context?.reported?.auto_throttle;
   const reportedItems = context?.reported?.items || [];
   const reportedFailures = reportedItems.filter((item) => item.state === 'failed' || item.state === 'cleanup_failed');
+  const savedRevision = Number(context?.policy?.revision || 0);
+  const reportedRevision = Number(context?.reported?.revision || 0);
+  const waitingForApply = Boolean(context?.host_online && savedRevision > reportedRevision);
+  const reportMatchesCurrentRevision = savedRevision === reportedRevision;
   const activeLimits = useMemo(() => {
     if (Array.isArray(context?.reported?.active_limits)) return context.reported.active_limits;
     const grouped = new Map<string, {
@@ -178,18 +197,19 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
       母机限速会作用于所选网卡上的母机及经过它的容器流量；容器限速只作用于所选 Incus / Podman 容器的默认网卡。不会改写已有 root qdisc 或 RFW 规则。修改策略后最多等待一个 Agent 动作轮询周期。
     </div>
 
-    {context?.reported && <p className={`mt-3 text-xs ${context.reported.state === 'applied' ? 'text-emerald-300' : context.reported.state === 'failed' || context.reported.state === 'rejected' ? 'text-rose-300' : 'text-slate-400'}`} role="status">
-      节点状态：{reportedLabel[context.reported.state || ''] || '等待节点回报'}{context.reported.revision ? ` · 修订 ${context.reported.revision}` : ''}
-      {context.sample_at ? ` · 最近上报 ${new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'medium' }).format(context.sample_at * 1000)}` : ''}
-      {context.reported.message ? ` · ${context.reported.message}` : ''}
+    {(context?.reported || waitingForApply) && <p className={`mt-3 text-xs ${waitingForApply ? 'text-amber-200' : context?.reported?.state === 'applied' ? 'text-emerald-300' : context?.reported?.state === 'failed' || context?.reported?.state === 'rejected' ? 'text-rose-300' : 'text-slate-400'}`} role="status">
+      节点状态：{waitingForApply ? '策略已保存，等待 Agent 应用并读回' : reportedLabel[context?.reported?.state || ''] || '等待节点回报'}{context?.reported?.revision ? ` · 最近确认修订 ${context.reported.revision}` : ''}
+      {waitingForApply ? ` · 当前策略修订 ${savedRevision}` : ''}
+      {context?.sample_at ? ` · 最近上报 ${new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'medium' }).format(context.sample_at * 1000)}` : ''}
+      {context?.reported?.message ? ` · ${context.reported.message}` : ''}
     </p>}
     {reportedFailures.length > 0 && <div className="mt-3 rounded-lg border border-rose-900/70 bg-rose-950/25 p-3" role="alert">
-      <h4 className="text-xs font-semibold text-rose-200">限速未确认成功的项目</h4>
+      <h4 className="text-xs font-semibold text-rose-200">{reportMatchesCurrentRevision ? '限速未确认成功的项目' : '上一修订失败记录（当前修订尚未全部确认）'}</h4>
       <div className="mt-2 space-y-2">
         {reportedFailures.map((item, index) => {
           const target = String(item.target || item.container_name || item.interface || '目标');
           const direction = directionLabel[String(item.direction || '')] || '目标';
-          const message = formatBandwidthFailure(String(item.message || 'Agent 未提供详细错误'));
+          const message = formatBandwidthFailure(String(item.message || 'Agent 未提供详细错误'), context?.agent_version || '');
           return <div key={`${target}-${String(item.direction || '')}-${index}`} className="break-words text-xs leading-5 text-rose-100/90">
             <span className="font-semibold">{target}{item.interface ? ` · ${String(item.interface)}` : ''} · {direction}：</span>{message}
           </div>;
