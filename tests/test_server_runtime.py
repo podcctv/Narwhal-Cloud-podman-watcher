@@ -790,7 +790,7 @@ class ServerRuntimeTests(unittest.TestCase):
         asyncio.run(
             submit_result(
                 second_action["id"],
-                "killed_processes=1 removed_services=0 removed_configs=0 cleanup_errors=0",
+                "killed_processes=1 removed_services=0 removed_configs=0 cleanup_errors=0 matched_processes=1 signal_errors=0 remaining_processes=0",
             )
         )
         conn = server.db()
