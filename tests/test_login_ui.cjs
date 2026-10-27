@@ -74,7 +74,7 @@ const path = require('node:path');
       page.getByRole('heading', { name: '登录监控控制台' }).waitFor(),
       page.getByRole('button', { name: '退出登录', exact: true }).evaluate(button => button.click()),
     ]);
-    assert.match(page.url(), /\/login\?next=/, 'an expired session must return to the login page');
+    assert.equal(new URL(page.url()).pathname, '/login', 'an expired session must return to the login page');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, viewports: [320, 375, 768, 1024, 1440], checks: 'redirect, keyboard, password toggle, errors, login, reload, logout, expiry, network failure, no browser storage', output }));
     await context.close();
