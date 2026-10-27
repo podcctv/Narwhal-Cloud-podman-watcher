@@ -207,6 +207,10 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     return () => { active = false; };
   }, [action, automaticReputationCandidates, checkReputation, diagnosticSnapshotId, isStale, reputationConfigured, reputationLookupScope, reputationSampleFresh, sample]);
   const attribution = sample?.connection_attribution;
+  const attributionUnavailable = Boolean(attribution && (
+    attribution.evidence_status === 'unavailable'
+    || (Number(sample?.connection_count || 0) > 0 && Number(attribution.captured_sockets || 0) === 0)
+  ));
   const connectionSockets = sample?.communication_sockets || [];
   const inboundPortEvidence = sample?.inbound_port_evidence || [];
   const originEvidenceLabels: Record<string, string> = {
@@ -538,13 +542,15 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
             <div className="rounded-lg border border-sky-500/25 bg-sky-950/20 p-3 text-xs">
               <div className="font-semibold text-sky-200">连接发起方深度核验</div>
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4 tabular-nums">
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">本地发起 · 已确认</span><strong className="text-sky-300">{attribution.confirmed_local_initiated || 0}</strong></div>
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">本地发起 · 推定</span><strong className="text-amber-300">{attribution.probable_local_initiated || 0}</strong></div>
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">外部发起 · 已确认</span><strong className="text-emerald-300">{attribution.confirmed_remote_initiated || 0}</strong></div>
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">方向未知</span><strong className="text-slate-300">{attribution.unknown_direction || 0}</strong></div>
+                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">本地发起 · 已确认</span><strong className="text-sky-300">{attributionUnavailable ? '未采集' : attribution.confirmed_local_initiated ?? 0}</strong></div>
+                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">本地发起 · 推定</span><strong className="text-amber-300">{attributionUnavailable ? '未采集' : attribution.probable_local_initiated ?? 0}</strong></div>
+                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">外部发起 · 已确认</span><strong className="text-emerald-300">{attributionUnavailable ? '未采集' : attribution.confirmed_remote_initiated ?? 0}</strong></div>
+                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">方向未知</span><strong className="text-slate-300">{attributionUnavailable ? '未采集' : attribution.unknown_direction ?? 0}</strong></div>
               </div>
               <p className="mt-2 leading-4 text-slate-400">
-                已归属进程/PID {attribution.process_attributed_sockets || 0}/{attribution.captured_sockets || 0} 条；conntrack 五元组确认 {attribution.conntrack_confirmed_sockets || 0} 条。
+                {attributionUnavailable
+                  ? `总连接 ${sample?.connection_count || 0} 条，但没有采到逐连接来源/PID 数据；这些归属数字未知，不能按 0 判断。`
+                  : `已归属进程/PID ${attribution.process_attributed_sockets ?? 0}/${attribution.captured_sockets ?? 0} 条；conntrack 五元组确认 ${attribution.conntrack_confirmed_sockets ?? 0} 条。`}
                 {!attribution.conntrack_available && ' 当前节点未提供 conntrack，已确认数可能较少。'}
                 {(attribution.conntrack_snapshot_truncated || attribution.socket_snapshot_truncated) && ' 快照达到采集上限，结果不是全量。'}
               </p>

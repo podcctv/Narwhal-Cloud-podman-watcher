@@ -43,13 +43,15 @@ export const ConnectionEvidenceTimeline: React.FC<{ identity: ContainerIdentity 
 
   const assessments = data?.source_assessment?.assessments || [];
   const timeline = data?.timeline || [];
+  const socketEvidenceSamples = timeline.filter((sample) => ['available', 'partial'].includes(sample.process_attribution.status)).length;
+  const conntrackSamples = timeline.filter((sample) => sample.process_attribution.conntrack_available === true).length;
 
   return <section className="rounded-xl border border-sky-900/60 bg-slate-950/50 p-4" aria-label="连接来源证据时间线">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex items-center gap-2">
         <ShieldAlert className="h-4 w-4 text-sky-300" aria-hidden="true" />
         <h3 className="text-xs font-bold text-slate-100">连接来源证据 · 最近 24 小时</h3>
-        {data && <span className="text-[10px] text-slate-500">{data.sample_count} 个采样</span>}
+        {data && <span className="text-[10px] text-slate-500">{data.sample_count} 条上报</span>}
       </div>
       <button type="button" onClick={() => void load()} disabled={loading} className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900 px-2.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50">
         {loading ? <LoaderCircle className="h-3 w-3 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3 w-3" aria-hidden="true" />}刷新证据
@@ -69,15 +71,33 @@ export const ConnectionEvidenceTimeline: React.FC<{ identity: ContainerIdentity 
               <span className="text-[10px] text-slate-500">{item.sample_count || 0} 次采样 · 身份未确认</span>
             </div>
             <p className="mt-1 text-[10px] leading-4 text-slate-400">服务端口：{(item.service_ports || []).join(', ') || '无'} · 未监听端口：{(item.non_listener_ports || []).join(', ') || '无'} · 已建立连接峰值 {item.max_established_flows || 0} · 未完成连接峰值 {item.max_incomplete_flows || 0}</p>
-          </div>) : <p className="rounded-lg border border-slate-800 bg-slate-900/70 p-3 text-[11px] text-slate-400">当前窗口没有足够的 conntrack 历史样本，不能判断来源行为。</p>}
+          </div>) : <p className="rounded-lg border border-slate-800 bg-slate-900/70 p-3 text-[11px] text-slate-400">
+            {timeline.length === 0
+              ? '当前窗口没有历史采样，暂时不能判断来源行为。'
+              : socketEvidenceSamples > 0
+                ? `已取得 ${socketEvidenceSamples} 个逐连接样本，但只有 ${conntrackSamples} 个样本具备 conntrack 证据；不足以区分持续业务连接和外部探测。`
+                : '有基础连接数记录，但没有逐连接归属证据。旧版 Agent 未上报该字段，不能把缺失数据解释成“本机/外部发起为 0”；升级 Agent 后的新样本会补充证据。'}
+          </p>}
         </div>
         <details className="mt-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3">
           <summary className="cursor-pointer select-none text-[11px] font-medium text-slate-300">展开原始采样时间线（{timeline.length} 条）</summary>
           <div className="mt-2 max-h-80 space-y-2 overflow-auto pr-1">
             {[...timeline].reverse().slice(0, 20).map((sample) => <article key={sample.ts} className="rounded-md border border-slate-800 bg-slate-950/70 p-2.5">
-              <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400"><Clock3 className="h-3 w-3" aria-hidden="true" />{new Date(sample.ts * 1000).toLocaleString()} · 连接 {sample.connection_count} · 本机发起 {sample.process_attribution.confirmed_local} · 外部发起 {sample.process_attribution.confirmed_remote} · 方向未知 {sample.process_attribution.unknown_direction}</div>
-              <div className="mt-1 text-[10px] text-slate-500">进程归属 {sample.process_attribution.attributed}/{sample.process_attribution.captured} · conntrack {sample.process_attribution.conntrack_available ? '可用' : '不可用'} · 日志请求 {sample.access_log.requests ?? '未采集'}</div>
-              {sample.ips.length > 0 && <div className="mt-2 space-y-1">{sample.ips.map((entry) => <div key={entry.ip} className="break-words text-[10px] text-slate-300"><code>{entry.ip}</code> · {entry.inbound} 条入站连接 · {processNames(entry.processes) || '未关联到本机进程'} · {classificationLabel[entry.assessment?.classification] || '证据不足'} · AbuseIPDB {entry.abuseipdb?.status === 'checked' ? `缓存分 ${entry.abuseipdb?.abuse_confidence_score ?? '未知'}` : '无缓存结果'}</div>)}</div>}
+              <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400"><Clock3 className="h-3 w-3" aria-hidden="true" />{new Date(sample.ts * 1000).toLocaleString()} · 连接 {sample.connection_count} · {sample.process_attribution.status === 'no_connections'
+                ? '未观察到连接'
+                : sample.process_attribution.status === 'unavailable'
+                  ? sample.process_attribution.reason === 'high_connection_count_socket_snapshot_empty'
+                    ? '连接数非零，但逐连接来源/PID 快照为空'
+                    : '来源与进程归属未采集'
+                  : `本机发起 已确认 ${sample.process_attribution.confirmed_local ?? 0} / 推定 ${sample.process_attribution.probable_local ?? 0} · 外部发起 已确认 ${sample.process_attribution.confirmed_remote ?? 0} / 推定 ${sample.process_attribution.probable_remote ?? 0} · 方向未知 ${sample.process_attribution.unknown_direction ?? 0}`}</div>
+              <div className="mt-1 text-[10px] text-slate-500">{sample.process_attribution.captured === null
+                ? '没有逐连接样本'
+                : `逐连接样本 ${sample.process_attribution.captured} 条 · 进程归属 ${sample.process_attribution.attributed ?? 0} 条`}
+                {' · '}conntrack {sample.process_attribution.conntrack_available === true ? `可用${sample.process_attribution.conntrack_confirmed !== null ? `，五元组确认 ${sample.process_attribution.conntrack_confirmed} 条` : ''}` : sample.process_attribution.conntrack_available === false ? '不可用' : '状态未上报'}
+                {sample.process_attribution.status === 'partial' ? ' · 采样不完整' : ''}
+                {' · '}日志请求 {sample.access_log.requests ?? '未采集'}
+              </div>
+              {sample.ips.length > 0 && <div className="mt-2 space-y-1">{sample.ips.map((entry) => <div key={entry.ip} className="break-words text-[10px] text-slate-300"><code>{entry.ip}</code> · {entry.inbound} 条入站连接 · 发起方向 {entry.origin_confidence === 'confirmed' ? '已确认' : entry.origin_confidence === 'probable' ? '推定' : '未知'} · {processNames(entry.processes) || '未关联到本机进程'} · {classificationLabel[entry.assessment?.classification] || '证据不足'} · AbuseIPDB {entry.abuseipdb?.status === 'checked' ? `缓存分 ${entry.abuseipdb?.abuse_confidence_score ?? '未知'}` : '无缓存结果'}</div>)}</div>}
             </article>)}
           </div>
         </details>

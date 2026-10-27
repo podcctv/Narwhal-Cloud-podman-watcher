@@ -168,7 +168,10 @@ export interface ContainerSecurity {
     original_remote_ips?: string[];
   }[];
   connection_attribution?: {
-    captured_sockets?: number;
+    evidence_status?: 'available' | 'partial' | 'unavailable' | 'no_connections' | string;
+    captured_sockets?: number | null;
+    expected_connection_count?: number;
+    source?: string;
     confirmed_local_initiated?: number;
     probable_local_initiated?: number;
     confirmed_remote_initiated?: number;
@@ -226,7 +229,10 @@ export interface SecurityAlert {
     outbound_ips?: DeepEvidenceIp[];
     connection_ips?: DeepEvidenceIp[];
     connection_attribution?: {
-      captured_sockets?: number;
+      evidence_status?: 'available' | 'partial' | 'unavailable' | 'no_connections' | string;
+      captured_sockets?: number | null;
+      expected_connection_count?: number;
+      source?: string;
       confirmed_local_initiated?: number;
       probable_local_initiated?: number;
       confirmed_remote_initiated?: number;
@@ -549,12 +555,18 @@ export interface ConnectionEvidenceResponse {
     ts: number;
     connection_count: number;
     process_attribution: {
-      captured: number;
-      attributed: number;
-      confirmed_local: number;
-      confirmed_remote: number;
-      unknown_direction: number;
-      conntrack_available: boolean;
+      status: 'available' | 'partial' | 'unavailable' | 'no_connections' | string;
+      captured: number | null;
+      attributed: number | null;
+      confirmed_local: number | null;
+      probable_local: number | null;
+      confirmed_remote: number | null;
+      probable_remote: number | null;
+      unknown_direction: number | null;
+      conntrack_available: boolean | null;
+      conntrack_confirmed: number | null;
+      source: string;
+      reason: string;
     };
     access_log: Record<string, number>;
     ips: Array<{
@@ -562,6 +574,7 @@ export interface ConnectionEvidenceResponse {
       inbound: number;
       processes: unknown[];
       origin_confidence: string;
+      direction_evidence: string[];
       network_evidence: Record<string, unknown>;
       assessment: Record<string, any>;
       abuseipdb: Record<string, any>;
@@ -806,7 +819,10 @@ export interface DiagnosticData {
       original_remote_ips?: string[];
     }[];
     connection_attribution?: {
-      captured_sockets?: number;
+      evidence_status?: 'available' | 'partial' | 'unavailable' | 'no_connections' | string;
+      captured_sockets?: number | null;
+      expected_connection_count?: number;
+      source?: string;
       confirmed_local_initiated?: number;
       probable_local_initiated?: number;
       confirmed_remote_initiated?: number;

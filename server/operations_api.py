@@ -554,11 +554,58 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             for row in reversed(raw_rows[:60]):
                 payload = ops.loads(row["payload_json"])
                 security = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+                deep_sample = payload.get("deep_sample") if isinstance(payload.get("deep_sample"), dict) else {}
                 signals = security.get("inbound_source_signals") if isinstance(security.get("inbound_source_signals"), list) else []
-                connection_ips = security.get("connection_ips") if isinstance(security.get("connection_ips"), list) else []
-                inbound = security.get("inbound_ips") if isinstance(security.get("inbound_ips"), list) else []
+                connection_ips = deep_sample.get("connection_ips") if isinstance(deep_sample.get("connection_ips"), list) else []
+                if not connection_ips:
+                    connection_ips = security.get("connection_ips") if isinstance(security.get("connection_ips"), list) else []
+                inbound = deep_sample.get("inbound_ips") if isinstance(deep_sample.get("inbound_ips"), list) else []
+                if not inbound:
+                    inbound = security.get("inbound_ips") if isinstance(security.get("inbound_ips"), list) else []
                 if not inbound:
                     inbound = [item for item in connection_ips if isinstance(item, dict) and ops.number(item.get("inbound")) > 0]
+                socket_rows = deep_sample.get("communication_sockets") if isinstance(deep_sample.get("communication_sockets"), list) else []
+                if not socket_rows:
+                    socket_rows = security.get("communication_sockets") if isinstance(security.get("communication_sockets"), list) else []
+                # Older agents did not report a summary object. Derive counts
+                # from their actual captured socket rows when available; never
+                # substitute zeros when both sources are absent.
+                if not inbound and socket_rows:
+                    grouped: dict[str, dict[str, Any]] = {}
+                    for socket in socket_rows[:2000]:
+                        if not isinstance(socket, dict) or socket.get("direction") != "inbound":
+                            continue
+                        ips = socket.get("original_remote_ips") if isinstance(socket.get("original_remote_ips"), list) else []
+                        if not ips and socket.get("remote_ip"):
+                            ips = [socket.get("remote_ip")]
+                        for raw_ip in ips[:5]:
+                            source_ip = str(raw_ip or "")[:64]
+                            if not source_ip:
+                                continue
+                            item = grouped.setdefault(source_ip, {
+                                "ip": source_ip, "inbound": 0, "outbound": 0,
+                                "inbound_processes": [], "inbound_origin_confidence": "unknown",
+                                "inbound_direction_evidence": [],
+                            })
+                            item["inbound"] = int(item["inbound"]) + 1
+                            process_name = str(socket.get("process") or "")[:120]
+                            try:
+                                process_pid = int(socket.get("pid") or 0)
+                            except (TypeError, ValueError, OverflowError):
+                                process_pid = 0
+                            if process_name and process_name != "unknown":
+                                owner = {"process": process_name}
+                                if process_pid > 0:
+                                    owner["pid"] = process_pid
+                                if owner not in item["inbound_processes"]:
+                                    item["inbound_processes"].append(owner)
+                            confidence = str(socket.get("origin_confidence") or "unknown")
+                            if confidence == "confirmed" or item["inbound_origin_confidence"] == "unknown":
+                                item["inbound_origin_confidence"] = confidence
+                            evidence = str(socket.get("direction_evidence") or "")
+                            if evidence and evidence not in item["inbound_direction_evidence"]:
+                                item["inbound_direction_evidence"].append(evidence)
+                    inbound = list(grouped.values())
                 observed = {}
                 for item in inbound[:20]:
                     if isinstance(item, dict) and item.get("ip"):
@@ -578,23 +625,74 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                         "inbound": max(0, min(1_000_000, int(ops.number(item.get("inbound", item.get("flow_count", 0)))))),
                         "processes": item.get("inbound_processes") or item.get("processes") or [],
                         "origin_confidence": item.get("inbound_origin_confidence") or item.get("origin_confidence") or "unknown",
+                        "direction_evidence": item.get("inbound_direction_evidence") or item.get("direction_evidence") or [],
                         "network_evidence": item.get("network_evidence") if isinstance(item.get("network_evidence"), dict) else item,
                         "assessment": by_ip.get(ip, {"classification": "insufficient_evidence", "identity_confirmed": False}),
                         "abuseipdb": reputation,
                     })
-                attribution = security.get("connection_attribution") if isinstance(security.get("connection_attribution"), dict) else {}
+                attribution = deep_sample.get("connection_attribution") if isinstance(deep_sample.get("connection_attribution"), dict) else {}
+                if not attribution:
+                    attribution = security.get("connection_attribution") if isinstance(security.get("connection_attribution"), dict) else {}
                 connection_metrics = security.get("connection_metrics") if isinstance(security.get("connection_metrics"), dict) else {}
                 access = security.get("access_log") if isinstance(security.get("access_log"), dict) else {}
+                connection_count = max(
+                    0,
+                    min(10_000_000, int(ops.number(connection_metrics.get("total", payload.get("conn_count", 0))))),
+                    min(10_000_000, int(ops.number(deep_sample.get("connection_count")))) if deep_sample else 0,
+                )
+                raw_captured = attribution.get("captured_sockets")
+                captured = None
+                attributed = None
+                confirmed_local = probable_local = confirmed_remote = probable_remote = unknown_direction = None
+                if raw_captured is not None and (ops.number(raw_captured) > 0 or not socket_rows):
+                    captured = max(0, min(5000, int(ops.number(raw_captured))))
+                    attributed = max(0, min(captured, int(ops.number(attribution.get("process_attributed_sockets")))))
+                    confirmed_local = max(0, min(captured, int(ops.number(attribution.get("confirmed_local_initiated")))))
+                    probable_local = max(0, min(captured, int(ops.number(attribution.get("probable_local_initiated")))))
+                    confirmed_remote = max(0, min(captured, int(ops.number(attribution.get("confirmed_remote_initiated")))))
+                    probable_remote = max(0, min(captured, int(ops.number(attribution.get("probable_remote_initiated")))))
+                    unknown_direction = max(0, min(captured, int(ops.number(attribution.get("unknown_direction")))))
+                elif socket_rows:
+                    captured = min(5000, len(socket_rows))
+                    attributed = sum(1 for item in socket_rows[:5000] if isinstance(item, dict) and (ops.number(item.get("pid")) > 0 or item.get("process_attribution") == "attributed"))
+                    confirmed_local = sum(1 for item in socket_rows[:5000] if isinstance(item, dict) and item.get("direction") == "outbound" and item.get("origin_confidence") == "confirmed")
+                    probable_local = sum(1 for item in socket_rows[:5000] if isinstance(item, dict) and item.get("direction") == "outbound" and item.get("origin_confidence") == "probable")
+                    confirmed_remote = sum(1 for item in socket_rows[:5000] if isinstance(item, dict) and item.get("direction") == "inbound" and item.get("origin_confidence") == "confirmed")
+                    probable_remote = sum(1 for item in socket_rows[:5000] if isinstance(item, dict) and item.get("direction") == "inbound" and item.get("origin_confidence") == "probable")
+                    unknown_direction = sum(1 for item in socket_rows[:5000] if isinstance(item, dict) and item.get("direction") not in ("inbound", "outbound"))
+                conntrack_value = attribution.get("conntrack_available")
+                if not isinstance(conntrack_value, bool):
+                    conntrack_value = security.get("host_conntrack_available") if isinstance(security.get("host_conntrack_available"), bool) else None
+                evidence_status = str(attribution.get("evidence_status") or "")
+                if evidence_status == "unavailable":
+                    captured = attributed = confirmed_local = probable_local = confirmed_remote = probable_remote = unknown_direction = None
+                elif captured is None and connection_count == 0 and security.get("communication_detail_available") is True:
+                    evidence_status = "no_connections"
+                    captured = attributed = confirmed_local = probable_local = confirmed_remote = probable_remote = unknown_direction = 0
+                elif captured is None or (captured == 0 and connection_count > 0):
+                    evidence_status = "unavailable"
+                    captured = attributed = confirmed_local = probable_local = confirmed_remote = probable_remote = unknown_direction = None
+                elif not evidence_status:
+                    evidence_status = "partial" if attribution.get("socket_snapshot_truncated") or security.get("communication_snapshot_truncated") else "available"
+                if evidence_status == "no_connections" and connection_count > 0:
+                    evidence_status = "unavailable"
+                    captured = attributed = confirmed_local = probable_local = confirmed_remote = probable_remote = unknown_direction = None
                 timeline.append({
                     "ts": int(row["ts"]),
-                    "connection_count": max(0, min(10_000_000, int(ops.number(connection_metrics.get("total", payload.get("conn_count", 0)))))),
+                    "connection_count": connection_count,
                     "process_attribution": {
-                        "captured": int(ops.number(attribution.get("captured_sockets"))),
-                        "attributed": int(ops.number(attribution.get("process_attributed_sockets"))),
-                        "confirmed_local": int(ops.number(attribution.get("confirmed_local_initiated"))),
-                        "confirmed_remote": int(ops.number(attribution.get("confirmed_remote_initiated"))),
-                        "unknown_direction": int(ops.number(attribution.get("unknown_direction"))),
-                        "conntrack_available": attribution.get("conntrack_available") is True,
+                        "status": evidence_status,
+                        "captured": captured,
+                        "attributed": attributed,
+                        "confirmed_local": confirmed_local,
+                        "probable_local": probable_local,
+                        "confirmed_remote": confirmed_remote,
+                        "probable_remote": probable_remote,
+                        "unknown_direction": unknown_direction,
+                        "conntrack_available": conntrack_value,
+                        "conntrack_confirmed": int(ops.number(attribution.get("conntrack_confirmed_sockets"))) if captured is not None else None,
+                        "source": str(attribution.get("source") or deep_sample.get("communication_source") or security.get("communication_source") or "unknown"),
+                        "reason": str(attribution.get("unavailable_reason") or ("legacy_agent_missing_attribution" if evidence_status == "unavailable" else "")),
                     },
                     "access_log": {key: access.get(key) for key in ("requests", "requests_per_second", "readable_files", "parse_errors") if key in access},
                     "ips": ips,

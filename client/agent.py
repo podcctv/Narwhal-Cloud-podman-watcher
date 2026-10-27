@@ -931,6 +931,61 @@ def _communication_socket_owner_count(communication: Dict[str, object]) -> int:
     return sum(1 for item in sockets if isinstance(item, dict) and int(item.get("pid") or 0) > 0)
 
 
+def _connection_attribution_summary(
+    communication: Dict[str, object],
+    conntrack: Dict[str, object],
+    expected_connections: int,
+) -> Dict[str, object]:
+    """Summarize only captured socket evidence; never turn a missing snapshot into zero activity."""
+    sockets = communication.get("communication_sockets")
+    sockets = sockets if isinstance(sockets, list) else []
+    conntrack_entries = conntrack.get("entries") if isinstance(conntrack.get("entries"), list) else []
+    conntrack_matches = _enrich_communication_with_conntrack_origins(communication, conntrack_entries)
+    captured = len(sockets)
+    expected = max(0, int(expected_connections or 0))
+    socket_collection_available = communication.get("communication_detail_available") is True
+    if captured:
+        evidence_status = "partial" if communication.get("communication_snapshot_truncated") is True or (expected > captured) else "available"
+    elif expected > 0 or not socket_collection_available:
+        evidence_status = "unavailable"
+    else:
+        evidence_status = "no_connections"
+
+    def count(direction: str, confidence: str) -> int:
+        return sum(
+            1 for item in sockets
+            if isinstance(item, dict)
+            and item.get("direction") == direction
+            and item.get("origin_confidence") == confidence
+        )
+
+    return {
+        "evidence_status": evidence_status,
+        "unavailable_reason": (
+            "high_connection_count_socket_snapshot_empty"
+            if evidence_status == "unavailable" and expected > 0 and socket_collection_available
+            else "socket_collection_unavailable"
+            if evidence_status == "unavailable"
+            else ""
+        ),
+        "captured_sockets": captured if captured or evidence_status == "no_connections" else None,
+        "expected_connection_count": expected,
+        "confirmed_local_initiated": count("outbound", "confirmed"),
+        "probable_local_initiated": count("outbound", "probable"),
+        "confirmed_remote_initiated": count("inbound", "confirmed"),
+        "probable_remote_initiated": count("inbound", "probable"),
+        "unknown_direction": sum(1 for item in sockets if isinstance(item, dict) and item.get("direction") not in ("inbound", "outbound")),
+        "process_attributed_sockets": _communication_socket_owner_count(communication),
+        "conntrack_confirmed_sockets": int(conntrack_matches.get("matched_outbound") or 0) + int(conntrack_matches.get("matched_inbound") or 0),
+        "conntrack_available": bool(conntrack.get("available")),
+        "conntrack_entries_examined": len(conntrack_entries),
+        "conntrack_snapshot_truncated": bool(conntrack.get("snapshot_truncated")),
+        "socket_snapshot_truncated": bool(communication.get("communication_snapshot_truncated")),
+        "process_attribution_available": _communication_socket_owner_count(communication) > 0,
+        "source": str(communication.get("communication_source") or "unknown"),
+    }
+
+
 def _communication_process_totals(sockets: List[Dict[str, object]]) -> List[Dict[str, object]]:
     totals: Dict[Tuple[int, str], Dict[str, object]] = {}
     for item in sockets:
@@ -6639,11 +6694,42 @@ def collect_container(
             "service_listeners": [],
         }
     )
+    expected_connection_count = max(
+        int(connection_metrics.get("total") or 0) if connection_metrics.get("valid") is True else 0,
+        int(conn_count or 0),
+    )
+    communication_sockets = communication.get("communication_sockets")
+    if (
+        runtime_name in {"incus", "podman"}
+        and expected_connection_count >= max(100, min(2000, int(_env_float("CONNECTION_EVIDENCE_PROC_FALLBACK_MIN", 500))))
+        and (not isinstance(communication_sockets, list) or not communication_sockets)
+        and pid > 1
+    ):
+        # Some minimal images have an ss binary that exits successfully but
+        # cannot see the target namespace's sockets. A high kernel socket count
+        # with an empty ss result is not a zero-connection forensic sample.
+        host_process_snapshot, host_processes = _collect_host_proc_process_snapshot(pid, 200)
+        host_communication = _collect_host_proc_socket_details(
+            pid,
+            host_processes,
+            socket_security.get("listening_ports", [])
+            if isinstance(socket_security.get("listening_ports"), list)
+            else [],
+            100,
+            process_scope_complete=host_process_snapshot.get("scope_complete") is True,
+        )
+        if host_communication.get("communication_sockets"):
+            communication = host_communication
     _enrich_communication_with_original_sources(
         communication,
         socket_security.get("inbound_public_flows", [])
         if isinstance(socket_security.get("inbound_public_flows"), list)
         else [],
+    )
+    attribution = _connection_attribution_summary(
+        communication,
+        host_conntrack if isinstance(host_conntrack, dict) else {},
+        expected_connection_count,
     )
     configured_protocols = socks_proxy.get("configured_inbound_protocols", [])
     configured_protocols = configured_protocols if isinstance(configured_protocols, list) else []
@@ -6890,6 +6976,7 @@ def collect_container(
             "network_exposure": network_exposure,
             "pid": pid,
             **communication,
+            "connection_attribution": attribution,
             "service_listeners": service_inventory,
             "service_inventory_state": service_inventory_state,
             "vmess_guard": vmess_status,
@@ -7440,7 +7527,20 @@ def collect_container_deep_sample(
     )
     socket_rows = communication.get("communication_sockets")
     primary_owner_count = _communication_socket_owner_count(communication)
-    if not communication.get("communication_detail_available") or (isinstance(socket_rows, list) and socket_rows and primary_owner_count < len(socket_rows)):
+    report_metrics = security.get("connection_metrics") if isinstance(security.get("connection_metrics"), dict) else {}
+    expected_connection_count = max(
+        int(base_report.get("conn_count") or 0),
+        int(report_metrics.get("total") or 0) if report_metrics.get("valid") is True else 0,
+    )
+    needs_host_proc_fallback = (
+        not communication.get("communication_detail_available")
+        or (isinstance(socket_rows, list) and socket_rows and primary_owner_count < len(socket_rows))
+        or (
+            expected_connection_count >= max(100, min(2000, int(_env_float("CONNECTION_EVIDENCE_PROC_FALLBACK_MIN", 500))))
+            and (not isinstance(socket_rows, list) or not socket_rows)
+        )
+    )
+    if needs_host_proc_fallback:
         if not host_processes:
             process_snapshot, host_processes = _collect_host_proc_process_snapshot(pid, process_limit)
         host_communication = _collect_host_proc_socket_details(
@@ -7448,7 +7548,12 @@ def collect_container_deep_sample(
             process_scope_complete=process_snapshot.get("scope_complete") is True,
         )
         if host_communication.get("communication_detail_available"):
-            if communication.get("communication_detail_available") and isinstance(socket_rows, list) and socket_rows:
+            host_socket_rows = host_communication.get("communication_sockets")
+            host_socket_rows = host_socket_rows if isinstance(host_socket_rows, list) else []
+            primary_socket_count = len(socket_rows) if isinstance(socket_rows, list) else 0
+            if host_socket_rows and (not primary_socket_count or len(host_socket_rows) > primary_socket_count):
+                communication = host_communication
+            elif communication.get("communication_detail_available") and isinstance(socket_rows, list) and socket_rows:
                 _merge_socket_process_attribution(communication, host_communication)
                 if _communication_socket_owner_count(communication) == 0 and _communication_socket_owner_count(host_communication) > 0:
                     communication = host_communication
@@ -7459,8 +7564,6 @@ def collect_container_deep_sample(
     if isinstance(communication.get("communication_sockets"), list) and communication.get("communication_sockets") and not communication.get("process_attribution_available"):
         errors.append("socket rows were collected, but process/PID ownership could not be read; connection direction may still be available")
     conntrack_snapshot = host_conntrack if isinstance(host_conntrack, dict) else {}
-    conntrack_entries = conntrack_snapshot.get("entries") if isinstance(conntrack_snapshot.get("entries"), list) else []
-    conntrack_matches = _enrich_communication_with_conntrack_origins(communication, conntrack_entries)
     _enrich_communication_with_original_sources(
         communication,
         security.get("inbound_public_flows", [])
@@ -7469,6 +7572,11 @@ def collect_container_deep_sample(
     )
     sockets = communication.get("communication_sockets")
     sockets = sockets if isinstance(sockets, list) else []
+    connection_attribution = _connection_attribution_summary(
+        communication,
+        conntrack_snapshot,
+        expected_connection_count,
+    )
     ip_totals: Dict[str, Dict[str, object]] = {}
     for item in sockets:
         if not isinstance(item, dict):
@@ -7587,42 +7695,6 @@ def collect_container_deep_sample(
         1 for item in communication_processes
         if isinstance(item, dict) and int(item.get("outbound_connections") or 0) > 0
     )
-    confirmed_local_initiated = sum(
-        1 for item in sockets if isinstance(item, dict)
-        and item.get("direction") == "outbound" and item.get("origin_confidence") == "confirmed"
-    )
-    probable_local_initiated = sum(
-        1 for item in sockets if isinstance(item, dict)
-        and item.get("direction") == "outbound" and item.get("origin_confidence") == "probable"
-    )
-    confirmed_remote_initiated = sum(
-        1 for item in sockets if isinstance(item, dict)
-        and item.get("direction") == "inbound" and item.get("origin_confidence") == "confirmed"
-    )
-    probable_remote_initiated = sum(
-        1 for item in sockets if isinstance(item, dict)
-        and item.get("direction") == "inbound" and item.get("origin_confidence") == "probable"
-    )
-    unknown_direction = sum(
-        1 for item in sockets if isinstance(item, dict) and item.get("direction") == "unknown"
-    )
-    owner_attributed = _communication_socket_owner_count(communication)
-    connection_attribution = {
-        "captured_sockets": len(sockets),
-        "confirmed_local_initiated": confirmed_local_initiated,
-        "probable_local_initiated": probable_local_initiated,
-        "confirmed_remote_initiated": confirmed_remote_initiated,
-        "probable_remote_initiated": probable_remote_initiated,
-        "unknown_direction": unknown_direction,
-        "process_attributed_sockets": owner_attributed,
-        "conntrack_confirmed_sockets": int(conntrack_matches.get("matched_outbound") or 0) + int(conntrack_matches.get("matched_inbound") or 0),
-        "conntrack_available": bool(conntrack_snapshot.get("available")),
-        "conntrack_entries_examined": len(conntrack_entries),
-        "conntrack_snapshot_truncated": bool(conntrack_snapshot.get("snapshot_truncated")),
-        "socket_snapshot_truncated": bool(communication.get("communication_snapshot_truncated")),
-        "process_attribution_available": owner_attributed > 0,
-    }
-
     return {
         "action_id": int(action.get("id") or 0),
         "sampled_at": int(time.time()),
