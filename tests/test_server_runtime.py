@@ -776,7 +776,7 @@ class ServerRuntimeTests(unittest.TestCase):
         ).fetchone()["status"]
         conn.close()
         self.assertEqual(failed["status"], "failed")
-        self.assertIn("no matching process", failed["result_message"])
+        self.assertIn("remediation could not be verified", failed["result_message"])
         self.assertEqual(alert_status, "active")
 
         conn = server.db()
