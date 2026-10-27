@@ -114,3 +114,37 @@ class FleetTests(unittest.TestCase):
         # A new canary still must report the target build and pass its soak
         # checks before rollout actions are sent to the rest of the fleet.
         self.assertEqual(sum(a['status'] == 'queued' for a in self.actions()), 1)
+
+    def test_new_automatic_campaign_reclaims_actions_from_superseded_campaign(self):
+        self.tick()
+        previous = self.c.execute('SELECT id FROM ops_upgrades').fetchone()['id']
+        first_action = self.actions()[0]['id']
+        self.c.execute("UPDATE security_actions SET status='dispatched' WHERE id=?", (first_action,))
+        self.c.execute("UPDATE ops_upgrade_nodes SET status='dispatched' WHERE campaign=? AND host_id='canary'", (previous,))
+
+        stale_action_ids = [first_action]
+        for host in ('old', 'offline'):
+            cursor = self.c.execute(
+                "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at,result_message) VALUES(0,?,'host','','__host__','managed_upgrade','{}','dispatched','automatic-fleet',1000,1000,'')",
+                (host,),
+            )
+            action_id = cursor.lastrowid
+            stale_action_ids.append(action_id)
+            node = self.c.execute('SELECT 1 FROM ops_upgrade_nodes WHERE campaign=? AND host_id=?', (previous, host)).fetchone()
+            if node:
+                self.c.execute("UPDATE ops_upgrade_nodes SET action_id=?,status='dispatched' WHERE campaign=? AND host_id=?", (action_id, previous, host))
+            else:
+                self.c.execute('INSERT INTO ops_upgrade_nodes VALUES(?,?,?,?,?)', (previous, host, action_id, 'dispatched', '1.7.41'))
+        self.c.commit()
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM security_actions WHERE status IN ('queued','dispatched','running')").fetchone()[0], 3)
+
+        fleet.reconcile(self.c, '1.7.48', 'b'*40, 1010)
+
+        rows = self.c.execute('SELECT status,result_message FROM security_actions WHERE id IN (?,?,?) ORDER BY id', stale_action_ids).fetchall()
+        self.assertTrue(all(row['status'] == 'failed' for row in rows))
+        self.assertTrue(all('较新版本取代' in row['result_message'] for row in rows))
+        old_nodes = self.c.execute('SELECT status FROM ops_upgrade_nodes WHERE campaign=?', (previous,)).fetchall()
+        self.assertTrue(all(row['status'] == 'superseded' for row in old_nodes))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM security_actions WHERE status IN ('queued','dispatched','running')").fetchone()[0], 1)
+        self.assertEqual(self.actions()[-1]['host_id'], 'canary')
+        self.assertEqual(self.actions()[-1]['status'], 'queued')

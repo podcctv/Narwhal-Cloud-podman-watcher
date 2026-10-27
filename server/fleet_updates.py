@@ -20,6 +20,32 @@ def save(conn, value):
     conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('fleet_updates',?)", (json.dumps(value),))
 
 
+def reclaim_superseded_actions(conn, now):
+    """Release dispatch slots held by actions from superseded campaigns."""
+    conn.execute(
+        """UPDATE security_actions
+           SET status='failed', result_message=?, updated_at=?
+           WHERE action_type='managed_upgrade'
+             AND status IN ('queued','dispatched','running')
+             AND id IN (
+                 SELECT n.action_id
+                 FROM ops_upgrade_nodes n
+                 JOIN ops_upgrades u ON u.id=n.campaign
+                 WHERE n.action_id IS NOT NULL
+                   AND u.status='superseded'
+             )""",
+        ('自动发布已被较新版本取代；旧动作不再派发', now),
+    )
+    conn.execute(
+        """UPDATE ops_upgrade_nodes SET status='superseded'
+           WHERE status IN ('pending','dispatched','running')
+             AND campaign IN (
+                 SELECT id FROM ops_upgrades
+                 WHERE status='superseded'
+             )"""
+    )
+
+
 def resolve(version):
     """Require this running image's immutable build revision, not just a tag."""
     revision = os.getenv('NARWHAL_REVISION', '')
@@ -47,12 +73,13 @@ def reconcile(conn, version, revision, now=None):
     if not cfg['enabled']:
         conn.rollback()
         return
+    reclaim_superseded_actions(conn, now)
     hosts = conn.execute('SELECT h.*,o.payload AS ops_payload,o.ts AS ops_ts FROM hosts h JOIN ops_hosts o ON o.host_id=h.host_id AND o.node=h.node_id ORDER BY h.last_seen DESC,h.host_id LIMIT 500').fetchall()
     eligible = {h['host_id']: h for h in hosts if h['node_id'] and json.loads(h['ops_payload']).get('managed_upgrade') and h['host_id'] not in cfg['holds']}
     campaign = conn.execute("SELECT * FROM ops_upgrades WHERE version=? AND revision=? ORDER BY id DESC LIMIT 1", (version, revision)).fetchone()
     # Manual campaigns remain under operator control. Never silently promote one.
     if campaign and not json.loads(campaign['payload']).get('automatic'):
-        conn.rollback()
+        conn.commit()
         return
     # A paused campaign is an explicit operator safety boundary. Do not let a
     # later coordinator tick silently restart it or send more nodes.
@@ -63,7 +90,7 @@ def reconcile(conn, version, revision, now=None):
     if not campaign:
         candidates = [h for h in eligible.values() if re.fullmatch(r'\d+\.\d+\.\d+',h['agent_version'] or '') and tuple(map(int,h['agent_version'].split('.'))) < tuple(map(int,version.split('.'))) and now-h['last_seen'] <= 900]
         if not candidates:
-            conn.rollback()
+            conn.commit()
             return
         candidates.sort(key=lambda h: tuple(map(int,h['agent_version'].split('.'))) if re.fullmatch(r'\d+\.\d+\.\d+',h['agent_version'] or '') else (0,0,0),reverse=True)
         canary = candidates[0]['host_id']
@@ -75,6 +102,7 @@ def reconcile(conn, version, revision, now=None):
             if tuple(map(int, old['version'].split('.'))) < tuple(map(int, version.split('.'))):
                 conn.execute("UPDATE ops_upgrade_nodes SET status='superseded' WHERE campaign=? AND status='pending' AND action_id IS NULL", (old['id'],))
                 conn.execute("UPDATE ops_upgrades SET status='superseded' WHERE id=?", (old['id'],))
+        reclaim_superseded_actions(conn, now)
     meta = json.loads(campaign['payload'])
     ident = campaign['id']
     for host, h in eligible.items():
