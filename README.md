@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.111**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.112**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.112：隐藏 Agent 安装摘要中的共享密钥
+
+- Client 安装结束摘要不再输出共享密钥，只说明密钥已写入权限受限的本机配置文件。
 
 ### v1.7.111：支持不安装容器运行时的主机探针
 

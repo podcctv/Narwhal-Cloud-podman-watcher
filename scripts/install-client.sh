@@ -536,7 +536,7 @@ Runtime: host agent (systemd)
 Service Name: narwhal-monitor-client.service
 Server URL: $server_url
 Server TLS CA: ${tls_ca_file:-system trust}
-Shared Secret: $(if [[ "$MODE" == "install" ]]; then echo "$secret"; else echo "preserved (see $CLIENT_ENV_FILE)"; fi)
+Shared Secret: stored in the restricted client environment file (value redacted)
 Host ID: $host_id
 Report Interval: $interval s
 Watch Disk File: /xfs_disk.img
