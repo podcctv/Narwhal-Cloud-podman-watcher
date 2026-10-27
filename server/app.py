@@ -3033,20 +3033,22 @@ def _fleet_firewall_node_state(
     status = "unregistered"
     if node_id:
         status = "offline" if not online else "awaiting_capability"
-        if online and container_policy_enabled and target_status == "inventory_unavailable":
-            status = "awaiting_interfaces"
-        elif online and runtime["stale"]:
-            status = "firewall_status_stale"
-        elif online and runtime["control_api"] == "unsupported":
+        if online and not runtime["stale"] and runtime["control_api"] == "unsupported":
             status = "runman_update_required"
-        elif online and runtime["control_api"] == "unavailable":
+        elif online and not runtime["stale"] and runtime["control_api"] == "unavailable":
             status = "runman_unavailable"
+        elif online and not live_readback["stale"] and protocol_status["unsupported_protocols"]:
+            status = "rfw_protocol_update_required"
+        elif online and runtime["stale"]:
+            status = (
+                "awaiting_interfaces"
+                if container_policy_enabled and target_status == "inventory_unavailable"
+                else "firewall_status_stale"
+            )
+        elif online and runtime["control_api"] == "ready" and protocol_status["unknown_protocols"]:
+            status = "awaiting_rfw_capability"
         elif runtime["control_api"] == "ready":
-            if protocol_status["unsupported_protocols"]:
-                status = "rfw_protocol_update_required"
-            elif protocol_status["unknown_protocols"]:
-                status = "awaiting_rfw_capability"
-            elif container_policy_enabled and target_status == "inventory_unavailable":
+            if container_policy_enabled and target_status == "inventory_unavailable":
                 status = "awaiting_interfaces"
             elif container_policy_enabled and target_status in {"runtime_not_found", "interface_not_found"}:
                 status = "interfaces_not_found"
