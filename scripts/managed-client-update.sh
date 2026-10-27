@@ -21,13 +21,39 @@ write_result() {
   printf '{"action_id":%s,"status":"%s","version":"%s","mode":"%s"}\n' "$action_id" "$1" "$installed_version" "$mode" >"$base/managed-update-result.json.tmp"
   mv -f "$base/managed-update-result.json.tmp" "$base/managed-update-result.json"
 }
+wait_for_client_stable() {
+  local timeout_seconds=45 stable_seconds=15 started_at=$SECONDS stable_since=0
+  local status active_state sub_state main_pid restart_count signature previous_signature=""
+  while (( SECONDS - started_at < timeout_seconds )); do
+    status=$(systemctl show --no-pager --property=ActiveState,SubState,MainPID,NRestarts narwhal-monitor-client.service 2>/dev/null || true)
+    active_state="$(sed -n 's/^ActiveState=//p' <<<"$status")"
+    sub_state="$(sed -n 's/^SubState=//p' <<<"$status")"
+    main_pid="$(sed -n 's/^MainPID=//p' <<<"$status")"
+    restart_count="$(sed -n 's/^NRestarts=//p' <<<"$status")"
+    if [[ "$active_state" == active && "$sub_state" == running && "$main_pid" =~ ^[1-9][0-9]*$ ]]; then
+      signature="$main_pid/$restart_count"
+      if [[ "$signature" != "$previous_signature" ]]; then
+        previous_signature="$signature"
+        stable_since=$SECONDS
+      elif (( SECONDS - stable_since >= stable_seconds )); then
+        return 0
+      fi
+    else
+      previous_signature=""
+      stable_since=0
+    fi
+    sleep 2
+  done
+  echo 'client service did not remain active with a stable process for 15 seconds' >&2
+  return 1
+}
 restore() {
   [[ -f "$snapshot/agent.py" && -f "$snapshot/client.env" ]] || return 1
   systemctl stop narwhal-monitor-client.service || return 1
   if [[ -f "$app_dir/admission_guard.py" ]]; then
     "$app_dir/.venv/bin/python" "$app_dir/admission_guard.py" --release-all || return 1
   fi
-  for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard; do
+  for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard; do
     if [[ -f "$snapshot/$module.py" ]]; then
       install -m 0644 "$snapshot/$module.py" "$app_dir/$module.py" || return 1
     fi
@@ -51,7 +77,7 @@ restore() {
   install -m 0644 "$snapshot/requirements.txt" "$app_dir/requirements.txt" || return 1
   "$app_dir/.venv/bin/pip" install -r "$app_dir/requirements.txt" || return 1
   systemctl restart narwhal-monitor-client.service || return 1
-  systemctl is-active --quiet narwhal-monitor-client.service
+  wait_for_client_stable
 }
 on_error() {
   local result=$?
@@ -95,14 +121,14 @@ cleanup_stage() {
 }
 trap cleanup_stage EXIT
 git -C "$repo" archive "$revision" | tar -x -C "$stage"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard manual_bandwidth; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard manual_bandwidth; do
   "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
 done
-"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py" "$stage/client/host_security_audit.py" "$stage/client/vmess_guard.py" "$stage/client/manual_bandwidth.py" "$stage/client/cpu_guard.py"
+"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/incus_metrics.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py" "$stage/client/host_security_audit.py" "$stage/client/vmess_guard.py" "$stage/client/manual_bandwidth.py" "$stage/client/cpu_guard.py"
 mkdir -p "$snapshot"
 chmod 0700 "$snapshot"
 install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard manual_bandwidth; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard manual_bandwidth; do
   [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
 done
 [[ ! -f "$app_dir/operations.py" ]] || install -m 0644 "$app_dir/operations.py" "$snapshot/operations.py"
@@ -116,7 +142,7 @@ snapshot_ready=1
 systemctl stop narwhal-monitor-client-update.timer
 systemctl disable narwhal-monitor-client-update.timer
 deployment_started=1
-if NARWHAL_MANAGED_UPDATE=1 NARWHAL_AUTO_UPDATE=1 bash "$stage/scripts/install-client.sh" update && systemctl is-active --quiet narwhal-monitor-client.service; then
+if NARWHAL_MANAGED_UPDATE=1 NARWHAL_AUTO_UPDATE=1 bash "$stage/scripts/install-client.sh" update && wait_for_client_stable; then
   # Keep the checkout and deployment marker aligned without discarding edits.
   git -C "$repo" merge --ff-only "$revision"
   printf '%s\n' "$revision" >"$base/client-auto-update.version"

@@ -1,6 +1,6 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.92**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.93**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 一个轻量级的 **CS 架构多运行时容器监控工具**，可在同一宿主机同时采集 **Podman、Docker 和 Incus 容器**：
 
@@ -12,6 +12,11 @@
 - **多运行时发现**：默认 `auto` 自动发现全部已安装运行时，也可显式指定组合。
 
 ## 主要能力
+
+### v1.7.93：修复 Client 缺少 Incus 指标模块导致的上报中断
+
+- Client 安装与托管升级会将 `incus_metrics.py` 安装到 Agent 使用的模块目录，并在升级前编译校验、纳入回滚快照。
+- 托管升级等待 Client 进程连续稳定运行后再记录“已安装”；服务仍在崩溃重启时会触发回滚，避免把短暂启动误判为升级成功。
 
 ### v1.7.92：CPU 保护告警兼容性修正
 
