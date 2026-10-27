@@ -474,6 +474,7 @@ for module in abuse_detection abuse_collection abuse_guard network_quarantine ad
   cp "$ROOT_DIR/client/$module.py" "$CLIENT_APP_DIR/$module.py"
 done
 cp "$ROOT_DIR/client/tcp_probe.py" "$CLIENT_APP_DIR/tcp_probe.py"
+cp "$ROOT_DIR/client/gfw_probe.py" "$CLIENT_APP_DIR/gfw_probe.py"
 cp "$ROOT_DIR/client/socks_detector.py" "$CLIENT_APP_DIR/socks_detector.py"
 cp "$ROOT_DIR/client/host_security_audit.py" "$CLIENT_APP_DIR/host_security_audit.py"
 cp "$ROOT_DIR/client/vmess_guard.py" "$CLIENT_APP_DIR/vmess_guard.py"

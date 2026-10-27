@@ -132,6 +132,32 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
     ? '采集不完整'
     : '等待客户端采集';
 
+  const protocolPortSummary = (() => {
+    const byProtocol = new Map<string, Set<number>>();
+    const shortLabel = (value: string) => {
+      const lower = value.toLowerCase();
+      if (lower.includes('hysteria')) return 'HY2';
+      if (lower.includes('socks')) return 'SOCKS';
+      if (lower === 'vless') return 'VLESS';
+      if (lower === 'vmess') return 'VMess';
+      if (lower.includes('wireguard')) return 'WireGuard';
+      if (lower.includes('openvpn')) return 'OpenVPN';
+      if (lower.includes('shadowsocks')) return 'SS';
+      return value;
+    };
+    for (const listener of serviceListeners) {
+      const port = Number(listener.port || 0);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+      for (const label of applicationProtocolsFor(listener).labels) {
+        const key = shortLabel(label);
+        const ports = byProtocol.get(key) || new Set<number>();
+        ports.add(port);
+        byProtocol.set(key, ports);
+      }
+    }
+    return Array.from(byProtocol, ([label, ports]) => ({ label, count: ports.size }));
+  })();
+
   const identity: ContainerIdentity = {
     host_id: c.host_id,
     runtime: c.runtime,
@@ -372,6 +398,12 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             </span>
             <ChevronDown className={`h-3 w-3 shrink-0 text-slate-500 transition-transform ${servicesExpanded ? 'rotate-180' : ''}`} />
           </button>
+
+          <div className="mt-1 flex min-w-0 flex-wrap gap-1" aria-label="已确认协议及各自使用的端口数">
+            {protocolPortSummary.length ? protocolPortSummary.map(item => <span key={item.label} className="rounded border border-violet-800/70 bg-violet-950/40 px-1.5 py-0.5 text-[9px] font-medium text-violet-200" title={`${item.label}：${item.count} 个不同监听端口；按已确认的协议与 PID/端口证据统计`}>
+              {item.label} ×{item.count}
+            </span>) : <span className="text-[9px] text-slate-500">{serviceListeners.length ? '协议待核实' : serviceInventoryState === 'complete' ? '未发现已确认代理协议' : '协议信息等待采集'}</span>}
+          </div>
 
           {servicesExpanded && (
             <div className="mt-1.5 space-y-1 border-t border-slate-800/70 pt-1.5">

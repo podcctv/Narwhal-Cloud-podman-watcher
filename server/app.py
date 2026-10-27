@@ -130,7 +130,7 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, disk_cleanup, connection_policy, ip_reputation, inbound_assessment, database_telemetry
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, ip_reputation, inbound_assessment, database_telemetry
 except ImportError:
     import operations
     import connection_policy
@@ -141,6 +141,7 @@ except ImportError:
     import dashboard_auth
     import commerce
     import tcping
+    import gfw_monitor
     import ip_reputation
     import inbound_assessment
     import database_telemetry
@@ -160,6 +161,7 @@ _AGENT_ONLY_PATHS = {
     "/api/v1/actions/poll",
     "/api/v1/actions/result",
     "/api/v1/tcp-probe/report",
+    "/api/v1/gfw-probe/report",
     "/api/v1/update/version",
 }
 
@@ -466,6 +468,7 @@ def init_db() -> None:
     investigation.initialize(conn)
     commerce.initialize(conn)
     tcping.initialize(conn)
+    gfw_monitor.initialize(conn)
     abuse_api.initialize(conn)
     admission_api.initialize(conn)
     ip_reputation.initialize(conn)
@@ -5485,14 +5488,16 @@ async def poll_security_actions(
         try:
             conn.execute("BEGIN IMMEDIATE")
             tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
+            gfw_probe = gfw_monitor.lease_job(conn, host_id, node_id, now)
             conn.commit()
         except Exception:
             conn.rollback()
-            logging.exception("Public TCP queue failed; signed security polling continues")
+            logging.exception("TCP probe queue failed; signed security polling continues")
             tcp_probe = {"job": None, "cancelled": []}
+            gfw_probe = {"job": None}
     finally:
         conn.close()
-    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy,'bandwidth_limits':bandwidth_policy}, "tcp_probe": tcp_probe}, x_timestamp)
+    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy,'bandwidth_limits':bandwidth_policy}, "tcp_probe": tcp_probe, "gfw_probe": gfw_probe}, x_timestamp)
 
 
 @app.post("/api/v1/actions/result")
@@ -5583,6 +5588,7 @@ operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup
 disk_cleanup.attach(app,db)
 commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD))
 tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
+gfw_monitor.attach(app, db, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)
 admission_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, buyer_notifications.reconcile)
 ip_reputation.attach(app, db, lambda: DB_PATH, commerce.cipher)
@@ -5808,6 +5814,7 @@ def security_status() -> JSONResponse:
             """,
             (today_start_ts,),
         ).fetchall()
+        gfw_by_host = gfw_monitor.status_map(conn, int(time.time()))
     finally:
         conn.close()
 
@@ -5853,6 +5860,7 @@ def security_status() -> JSONResponse:
         items.append(
             {
                 "host_id": host_id,
+                "gfw_reachability": gfw_by_host.get(host_id, {"status": "unassessed"}),
                 "node_id": str(row["node_id"] or ""),
                 "host_config": json.loads(row["config_json"] or "{}"),
                 "timestamp": int(row["ts"]),

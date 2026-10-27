@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, ArrowUpRight, Loader2, Plus, Save } from 'lucide-react';
 import { request } from '../../api/client';
 import { Source, sourceStatus } from './types';
+import { GfwProbeManage } from './GfwProbeManage';
 import './tcping.css';
 
 interface PrivateSource extends Source { host_id: string; node_id: string; enabled: boolean }
@@ -26,6 +27,7 @@ export const TcpingManage: React.FC = () => {
   return <main className="tcp-lab"><div className="tcp-manage"><header className="tcp-top"><a href="/" className="tcp-brand"><ArrowLeft size={18} />监控后台</a><a href="/tcping" target="_blank" rel="noopener noreferrer">查看公开页面 <ArrowUpRight size={15} style={{ display: 'inline' }} /></a></header><h1>公开测速配置</h1><p>公开页面展示已发布的 VPS 名称、地区、测试结果和商品链接。内部节点身份、监控数据和经营数据不会出现在公开页面。来源绑定稳定节点身份，不能通过改名绕过冷却。</p>
     {error && <div className="tcp-message tcp-error" role="alert">{error}</div>}{message && <div className="tcp-message" role="status">{message}</div>}
     <div className="tcp-console"><div className="tcp-selected"><strong>新测试：{data?.enabled ? '已开启' : '已暂停'}</strong><small>暂停会取消进行中的任务；已有结果仍可查看。省级冷却 15 分钟，全量/市级 30 分钟；全站最多 2 个并发、每小时 20 个新任务。</small></div><button className="tcp-primary" disabled={busy || !data} onClick={() => perform('/api/v1/tcping/settings', { enabled: !data?.enabled }, '公开测试开关已更新')}>{data?.enabled ? '暂停新测试' : '开启新测试'}</button></div>
+    <GfwProbeManage />
     <section className="tcp-auto-source" aria-label="新主机自动同步" aria-busy={busy}>
       <label htmlFor="tcp-auto-publish"><input id="tcp-auto-publish" type="checkbox" checked={!!data?.auto_publish_new_hosts} disabled={busy || !data} aria-describedby="tcp-auto-publish-help" onChange={e => perform('/api/v1/tcping/settings', { auto_publish_new_hosts: e.target.checked }, e.target.checked ? '自动同步已开启，遗漏主机已补齐' : '自动同步已关闭，现有来源保持不变')} />自动加入新主机</label>
       {busy && <span role="status"><Loader2 className="tcp-spin" size={16} />正在保存…</span>}

@@ -23,12 +23,13 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth, cpu_guard
+    from client import operations as node_operations, security_banner, tcp_probe, gfw_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth, cpu_guard
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 except ImportError:
     import operations as node_operations
     import security_banner
     import tcp_probe
+    import gfw_probe
     import disk_cleanup
     import socks_detector
     import host_security_audit
@@ -9670,6 +9671,11 @@ def process_security_actions(
                          lambda path, payload: signed_post_json(server, secret, path, payload))
     except Exception:
         print("public TCP worker could not be scheduled; normal monitoring continues")
+    try:
+        gfw_probe.handle(response.get("gfw_probe"), host_id, node_id,
+                         lambda path, payload: signed_post_json(server, secret, path, payload))
+    except Exception:
+        print("domestic reachability probe could not be scheduled; normal monitoring continues")
     actions = response.get("actions") if isinstance(response.get("actions"), list) else []
     changed = False
     for action in actions:

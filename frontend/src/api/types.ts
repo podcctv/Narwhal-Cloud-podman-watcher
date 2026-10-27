@@ -273,6 +273,23 @@ export interface SecurityAlert {
 }
 
 export interface SecurityStatusItem {
+  gfw_reachability?: {
+    status?: 'unassessed' | 'normal' | 'blocked' | 'recovered' | 'investigating' | 'stale' | string;
+    last_known_state?: string;
+    stale?: boolean;
+    since?: number;
+    duration_seconds?: number;
+    last_normal_duration_seconds?: number;
+    blocked_count?: number;
+    last_sample_at?: number;
+    last_classification?: string;
+    pending_block_rounds?: number;
+    mainland_sources?: number;
+    overseas_sources?: number;
+    reason?: string;
+    evidence?: Array<{ ip?: string; port?: number; interface?: string; status?: string; mainland?: { success?: number; failed?: number; total?: number }; overseas?: { success?: number; failed?: number; total?: number } }>;
+    history?: Array<{ event_type?: 'blocked' | 'recovered' | string; at?: number; duration_seconds?: number; normal_duration_seconds?: number }>;
+  };
   enabled?: boolean;
   stale?: boolean;
   interval_seconds?: number;
