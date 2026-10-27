@@ -25,6 +25,9 @@ const path = require('node:path');
     await page.getByLabel('用户名', { exact: true }).fill('preview');
     await page.getByLabel('密码', { exact: true }).fill('local-preview-only');
     await page.getByRole('button', { name: '登录控制台' }).click();
+    // The dashboard now keeps healthy host cards collapsed until expanded;
+    // exercise the explicit master toggle before inspecting container detail.
+    await page.getByTitle('展开所有母鸡').click();
     await page.getByText('入站来源观测 5 个样本', { exact: true }).waitFor();
     await page.getByText('synthetic-instance-1', { exact: true }).last().click();
     await page.getByText('已建立连接来源样本', { exact: true }).waitFor();
