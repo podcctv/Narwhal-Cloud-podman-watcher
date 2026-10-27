@@ -166,9 +166,14 @@ if ! command -v podman >/dev/null 2>&1 \
   && ! command -v podman-remote >/dev/null 2>&1 \
   && ! command -v docker >/dev/null 2>&1 \
   && ! command -v incus >/dev/null 2>&1; then
-  echo "No supported runtime found; installing podman as the default runtime..."
-  apt-get update
-  apt-get install -y podman
+  if is_truthy "${NARWHAL_ALLOW_NO_RUNTIME:-0}"; then
+    echo "[INFO] No container runtime found; continuing without installing Podman."
+    echo "[INFO] Set Container runtimes to 'none' when prompted for a host-only probe."
+  else
+    echo "No supported runtime found; installing podman as the default runtime..."
+    apt-get update
+    apt-get install -y podman
+  fi
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then

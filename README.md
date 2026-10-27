@@ -1,6 +1,12 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.108**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.111**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.111：支持不安装容器运行时的主机探针
+
+- Client 安装器新增 `NARWHAL_ALLOW_NO_RUNTIME=1` 开关。没有 Docker、Podman 或 Incus 的主机可继续安装宿主机 Agent，而不自动安装 Podman。
+- 作为连通性探针时，将 `Container runtimes` 设为 `none`，避免采集无关的容器运行时；Agent 仍以宿主机 systemd 服务运行，并使用宿主机网络命名空间执行已签名的 TCP 探测任务。
+- 普通安装默认行为不变：未检测到容器运行时时仍会安装 Podman。
 
 ### v1.7.108：紧凑展示 GFW 状态与容器协议端口
 
