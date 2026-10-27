@@ -175,7 +175,11 @@ def schedule_upgrade(action,node_id):
     script="/opt/narwhal-monitor/managed-client-update.sh"
     if not os.path.isfile(script) or not shutil.which("systemd-run"):
         return False,"managed update requires installed host/systemd agent"
-    args=["systemd-run","--unit",f"narwhal-managed-{int(action.get('id',0))}","--collect","--property=Type=oneshot","--property=TimeoutStartSec=15min","/bin/bash",script]
+    # Hand off to a transient unit without blocking the Agent action loop.
+    args=["systemd-run","--no-block","--unit",f"narwhal-managed-{int(action.get('id',0))}","--collect","--property=Type=oneshot","--property=TimeoutStartSec=15min","/bin/bash",script]
     args += ["rollback",str(int(action.get("id",0)))] if rollback else ["upgrade",revision,version,str(int(action.get("id",0)))]
-    result=subprocess.run(args,capture_output=True,text=True,timeout=10)
+    try:
+        result=subprocess.run(args,capture_output=True,text=True,timeout=10)
+    except (OSError,subprocess.TimeoutExpired):
+        return False,"unable to enqueue managed update; systemd-run failed or timed out"
     return result.returncode==0,"scheduled managed rollback" if rollback else "scheduled immutable upgrade"

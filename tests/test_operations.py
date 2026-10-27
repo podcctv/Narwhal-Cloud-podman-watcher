@@ -386,6 +386,14 @@ class NodeOperationsTests(unittest.TestCase):
             run.return_value.returncode=0
             self.assertTrue(agent_ops.schedule_upgrade(action,"node")[0])
             args=run.call_args.args[0]
+            self.assertIn("--no-block",args)
             self.assertIn("narwhal-managed-17",args)
             self.assertEqual(args[-5:],["/opt/narwhal-monitor/managed-client-update.sh","upgrade","a"*40,"1.7.0","17"])
             self.assertNotIn("shell",run.call_args.kwargs)
+
+    def test_managed_upgrade_reports_enqueue_timeout_without_crashing_agent(self):
+        action={"id":17,"action_type":"managed_upgrade","params":{"expected_node_id":"node","revision":"a"*40,"version":"1.7.0"}}
+        with mock.patch.object(agent_ops.os.path,"isfile",return_value=True),mock.patch.object(agent_ops.shutil,"which",return_value="/bin/systemd-run"),mock.patch.object(agent_ops.subprocess,"run",side_effect=agent_ops.subprocess.TimeoutExpired("systemd-run",10)):
+            ok,message=agent_ops.schedule_upgrade(action,"node")
+        self.assertFalse(ok)
+        self.assertIn("timed out",message)
