@@ -15,6 +15,7 @@ COPY disk_cleanup.py .
 COPY connection_policy.py .
 COPY inbound_assessment.py .
 COPY database_telemetry.py .
+COPY gfw_monitor.py .
 COPY operations.py operations_api.py buyer_notifications.py buyer_mapping.py buyer_content.py investigation.py dashboard_auth.py commerce.py tcping.py ./
 COPY fleet_updates.py ./
 COPY maintain_db.py .

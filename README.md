@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.105**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.106**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.106：修复 GFW 监控服务端模块未进入容器镜像
+
+- 服务端镜像现在包含 `gfw_monitor.py`，修复镜像启动烟测中的模块导入失败，并确保跨区域连通性 API 随 Server 一起发布。
 
 ### v1.7.105：修复 GFW 探测模块的 Agent 更新打包检查
 
