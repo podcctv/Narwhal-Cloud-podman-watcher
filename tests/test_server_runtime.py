@@ -282,7 +282,10 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("api.getLatest(true)", app)
         self.assertIn("!container.alerts?.stale", app)
         self.assertIn("if (container.alerts?.stale)", cards)
-        self.assertIn("containers.filter((c) => !c.alerts?.stale)", cards)
+        self.assertIn(
+            "containers.filter((c) => !c.alerts?.stale && !c.alerts?.host_stale)",
+            cards,
+        )
 
     def test_stable_node_id_merges_a_renamed_host(self):
         now = int(time.time())
