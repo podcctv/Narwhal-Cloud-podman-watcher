@@ -5176,6 +5176,10 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
         queued = 0
         deferred = 0
         network_deferred = 0
+        policy_abuse = policy.get("abuse") if isinstance(policy, dict) else None
+        container_policy_enabled = isinstance(policy_abuse, dict) and any(
+            policy_abuse.get(key) is True for key in ("speedtest", "mining", "bt")
+        )
         for host in hosts:
             host_id = str(host["host_id"])
             node_id = str(host["node_id"] or "")
@@ -5196,6 +5200,10 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
                 queued += 1
             else:
                 deferred += 1
+                if container_policy_enabled:
+                    _targets, target_status = _host_firewall_policy_targets(conn, host_id, policy, now)
+                    if target_status in {"inventory_unavailable", "runtime_not_found", "interface_not_found"}:
+                        network_deferred += 1
         conn.commit()
         return JSONResponse(status_code=202, content={
             "ok": True,
