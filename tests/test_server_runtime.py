@@ -241,7 +241,9 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("http_4xx_rate", client)
         self.assertIn("top_ip_requests_per_second", client)
         self.assertRegex(client, r"host_audit:\s*item\.host_audit")
-        self.assertIn('className="mt-3 w-full min-w-0"', telemetry)
+        self.assertIn('className="mt-3 grid min-w-0 gap-3', telemetry)
+        self.assertIn('className="col-span-full min-w-0"', telemetry)
+        self.assertIn('w-full min-w-0 rounded-xl border p-3', telemetry)
         self.assertIn("怎么处理", telemetry)
         self.assertIn("sudo apt update && sudo apt install --only-upgrade", telemetry)
 
