@@ -8650,7 +8650,7 @@ def _verify_remediation_stopped(
 ) -> Tuple[bool, str]:
     """Re-scan exact executable identities after supervisors have had time to respawn."""
     if not names:
-        return True, "no_process_targets=1"
+        return True, "remaining_processes=0 no_process_targets=1"
     words = " ".join(shlex.quote(value.lower()) for value in names)
     script = (
         "set +f; sleep 1; remaining=0; for proc in /proc/[0-9]*; do "
@@ -8669,6 +8669,38 @@ def _verify_remediation_stopped(
     )
     ok, message = _run_action_command(_runtime_exec_cmd(runtime, name, script, project))
     return bool(ok and re.search(r"\bremaining_processes=0\b", message)), message
+
+
+def _remediation_zero_effect_verified(message: str) -> bool:
+    """Accept an idempotent no-op only when a clean process scan proves absence."""
+    values = {
+        key: int(value)
+        for key, value in re.findall(
+            r"\b(killed_processes|removed_services|removed_configs|removed_binaries|cleanup_errors|matched_processes|signal_errors|host_matched_processes|host_killed_processes|host_kill_errors)=(\d+)\b",
+            message or "",
+        )
+    }
+    changed = sum(
+        values.get(key, 0)
+        for key in ("killed_processes", "removed_services", "removed_configs", "removed_binaries")
+    )
+    errors = sum(values.get(key, 0) for key in ("cleanup_errors", "signal_errors", "host_kill_errors"))
+    no_process_targets = re.search(r"\bno_process_targets=1\b", message or "") is not None
+    process_scan = (
+        ("matched_processes" in values or "host_matched_processes" in values)
+        and not no_process_targets
+    ) or (
+        no_process_targets
+        and re.search(r"\bchecked_configs=[1-9]\d*\b", message or "") is not None
+    )
+    return (
+        changed == 0
+        and errors == 0
+        and "cleanup_errors" in values
+        and "signal_errors" in values
+        and process_scan
+        and re.search(r"\bremaining_processes=0\b", message or "") is not None
+    )
 
 
 def stop_unauthenticated_socks(action: Dict) -> Tuple[bool, str]:
@@ -8960,7 +8992,7 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
     )
     script = (
         "set -u; " + _cleanup_receipt_shell() + "killed_processes=0; removed_services=0; removed_configs=0; "
-        "removed_binaries=0; cleanup_errors=0; "
+        "removed_binaries=0; cleanup_errors=0; matched_processes=0; signal_errors=0; "
         f"for pattern in {names}; do "
         "command -v systemctl >/dev/null 2>&1 && systemctl disable --now \"${pattern}.service\" >/dev/null 2>&1 || true; "
         "for unit_dir in /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system; do "
@@ -8974,15 +9006,17 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
         "exe=$(readlink \"$proc/exe\" 2>/dev/null || true); matched=0; "
         "for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do "
         "candidate=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); [ \"$candidate\" = \"$pattern\" ] && matched=1; done; "
-        "if [ \"$matched\" -eq 1 ]; then if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); nw_receipt process \"$comm:$pid\" ok; "
-        "sleep 1; [ -d \"$proc\" ] && kill -KILL \"$pid\" 2>/dev/null || true; fi; fi; done; done; "
+        "if [ \"$matched\" -eq 1 ]; then matched_processes=$((matched_processes+1)); "
+        "if kill -TERM \"$pid\" 2>/dev/null; then killed_processes=$((killed_processes+1)); nw_receipt process \"$comm:$pid\" ok; "
+        "sleep 1; if [ -d \"$proc\" ] && ! kill -KILL \"$pid\" 2>/dev/null; then signal_errors=$((signal_errors+1)); nw_receipt process \"$comm:$pid\" failed; fi; "
+        "else signal_errors=$((signal_errors+1)); nw_receipt process \"$comm:$pid\" failed; fi; fi; done; done; "
         f"for path in {config_paths}; do [ -e \"$path\" ] || [ -L \"$path\" ] || continue; "
         "if rm -f -- \"$path\"; then removed_configs=$((removed_configs+1)); nw_receipt config \"$path\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt config \"$path\" failed; fi; done; "
         f"for path in {binary_paths}; do [ -e \"$path\" ] || [ -L \"$path\" ] || continue; "
         "if rm -f -- \"$path\"; then removed_binaries=$((removed_binaries+1)); nw_receipt binary \"$path\" ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt binary \"$path\" failed; fi; done; "
         "command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true; "
-        "printf 'killed_processes=%s removed_services=%s removed_configs=%s removed_binaries=%s cleanup_errors=%s\\n' "
-        "\"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$removed_binaries\" \"$cleanup_errors\"; "
+        "printf 'killed_processes=%s removed_services=%s removed_configs=%s removed_binaries=%s cleanup_errors=%s matched_processes=%s signal_errors=%s\\n' "
+        "\"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$removed_binaries\" \"$cleanup_errors\" \"$matched_processes\" \"$signal_errors\"; "
         "changes=$((killed_processes+removed_services+removed_configs+removed_binaries)); "
         "[ \"$cleanup_errors\" -eq 0 ] && [ \"$changes\" -gt 0 ]"
     )
@@ -8992,33 +9026,52 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
     counts = {
         key: int(value)
         for key, value in re.findall(
-            r"\b(killed_processes|removed_services|removed_configs|removed_binaries|cleanup_errors)=(\d+)\b",
+            r"\b(killed_processes|removed_services|removed_configs|removed_binaries|cleanup_errors|matched_processes|signal_errors)=(\d+)\b",
             output or "",
         )
     }
     if runtime_kind == "incus":
-        _, host_killed, host_errors, host_output = _incus_host_namespace_kill(
+        host_matched, host_killed, host_errors, host_output = _incus_host_namespace_kill(
             runtime_bin, container_name, project, process_names
         )
         counts["killed_processes"] = counts.get("killed_processes", 0) + host_killed
         counts["cleanup_errors"] = counts.get("cleanup_errors", 0) + host_errors
-        changes = sum(
-            counts.get(key, 0)
-            for key in (
-                "killed_processes",
-                "removed_services",
-                "removed_configs",
-                "removed_binaries",
-            )
-        )
+        counts["host_matched_processes"] = host_matched
+        counts["host_killed_processes"] = host_killed
+        counts["host_kill_errors"] = host_errors
         output = (
             f"killed_processes={counts.get('killed_processes', 0)} "
             f"removed_services={counts.get('removed_services', 0)} "
             f"removed_configs={counts.get('removed_configs', 0)} "
             f"removed_binaries={counts.get('removed_binaries', 0)} "
-            f"cleanup_errors={counts.get('cleanup_errors', 0)}; {_cleanup_marker_text(output)}; {host_output}"
+            f"cleanup_errors={counts.get('cleanup_errors', 0)} "
+            f"matched_processes={counts.get('matched_processes', 0)} "
+            f"signal_errors={counts.get('signal_errors', 0)} "
+            f"host_matched_processes={host_matched} host_killed_processes={host_killed} "
+            f"host_kill_errors={host_errors}; {_cleanup_marker_text(output)}; {host_output}"
         )
-        ok = counts.get("cleanup_errors", 0) == 0 and changes > 0
+    verified, verification = _verify_remediation_stopped(
+        runtime_bin, container_name, project, process_names, include_supervisors=True
+    )
+    output = (output or "") + "; " + verification
+    changes = sum(
+        counts.get(key, 0)
+        for key in ("killed_processes", "removed_services", "removed_configs", "removed_binaries")
+    )
+    signal_errors = counts.get("signal_errors", 0)
+    host_killed = counts.get("host_killed_processes", 0)
+    host_errors = counts.get("host_kill_errors", 0)
+    signal_recovered = signal_errors == 0 or (
+        runtime_kind == "incus"
+        and host_killed >= signal_errors
+        and host_errors == 0
+        and verified
+    )
+    errors = counts.get("cleanup_errors", 0) + host_errors + (0 if signal_recovered else signal_errors)
+    already_absent = _remediation_zero_effect_verified(output)
+    ok = verified and errors == 0 and (changes > 0 or already_absent)
+    if already_absent:
+        output = "target_state=already_absent; " + output
     return ok, output or ("malware remediation completed" if ok else "malware remediation failed")
 
 
@@ -9070,6 +9123,7 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
         "removed_configs=0",
         "killed_processes=0",
         "cleanup_errors=0",
+        "checked_configs=0",
         "matched_processes=0",
         "signal_errors=0",
     ]
@@ -9148,14 +9202,14 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     for config_file in config_files:
         quoted_file = shlex.quote(config_file)
         script_parts.append(
-            f"if [ -f {quoted_file} ] || [ -L {quoted_file} ]; then "
+            f"checked_configs=$((checked_configs+1)); if [ -f {quoted_file} ] || [ -L {quoted_file} ]; then "
             f"if rm -f -- {quoted_file}; then removed_configs=$((removed_configs+1)); nw_receipt config {quoted_file} ok; "
             f"else cleanup_errors=$((cleanup_errors+1)); nw_receipt config {quoted_file} failed; fi; fi"
         )
     script_parts.extend(
         [
             "command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true",
-            "printf 'killed_processes=%s removed_services=%s removed_configs=%s cleanup_errors=%s matched_processes=%s signal_errors=%s\\n' \"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$cleanup_errors\" \"$matched_processes\" \"$signal_errors\"",
+            "printf 'killed_processes=%s removed_services=%s removed_configs=%s cleanup_errors=%s matched_processes=%s signal_errors=%s checked_configs=%s\\n' \"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$cleanup_errors\" \"$matched_processes\" \"$signal_errors\" \"$checked_configs\"",
             "changes=$((killed_processes+removed_services+removed_configs))",
             "[ \"$cleanup_errors\" -eq 0 ] && [ \"$changes\" -gt 0 ]",
         ]
@@ -9173,29 +9227,44 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
         )
     }
     if runtime_kind == "incus" and patterns:
-        _, host_killed, host_errors, host_output = _incus_host_namespace_kill(
+        host_matched, host_killed, host_errors, host_output = _incus_host_namespace_kill(
             runtime_bin, container_name, project, patterns, process_pids
         )
-        output = (output or "") + "; " + host_output
-        if host_killed or host_errors:
-            counts["killed_processes"] = counts.get("killed_processes", 0) + host_killed
-            counts["cleanup_errors"] = counts.get("cleanup_errors", 0) + host_errors
-            output = (
-                f"killed_processes={counts.get('killed_processes', 0)} "
-                f"removed_services={counts.get('removed_services', 0)} "
-                f"removed_configs={counts.get('removed_configs', 0)} "
-                f"cleanup_errors={counts.get('cleanup_errors', 0)} "
-                f"matched_processes={counts.get('matched_processes', 0)} "
-                f"signal_errors={counts.get('signal_errors', 0)}; {_cleanup_marker_text(output)}; {host_output}"
-            )
-            changes = sum(counts.get(key, 0) for key in ("killed_processes", "removed_services", "removed_configs"))
-            ok = counts.get("cleanup_errors", 0) == 0 and changes > 0
+        counts["killed_processes"] = counts.get("killed_processes", 0) + host_killed
+        counts["cleanup_errors"] = counts.get("cleanup_errors", 0) + host_errors
+        counts["host_matched_processes"] = host_matched
+        counts["host_killed_processes"] = host_killed
+        counts["host_kill_errors"] = host_errors
+        output = (
+            f"killed_processes={counts.get('killed_processes', 0)} "
+            f"removed_services={counts.get('removed_services', 0)} "
+            f"removed_configs={counts.get('removed_configs', 0)} "
+            f"cleanup_errors={counts.get('cleanup_errors', 0)} "
+            f"matched_processes={counts.get('matched_processes', 0)} "
+            f"signal_errors={counts.get('signal_errors', 0)} "
+            f"host_matched_processes={host_matched} host_killed_processes={host_killed} "
+            f"host_kill_errors={host_errors}; {_cleanup_marker_text(output)}; {host_output}"
+        )
     if patterns:
         verified, verification = _verify_remediation_stopped(
             runtime_bin, container_name, project, patterns, include_supervisors=True
         )
-        ok = ok and verified
         output = (output or "") + "; " + verification
+        changes = sum(counts.get(key, 0) for key in ("killed_processes", "removed_services", "removed_configs"))
+        signal_errors = counts.get("signal_errors", 0)
+        host_killed = counts.get("host_killed_processes", 0)
+        host_errors = counts.get("host_kill_errors", 0)
+        signal_recovered = signal_errors == 0 or (
+            runtime_kind == "incus"
+            and host_killed >= signal_errors
+            and host_errors == 0
+            and verified
+        )
+        errors = counts.get("cleanup_errors", 0) + host_errors + (0 if signal_recovered else signal_errors)
+        already_absent = _remediation_zero_effect_verified(output)
+        ok = verified and errors == 0 and (changes > 0 or already_absent)
+        if already_absent:
+            output = "target_state=already_absent; " + output
     return ok, output or ("remediation completed" if ok else "remediation command failed")
 
 

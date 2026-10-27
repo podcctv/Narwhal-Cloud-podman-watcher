@@ -3921,16 +3921,61 @@ def _remediation_changed(message: str) -> bool:
     counts = {
         key: int(value)
         for key, value in re.findall(
-            r"\b(killed_processes|removed_services|removed_configs|removed_binaries|cleanup_errors)=(\d+)\b",
+            r"\b(killed_processes|removed_services|removed_configs|removed_binaries|cleanup_errors|matched_processes|signal_errors|host_matched_processes|host_killed_processes|host_kill_errors|checked_configs)=(\d+)\b",
             message,
         )
     }
-    return counts.get("cleanup_errors", 0) == 0 and sum(
+    no_process_targets = re.search(r"\bno_process_targets=1\b", message) is not None
+    process_scan = (
+        ("matched_processes" in counts or "host_matched_processes" in counts)
+        and not no_process_targets
+    ) or (no_process_targets and counts.get("checked_configs", 0) > 0)
+    remaining_zero = re.search(r"\bremaining_processes=0\b", message) is not None
+    if (
+        "cleanup_errors" not in counts
+        or "signal_errors" not in counts
+        or not process_scan
+        or not remaining_zero
+    ):
+        return False
+    cleanup_errors = counts.get("cleanup_errors", 0)
+    signal_errors = counts.get("signal_errors", 0)
+    host_killed = counts.get("host_killed_processes", 0)
+    host_matched = counts.get("host_matched_processes", 0)
+    host_errors = counts.get("host_kill_errors", 0)
+    signal_recovered = signal_errors == 0 or (
+        "host_matched_processes" in counts
+        and "host_killed_processes" in counts
+        and "host_kill_errors" in counts
+        and host_matched >= signal_errors
+        and host_killed >= signal_errors
+        and host_errors == 0
+        and remaining_zero
+    )
+    errors = cleanup_errors + host_errors + (0 if signal_recovered else signal_errors)
+    changed = sum(
         counts.get(key, 0)
         for key in (
             "killed_processes", "removed_services", "removed_configs", "removed_binaries"
         )
     ) > 0
+    if errors > 0:
+        return False
+    if changed:
+        return True
+    no_process_targets = re.search(r"\bno_process_targets=1\b", message) is not None
+    process_scan = (
+        ("matched_processes" in counts or "host_matched_processes" in counts)
+        and not no_process_targets
+    ) or (no_process_targets and counts.get("checked_configs", 0) > 0)
+    return (
+        process_scan
+        and "cleanup_errors" in counts
+        and counts["cleanup_errors"] == 0
+        and "signal_errors" in counts
+        and counts["signal_errors"] == 0
+        and remaining_zero
+    )
 
 
 def _alert_details(raw: str) -> Dict[str, Any]:
@@ -5414,13 +5459,22 @@ async def security_action_result(
         params = json.loads(row["params_json"] or "{}")
         if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
-        if (
-            status == "succeeded"
-            and row["action_type"] in ("remediate_panel_pairing", "remediate_malicious_process")
-            and not _remediation_changed(message)
-        ):
-            status = "failed"
-            message = f"no matching process, service or config was removed; {message}"[:2000]
+        if row["action_type"] in ("remediate_panel_pairing", "remediate_malicious_process") and status in {"succeeded", "failed"}:
+            if _remediation_changed(message):
+                if not any(
+                    int(value) > 0
+                    for value in re.findall(
+                        r"\b(?:killed_processes|removed_services|removed_configs|removed_binaries)=(\d+)\b",
+                        message,
+                    )
+                ):
+                    status = "succeeded"
+                    if "target_state=already_absent" not in message:
+                        message = f"target_state=already_absent; target process verified absent, no repeated cleanup needed; {message}"
+                    message = message[:2000]
+            elif status == "succeeded":
+                status = "failed"
+                message = f"remediation could not be verified; no process, service or config change was confirmed; {message}"[:2000]
         if row["status"] not in ("succeeded", "failed"):
             if row['action_type'] in disk_cleanup.TYPES:
                 disk_cleanup.record(conn,host_id,node_id,payload.get('cleanup_run'))
@@ -6147,17 +6201,39 @@ function escapeHtml(value){
 const alertsById=new Map();
 const submittingAlertActions=new Set();
 function remediationChanged(action){
+  if(!action||!['remediate_panel_pairing','remediate_malicious_process'].includes(action.action_type)||action.status!=='succeeded'||!remediationReceipt(action))return false;
+  const text=String(action.result_message||'');
+  const values=[...text.matchAll(/\\b(?:killed_processes|removed_services|removed_configs|removed_binaries)=(\\d+)\\b/g)].map(x=>Number(x[1]||0));
+  return values.some(x=>x>0);
+}
+function remediationReceipt(action){
+  const text=String(action?.result_message||'');
+  const has=key=>new RegExp('\\\\b'+key+'=\\\\d+\\\\b').test(text);
+  const count=key=>Number((text.match(new RegExp('\\\\b'+key+'=(\\\\d+)\\\\b'))||[])[1]||0);
+  const noProcessTargets=/\\bno_process_targets=1\\b/.test(text);
+  const hasProcessScan=(has('matched_processes')||has('host_matched_processes'))&&!noProcessTargets;
+  const hasConfigScan=noProcessTargets&&count('checked_configs')>0;
+  if(!has('cleanup_errors')||!has('signal_errors')||(!hasProcessScan&&!hasConfigScan)||!/\\bremaining_processes=0\\b/.test(text))return false;
+  const signalErrors=count('signal_errors'),hostMatched=count('host_matched_processes'),hostKilled=count('host_killed_processes'),hostErrors=count('host_kill_errors');
+  const signalRecovered=signalErrors===0||(has('host_matched_processes')&&has('host_killed_processes')&&has('host_kill_errors')&&hostMatched>=signalErrors&&hostKilled>=signalErrors&&hostErrors===0);
+  return count('cleanup_errors')===0&&hostErrors===0&&signalRecovered;
+}
+function remediationComplete(action){
   if(!action||!['remediate_panel_pairing','remediate_malicious_process'].includes(action.action_type)||action.status!=='succeeded')return false;
   const text=String(action.result_message||'');
-  const values=[...text.matchAll(/\\b(?:killed_processes|removed_services|removed_configs)=(\\d+)\\b/g)].map(x=>Number(x[1]||0));
-  return values.some(x=>x>0)&&!/\\bcleanup_errors=[1-9]\\d*\\b/.test(text);
+  if(!remediationReceipt(action))return false;
+  if(remediationChanged(action))return true;
+  return /\\btarget_state=already_absent\\b/.test(text)||/\\b(?:matched_processes|host_matched_processes)=0\\b/.test(text)||/\\bchecked_configs=\\d+\\b/.test(text);
 }
 function actionStatusText(action){
   if(!action)return '';
   if(action.status==='queued')return '等待节点领取（正常情况下约 10 秒内）';
   if(action.status==='dispatched')return action.action_type==='enforce_socks_auth'?'节点已领取，正在停止无认证 SOCKS':(action.action_type==='release_socks_auth'?'节点已领取，正在解除 SOCKS 持续拦截':'节点已领取，正在执行清理');
-  if(action.action_type==='remediate_panel_pairing'&&action.status==='succeeded'&&!remediationChanged(action)){
-    return `未清理到目标：${action.result_message||'节点未找到匹配的进程、服务或配置'}`;
+  if(['remediate_panel_pairing','remediate_malicious_process'].includes(action.action_type)&&action.status==='succeeded'&&!remediationChanged(action)&&remediationComplete(action)){
+    return '目标进程已复查为不在运行，本次无需重复清理；等待后续采样确认。';
+  }
+  if(['remediate_panel_pairing','remediate_malicious_process'].includes(action.action_type)&&action.status==='succeeded'&&!remediationComplete(action)){
+    return `处置结果未验证：${action.result_message||'节点未确认目标进程已停止'}`;
   }
   const labels={succeeded:'已完成',failed:'失败'};
   const result=action.result_message?`：${action.result_message}`:'';
@@ -6229,8 +6305,9 @@ async function loadAlerts(){
     const lastRemediation=['remediate_panel_pairing','remediate_malicious_process'].includes(alert.latest_action?.action_type)?alert.latest_action:null;
     const lastSocksEnforcement=alert.latest_action?.action_type==='enforce_socks_auth'?alert.latest_action:null;
     const changed=remediationChanged(lastRemediation);
-    const recurred=changed&&Number(alert.last_seen||0)>Number(lastRemediation?.updated_at||0);
-    const denyLabel=pending?'禁止处理中':((lastRemediation&&(lastRemediation.status==='failed'||!changed))?'重试禁止':(recurred?'再次禁止':'禁止'));
+    const completed=remediationComplete(lastRemediation);
+    const recurred=completed&&Number(alert.last_seen||0)>Number(lastRemediation?.updated_at||0);
+    const denyLabel=pending?'禁止处理中':((lastRemediation&&(lastRemediation.status==='failed'||!completed))?'重试禁止':(recurred?'再次禁止':'禁止'));
     const socksPolicyActive=lastSocksEnforcement?.status==='succeeded'&&['no_auth','weak_password'].includes(alert.details?.socks_auth_mode);
     const socksReleased=alert.details?.socks_auth_enforcement?.released===true;
     let denyControl='';
@@ -6238,7 +6315,7 @@ async function loadAlerts(){
       const socksLabel=pending?'正在启用持续拦截':(lastSocksEnforcement?.status==='failed'?'重试停止并持续拦截':'停止并持续拦截');
       denyControl=socksPolicyActive?`<span class='ok'>持续拦截已启用</span>`:`<button class='btn btn-danger' data-alert-action="${Number(alert.id)}" ${pending?'disabled':''} onclick="setAlertDisposition(${Number(alert.id)},'deny')">${socksLabel}</button>`;
     }else if(canPanelRemediate||canMaliciousRemediate){
-      denyControl=changed&&!recurred?`<span class='ok'>已禁止，等待复检</span>`:`<button class='btn btn-danger' data-alert-action="${Number(alert.id)}" ${pending?'disabled':''} onclick="setAlertDisposition(${Number(alert.id)},'deny')">${denyLabel}</button>`;
+      denyControl=completed&&!recurred?`<span class='ok'>${changed?'已处置，等待复检':'目标进程已不存在，等待复检'}</span>`:`<button class='btn btn-danger' data-alert-action="${Number(alert.id)}" ${pending?'disabled':''} onclick="setAlertDisposition(${Number(alert.id)},'deny')">${denyLabel}</button>`;
     }else if(socksReleased){denyControl=`<span class='ok'>已检测到非空认证，持续拦截已解除</span>`;}
     const allowLabel=socksPolicyActive?'解除拦截并允许（不再提醒）':'允许且不再提醒';
     const dismissLabel=socksPolicyActive?'仅隐藏本次告警（保留拦截）':'本次取消提醒';

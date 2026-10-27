@@ -1021,7 +1021,11 @@ class SecurityTelemetryTests(unittest.TestCase):
             agent, "get_runtime_bins", return_value={"incus": "incus"}
         ), mock.patch.object(
             agent, "_incus_host_namespace_kill", return_value=(0, 0, 0, "")
-        ), mock.patch.object(agent, "_run_action_command", return_value=(True, "remaining_processes=0")) as runner:
+        ), mock.patch.object(
+            agent,
+            "_run_action_command",
+            return_value=(True, "killed_processes=0 removed_services=0 removed_configs=0 cleanup_errors=0 matched_processes=0 signal_errors=0 remaining_processes=0"),
+        ) as runner:
             ok, _ = agent.remediate_panel_pairing(action)
         self.assertTrue(ok)
         command = runner.call_args_list[0].args[0]
@@ -1074,7 +1078,9 @@ class SecurityTelemetryTests(unittest.TestCase):
         ), mock.patch.object(
             agent, "_incus_host_namespace_kill", return_value=(0, 0, 0, "")
         ), mock.patch.object(
-            agent, "_run_action_command", return_value=(True, "remaining_processes=0")
+            agent,
+            "_run_action_command",
+            return_value=(True, "killed_processes=0 removed_services=0 removed_configs=0 cleanup_errors=0 matched_processes=0 signal_errors=0 remaining_processes=0"),
         ) as runner, tempfile.TemporaryDirectory() as tmp:
             ok, _ = agent.remediate_panel_pairing(action)
             script = runner.call_args_list[0].args[0][-1]
