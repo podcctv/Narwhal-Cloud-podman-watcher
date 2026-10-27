@@ -85,3 +85,32 @@ class FleetTests(unittest.TestCase):
         self.c.execute("UPDATE ops_hosts SET payload=? WHERE host_id='canary'",(json.dumps({'managed_upgrade':True,'health':[{'source':'security','status':'failed'}]}),)); self.c.commit()
         self.tick(1130)
         self.assertEqual(len(self.actions()),1)
+
+    def test_automatic_campaign_replaces_offline_canary_without_bypassing_soak(self):
+        self.tick()
+        original = self.actions()[0]
+        self.assertEqual(original['host_id'], 'canary')
+
+        # The first node has stopped reporting; another node has fresh host
+        # and operations samples. Once the original action times out, it must
+        # no longer hold the other eligible nodes behind the canary gate.
+        now = 2801
+        self.c.execute("UPDATE hosts SET last_seen=? WHERE host_id='old'", (now,))
+        self.c.execute("UPDATE ops_hosts SET ts=? WHERE host_id='old'", (now,))
+        self.c.commit()
+        fleet.reconcile(self.c, '1.7.47', 'a'*40, now)
+
+        campaign = self.c.execute('SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 1').fetchone()
+        metadata = json.loads(campaign['payload'])
+        self.assertEqual(campaign['status'], 'canary')
+        self.assertEqual(metadata['canary'], 'old')
+        self.assertEqual(metadata['canary_history'][-1]['from'], 'canary')
+        self.assertEqual(metadata['canary_history'][-1]['to'], 'old')
+        self.assertEqual(len(self.actions()), 2)
+        self.assertEqual(self.actions()[1]['host_id'], 'old')
+        self.assertEqual(self.actions()[1]['status'], 'queued')
+        self.assertEqual(self.c.execute("SELECT status FROM ops_upgrade_nodes WHERE campaign=? AND host_id='canary'", (campaign['id'],)).fetchone()[0], 'failed')
+
+        # A new canary still must report the target build and pass its soak
+        # checks before rollout actions are sent to the rest of the fleet.
+        self.assertEqual(sum(a['status'] == 'queued' for a in self.actions()), 1)

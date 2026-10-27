@@ -610,7 +610,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <ul className="mt-2 space-y-1.5 text-xs leading-5 text-amber-100/80">
               <li>RFW 原生规则作用于母机 RFW 接口，可能影响这台母机上的所有业务和容器。</li>
               <li>下方三项防滥用规则只匹配容器转发流量，不改宿主机 INPUT/OUTPUT；本地手工 RFW 规则不由本页面删除或覆盖。</li>
-              <li>Incus 与系统防火墙可能相互影响；本页只管理已登记的 RFW 规则，不清空其他防火墙规则。应用后请核对节点读回与网络状态。</li>
+              <li>本页只配置并核验经 Agent/RFW 接口登记的规则；不会管理 UFW、nftables、iptables、firewalld、云厂商安全组或其他独立防火墙，因此不能代表宿主机全部防火墙配置。</li>
+              <li>Incus 与系统防火墙可能相互影响；本地手工 RFW 规则需逐条确认后才可删除。应用后请核对节点读回与实际网络状态。</li>
               <li>未启用进程强杀、容器文件陷阱、内核参数修改或任意脚本执行。</li>
             </ul>
           </div>

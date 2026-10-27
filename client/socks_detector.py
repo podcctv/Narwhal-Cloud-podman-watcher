@@ -339,9 +339,17 @@ def process_configs(output):
         if process not in FAMILIES | {'danted', 'sockd', '3proxy'} or not tokens or posixpath.basename(tokens[0]).lower() != process:
             continue
         paths = []
+        config_dirs = []
         unparsed_config_path = False
         for index, token in enumerate(tokens):
             value = ''
+            if token in {'-confdir', '--config-dir'} and index + 1 < len(tokens):
+                directory = tokens[index + 1]
+                if (re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', directory)
+                        and '..' not in directory.split('/')):
+                    config_dirs.append(directory.rstrip('/') or '/')
+                else:
+                    unparsed_config_path = True
             if token in {'-c', '-C', '-f', '-config', '--config', '-conf', '--config-file'} and index + 1 < len(tokens):
                 value = tokens[index + 1]
             elif token.startswith(('--config=', '-config=', '--config-file=')):
@@ -355,15 +363,17 @@ def process_configs(output):
                     unparsed_config_path = True
         if process == '3proxy':
             paths += [t for t in tokens[1:] if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}\.cfg', t) and '..' not in t.split('/')]
-        if not paths and not any(t.startswith(('-c', '-C', '-f', '--config', '-config', '-confdir')) for t in tokens):
+        if not paths and not config_dirs and not any(t.startswith(('-c', '-C', '-f', '--config', '-config', '-confdir')) for t in tokens):
             paths = {'danted': ['/etc/danted.conf'], 'sockd': ['/etc/sockd.conf'],
                      '3proxy': ['/etc/3proxy/3proxy.cfg'], 'gost': ['/etc/gost/config.json', '/etc/gost/config.yaml']}.get(process, [f'/etc/{process}/config.json'])
-        elif not paths:
+        elif not paths and not config_dirs:
             unparsed_config_path = True
         unique_paths = list(dict.fromkeys(paths))
-        rows.append({'pid': int(parts[0]), 'process': process, 'paths': unique_paths[:4],
-                     'additional_configs': (any(t.startswith(('-confdir', '--config-dir')) for t in tokens)
-                                            or unparsed_config_path or len(unique_paths) > 4)})
+        unique_dirs = list(dict.fromkeys(config_dirs))
+        rows.append({'pid': int(parts[0]), 'process': process, 'paths': unique_paths[:16],
+                     'config_dirs': unique_dirs[:4],
+                     'additional_configs': (unparsed_config_path or len(unique_paths) > 16
+                                            or len(unique_dirs) > 4)})
         if len(rows) >= 8:
             break
     return rows

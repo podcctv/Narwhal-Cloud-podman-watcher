@@ -101,6 +101,79 @@ def reconcile(conn, version, revision, now=None):
                 conn.commit()
                 return
             meta['retry_at'].setdefault(n['host_id'], now + 300 * 2**min(3, meta['attempts'].get(n['host_id'], 1)-1))
+    # An automatic rollout must not wait forever for a canary that stopped
+    # reporting. Keep retrying a live canary (and keep the existing three
+    # attempt safety budget), but transfer the canary role when its enrollment
+    # is no longer eligible or its latest host/operations sample is stale.
+    # The old node remains in the campaign and can be retried during rollout
+    # if it returns; no host hold or health gate is bypassed.
+    canary_host = str(meta.get('canary') or '')
+    canary_row = conn.execute(
+        'SELECT status FROM ops_upgrade_nodes WHERE campaign=? AND host_id=?',
+        (ident, canary_host),
+    ).fetchone()
+    current_canary = eligible.get(canary_host)
+    canary_fresh = bool(
+        current_canary
+        and now - int(current_canary['last_seen'] or 0) <= 900
+        and 0 <= now - int(current_canary['ops_ts'] or 0) <= 900
+        and canary_host not in cfg['holds']
+    )
+    if (
+        meta.get('automatic') is True
+        and campaign['status'] == 'canary'
+        and not (canary_row and canary_row['status'] == 'verified')
+        and not canary_fresh
+    ):
+        node_rows = {
+            row['host_id']: row['status']
+            for row in conn.execute(
+                'SELECT host_id,status FROM ops_upgrade_nodes WHERE campaign=?',
+                (ident,),
+            ).fetchall()
+        }
+        replacements = []
+        for host, candidate in eligible.items():
+            status = node_rows.get(host)
+            if host == canary_host or status != 'pending':
+                continue
+            if now - int(candidate['last_seen'] or 0) > 900 or not 0 <= now - int(candidate['ops_ts'] or 0) <= 900:
+                continue
+            if not re.fullmatch(r'\d+\.\d+\.\d+', candidate['agent_version'] or ''):
+                continue
+            if tuple(map(int, candidate['agent_version'].split('.'))) >= tuple(map(int, version.split('.'))):
+                continue
+            if meta.get('nodes', {}).get(host, candidate['node_id']) != candidate['node_id']:
+                continue
+            if meta.get('attempts', {}).get(host, 0) >= 3:
+                continue
+            replacements.append(candidate)
+        replacements.sort(
+            key=lambda h: (
+                tuple(map(int, h['agent_version'].split('.'))),
+                int(h['last_seen'] or 0),
+                h['host_id'],
+            ),
+            reverse=True,
+        )
+        if replacements:
+            replacement = replacements[0]
+            history = meta.setdefault('canary_history', [])
+            history.append({
+                'from': canary_host,
+                'to': replacement['host_id'],
+                'at': now,
+                'reason': 'previous canary is offline or its operational sample is stale',
+            })
+            meta['canary'] = replacement['host_id']
+            canary_host = replacement['host_id']
+            # Preserve the failed/offline node's retry timer, but do not let
+            # it keep the new canary's explanatory state or rollout gate.
+            save(conn, {**cfg, 'last_checked': now, 'target_version': version,
+                        'campaign': ident, 'error': ''})
+        elif not canary_fresh:
+            save(conn, {**cfg, 'last_checked': now, 'target_version': version,
+                        'campaign': ident, 'error': '灰度节点已离线；等待有新鲜上报的候选节点'})
     canary = conn.execute('SELECT n.status,a.updated_at FROM ops_upgrade_nodes n LEFT JOIN security_actions a ON a.id=n.action_id WHERE n.campaign=? AND n.host_id=?', (ident, meta['canary'])).fetchone()
     h = eligible.get(meta['canary'])
     promote = bool(canary and canary['status'] == 'verified' and h and h['agent_version'] == version and 0<=now-h['ops_ts']<=900 and canary['updated_at'] and now>=canary['updated_at']+120 and h['ops_ts'] >= canary['updated_at']+120)

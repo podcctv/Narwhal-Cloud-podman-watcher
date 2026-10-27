@@ -405,6 +405,28 @@ export interface HostFirewallInterfaceInventory {
   interfaces: HostFirewallInterface[];
 }
 
+export interface ManualBandwidthLimit {
+  scope: 'host' | 'container';
+  interface?: string;
+  runtime?: 'incus' | 'podman';
+  project?: string;
+  container_name?: string;
+  container_id?: string;
+  upload_mbps: number;
+  download_mbps: number;
+}
+
+export interface ManualBandwidthLimitResponse {
+  host_id: string;
+  expected_node_id: string;
+  host_online: boolean;
+  sample_at: number;
+  interfaces: Array<{ name: string; kind: string; state: string; is_default_route: boolean }>;
+  containers: Array<{ runtime: 'incus' | 'podman'; project: string; container_name: string; container_id: string }>;
+  policy: { schema: 1; revision: number; limits: ManualBandwidthLimit[] };
+  reported: { revision?: number; state?: string; items?: Array<Record<string, unknown>>; message?: string };
+}
+
 export interface HostFirewallLiveRule {
   id: number;
   priority: number;

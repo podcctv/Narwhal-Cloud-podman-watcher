@@ -28,6 +28,7 @@ import { ContainerCardCompact } from './ContainerCardCompact';
 import { ContainerTableView } from './ContainerTableView';
 import { HostDiskPressure, hostDiskPressure } from './HostDiskPressure';
 import { AdmissionStatus } from '../container/AdmissionStatus';
+import { HostBandwidthPanel } from './HostBandwidthPanel';
 
 interface HostContainerListProps {
   containers: ContainerItem[];
@@ -280,12 +281,11 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     });
   }, [hostMap, activeAlerts]);
 
-  // Host accordion state: default expanded so users immediately see content
+  // Keep fleet lists compact; expand only hosts with an active finding by default.
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>(() => {
-    const init: Record<string, boolean> = {};
-    Object.keys(hostMap).forEach((h) => (init[h] = true));
-    return init;
+    return {};
   });
+  const [bandwidthOpenHosts, setBandwidthOpenHosts] = useState<Record<string, boolean>>({});
 
   // Keep expandedHosts in sync with new hosts
   useEffect(() => {
@@ -294,13 +294,25 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
       const next = { ...prev };
       hostIds.forEach((h) => {
         if (next[h] === undefined) {
-          next[h] = true;
+          next[h] = (hostMap[h] || []).some((container) => evaluateContainerRisk(container, activeAlerts).hasRisk);
           changed = true;
         }
       });
       return changed ? next : prev;
     });
-  }, [hostIds]);
+  }, [hostIds, hostMap, activeAlerts]);
+
+  useEffect(() => {
+    if (!searchQuery.trim()) return;
+    const query = searchQuery.trim().toLowerCase();
+    const matches = hostIds.filter((hostId) => (hostMap[hostId] || []).some((container) =>
+      container.container_name.toLowerCase().includes(query)
+      || hostId.toLowerCase().includes(query)
+      || container.runtime.toLowerCase().includes(query)
+      || (container.project || '').toLowerCase().includes(query)
+    ));
+    if (matches.length) setExpandedHosts((previous) => ({ ...previous, ...Object.fromEntries(matches.map((hostId) => [hostId, true])) }));
+  }, [searchQuery, hostIds, hostMap]);
 
   const toggleHost = (hostId: string) => {
     setExpandedHosts((prev) => ({ ...prev, [hostId]: !prev[hostId] }));
@@ -537,6 +549,11 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
               {/* Sub-container Canvas Area */}
               {isExpanded && (
                 <div id={`host-containers-${hostId}`} className="bg-slate-950/70 p-3">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] text-slate-400">先看主机汇总；需要时展开容器明细或设置本机限速。</p>
+                    <button type="button" onClick={() => setBandwidthOpenHosts((current) => ({ ...current, [hostId]: !current[hostId] }))} aria-expanded={Boolean(bandwidthOpenHosts[hostId])} className="min-h-9 rounded-lg border border-sky-800 bg-sky-950/40 px-3 text-xs text-sky-200 hover:bg-sky-900/50">{bandwidthOpenHosts[hostId] ? '收起限速配置' : '主机 / 容器限速'}</button>
+                  </div>
+                  {bandwidthOpenHosts[hostId] && <div className="mb-3"><HostBandwidthPanel hostId={hostId} containers={hostContainers} onToast={onToast} onRefresh={onRefresh} onClose={() => setBandwidthOpenHosts((current) => ({ ...current, [hostId]: false }))} /></div>}
                   {filteredContainers.length === 0 ? (
                     <div className="flex items-center justify-center gap-2 py-6 text-xs text-slate-500 border border-dashed border-slate-800/80 rounded-xl">
                       <FilterX className="h-4 w-4 text-slate-600" />

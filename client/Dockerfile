@@ -17,5 +17,6 @@ COPY tcp_probe.py .
 COPY socks_detector.py .
 COPY host_security_audit.py .
 COPY vmess_guard.py .
+COPY manual_bandwidth.py .
 
 CMD ["python", "agent.py"]

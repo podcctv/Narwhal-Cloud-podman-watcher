@@ -14,6 +14,8 @@ import {
   FleetFirewallPolicyResponse,
   HostFirewallRule,
   HostFirewallAbusePolicy,
+  ManualBandwidthLimit,
+  ManualBandwidthLimitResponse,
   IPReputationSettings,
   IPReputationResult,
   ConnectionEvidenceResponse,
@@ -160,6 +162,14 @@ export const api = {
 
   getHostFirewallPolicy: (hostId: string) =>
     request<HostFirewallPolicyResponse>(`/api/v1/hosts/${encodeURIComponent(hostId)}/firewall-policy`),
+
+  getManualBandwidthLimits: (hostId: string) =>
+    request<ManualBandwidthLimitResponse>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/bandwidth-limits`),
+
+  updateManualBandwidthLimits: (hostId: string, limits: ManualBandwidthLimit[]) =>
+    request<{ ok: boolean; revision: number; limits: ManualBandwidthLimit[]; apply: string }>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/bandwidth-limits`, {
+      method: 'PUT', body: JSON.stringify({ limits }),
+    }),
 
   updateHostFirewallPolicy: (hostId: string, policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy }) =>
     request<{ ok: boolean; revision: number; action_id: number; queued: boolean }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/firewall-policy`, {

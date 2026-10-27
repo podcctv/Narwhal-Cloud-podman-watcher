@@ -185,11 +185,13 @@ class DirectionTests(unittest.TestCase):
 
     def test_real_executable_and_explicit_path_only(self):
         output='1 S supervise-daemo supervise-daemon xray --start\n12 S xray /usr/bin/xray run -config /opt/proxy/test.json\n'
-        self.assertEqual(detector.process_configs(output),[{'pid':12,'process':'xray','paths':['/opt/proxy/test.json'],'additional_configs':False}])
+        self.assertEqual(detector.process_configs(output),[{'pid':12,'process':'xray','paths':['/opt/proxy/test.json'],'config_dirs':[],'additional_configs':False}])
 
-    def test_additional_config_directory_invalidates_single_file_proof(self):
+    def test_supported_config_directory_is_returned_for_bounded_scan(self):
         output='12 S xray /usr/bin/xray run -config /etc/xray/config.json -confdir /etc/xray/conf.d'
-        self.assertTrue(detector.process_configs(output)[0]['additional_configs'])
+        result = detector.process_configs(output)[0]
+        self.assertEqual(result['config_dirs'], ['/etc/xray/conf.d'])
+        self.assertFalse(result['additional_configs'])
 
     def test_unreadable_or_truncated_config_paths_make_inventory_incomplete(self):
         toml = detector.process_configs('12 S xray /usr/bin/xray run -c /etc/xray/config.toml')[0]
@@ -197,8 +199,8 @@ class DirectionTests(unittest.TestCase):
         self.assertTrue(toml['additional_configs'])
         paths = ' '.join(f'-c /etc/xray/{index}.json' for index in range(5))
         truncated = detector.process_configs(f'12 S xray /usr/bin/xray run {paths}')[0]
-        self.assertEqual(len(truncated['paths']), 4)
-        self.assertTrue(truncated['additional_configs'])
+        self.assertEqual(len(truncated['paths']), 5)
+        self.assertFalse(truncated['additional_configs'])
 
     def test_invalid_and_non_integer_ports_remain_unverified(self):
         for port in (float('inf'),1080.5,True,{},'1080-1085',70000):
@@ -339,10 +341,14 @@ class LiveEvidenceTests(unittest.TestCase):
         self.assertIn('COPY socks_detector.py .',dockerfile)
         self.assertIn('COPY host_security_audit.py .',dockerfile)
         self.assertIn('COPY vmess_guard.py .',dockerfile)
+        self.assertIn('COPY manual_bandwidth.py .',dockerfile)
         self.assertIn('client/socks_detector.py',installer)
         self.assertIn('client/host_security_audit.py',installer)
         self.assertIn('client/vmess_guard.py',installer)
-        self.assertEqual(updater.count('disk_cleanup_worker socks_detector host_security_audit vmess_guard; do'),3)
+        self.assertIn('client/manual_bandwidth.py',installer)
+        self.assertEqual(updater.count('vmess_guard manual_bandwidth; do'),2)
+        self.assertIn('"$stage/client/manual_bandwidth.py"',updater)
+        self.assertIn('"$snapshot/manual_bandwidth.py"',updater)
 
 
 if __name__=='__main__': unittest.main()

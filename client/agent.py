@@ -23,7 +23,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard
+    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 except ImportError:
     import operations as node_operations
@@ -33,6 +33,7 @@ except ImportError:
     import socks_detector
     import host_security_audit
     import vmess_guard
+    import manual_bandwidth
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 
 try:
@@ -3369,6 +3370,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             **_runman_firewall_control_status(),
             "interface_inventory": _collect_host_firewall_interface_inventory(),
         },
+        "manual_bandwidth_limits": manual_bandwidth.last_status(),
     }
     if isinstance(summary.get("host_firewall"), dict):
         summary["host_firewall"] = {
@@ -3529,6 +3531,17 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             else:
                 reason_labels = {
                     "configuration_scan_incomplete": "配置文件未能完整读取",
+                    "config_directory_unreadable_or_truncated": "配置目录无法完整读取或文件清单超过安全上限",
+                    "config_directory_path_invalid": "配置目录路径未通过安全校验",
+                    "config_file_limit_exceeded": "配置文件数量超过单进程扫描上限",
+                    "unparsed_or_excess_config_arguments": "进程启动参数包含未识别或过多的配置入口",
+                    "config_path_not_found_or_unreadable": "没有可验证的配置文件路径，或路径不可读",
+                    "config_parse_failed_or_too_large": "配置文件格式不受支持、解析失败或超过大小上限",
+                    "config_scan_timed_out": "配置扫描达到时间上限",
+                    "process_changed_during_config_scan": "扫描期间进程发生变化，不能确认配置仍属于当前进程",
+                    "endpoint_report_limit_exceeded": "入站端点数量超过上报上限",
+                    "process_scan_limit_exceeded": "协议进程数量达到扫描上限",
+                    "process_snapshot_unavailable": "容器进程清单不可读或采集未完成",
                     "listener_inventory_incomplete": "实时监听清单不完整，无法确认端口归属",
                     "live_listener_not_confirmed": "未找到配置对应的实时监听端口",
                     "listener_protocol_or_owner_ambiguous": "实时监听的进程或协议归属不唯一",
@@ -3552,10 +3565,25 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "previous_guard_rule_preserved": "当前证据不足以确认旧 VMess 入口已消失，因此保留原端口阻断",
                 }
                 labels = pending_labels or [str(item.get("port")) for item in pending if isinstance(item, dict) and item.get("port")]
-                reason = reason_labels.get(str(vmess.get("reason") or ""), "端口归属或规则生效状态未能确认")
+                reason_key = str(vmess.get("reason") or "")
+                if reason_key == "configuration_scan_incomplete":
+                    reason_key = str(vmess.get("protocol_inventory_reason") or reason_key)
+                reason = reason_labels.get(reason_key, "端口归属或规则生效状态未能确认")
                 detail = f"已从运行配置发现 VMess 入站，但未能安全确认端口保护：{reason}。未停止进程或容器。"
                 if labels:
                     detail += f"待核实端口：{'、'.join(labels)}。"
+                socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
+                scan_states = socks_proxy.get("protocol_process_scan_states") if isinstance(socks_proxy.get("protocol_process_scan_states"), list) else []
+                incomplete_scans = [item for item in scan_states if isinstance(item, dict) and item.get("state") != "complete"]
+                for item in incomplete_scans[:4]:
+                    process = str(item.get("process") or "未知进程")[:40]
+                    pid = int(item.get("pid") or 0) if str(item.get("pid") or "").isdigit() else 0
+                    scan_reason = reason_labels.get(str(item.get("reason") or ""), "扫描证据不完整")
+                    detail += f"进程 {process}{f' PID {pid}' if pid else ''}：{scan_reason}。"
+                    config_files = item.get("config_files") if isinstance(item.get("config_files"), list) else []
+                    safe_files = [str(path)[:180] for path in config_files[:4] if isinstance(path, str)]
+                    if safe_files:
+                        detail += f"已检查路径：{'、'.join(safe_files)}。"
                 detail += "建议迁移到 VLESS + Reality + Vision。"
                 vmess_alert = _security_alert("vmess_block_unverified", "warning", "VMess 入站保护待核实", detail, len(labels), 0, container)
                 vmess_alert.update(alert_key="vmess:unverified:" + ",".join(labels), vmess_guard=vmess,
@@ -4955,6 +4983,7 @@ def _collect_socks_config_evidence(
         "configured_inbound_protocols": [],
         "protocol_process_scan_states": [],
         "protocol_inventory_state": "unavailable",
+        "protocol_inventory_reason": "process_snapshot_unavailable",
     }
     if not process_output.strip() and not enabled:
         return result
@@ -5011,6 +5040,7 @@ def _collect_socks_config_evidence(
     configured_inbound_protocols = []
     has_process_snapshot = bool(process_output.strip())
     protocol_complete = has_process_snapshot
+    inventory_reason = "" if has_process_snapshot else "process_snapshot_unavailable"
     scan_deadline = time.monotonic() + 8
     configured_processes = socks_detector.process_configs(process_output)
     protocol_processes = [proc for proc in configured_processes if proc['process'] in vmess_guard.SUPPORTED_ENGINES]
@@ -5019,29 +5049,79 @@ def _collect_socks_config_evidence(
         for proc in protocol_processes
     }
     protocol_process_start_ticks: Dict[Tuple[int, str], str] = {}
+    protocol_process_scan_reasons: Dict[Tuple[int, str], str] = {}
+    protocol_process_scan_files: Dict[Tuple[int, str], List[str]] = {}
     if len(configured_processes) >= 8:
         protocol_complete = False
+        inventory_reason = "process_scan_limit_exceeded"
     for proc in configured_processes:
         if not enabled and proc['process'] not in vmess_guard.SUPPORTED_ENGINES:
             continue
         if time.monotonic() >= scan_deadline:
             protocol_complete = False
+            inventory_reason = inventory_reason or 'config_scan_timed_out'
+            for skipped in protocol_processes:
+                skipped_key = (int(skipped['pid']), str(skipped['process']))
+                if protocol_process_scan_states.get(skipped_key) == 'partial' and not protocol_process_scan_reasons.get(skipped_key):
+                    protocol_process_scan_reasons[skipped_key] = 'config_scan_timed_out'
+                    protocol_process_scan_files[skipped_key] = sorted(set(skipped.get('paths') or []))[:32]
             break
         documents = []
         sources = []
         password_facts = []
         is_protocol_process = proc['process'] in vmess_guard.SUPPORTED_ENGINES
-        process_protocol_complete = is_protocol_process and bool(proc['paths']) and not proc['additional_configs']
+        scan_paths = list(proc.get('paths') or [])
+        config_dirs = proc.get('config_dirs') if isinstance(proc.get('config_dirs'), list) else []
+        process_key = (int(proc['pid']), str(proc['process']))
+        process_scan_reason = 'unparsed_or_excess_config_arguments' if proc.get('additional_configs') else ''
+        directory_scan_complete = True
+        for directory in config_dirs[:4]:
+            if not is_protocol_process and not enabled:
+                continue
+            if not re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', str(directory)) or '..' in str(directory).split('/'):
+                directory_scan_complete = False
+                process_scan_reason = process_scan_reason or 'config_directory_path_invalid'
+                continue
+            find_command = (
+                f"find {shlex.quote(str(directory))} -maxdepth 1 -type f "
+                "\\( -name '*.json' -o -name '*.yaml' -o -name '*.yml' -o -name '*.conf' -o -name '*.cfg' \\) "
+                "-print 2>/dev/null; rc=$?; [ $rc -eq 0 ] && echo @@CONFIG_DIR_SCAN_OK@@"
+            )
+            listing = run(_runtime_exec_cmd(runtime, name, find_command, project), timeout=2)
+            lines = [line.strip() for line in listing.splitlines() if line.strip()]
+            complete_marker = '@@CONFIG_DIR_SCAN_OK@@' in lines
+            found_paths = [line for line in lines if line != '@@CONFIG_DIR_SCAN_OK@@']
+            valid_paths = [path for path in found_paths
+                           if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', path)
+                           and '..' not in path.split('/')
+                           and path.startswith(str(directory).rstrip('/') + '/')]
+            if not complete_marker or len(found_paths) != len(valid_paths) or len(valid_paths) > 32:
+                directory_scan_complete = False
+                process_scan_reason = process_scan_reason or 'config_directory_unreadable_or_truncated'
+            scan_paths.extend(valid_paths[:32])
+        scan_paths = list(dict.fromkeys(scan_paths))
+        if len(scan_paths) > 32:
+            scan_paths = scan_paths[:32]
+            directory_scan_complete = False
+            process_scan_reason = process_scan_reason or 'config_file_limit_exceeded'
+        process_protocol_complete = (
+            is_protocol_process and bool(scan_paths) and not proc['additional_configs']
+            and directory_scan_complete
+        )
         if is_protocol_process and not process_protocol_complete:
             protocol_complete = False
+            process_scan_reason = process_scan_reason or 'config_path_not_found_or_unreadable'
+            inventory_reason = inventory_reason or process_scan_reason
         start_ticks_before = run(_runtime_exec_cmd(runtime, name,
             f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if (enabled or is_protocol_process) else ''
-        for path in proc['paths']:
+        for path in scan_paths:
             if time.monotonic() >= scan_deadline:
                 documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
                 if is_protocol_process:
                     process_protocol_complete = False
                     protocol_complete = False
+                    process_scan_reason = process_scan_reason or 'config_scan_timed_out'
+                    inventory_reason = inventory_reason or 'config_scan_timed_out'
                 break
             # Raw JSON is local-only and bounded; it never enters a report/log.
             raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
@@ -5050,12 +5130,14 @@ def _collect_socks_config_evidence(
                 if not protocol_document.get('parsed'):
                     process_protocol_complete = False
                     protocol_complete = False
+                    process_scan_reason = process_scan_reason or 'config_parse_failed_or_too_large'
+                    inventory_reason = inventory_reason or process_scan_reason
                 for endpoint in protocol_document.get('endpoints', []):
                     if len(configured_inbound_protocols) < 100:
                         configured_inbound_protocols.append({
                             'pid': int(proc['pid']), 'process': proc['process'],
                             'protocol': endpoint['protocol'], 'port': endpoint['port'],
-                            'listen': endpoint['listen'],
+                            'listen': endpoint['listen'], 'config_file': path,
                             **({'transports': endpoint['transports']} if 'transports' in endpoint else {}),
                         })
                     else:
@@ -5064,6 +5146,8 @@ def _collect_socks_config_evidence(
                         # omitted from the bounded report.
                         process_protocol_complete = False
                         protocol_complete = False
+                        process_scan_reason = process_scan_reason or 'endpoint_report_limit_exceeded'
+                        inventory_reason = inventory_reason or process_scan_reason
                 if proc.get('additional_configs'):
                     process_protocol_complete = False
                     protocol_complete = False
@@ -5093,6 +5177,8 @@ def _collect_socks_config_evidence(
             if not start_ticks:
                 process_protocol_complete = False
                 protocol_complete = False
+                process_scan_reason = process_scan_reason or 'process_changed_during_config_scan'
+                inventory_reason = inventory_reason or process_scan_reason
         cli = socks_detector.gost_cli(process_output, proc['pid']) if enabled and proc['process'] == 'gost' else None
         if cli:
             # -L is inbound, -F chains are deliberately excluded. A config plus CLI
@@ -5107,9 +5193,14 @@ def _collect_socks_config_evidence(
             'password_profiles': password_facts})
         if is_protocol_process:
             if process_protocol_complete:
-                protocol_process_scan_states[(int(proc['pid']), str(proc['process']))] = 'complete'
+                protocol_process_scan_states[process_key] = 'complete'
+                process_scan_reason = ''
             else:
                 protocol_complete = False
+            protocol_process_scan_reasons[process_key] = (
+                '' if process_protocol_complete else process_scan_reason or 'scan_incomplete'
+            )
+            protocol_process_scan_files[process_key] = sorted(set(scan_paths))[:32]
         if proc['process'] not in socks_detector.FAMILIES:
             continue
         if enabled:
@@ -5120,6 +5211,7 @@ def _collect_socks_config_evidence(
                                    'single_purpose': parsed and not proc['additional_configs'] and len(documents) == 1 and documents[0]['single_purpose']})
     if protocol_processes and any(proc.get('additional_configs') for proc in protocol_processes):
         protocol_complete = False
+        inventory_reason = inventory_reason or 'unparsed_or_excess_config_arguments'
     protocol_state = 'complete' if protocol_complete else ('partial' if has_process_snapshot else 'unavailable')
     result.update(
         {
@@ -5137,11 +5229,14 @@ def _collect_socks_config_evidence(
             "configured_inbound_protocols": configured_inbound_protocols[:100],
             "protocol_process_scan_states": [
                 {"pid": pid, "process": process, "state": state,
-                 "start_ticks": protocol_process_start_ticks.get((pid, process), "")}
+                 "start_ticks": protocol_process_start_ticks.get((pid, process), ""),
+                 "reason": protocol_process_scan_reasons.get((pid, process), ""),
+                 "config_files": protocol_process_scan_files.get((pid, process), [])}
                 for (pid, process), state in sorted(protocol_process_scan_states.items())
             ],
             "review_processes": review_processes,
             "protocol_inventory_state": protocol_state,
+            "protocol_inventory_reason": inventory_reason if protocol_state != 'complete' else '',
         }
     )
     return result
@@ -5365,6 +5460,7 @@ def collect_panel_pairing_indicators(
         "configured_inbound_protocols": socks_config.get("configured_inbound_protocols", []),
         "protocol_process_scan_states": socks_config.get("protocol_process_scan_states", []),
         "protocol_inventory_state": socks_config.get("protocol_inventory_state", "unavailable"),
+        "protocol_inventory_reason": socks_config.get("protocol_inventory_reason", "process_snapshot_unavailable"),
         "risk_reasons": sorted(
             set(socks_process.get("risk_reasons", [])) | set(socks_config.get("risk_reasons", []))
         ),
@@ -6547,6 +6643,7 @@ def collect_container(
     )
     vmess_plan["listener_inventory_source"] = vmess_listener_source
     vmess_plan["listener_inventory_reason"] = vmess_listener_inventory_reason
+    vmess_plan["protocol_inventory_reason"] = socks_proxy.get("protocol_inventory_reason", "")
     vmess_status = dict(vmess_plan)
     should_reconcile_vmess = (
         runtime_name in {"incus", "podman"}
@@ -9214,6 +9311,15 @@ def process_security_actions(server: str, secret: str, host_id: str, node_id: st
     _schedule_abuse_guard(server, secret, host_id, node_id)
     response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
     node_operations.configure(response.get("operations"))
+    operations_payload = response.get("operations") if isinstance(response.get("operations"), dict) else {}
+    try:
+        limit_status = manual_bandwidth.reconcile(
+            operations_payload.get("bandwidth_limits"), host_id, node_id, _abuse_targets,
+        )
+        if limit_status.get("state") in {"failed", "rejected"}:
+            print("manual bandwidth policy was not fully applied; inspect the dashboard status")
+    except Exception:
+        print("manual bandwidth policy reconciliation failed; existing filters were left untouched")
     if disk_cleanup.available():
         try:disk_cleanup.controller().configure(response.get('operations',{}).get('disk_cleanup'),node_id)
         except (OSError,ValueError):print('disk cleanup state unavailable; cleanup disabled')

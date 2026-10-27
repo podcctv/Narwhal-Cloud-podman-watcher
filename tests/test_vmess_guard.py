@@ -177,7 +177,8 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(result["protocol_inventory_state"], "complete")
         self.assertEqual(result["configured_inbound_protocols"], [])
         self.assertEqual(result["protocol_process_scan_states"], [
-            {"pid": 120, "process": "xray", "state": "complete", "start_ticks": "120"},
+            {"pid": 120, "process": "xray", "state": "complete", "start_ticks": "120",
+             "reason": "", "config_files": ["/etc/xray/config.json"]},
         ])
 
     def test_scan_states_are_scoped_to_each_supported_engine_process(self):
@@ -198,10 +199,41 @@ class VmessPlanTests(unittest.TestCase):
             )
         self.assertEqual(result["protocol_inventory_state"], "partial")
         self.assertEqual(result["protocol_process_scan_states"], [
-            {"pid": 120, "process": "xray", "state": "complete", "start_ticks": "120"},
-            {"pid": 121, "process": "v2ray", "state": "partial", "start_ticks": "121"},
+            {"pid": 120, "process": "xray", "state": "complete", "start_ticks": "120",
+             "reason": "", "config_files": ["/etc/xray/config.json"]},
+            {"pid": 121, "process": "v2ray", "state": "partial", "start_ticks": "121",
+             "reason": "config_parse_failed_or_too_large", "config_files": ["/etc/v2ray/config.json"]},
         ])
         self.assertEqual(result["configured_inbound_protocols"][0]["port"], 443)
+
+    def test_xray_config_directory_is_scanned_with_bounded_file_list(self):
+        process_output = "120 S xray /usr/bin/xray run -confdir /etc/xray/conf.d\n"
+        with mock.patch.object(agent, "run", side_effect=[
+            "/etc/xray/conf.d/inbound.json\n@@CONFIG_DIR_SCAN_OK@@",
+            "120",
+            '{"inbounds":[{"protocol":"vmess","port":8443,"streamSettings":{"network":"tcp"}}]}',
+            "120",
+        ]) as run:
+            result = agent._collect_socks_config_evidence(
+                "incus", "fixture", "default", False, process_output
+            )
+        self.assertEqual(result["protocol_inventory_state"], "complete")
+        self.assertEqual(result["configured_inbound_protocols"][0]["port"], 8443)
+        scan = result["protocol_process_scan_states"][0]
+        self.assertEqual(scan["state"], "complete")
+        self.assertEqual(scan["config_files"], ["/etc/xray/conf.d/inbound.json"])
+        self.assertEqual(scan["reason"], "")
+        self.assertEqual(run.call_count, 4)
+
+    def test_unreadable_xray_config_directory_reports_actionable_reason(self):
+        process_output = "120 S xray /usr/bin/xray run -confdir /etc/xray/conf.d\n"
+        with mock.patch.object(agent, "run", side_effect=["", "120", "", "120"]):
+            result = agent._collect_socks_config_evidence(
+                "incus", "fixture", "default", False, process_output
+            )
+        self.assertEqual(result["protocol_inventory_state"], "partial")
+        self.assertEqual(result["protocol_process_scan_states"][0]["reason"],
+                         "config_directory_unreadable_or_truncated")
 
     def test_engine_restart_during_config_scan_invalidates_generation_evidence(self):
         process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
@@ -215,7 +247,8 @@ class VmessPlanTests(unittest.TestCase):
             )
         self.assertEqual(result["protocol_inventory_state"], "partial")
         self.assertEqual(result["protocol_process_scan_states"], [
-            {"pid": 120, "process": "xray", "state": "partial", "start_ticks": ""},
+            {"pid": 120, "process": "xray", "state": "partial", "start_ticks": "",
+             "reason": "process_changed_during_config_scan", "config_files": ["/etc/xray/config.json"]},
         ])
 
     def test_customer_banner_copy_says_only_port_is_blocked(self):

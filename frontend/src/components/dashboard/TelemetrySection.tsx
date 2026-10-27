@@ -69,7 +69,7 @@ const vulnerabilityRepair = (finding: { package?: string; source?: string }, osI
   return { command: '先根据当前发行版的安全公告确认修复版本，再使用该发行版的包管理器更新对应软件包。', impact: '影响取决于软件包；更新可能重启相关服务。' };
 };
 const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode }> = ({ title, level, children }) =>
-  <div className={`min-w-0 rounded-xl border p-3 ${tones[level]}`}>
+  <div className={`w-full min-w-0 rounded-xl border p-3 ${tones[level]}`}>
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-semibold">
       <h4>{title}</h4><span className="text-[11px]">{labels[level]}</span>
     </div><div className="space-y-1.5 wrap-break-word text-xs leading-5 tabular-nums">{children}</div>
@@ -181,6 +181,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             : (connLvl === 'warning' || ipLvl === 'warning')
             ? 'warning'
             : 'normal';
+        const auditLevel = hostAuditLevel(t);
+        const auditLabel = labels[auditLevel];
 
         return <article key={t.host_id} className="min-w-0 rounded-xl border border-slate-700 bg-slate-900/60 p-3 sm:p-4">
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
@@ -194,6 +196,15 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-red-400">删除</button>
             </div>
           </div>
+          <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
+            <span className={`rounded-full border px-2 py-1 ${tones[peakLevel]}`}>网络峰值：{labels[peakLevel]}</span>
+            <span className={`rounded-full border px-2 py-1 ${tones[httpLevel]}`}>CC / HTTP：{labels[httpLevel]}</span>
+            <span className={`rounded-full border px-2 py-1 ${tones[auditLevel]}`}>主机审计：{auditLabel}</span>
+            <span className="rounded-full border border-slate-700 px-2 py-1 text-slate-300">最高连接 {fmtNumber(connPeak, 0)} · 事件 {events.length}</span>
+          </div>
+          <details className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+            <summary className="cursor-pointer text-xs font-semibold text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-400">展开网络信号、主机安全证据与修复建议</summary>
+            <div className="mt-3 space-y-3">
           <div className="grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
             <Signal title="实时速率 / 今日峰值" level={signalLevel(t, /^ddos_(host_)?bandwidth$/)}>
               <p>↓ {fmtNetSpeed(t.rx_bps).mbps} · ↑ {fmtNetSpeed(t.tx_bps).mbps}</p>
@@ -220,8 +231,9 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <p className="text-slate-300">UTC+8 当日采样最大值；各项可能来自不同容器。推送使用触发当时的单容器值，峰值不代表当前仍异常。</p>
             </Signal>
           </div>
-          <div className="mt-3 w-full min-w-0">
-            <Signal title={sshOnlyAudit ? '小鸡 SSH 安全检查' : '母鸡完整性、漏洞与威胁指标'} level={hostAuditLevel(t)}>
+          <div className="mt-3 grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
+          <div className="col-span-full min-w-0">
+            <Signal title={sshOnlyAudit ? '小鸡 SSH 安全检查' : '母鸡完整性、漏洞与威胁指标'} level={auditLevel}>
               {!hostAudit?.enabled ? <>
                 <p>{auditAdvice[0]}</p>
                 <p className="text-slate-300">修复后等待 Agent 下一次上报，再检查本卡状态。</p>
@@ -292,6 +304,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               </>}
             </Signal>
           </div>
+          </div>
           <details className="mt-3 rounded-lg border border-slate-700 p-3 text-xs text-slate-300">
             <summary className="cursor-pointer font-semibold text-slate-100">查看本次采样事件（{events.length} 项，含普通提示）与阈值说明</summary>
             <div className="mt-3 space-y-2">
@@ -304,6 +317,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <p>这里展示客户端本次采样检测结果；放行、已处置状态与历史推送请查看“告警历史”。</p>
               <p>HTTP 默认警告线：总 {thresholds.http_rps_warning ?? 100} rps、单 IP {thresholds.ip_rps_warning ?? 30} rps，2 倍为危险；4xx ≥ {((thresholds.http_4xx_warning ?? .5) * 100).toFixed(0)}%、5xx ≥ {((thresholds.http_5xx_warning ?? .05) * 100).toFixed(0)}% 警告，2 倍为危险（4xx 最高 100%）。比例检测至少需要 {thresholds.http_min_requests ?? 50} 次请求。</p>
               <p>这是可调的运维起始阈值，不是通用攻击判定标准。配置节点 ALERT_* 环境变量后重启客户端即可调整；旧版客户端需升级才能上报实际阈值及分来源数据。</p>
+            </div>
+          </details>
             </div>
           </details>
         </article>;

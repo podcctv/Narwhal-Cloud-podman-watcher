@@ -476,6 +476,7 @@ cp "$ROOT_DIR/client/tcp_probe.py" "$CLIENT_APP_DIR/tcp_probe.py"
 cp "$ROOT_DIR/client/socks_detector.py" "$CLIENT_APP_DIR/socks_detector.py"
 cp "$ROOT_DIR/client/host_security_audit.py" "$CLIENT_APP_DIR/host_security_audit.py"
 cp "$ROOT_DIR/client/vmess_guard.py" "$CLIENT_APP_DIR/vmess_guard.py"
+cp "$ROOT_DIR/client/manual_bandwidth.py" "$CLIENT_APP_DIR/manual_bandwidth.py"
 install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
 cp "$ROOT_DIR/client/requirements.txt" "$CLIENT_APP_DIR/requirements.txt"
 cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"

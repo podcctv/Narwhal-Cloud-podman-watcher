@@ -40,6 +40,64 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         now = int(time.time())
         return conn.execute("INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,'host','','__host__',?,?,'queued',?,?,?)", (host, action_type, json.dumps(params), user, now, now)).lastrowid
 
+    def bandwidth_context(conn, host_id):
+        host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if not host:
+            raise HTTPException(404, "主机不存在")
+        report = conn.execute(
+            "SELECT ts,payload_json FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1",
+            (host_id,),
+        ).fetchone()
+        security = ops.loads(report["payload_json"], {}) if report else {}
+        firewall = security.get("host_firewall") if isinstance(security.get("host_firewall"), dict) else {}
+        inventory = firewall.get("interface_inventory") if isinstance(firewall.get("interface_inventory"), dict) else {}
+        interfaces = []
+        for item in inventory.get("interfaces", []) if isinstance(inventory.get("interfaces"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name):
+                continue
+            interfaces.append({
+                "name": name, "kind": str(item.get("kind") or "")[:40],
+                "state": str(item.get("state") or "unknown")[:24],
+                "is_default_route": item.get("is_default_route") is True,
+            })
+        latest_container_rows = conn.execute(
+            """SELECT r.runtime,r.project,r.container_name,r.payload_json FROM reports r
+               JOIN (SELECT runtime,project,container_name,MAX(ts) AS ts FROM reports
+                     WHERE host_id=? AND ts>=? GROUP BY runtime,project,container_name) latest
+                 ON latest.runtime=r.runtime AND latest.project=r.project
+                AND latest.container_name=r.container_name AND latest.ts=r.ts
+               WHERE r.host_id=? AND r.ts>=? ORDER BY r.container_name LIMIT 500""",
+            (host_id, int(time.time()) - 900, host_id, int(time.time()) - 900),
+        ).fetchall()
+        containers = []
+        for row in latest_container_rows:
+            item = ops.loads(row["payload_json"], {})
+            if row["runtime"] not in {"incus", "podman"}:
+                continue
+            name = str(row["container_name"] or "")
+            container_id = str(item.get("id") or "")
+            if not name or not container_id:
+                continue
+            containers.append({
+                "runtime": row["runtime"], "project": str(row["project"] or ""),
+                "container_name": name, "container_id": container_id,
+            })
+        settings_row = conn.execute("SELECT payload FROM ops_settings WHERE key=?", (f"manual_bandwidth:{host_id}",)).fetchone()
+        saved = ops.loads(settings_row[0], {}) if settings_row else {}
+        reported = security.get("manual_bandwidth_limits") if isinstance(security.get("manual_bandwidth_limits"), dict) else {}
+        return {
+            "host_id": host_id, "expected_node_id": str(host["node_id"] or ""),
+            "host_online": bool(host["node_id"] and int(time.time()) - int(host["last_seen"] or 0) <= 900),
+            "sample_at": int(report["ts"] or 0) if report else 0,
+            "interfaces": interfaces, "containers": containers,
+            "policy": {"schema": 1, "revision": int(saved.get("revision") or 0),
+                       "limits": saved.get("limits", []) if isinstance(saved.get("limits"), list) else []},
+            "reported": reported,
+        }
+
     def require_admin(request):
         if getattr(request.state, "dashboard_role", "admin") != "admin":
             raise HTTPException(403, "只有管理员可以执行此运维操作")
@@ -207,6 +265,96 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         conn = db()
         try:
             return {"items": unpack(rows(conn, "SELECT * FROM ops_services LIMIT 500")), "results": unpack(rows(conn, "SELECT * FROM ops_service_results LIMIT 500"))}
+        finally:
+            conn.close()
+
+    @router.get("/hosts/{host_id}/bandwidth-limits")
+    def get_bandwidth_limits(host_id: str, request: Request):
+        require_operator(request)
+        if not host_id or len(host_id) > 200:
+            raise HTTPException(400, "invalid host")
+        conn = db()
+        try:
+            return bandwidth_context(conn, host_id)
+        finally:
+            conn.close()
+
+    @router.put("/hosts/{host_id}/bandwidth-limits")
+    async def put_bandwidth_limits(host_id: str, request: Request):
+        require_admin(request)
+        if not host_id or len(host_id) > 200:
+            raise HTTPException(400, "invalid host")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "请求必须是有效 JSON") from None
+        if not isinstance(body, dict) or set(body) != {"limits"} or not isinstance(body["limits"], list) or len(body["limits"]) > 256:
+            raise HTTPException(400, "limits 必须是最多 256 项的列表")
+        conn = db()
+        try:
+            context = bandwidth_context(conn, host_id)
+            if not context["host_online"] or not context["expected_node_id"]:
+                raise HTTPException(409, "需要主机在线并上报节点身份")
+            if int(time.time()) - int(context["sample_at"] or 0) > 900:
+                raise HTTPException(409, "网卡和容器清单已过期，请等待主机重新上报")
+            allowed_interfaces = {item["name"] for item in context["interfaces"] if item["state"] == "up"}
+            known_containers = {
+                (item["runtime"], item["project"], item["container_name"], item["container_id"])
+                for item in context["containers"]
+            }
+            normalized = []
+            identities = set()
+            host_limit_count = 0
+            for item in body["limits"]:
+                if not isinstance(item, dict) or set(item) - {"scope", "interface", "runtime", "project", "container_name", "container_id", "upload_mbps", "download_mbps"}:
+                    raise HTTPException(400, "带宽策略字段无效")
+                scope = item.get("scope")
+                upload = item.get("upload_mbps", 0)
+                download = item.get("download_mbps", 0)
+                if type(upload) is not int or type(download) is not int or not 0 <= upload <= 100000 or not 0 <= download <= 100000 or not (upload or download):
+                    raise HTTPException(400, "上下行速率必须是 0–100000 之间的整数，且至少一项大于 0")
+                if scope == "host":
+                    interface = str(item.get("interface") or "")
+                    if interface not in allowed_interfaces:
+                        raise HTTPException(409, "母机网卡不在当前在线采集清单中")
+                    host_limit_count += 1
+                    key = ("host", interface)
+                    entry = {"scope": "host", "interface": interface,
+                             "upload_mbps": upload, "download_mbps": download}
+                elif scope == "container":
+                    runtime = str(item.get("runtime") or "")
+                    project = str(item.get("project") or "")
+                    name = str(item.get("container_name") or "")
+                    container_id = str(item.get("container_id") or "")
+                    if (runtime, project, name, container_id) not in known_containers:
+                        raise HTTPException(409, "容器身份与最新采样不匹配；刷新后重新选择目标容器")
+                    if len(name) > 200 or len(project) > 100 or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,256}", container_id):
+                        raise HTTPException(400, "容器身份无效")
+                    key = ("container", runtime, project, name, container_id)
+                    entry = {"scope": "container", "runtime": runtime, "project": project,
+                             "container_name": name, "container_id": container_id,
+                             "upload_mbps": upload, "download_mbps": download}
+                else:
+                    raise HTTPException(400, "scope 必须为 host 或 container")
+                if key in identities:
+                    raise HTTPException(400, "同一目标不能重复配置")
+                identities.add(key)
+                normalized.append(entry)
+            if host_limit_count > 1:
+                raise HTTPException(400, "每台母机只可选择一张网卡设置主机总限速")
+            saved = context["policy"]
+            policy = {
+                "schema": 1, "host_id": host_id,
+                "expected_node_id": context["expected_node_id"],
+                "revision": int(saved.get("revision") or 0) + 1,
+                "limits": normalized, "updated_at": int(time.time()),
+                "updated_by": request.state.dashboard_user,
+            }
+            conn.execute("INSERT OR REPLACE INTO ops_settings(key,payload) VALUES(?,?)",
+                         (f"manual_bandwidth:{host_id}", json.dumps(policy, ensure_ascii=True)))
+            conn.commit()
+            return {"ok": True, "revision": policy["revision"], "limits": normalized,
+                    "apply": "主机 Agent 下一次动作轮询时应用；最多等待一个轮询周期"}
         finally:
             conn.close()
 

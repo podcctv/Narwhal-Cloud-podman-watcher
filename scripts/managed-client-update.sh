@@ -32,6 +32,11 @@ restore() {
       install -m 0644 "$snapshot/$module.py" "$app_dir/$module.py" || return 1
     fi
   done
+  if [[ -f "$snapshot/manual_bandwidth.py" ]]; then
+    install -m 0644 "$snapshot/manual_bandwidth.py" "$app_dir/manual_bandwidth.py" || return 1
+  else
+    rm -f "$app_dir/manual_bandwidth.py" || return 1
+  fi
   install -m 0644 "$snapshot/agent.py" "$app_dir/agent.py" || return 1
   if [[ -f "$snapshot/operations.py" ]]; then
     install -m 0644 "$snapshot/operations.py" "$app_dir/operations.py" || return 1
@@ -90,14 +95,14 @@ cleanup_stage() {
 }
 trap cleanup_stage EXIT
 git -C "$repo" archive "$revision" | tar -x -C "$stage"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard manual_bandwidth; do
   "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
 done
-"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py" "$stage/client/host_security_audit.py" "$stage/client/vmess_guard.py"
+"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py" "$stage/client/host_security_audit.py" "$stage/client/vmess_guard.py" "$stage/client/manual_bandwidth.py"
 mkdir -p "$snapshot"
 chmod 0700 "$snapshot"
 install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard manual_bandwidth; do
   [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
 done
 [[ ! -f "$app_dir/operations.py" ]] || install -m 0644 "$app_dir/operations.py" "$snapshot/operations.py"

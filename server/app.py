@@ -5251,6 +5251,16 @@ async def poll_security_actions(
         conn.commit()
         ops_services = [{"id": r["id"], **operations.loads(r["payload"])} for r in conn.execute("SELECT id,payload FROM ops_services WHERE host_id=? AND enabled=1 LIMIT 20", (host_id,)).fetchall()]
         cleanup_policy=disk_cleanup.node_config(conn,node_id)
+        bandwidth_row = conn.execute("SELECT payload FROM ops_settings WHERE key=?", (f"manual_bandwidth:{host_id}",)).fetchone()
+        bandwidth_policy = operations.loads(bandwidth_row[0], {}) if bandwidth_row else {}
+        if (not isinstance(bandwidth_policy, dict)
+                or bandwidth_policy.get("host_id") != host_id
+                or bandwidth_policy.get("expected_node_id") != node_id):
+            bandwidth_policy = {"schema": 1, "host_id": host_id,
+                                "expected_node_id": node_id, "revision": 0, "limits": []}
+        else:
+            bandwidth_policy = {key: bandwidth_policy.get(key) for key in
+                                ("schema", "host_id", "expected_node_id", "revision", "limits")}
         try:
             conn.execute("BEGIN IMMEDIATE")
             tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
@@ -5261,7 +5271,7 @@ async def poll_security_actions(
             tcp_probe = {"job": None, "cancelled": []}
     finally:
         conn.close()
-    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy}, "tcp_probe": tcp_probe}, x_timestamp)
+    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy,'bandwidth_limits':bandwidth_policy}, "tcp_probe": tcp_probe}, x_timestamp)
 
 
 @app.post("/api/v1/actions/result")
