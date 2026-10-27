@@ -23,7 +23,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth
+    from client import operations as node_operations, security_banner, tcp_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth, cpu_guard
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 except ImportError:
     import operations as node_operations
@@ -34,6 +34,7 @@ except ImportError:
     import host_security_audit
     import vmess_guard
     import manual_bandwidth
+    import cpu_guard
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 
 try:
@@ -114,6 +115,30 @@ def get_podman_bin(warn: bool = True) -> str:
 def _runtime_kind(runtime: str) -> str:
     name = os.path.basename(runtime or "")
     return "podman" if name in ("podman", "podman-remote") else name
+
+
+def _cpu_set_count(value: object) -> float:
+    cpus = set()
+    for item in str(value or "").split(","):
+        part = item.strip()
+        if not part:
+            continue
+        if re.fullmatch(r"\d+", part):
+            cpus.add(int(part))
+            continue
+        match = re.fullmatch(r"(\d+)-(\d+)", part)
+        if match:
+            start, end = int(match.group(1)), int(match.group(2))
+            if end >= start and end - start < 4096:
+                cpus.update(range(start, end + 1))
+    return float(len(cpus))
+
+
+def _host_cpu_capacity() -> float:
+    try:
+        return float(max(1, len(os.sched_getaffinity(0))))
+    except (AttributeError, OSError, TypeError):
+        return float(max(1, os.cpu_count() or 1))
 
 
 def _docker_monitor_mode() -> str:
@@ -3351,10 +3376,97 @@ def notify_buyers_of_critical_alert(
         return False, f"failed to dispatch buyer notification: {exc}"
 
 
+def _sample_cpu_guard_process(container: Dict[str, object]) -> Dict[str, object]:
+    runtime_name = str(container.get("runtime") or "").lower()
+    runtime = get_runtime_bins().get(runtime_name, "")
+    name = str(container.get("name") or "")
+    project = str(container.get("project") or "")
+    if runtime_name not in {"incus", "podman"} or not runtime or not name:
+        return {"available": False, "reason": "运行时或容器身份不可用"}
+
+    # Sample /proc stat counters across one second. Only the process name and
+    # PID leave the node; command-line arguments may contain credentials.
+    script = r"""ticks=$(getconf CLK_TCK 2>/dev/null || printf '100')
+case "$ticks" in ''|*[!0-9]*) ticks=100;; esac
+snapshot() {
+  for stat in /proc/[0-9]*/stat; do
+    pid=${stat#/proc/}
+    pid=${pid%/stat}
+    IFS= read -r line < "$stat" || continue
+    rest=${line##*) }
+    set -- $rest
+    [ "$#" -ge 13 ] || continue
+    utime=${12}
+    stime=${13}
+    case "$utime:$stime" in *[!0-9:]*|:*) continue;; esac
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null | tr '\t\r\n' '   ')
+    [ -n "$comm" ] || comm=unknown
+    printf '%s\t%s\t%s\n' "$pid" "$comm" "$((utime + stime))"
+  done
+}
+start=$(awk '{print $1}' /proc/uptime 2>/dev/null)
+before=$(snapshot)
+sleep 1
+after=$(snapshot)
+finish=$(awk '{print $1}' /proc/uptime 2>/dev/null)
+printf 'B\t%s\n%s\nA\t%s\n%s\n' "$start" "$before" "$finish" "$after" |
+awk -F '\t' -v hz="$ticks" '
+  $1 == "B" { phase = 1; started = $2 + 0; next }
+  $1 == "A" { phase = 2; elapsed = ($2 + 0) - started; next }
+  phase == 1 && NF >= 3 { before[$1] = $3 + 0; names[$1] = $2; next }
+  phase == 2 && NF >= 3 && ($1 in before) {
+    used = ($3 + 0) - before[$1]
+    cpu = elapsed > 0 && hz > 0 ? used * 100 / (hz * elapsed) : 0
+    if (cpu > best) { best = cpu; pid = $1; name = names[$1] }
+  }
+  END { if (pid != "") printf "%s\t%s\t%.2f\t%.2f\n", pid, name, best, elapsed }
+'"""
+    output = run(_runtime_exec_cmd(runtime, name, script, project), timeout=10)
+    parts = output.strip().split("\t")
+    if len(parts) != 4 or not parts[0].isdigit():
+        return {"available": False, "reason": "未取得完整的进程 CPU 增量采样"}
+    process_name = re.sub(r"[\x00-\x1f\x7f]", " ", parts[1]).strip()[:120] or "unknown"
+    try:
+        return {
+            "available": True,
+            "pid": int(parts[0]),
+            "process": process_name,
+            "cpu_percent": round(max(0.0, float(parts[2])), 2),
+            "sampled_seconds": round(max(0.0, float(parts[3])), 2),
+            "source": "container_proc_stat_delta",
+        }
+    except (ValueError, OverflowError):
+        return {"available": False, "reason": "进程 CPU 增量采样格式无效"}
+
+
+def _collect_cpu_guard(containers: List[Dict[str, object]], interval_seconds: float, summary: Dict[str, object], allow_new_limits: bool) -> None:
+    host_cpu = cpu_guard.sample_host_cpu()
+    summary["host_cpu"] = host_cpu
+    try:
+        result = cpu_guard.observe(
+            containers,
+            host_cpu,
+            interval_seconds,
+            get_runtime_bins(),
+            process_sampler=_sample_cpu_guard_process,
+            allow_new_limits=allow_new_limits,
+        )
+        summary["cpu_guard"] = {key: value for key, value in result.items() if key != "alerts"}
+        alerts = result.get("alerts")
+        if isinstance(alerts, list):
+            summary_alerts = summary.get("alerts")
+            if isinstance(summary_alerts, list):
+                summary_alerts.extend(item for item in alerts if isinstance(item, dict))
+    except Exception as error:
+        summary["cpu_guard"] = {"enabled": True, "state": "unavailable", "message": str(error)[:240]}
+        print(f"cpu guard collection failed: {error}")
+
+
 def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float) -> Dict[str, object]:
     global _pending_firewall_event_cursor
     enabled = os.getenv("SECURITY_MONITOR_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
     access = _collect_access_log_stats(interval_seconds) if enabled else {"enabled": False, "readable_files": 0}
+    alerts: List[Dict[str, object]] = []
     summary: Dict[str, object] = {
         "enabled": enabled,
         "interval_seconds": round(max(1.0, interval_seconds), 3),
@@ -3365,7 +3477,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         "syn_recv_count": 0,
         "access_log": access,
         "access_sources": [{"label": "宿主机日志", **access}],
-        "alerts": [],
+        "alerts": alerts,
         "host_firewall": {
             **_runman_firewall_control_status(),
             "interface_inventory": _collect_host_firewall_interface_inventory(),
@@ -3389,6 +3501,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     # host/container security scanning. Keep collecting these control-plane
     # signals even when SECURITY_MONITOR_ENABLED is disabled.
     if not enabled:
+        _collect_cpu_guard(containers, interval_seconds, summary, allow_new_limits=False)
         return summary
 
     try:
@@ -3452,7 +3565,6 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     auto_remediate_xrayr = os.getenv(
         "SECURITY_AUTO_REMEDIATE_XRAYR", "true"
     ).strip().lower() not in ("0", "false", "no", "off")
-    alerts: List[Dict[str, object]] = []
     container_access_readable_files = 0
     socks_enforcement_entries = _socks_auth_enforcement_entries()
 
@@ -4398,6 +4510,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
 
     alerts.extend(_http_security_alerts(access))
 
+    _collect_cpu_guard(containers, interval_seconds, summary, allow_new_limits=True)
     summary["alerts"] = alerts
     return summary
 
@@ -6231,6 +6344,7 @@ def _incus_stats(
     return {
         "cpu_percent": cpu_percent,
         "cpu_effective_cpus": float(metrics.get("effective_cpus", 0.0) or 0.0),
+        "cpu_sample_available": cpu_seconds > 0,
         "mem_bytes": mem_bytes,
         "mem_limit_bytes": mem_limit,
         "mem_percent": mem_percent,
@@ -6311,6 +6425,7 @@ def collect_container(
         parsed_compact = _parse_stats_compact(stats_compact)
 
     cpu_candidates = [parsed_stats["cpu_percent"], parsed_tpl["cpu_percent"], parsed_compact["cpu_percent"]]
+    cpu_pressure_sample_available = bool(parsed_stats.get("cpu_sample_available")) if runtime_name == "incus" else False
     mem_candidates = [parsed_stats["mem_bytes"], parsed_tpl["mem_bytes"], parsed_compact["mem_bytes"]]
     mem_limit_candidates = [
         parsed_stats.get("mem_limit_bytes", 0),
@@ -6327,6 +6442,7 @@ def collect_container(
     for c in cpu_candidates:
         if float(c) > 0:
             cpu_percent = float(c)
+            cpu_pressure_sample_available = True
             break
     for m in mem_candidates:
         if int(m) > 0:
@@ -6348,6 +6464,9 @@ def collect_container(
     counter_source = "runtime" if rx_total or tx_total else "unavailable"
     rx_packet_total = int(parsed_stats.get("net_rx_total_packets", 0) or 0)
     tx_packet_total = int(parsed_stats.get("net_tx_total_packets", 0) or 0)
+    cpu_effective_cpus = float(parsed_stats.get("cpu_effective_cpus", 0.0) or 0.0)
+    if runtime_name == "incus" and cpu_effective_cpus <= 0:
+        cpu_effective_cpus = _host_cpu_capacity()
 
     conn_count = 0
     pid = int(pid_hint or 0)
@@ -6367,6 +6486,18 @@ def collect_container(
             pid = int(d.get("State", {}).get("Pid", 0) or 0)
             configuration_risks = _oci_security_risks(d)
             host_config = d.get("HostConfig") if isinstance(d.get("HostConfig"), dict) else {}
+            quota = int(host_config.get("CpuQuota") or 0)
+            period = int(host_config.get("CpuPeriod") or 0)
+            nano_cpus = int(host_config.get("NanoCpus") or 0)
+            cpu_caps = []
+            if quota > 0 and period > 0:
+                cpu_caps.append(quota / period)
+            if nano_cpus > 0:
+                cpu_caps.append(nano_cpus / 1_000_000_000.0)
+            cpuset_cpus = _cpu_set_count(host_config.get("CpusetCpus"))
+            if cpuset_cpus > 0:
+                cpu_caps.append(cpuset_cpus)
+            cpu_effective_cpus = min(cpu_caps) if cpu_caps else _host_cpu_capacity()
             network_mode = str(host_config.get("NetworkMode") or "").strip().lower()
             network_exposure = _oci_network_exposure(d)
             network_settings = d.get("NetworkSettings") if isinstance(d.get("NetworkSettings"), dict) else {}
@@ -6767,6 +6898,7 @@ def collect_container(
             "vmess_listener_inventory_complete": vmess_listener_inventory_complete,
         }
     )
+    cpu_pressure_percent = cpu_percent
     if cpu_percent <= 0 and float(top_cpu_process.get("cpu_percent") or 0) > 0:
         cpu_percent = float(top_cpu_process.get("cpu_percent") or 0)
 
@@ -6783,7 +6915,9 @@ def collect_container(
         "runtime": runtime_name,
         "project": project,
         "cpu_percent": cpu_percent,
-        "cpu_effective_cpus": float(parsed_stats.get("cpu_effective_cpus", 0.0) or 0.0),
+        "cpu_pressure_percent": cpu_pressure_percent,
+        "cpu_pressure_sample_available": cpu_pressure_sample_available,
+        "cpu_effective_cpus": cpu_effective_cpus,
         "mem_bytes": mem,
         "mem_limit_bytes": mem_limit,
         "mem_percent": mem_percent,

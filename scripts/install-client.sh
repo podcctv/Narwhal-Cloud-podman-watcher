@@ -469,7 +469,7 @@ cp "$ROOT_DIR/client/operations.py" "$CLIENT_APP_DIR/operations.py"
 cp "$ROOT_DIR/client/disk_cleanup.py" "$CLIENT_APP_DIR/disk_cleanup.py"
 cp "$ROOT_DIR/client/disk_cleanup_worker.py" "$CLIENT_APP_DIR/disk_cleanup_worker.py"
 cp "$ROOT_DIR/client/security_banner.py" "$CLIENT_APP_DIR/security_banner.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard; do
   cp "$ROOT_DIR/client/$module.py" "$CLIENT_APP_DIR/$module.py"
 done
 cp "$ROOT_DIR/client/tcp_probe.py" "$CLIENT_APP_DIR/tcp_probe.py"

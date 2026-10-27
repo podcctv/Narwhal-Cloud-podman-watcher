@@ -843,10 +843,12 @@ def process_security_alerts(
             (fingerprint,),
         ).fetchone() is not None
         automatic_remediation = raw_alert.get("automatic_remediation")
+        ongoing_protection = raw_alert.get("ongoing_protection") is True
         automatically_remediated = (
             isinstance(automatic_remediation, dict)
             and automatic_remediation.get("attempted") is True
             and automatic_remediation.get("succeeded") is True
+            and not ongoing_protection
         )
         next_status = (
             "suppressed" if allow_policy
@@ -876,6 +878,18 @@ def process_security_alerts(
                     should_notify = False
             else:
                 should_notify = previous_status == "resolved" or _SEVERITY_RANK[severity] > _SEVERITY_RANK.get(str(existing["severity"]), 0)
+                previous_details = _alert_details(existing["details_json"])
+                previous_remediation = previous_details.get("automatic_remediation")
+                if (
+                    ongoing_protection
+                    and isinstance(previous_remediation, dict)
+                    and previous_remediation.get("attempted") is True
+                    and previous_remediation.get("succeeded") is not True
+                    and isinstance(automatic_remediation, dict)
+                    and automatic_remediation.get("attempted") is True
+                    and automatic_remediation.get("succeeded") is True
+                ):
+                    should_notify = True
                 if alert_type == 'container_connection_count':
                     was_escalated = _alert_details(existing['details_json']).get('connection_policy', {}).get('escalated')
                     should_notify = should_notify or bool(raw_alert.get('connection_policy', {}).get('escalated') and not was_escalated)

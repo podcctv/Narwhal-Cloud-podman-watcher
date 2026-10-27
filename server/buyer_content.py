@@ -142,6 +142,51 @@ def issue(alert, details):
         return '服务器网络保护需要管理员检查','当前无法确认采样或保护规则已生效；未将证据不足视为恢复。','请发工单，由管理员核查处理。'
     if kind=='pasarguard_node_removed':
         return '服务器发现禁止运行的 PasarGuard Node 服务', '已核实程序或镜像归属，具体清理结果见下方处理回执。', '请勿再次安装此服务；如有疑问，请发工单。'
+    if kind == "cpu_pressure_protection":
+        cpu = details.get("cpu_guard") if isinstance(details.get("cpu_guard"), dict) else {}
+        action = details.get("automatic_remediation") if isinstance(details.get("automatic_remediation"), dict) else {}
+        process = cpu.get("top_process") if isinstance(cpu.get("top_process"), dict) else {}
+        applied = action.get("succeeded") is True and cpu.get("limit_applied") is not False
+        restore_failed = cpu.get("restore_failed") is True or action.get("restore_succeeded") is False
+        if restore_failed:
+            title = "服务器 CPU 已回落，但临时保护限额未能自动恢复"
+        elif applied:
+            title = "服务器持续高 CPU，已启用临时保护"
+        else:
+            title = "服务器持续高 CPU，自动保护未能确认生效"
+        facts = []
+        if cpu.get("container_cpu_percent") is not None:
+            facts.append(f"容器 CPU {fmt(cpu.get('container_cpu_percent'))}%")
+        if cpu.get("effective_cpus") is not None:
+            facts.append(f"可用 CPU {fmt(cpu.get('effective_cpus'))} 核")
+        if cpu.get("host_busy_percent") is not None:
+            facts.append(f"主机 CPU 忙碌 {fmt(cpu.get('host_busy_percent'))}%")
+        if cpu.get("host_iowait_percent") is not None:
+            facts.append(f"主机 IO 等待 {fmt(cpu.get('host_iowait_percent'))}%")
+        if cpu.get("confirmed_duration_seconds") is not None:
+            facts.append(f"连续高占用确认 {fmt(num(cpu.get('confirmed_duration_seconds'))/60)} 分钟（有效采样 {fmt(cpu.get('sample_count'))}/{fmt(cpu.get('required_samples'))} 次）")
+        if cpu.get("threshold_percent_of_one_cpu") is not None:
+            facts.append(f"判断阈值：单核 CPU {fmt(cpu.get('threshold_percent_of_one_cpu'))}% 或容器配额饱和；主机 CPU 忙碌 {fmt(cpu.get('host_busy_threshold_percent'))}%")
+        if process.get("available") is True:
+            facts.append(f"触发时进程 {clean(process.get('process') or 'unknown', 120)}（容器内 PID {fmt(process.get('pid'))}），{fmt(process.get('sampled_seconds'))} 秒采样 CPU {fmt(process.get('cpu_percent'))}%")
+        else:
+            facts.append("触发时未取得可确认的进程级采样；自动判断依据是容器运行时 CPU 区间指标")
+        if applied:
+            original = clean(action.get("original_limit") or "原配额", 80)
+            active = clean(action.get("active_limit") or "临时配额", 80)
+            facts.append(f"容器 CPU 配额：{original} → {active}")
+            if restore_failed:
+                facts.append("原 CPU 配额自动恢复失败；临时保护配额仍在生效")
+        else:
+            facts.append("系统未停止进程或容器；当前未确认 CPU 限额生效")
+        advice = (
+            "请检查该进程对应的任务和日志。临时配额会在容器 CPU 连续回落后自动恢复；本次措施是主机资源保护，不代表认定客户滥用。"
+            if applied and not restore_failed else
+            "请管理员检查容器运行时及 CPU 配额读回结果；系统没有停止进程或容器。本次告警是主机资源保护，不代表认定客户滥用。"
+        )
+        if restore_failed:
+            advice = "临时 CPU 配额仍在保护容器，但原配额未能自动恢复。请管理员检查容器运行时配置后手动恢复；系统没有停止进程或容器。"
+        return title, "；".join(facts) + "。", advice
     if kind in METRICS:
         description, label, unit, advice = METRICS[kind]
         value, threshold = num(alert.get("value")), num(alert.get("threshold"))
@@ -301,7 +346,9 @@ def render(alert, state, node="", action=None):
     outcome = execution_text(details, action)
     if alert.get("alert_type") == "vmess_port_blocked" and vmess_block_evidence(details):
         outcome = ""
-    subject = "服务器服务策略提醒" if alert.get("alert_type") == "vmess_port_blocked" else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
+    if alert.get("alert_type") == "cpu_pressure_protection":
+        outcome = ""
+    subject = "服务器服务策略提醒" if alert.get("alert_type") == "vmess_port_blocked" else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency", "cpu_pressure_protection"} else "服务器安全提醒"
     if state == "verified":
         subject = "服务器安全复查通知"
         text = f"{identity}此前{description}。\n本次复查未再发现该问题。请保持安全设置，并留意后续使用情况。"
