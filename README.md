@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.104**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.105**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.105：修复 GFW 探测模块的 Agent 更新打包检查
+
+- Agent 更新器继续单独编译检查并备份新增的 `gfw_probe.py`，同时保持既有模块打包循环的兼容格式，避免升级发布检查误报失败。
 
 ### v1.7.104：新增跨区域国内连通性跟踪与容器协议端口摘要
 
