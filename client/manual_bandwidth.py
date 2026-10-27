@@ -270,11 +270,32 @@ def _filter_present(listing: str, handle: str, pref: int) -> bool:
     return False
 
 
-def _filter_has_police_action(listing: str, handle: str, pref: int) -> bool:
+def _filter_has_police_action(
+    listing: str, handle: str, pref: int, rate_mbps: int | None = None,
+) -> bool:
     for block in re.split(r"(?=filter protocol )", listing):
-        if (re.search(rf"\bhandle\s+{re.escape(handle)}\b", block)
+        if not (re.search(rf"\bhandle\s+{re.escape(handle)}\b", block)
                 and re.search(rf"\bpref\s+{pref}\b", block)
                 and "police" in block):
+            continue
+        if rate_mbps is None:
+            return True
+        match = re.search(
+            r"\brate\s+([0-9]+(?:\.[0-9]+)?)\s*([kmgt]?bit(?:/s)?|[kmgt]?bps)\b",
+            block, re.IGNORECASE,
+        )
+        if not match:
+            continue
+        unit = match.group(2).casefold().replace("/s", "")
+        multipliers = {
+            "bit": 1, "bps": 1,
+            "kbit": 1_000, "kbps": 1_000,
+            "mbit": 1_000_000, "mbps": 1_000_000,
+            "gbit": 1_000_000_000, "gbps": 1_000_000_000,
+            "tbit": 1_000_000_000_000, "tbps": 1_000_000_000_000,
+        }
+        actual_mbps = float(match.group(1)) * multipliers.get(unit, 0) / 1_000_000
+        if abs(actual_mbps - rate_mbps) <= max(0.001, rate_mbps * 0.001):
             return True
     return False
 
@@ -323,12 +344,13 @@ def _apply_filter(
     )
     if not pref:
         raise BandwidthPolicyError("no free tc filter priority is available on this interface")
-    # `tc filter add` fails with EEXIST when another subsystem owns the
-    # preferred priority. Refresh the listing and retry with another free slot;
-    # never delete, replace, or re-prioritize a filter with a foreign handle.
+    # Existing owned filters are changed in place. `replace` can return EEXIST
+    # on kernels with a competing filter at the same priority even when this
+    # handle is ours; `change` targets the verified filter identity without
+    # creating or replacing a foreign filter. New filters retry free priorities.
     for _attempt in range(5):
         replacing_owned = previously_owned and owned_pref == pref
-        verb = "replace" if replacing_owned else "add"
+        verb = "change" if replacing_owned else "add"
         code, message = _call(prefix, [
             "tc", "filter", verb, "dev", interface, tc_direction,
             "protocol", "all", "pref", str(pref), "handle", handle,
@@ -337,9 +359,21 @@ def _apply_filter(
         ])
         if code == 0:
             verified = _filter_listing(prefix, interface, direction)
-            if not _filter_has_police_action(verified, handle, pref):
-                raise BandwidthPolicyError("bandwidth policer readback did not confirm the filter")
+            if not _filter_has_police_action(verified, handle, pref, rate_mbps):
+                raise BandwidthPolicyError(
+                    f"bandwidth policer readback did not confirm {rate_mbps} Mbps at priority {pref}"
+                )
             return pref
+        if replacing_owned and "file exists" in message.casefold():
+            verified = _filter_listing(prefix, interface, direction)
+            if _filter_has_police_action(verified, handle, pref, rate_mbps):
+                # Netlink may report an already-applied identical change as
+                # EEXIST. Trust only an exact owned-handle rate readback.
+                return pref
+            raise BandwidthPolicyError(
+                f"owned bandwidth filter change failed at priority {pref}; "
+                f"readback did not confirm {rate_mbps} Mbps: {(message or 'tc failed')[:180]}"
+            )
         if verb == "add" and "file exists" in message.casefold():
             listing = _filter_listing(prefix, interface, direction)
             if _filter_preference(listing, handle) is not None:
@@ -348,7 +382,10 @@ def _apply_filter(
             if pref:
                 continue
             raise BandwidthPolicyError("no free tc filter priority is available on this interface")
-        raise BandwidthPolicyError("bandwidth policer was not confirmed: " + (message or "tc failed")[:240])
+        raise BandwidthPolicyError(
+            f"bandwidth policer was not confirmed (tc filter {verb}, priority {pref}, {direction}): "
+            + (message or "tc failed")[:200]
+        )
     raise BandwidthPolicyError("tc filter priorities kept colliding; no foreign filter was changed")
 
 
@@ -486,6 +523,68 @@ def _auto_tier_rates(base_mbps: int) -> list[int]:
     return rates
 
 
+def _sysfs_host_links() -> tuple[dict[int, dict[str, Any]], str]:
+    """Read host veth peer/master metadata without depending on iproute2 JSON support."""
+    root = "/sys/class/net"
+    try:
+        names = os.listdir(root)
+    except OSError as exc:
+        return {}, f"cannot read {root}: {exc}"
+    links: dict[int, dict[str, Any]] = {}
+    for name in names[:512]:
+        if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name):
+            continue
+        base = os.path.join(root, name)
+        try:
+            with open(os.path.join(base, "ifindex"), "r", encoding="ascii") as handle:
+                index = int(handle.read().strip())
+        except (OSError, ValueError):
+            continue
+        try:
+            with open(os.path.join(base, "iflink"), "r", encoding="ascii") as handle:
+                peer_index = int(handle.read().strip())
+        except (OSError, ValueError):
+            peer_index = index
+        try:
+            master = os.path.basename(os.readlink(os.path.join(base, "master")))
+        except OSError:
+            master = ""
+        if index > 0:
+            links[index] = {
+                "ifname": name, "ifindex": index, "link_index": peer_index,
+                "iflink": peer_index, "master": master,
+            }
+    return links, "" if links else f"{root} contained no readable interfaces"
+
+
+def _proc_default_routes() -> set[str]:
+    """Fallback route inventory for minimal iproute2 builds."""
+    result: set[str] = set()
+    try:
+        with open("/proc/net/route", "r", encoding="ascii") as handle:
+            for line in handle.read().splitlines()[1:]:
+                fields = line.split()
+                if len(fields) >= 4 and fields[1] == "00000000":
+                    try:
+                        is_up = bool(int(fields[3], 16) & 0x1)
+                    except ValueError:
+                        is_up = False
+                    if is_up and re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", fields[0]):
+                        result.add(fields[0])
+    except OSError:
+        pass
+    try:
+        with open("/proc/net/ipv6_route", "r", encoding="ascii") as handle:
+            for line in handle.read().splitlines():
+                fields = line.split()
+                if (len(fields) >= 10 and not fields[0].strip("0") and fields[1] == "00"
+                        and re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", fields[9])):
+                    result.add(fields[9])
+    except OSError:
+        pass
+    return result
+
+
 def _host_link_snapshot() -> tuple[dict[int, dict[str, Any]], set[str], str]:
     code, output = _runner(["ip", "-j", "link", "show"])
     link_error = f"ip -j link show failed ({code}): {output}" if code != 0 else ""
@@ -496,7 +595,7 @@ def _host_link_snapshot() -> tuple[dict[int, dict[str, Any]], set[str], str]:
         link_error = "ip -j link show returned invalid JSON"
     # Some minimal iproute2 builds expose the same link fields only through
     # `address show`; try that read-only source before disabling auto mapping.
-    if not isinstance(raw_links, list):
+    if not isinstance(raw_links, list) or not raw_links:
         fallback_code, fallback_output = _runner(["ip", "-j", "address", "show"])
         try:
             fallback_links = json.loads(fallback_output)
@@ -507,21 +606,32 @@ def _host_link_snapshot() -> tuple[dict[int, dict[str, Any]], set[str], str]:
             link_error = ""
         else:
             link_error += f"; ip -j address show failed ({fallback_code}): {fallback_output}"
-    if not isinstance(raw_links, list):
-        return {}, set(), link_error[:500]
-    links: dict[int, dict[str, Any]] = {}
-    for item in raw_links[:512]:
-        if not isinstance(item, dict):
-            continue
-        try:
-            index = int(item.get("ifindex") or 0)
-        except (TypeError, ValueError):
-            continue
-        name = str(item.get("ifname") or "")
-        if index > 0 and re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name):
-            links[index] = item
-    if not links:
-        return {}, set(), (link_error or "link inventory contained no valid interfaces")[:500]
+    if not isinstance(raw_links, list) or not raw_links:
+        sysfs_links, sysfs_error = _sysfs_host_links()
+        if sysfs_links:
+            return_links = sysfs_links
+            link_error = ""
+        else:
+            return {}, set(), (link_error + "; " + sysfs_error)[:500]
+    else:
+        return_links = {}
+    if not return_links:
+        for item in raw_links[:512]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("ifindex") or 0)
+            except (TypeError, ValueError):
+                continue
+            name = str(item.get("ifname") or "")
+            if index > 0 and re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name):
+                return_links[index] = item
+    if not return_links:
+        sysfs_links, sysfs_error = _sysfs_host_links()
+        if not sysfs_links:
+            return {}, set(), (link_error or "link inventory contained no valid interfaces") + "; " + sysfs_error
+        return_links = sysfs_links
+        link_error = ""
     code, output = _runner(["ip", "-j", "route", "show", "default"])
     defaults: set[str] = set()
     if code == 0:
@@ -535,7 +645,11 @@ def _host_link_snapshot() -> tuple[dict[int, dict[str, Any]], set[str], str]:
                 if re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name):
                     defaults.add(name)
     route_error = f"ip -j route show default failed ({code}): {output}" if code != 0 else ""
-    return links, defaults, route_error[:500]
+    if not defaults:
+        defaults.update(_proc_default_routes())
+        if defaults:
+            route_error = ""
+    return return_links, defaults, route_error[:500]
 
 
 def _uses_selected_host_interface(
@@ -776,6 +890,7 @@ def _automatic_limits(
         auto_state["unmapped_containers"] = len(unmapped_identities)
         auto_state["unavailable_samples"] = unavailable_samples
         auto_state["mapping_reason"] = mapping_reason
+        auto_state["mapping_error"] = host_network_error[:500] if mapping_reason and host_network_error else ""
     # Prune long-departed identities, but keep recent ones so a transient runtime
     # inventory failure cannot remove a limiter that is already protecting a container.
     for key, record in list(tracked.items()):
@@ -855,9 +970,11 @@ def _automatic_limits(
     if auto_state.get("mapping_reason") == "host_namespace_unavailable":
         status["message"] = "宿主机网络命名空间不可读，已跳过自动限速路径核验"
     elif auto_state.get("mapping_reason") == "host_link_inventory_unavailable":
-        status["message"] = "宿主机网卡清单不可读，已跳过自动限速路径核验" + (f"：{host_network_error}" if new_sample and host_network_error else "")
+        detail = str(auto_state.get("mapping_error") or "")
+        status["message"] = "宿主机网卡清单不可读，已跳过自动限速路径核验" + (f"：{detail}" if detail else "")
     elif auto_state.get("mapping_reason") == "host_route_inventory_unavailable":
-        status["message"] = "宿主机路由清单不可读，无法确认容器是否经过所选网卡，已跳过自动限速路径核验" + (f"：{host_network_error}" if new_sample and host_network_error else "")
+        detail = str(auto_state.get("mapping_error") or "")
+        status["message"] = "宿主机路由清单不可读，无法确认容器是否经过所选网卡，已跳过自动限速路径核验" + (f"：{detail}" if detail else "")
     return auto_limits, status
 
 
