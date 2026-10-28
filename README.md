@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.120**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.121**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.121：修复升级健康模块的 Server 镜像打包
+
+- Server 镜像现在包含 `upgrade_health.py`，确保健康门禁模块可在容器运行时导入，并通过镜像构建后的启动导入检查。
 
 ### v1.7.120：修复 VMess 进程时钟证据与纯探针升级门禁
 
