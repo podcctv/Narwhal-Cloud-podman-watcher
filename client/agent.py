@@ -5281,6 +5281,7 @@ def _protocol_process_start_epoch_lower_bound(
         if observed_start_ticks != start_ticks:
             reject("process_generation_changed")
             return None
+        uptime_text = remaining_snapshot.strip()
         uptime_fields = uptime_text.split()
         if len(uptime_fields) != 2:
             reject("uptime_snapshot_invalid")
