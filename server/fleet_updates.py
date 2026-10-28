@@ -25,7 +25,7 @@ def save(conn, value):
 
 
 def reclaim_superseded_actions(conn, now):
-    """Release dispatch slots held by actions from superseded campaigns."""
+    """Release dispatch slots no longer owned by live fleet work."""
     conn.execute(
         """UPDATE security_actions
            SET status='failed', result_message=?, updated_at=?
@@ -47,6 +47,27 @@ def reclaim_superseded_actions(conn, now):
                  SELECT id FROM ops_upgrades
                  WHERE status='superseded'
              )"""
+    )
+    # A timed-out action can remain marked running after its node has already
+    # been failed and its campaign paused. It is no longer executable work,
+    # but the global concurrency count would keep reserving a slot forever.
+    # Reclaim only old actions whose node and campaign are both terminal;
+    # never release a fresh action or work in an active campaign.
+    conn.execute(
+        """UPDATE security_actions
+           SET status='failed', result_message=?, updated_at=?
+           WHERE action_type='managed_upgrade'
+             AND status IN ('queued','dispatched','running')
+             AND created_at<=?
+             AND id IN (
+                 SELECT n.action_id
+                 FROM ops_upgrade_nodes n
+                 JOIN ops_upgrades u ON u.id=n.campaign
+                 WHERE n.action_id IS NOT NULL
+                   AND n.status IN ('failed','superseded','rolled_back','verified')
+                   AND u.status IN ('paused','superseded','failed','verified')
+             )""",
+        ('自动升级动作已超时且所属节点/发布已终态；释放调度名额', now, now - 1800),
     )
 
 

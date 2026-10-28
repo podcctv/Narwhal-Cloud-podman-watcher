@@ -161,3 +161,35 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM security_actions WHERE status IN ('queued','dispatched','running')").fetchone()[0], 1)
         self.assertEqual(self.actions()[-1]['host_id'], 'canary')
         self.assertEqual(self.actions()[-1]['status'], 'queued')
+
+    def test_reclaim_only_old_running_actions_from_terminal_campaign_nodes(self):
+        paused = self.c.execute(
+            "INSERT INTO ops_upgrades(version,revision,status,created_at,payload) VALUES('1.7.40',?,'paused',1000,'{}')",
+            ('c'*40,),
+        ).lastrowid
+        active = self.c.execute(
+            "INSERT INTO ops_upgrades(version,revision,status,created_at,payload) VALUES('1.7.46',?,'rollout',1000,'{}')",
+            ('d'*40,),
+        ).lastrowid
+
+        def action(host, created):
+            return self.c.execute(
+                "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at,result_message) VALUES(0,?,'host','','__host__','managed_upgrade','{}','running','automatic-fleet',?,?, '')",
+                (host, created, created),
+            ).lastrowid
+
+        stale = action('stale', 1000)
+        fresh = action('fresh', 2500)
+        active_action = action('active', 1000)
+        self.c.execute("INSERT INTO ops_upgrade_nodes VALUES(?,?,?,?,?)", (paused, 'stale', stale, 'failed', '1.7.39'))
+        self.c.execute("INSERT INTO ops_upgrade_nodes VALUES(?,?,?,?,?)", (paused, 'fresh', fresh, 'failed', '1.7.39'))
+        self.c.execute("INSERT INTO ops_upgrade_nodes VALUES(?,?,?,?,?)", (active, 'active', active_action, 'failed', '1.7.45'))
+        self.c.commit()
+
+        fleet.reclaim_superseded_actions(self.c, 3000)
+
+        stale_row = self.c.execute('SELECT status,result_message FROM security_actions WHERE id=?', (stale,)).fetchone()
+        self.assertEqual(stale_row['status'], 'failed')
+        self.assertIn('释放调度名额', stale_row['result_message'])
+        self.assertEqual(self.c.execute('SELECT status FROM security_actions WHERE id=?', (fresh,)).fetchone()[0], 'running')
+        self.assertEqual(self.c.execute('SELECT status FROM security_actions WHERE id=?', (active_action,)).fetchone()[0], 'running')
