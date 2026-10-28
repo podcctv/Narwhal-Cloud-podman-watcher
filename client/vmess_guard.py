@@ -21,6 +21,7 @@ except ImportError:
 SUPPORTED_RUNTIMES = {"incus", "podman"}
 SUPPORTED_ENGINES = {"xray", "v2ray", "sing-box"}
 MAX_ENDPOINTS = 32
+_SAFE_SCAN_REASON = re.compile(r"[a-z0-9_]{1,64}")
 
 
 def _integer(value, minimum=1, maximum=65535):
@@ -107,12 +108,16 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         pid, process, port = configured["pid"], configured["process"], configured["port"]
         if process_states is not None:
             process_state = process_states.get((pid, process))
-            if (
-                not isinstance(process_state, dict)
-                or str(process_state.get("state") or "partial").lower() != "complete"
-                or not str(process_state.get("start_ticks") or "").isdigit()
-            ):
-                pending.append({"port": port, "process": process, "reason": "configuration_scan_incomplete"})
+            process_state_name = str(process_state.get("state") or "partial").lower() if isinstance(process_state, dict) else "missing"
+            start_ticks = str(process_state.get("start_ticks") or "") if isinstance(process_state, dict) else ""
+            reason = str(process_state.get("reason") or "") if isinstance(process_state, dict) else ""
+            if process_state_name != "complete" or not start_ticks.isdigit():
+                if not _SAFE_SCAN_REASON.fullmatch(reason):
+                    reason = "process_scan_state_missing" if process_state_name == "missing" else (
+                        "process_start_generation_unavailable" if process_state_name == "complete"
+                        else "configuration_scan_incomplete"
+                    )
+                pending.append({"port": port, "process": process, "reason": reason})
                 continue
         configured_transports = None
         for item in configured_protocols:

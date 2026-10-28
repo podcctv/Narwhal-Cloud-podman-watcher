@@ -17,6 +17,28 @@ STALE_SECONDS = 900
 JOB_SECONDS = 600
 MAX_ACTIVE_CYCLES = 30
 SUCCESSFUL_PROBE_ERRORS = {"", "timeout", "refused", "network_error"}
+PROBE_FAILURE_CODES = {
+    "probe_source_identity_mismatch", "invalid_probe_identity", "invalid_probe_lease",
+    "invalid_probe_deadline", "invalid_target_count", "invalid_target_fields",
+    "invalid_target_endpoint", "invalid_target_identity", "invalid_targets_hash",
+    "incomplete_probe_results", "probe_runtime_unavailable", "probe_worker_busy", "probe_worker_error",
+}
+PROBE_FAILURE_LABELS = {
+    "probe_source_identity_mismatch": "探针身份不匹配",
+    "invalid_probe_identity": "探针任务身份校验失败",
+    "invalid_probe_lease": "探针任务授权校验失败",
+    "invalid_probe_deadline": "探针任务已过期",
+    "invalid_target_count": "目标端口数量不符合限制",
+    "invalid_target_fields": "目标字段校验失败",
+    "invalid_target_endpoint": "目标地址校验失败",
+    "invalid_target_identity": "目标身份校验失败",
+    "invalid_targets_hash": "目标清单校验失败",
+    "incomplete_probe_results": "探测结果不完整",
+    "probe_runtime_unavailable": "探针未运行在宿主机网络环境",
+    "probe_worker_busy": "探针已有任务执行中",
+    "probe_worker_error": "探针执行异常",
+    "probe deadline elapsed": "任务超时",
+}
 
 
 def _json(value):
@@ -285,7 +307,22 @@ def _apply_cycle(conn, cycle, now):
         classification = "unknown"
         reason = "当前异常发生在不同 IP/端口；不能与原阻断端点合并计时"
     elif classification == "unknown" and not reason:
-        reason = "国内或海外探测样本不足/结果不一致；本轮不用于确认阻断或恢复"
+        failures = {}
+        for job in jobs:
+            if job["status"] not in ("failed", "expired"):
+                continue
+            code = str(job["error"] or ("probe deadline elapsed" if job["status"] == "expired" else "probe_worker_error"))
+            label = PROBE_FAILURE_LABELS.get(code, "任务未完成")
+            role = "国内" if job["role"] == "mainland" else "海外"
+            key = (role, label)
+            failures[key] = failures.get(key, 0) + 1
+        if failures:
+            reason = "探测任务未完成：" + "；".join(
+                f"{role}探针{label} {count} 个"
+                for (role, label), count in sorted(failures.items())
+            ) + "；本轮不用于确认阻断或恢复"
+        else:
+            reason = "国内或海外探测样本不足/结果不一致；本轮不用于确认阻断或恢复"
     event = None
     if classification == "blocked":
         if state["state"] != "blocked":
@@ -336,6 +373,11 @@ def _apply_cycle(conn, cycle, now):
                         "blocked_endpoint_keys": sorted([list(key) for key in anchored_blocked_keys])}
     if reason:
         evidence_payload["reason"] = reason
+    evidence_payload["probe_failures"] = [
+        {"role": job["role"], "status": job["status"],
+         "code": str(job["error"] or ("probe deadline elapsed" if job["status"] == "expired" else "probe_worker_error"))}
+        for job in jobs if job["status"] in ("failed", "expired")
+    ][:5]
     state.update(node_id=cycle["node_id"], last_sample_at=cycle["created_at"], evidence_json=_json(evidence_payload))
     conn.execute("""INSERT INTO gfw_states(host_id,node_id,state,blocked_since,recovered_at,normal_since,last_cycle_at,last_sample_at,
       last_classification,pending_block_count,pending_block_since,pending_recovery_count,last_normal_duration,blocked_count,evidence_json)
@@ -418,6 +460,36 @@ def report(conn, payload, now):
         conn.execute("INSERT INTO gfw_probe_results(job_id,target_id,success,latency_ms,error,attempts) VALUES(?,?,?,?,?,?)",
                      (row["id"], result["target_id"], int(result["success"]), result["latency_ms"], result["error"], result["attempts"]))
     conn.execute("UPDATE gfw_probe_jobs SET status='complete',finished_at=? WHERE id=?", (now, row["id"]))
+    cycle = conn.execute("SELECT * FROM gfw_cycles WHERE id=?", (row["cycle_id"],)).fetchone()
+    _apply_cycle(conn, cycle, now)
+    conn.commit()
+    return {"ok": True}
+
+
+def report_failure(conn, payload, now):
+    keys = {"job_id", "cycle_id", "source_host_id", "source_node_id", "lease", "targets_hash", "failure_code"}
+    if not isinstance(payload, dict) or set(payload) != keys:
+        raise HTTPException(400, "invalid GFW probe failure report")
+    if any(not isinstance(payload[key], str) or not 1 <= len(payload[key]) <= 256 for key in keys):
+        raise HTTPException(400, "invalid GFW probe failure identity")
+    if payload["failure_code"] not in PROBE_FAILURE_CODES:
+        raise HTTPException(400, "invalid GFW probe failure code")
+    conn.execute("BEGIN IMMEDIATE")
+    row = conn.execute("SELECT * FROM gfw_probe_jobs WHERE id=?", (payload["job_id"],)).fetchone()
+    if (not row or row["cycle_id"] != payload["cycle_id"]
+            or row["source_host_id"] != payload["source_host_id"]
+            or row["source_node_id"] != payload["source_node_id"]
+            or not secrets.compare_digest(row["lease"], payload["lease"])):
+        raise HTTPException(403, "invalid GFW probe lease")
+    if (payload["targets_hash"] != row["targets_hash"] or row["status"] != "running"
+            or row["deadline_at"] <= now):
+        raise HTTPException(409, "GFW probe job is no longer active")
+    role = conn.execute("SELECT role FROM gfw_probe_roles WHERE host_id=? AND node_id=?",
+                        (row["source_host_id"], row["source_node_id"])).fetchone()
+    if not role or role["role"] != row["role"]:
+        raise HTTPException(409, "probe node role changed")
+    conn.execute("UPDATE gfw_probe_jobs SET status='failed',finished_at=?,error=? WHERE id=?",
+                 (now, payload["failure_code"], row["id"]))
     cycle = conn.execute("SELECT * FROM gfw_cycles WHERE id=?", (row["cycle_id"],)).fetchone()
     _apply_cycle(conn, cycle, now)
     conn.commit()
@@ -543,5 +615,22 @@ def attach(app, db, verify_signature, signed_response):
         conn = db()
         try:
             return signed_response(report(conn, payload, int(time.time())), ts)
+        finally:
+            conn.close()
+
+    @app.post("/api/v1/gfw-probe/failure")
+    async def agent_failure(request: Request):
+        raw = await request.body()
+        if len(raw) > 8192:
+            raise HTTPException(413, "GFW probe failure report too large")
+        ts = request.headers.get("x-timestamp", "")
+        verify_signature(raw, ts, request.headers.get("x-signature", ""))
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            raise HTTPException(400, "invalid JSON") from None
+        conn = db()
+        try:
+            return signed_response(report_failure(conn, payload, int(time.time())), ts)
         finally:
             conn.close()

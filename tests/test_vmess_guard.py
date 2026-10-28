@@ -96,7 +96,20 @@ class VmessPlanTests(unittest.TestCase):
         )
         self.assertEqual(result["blocked_endpoints"], [])
         self.assertEqual(result["state"], "unverified")
-        self.assertEqual(result["pending_endpoints"][0]["reason"], "configuration_scan_incomplete")
+        self.assertEqual(result["pending_endpoints"][0]["reason"], "process_start_generation_unavailable")
+
+    def test_process_scan_failure_reason_is_preserved_for_operator_diagnosis(self):
+        result = vmess_guard.plan(
+            "incus", self.config, [self.listener], [], "partial",
+            process_scan_states=[{
+                "pid": 120, "process": "xray", "state": "partial", "start_ticks": "900",
+                "reason": "config_process_clock_unavailable",
+            }],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(result["state"], "unverified")
+        self.assertEqual(result["blocked_endpoints"], [])
+        self.assertEqual(result["pending_endpoints"][0]["reason"], "config_process_clock_unavailable")
 
     def test_incomplete_listener_inventory_prevents_per_process_block(self):
         result = vmess_guard.plan(

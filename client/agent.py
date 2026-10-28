@@ -3729,6 +3729,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "endpoint_report_limit_exceeded": "入站端点数量超过上报上限",
                     "process_scan_limit_exceeded": "协议进程数量达到扫描上限",
                     "process_snapshot_unavailable": "容器进程清单不可读或采集未完成",
+                    "process_scan_state_missing": "未取得该进程的独立扫描状态",
+                    "process_start_generation_unavailable": "无法确认该进程当前运行代次",
                     "listener_inventory_incomplete": "实时监听清单不完整，无法确认端口归属",
                     "live_listener_not_confirmed": "未找到配置对应的实时监听端口",
                     "listener_protocol_or_owner_ambiguous": "实时监听的进程或协议归属不唯一",

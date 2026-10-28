@@ -162,6 +162,7 @@ _AGENT_ONLY_PATHS = {
     "/api/v1/actions/result",
     "/api/v1/tcp-probe/report",
     "/api/v1/gfw-probe/report",
+    "/api/v1/gfw-probe/failure",
     "/api/v1/update/version",
 }
 
