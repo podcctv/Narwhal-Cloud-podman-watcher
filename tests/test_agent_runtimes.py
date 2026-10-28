@@ -1534,7 +1534,10 @@ class SecurityTelemetryTests(unittest.TestCase):
     def test_config_confirmed_xray_socks_keeps_safe_process_target(self):
         process_output = "12 S xray /usr/bin/xray run -config /etc/xray/config.json\n"
         config = json.dumps({'inbounds':[{'protocol':'socks','port':1080,'settings':{'auth':'noauth'}}]})
-        with mock.patch.object(agent, "run", side_effect=[process_output, '', '12345', config, '12345', 'fixture-generation', ""]):
+        with mock.patch.object(agent, "run", side_effect=[
+            process_output, '', '12345', '1:2:3:4:5', config,
+            '1:2:3:4:5', 'fixture-generation', '12345',
+        ]):
             result = agent.collect_panel_pairing_indicators(
                 "proxy", "incus", "default", "xray:latest"
             )
