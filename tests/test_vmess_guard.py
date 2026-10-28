@@ -436,9 +436,18 @@ class VmessPlanTests(unittest.TestCase):
 
 
 class VmessConfigClockTests(unittest.TestCase):
-    def _snapshot(self, ticks='90000', uptime='1000.00 500.00', comm='xray worker ) helper'):
+    def _snapshot(
+        self, ticks='90000', uptime='1000.00 500.00', comm='xray worker ) helper',
+        target_offset='0 0', self_offset='0 0', target_time_ns='42:42', self_time_ns='42:42',
+    ):
         fields = ['S'] + ['0'] * 18 + [str(ticks)]
-        return f"120 ({comm}) {' '.join(fields)}\n\n@@UPTIME@@\n{uptime}\n"
+        return (
+            f"120 ({comm}) {' '.join(fields)}\n\n@@UPTIME@@\n{uptime}\n"
+            f"@@TARGET_TIMENS@@\nboottime {target_offset}\n"
+            f"@@SELF_TIMENS@@\nboottime {self_offset}\n"
+            f"@@TARGET_TIME_NS@@\n{target_time_ns}\n"
+            f"@@SELF_TIME_NS@@\n{self_time_ns}\n"
+        )
 
     def _start_bound(self, snapshot=None, elapsed=0.01, ticks='90000'):
         if snapshot is None:
@@ -473,12 +482,17 @@ class VmessConfigClockTests(unittest.TestCase):
         ))
 
     def test_container_time_namespace_uses_its_own_uptime_and_start_ticks(self):
-        snapshot = self._snapshot(ticks='60570000', uptime='605800.00 500.00')
+        snapshot = self._snapshot(
+            ticks='60570000', uptime='604700.00 500.00',
+            target_offset='1000 0', self_offset='0 0',
+            target_time_ns='43:43', self_time_ns='42:42',
+        )
         bound, _ = self._start_bound(snapshot=snapshot, ticks='60570000')
-        self.assertAlmostEqual(bound, 1700000899.97, places=4)
+        self.assertAlmostEqual(bound, 1700000999.97, places=4)
 
     def test_missing_namespace_links_do_not_break_a_same_exec_clock_pair(self):
-        bound, _ = self._start_bound(snapshot=self._snapshot())
+        snapshot = self._snapshot(target_time_ns='', self_time_ns='')
+        bound, _ = self._start_bound(snapshot=snapshot)
         self.assertIsNotNone(bound)
 
     def test_malformed_or_changed_proc_snapshot_is_rejected(self):
