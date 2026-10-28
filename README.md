@@ -1,6 +1,12 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.117**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.118**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.118：修复探针托管升级缺少仓库配置
+
+- 从压缩包或远程安装脚本安装、没有本地 Git checkout 的节点，安装器现在会在 `/opt/narwhal-monitor/<端类型>-update-repo` 建立固定上游的干净 checkout，再启用自动更新；已有路径或来源异常时保留现场，不覆盖。
+- Agent 只有在更新脚本、systemd-run、Git、本地 checkout 与固定上游来源均可用时才报告支持托管升级，避免把永远无法更新的节点加入发布队列。
+- Client 升级预检失败（如缺少 checkout、上游不符、main 已变化或本地修改）会写入失败回执；服务端不再等到 30 分钟超时才发现。
 
 ### v1.7.117：修复 GFW 探针身份校验并说明 VMess 待核实原因
 

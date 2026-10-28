@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import sqlite3
+import shlex
 import tempfile
 import time
 import unittest
@@ -379,6 +380,31 @@ class NodeOperationsTests(unittest.TestCase):
     def test_managed_upgrade_rejects_mismatched_identity_and_commands(self):
         self.assertFalse(agent_ops.schedule_upgrade({"params":{"expected_node_id":"other"}},"node")[0])
         self.assertFalse(agent_ops.schedule_upgrade({"params":{"expected_node_id":"node","revision":"a; curl evil","version":"1.7.0"}},"node")[0])
+
+    def test_managed_upgrade_capability_requires_trusted_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp); repo=base/"repo"; (repo/".git").mkdir(parents=True)
+            (base/"managed-client-update.sh").write_text("#!/bin/sh\n")
+            config=base/"client-auto-update.env"
+            with mock.patch.object(agent_ops.shutil,"which",side_effect=lambda name:"/bin/"+name if name in {"systemd-run","git"} else None), mock.patch.object(agent_ops.subprocess,"run") as run:
+                run.return_value.returncode=0
+                run.return_value.stdout="https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git\n"
+                self.assertFalse(agent_ops._managed_upgrade_available(base))
+                config.write_text("AUTO_UPDATE_REPO_DIR="+shlex.quote(str(repo))+"\n")
+                run.side_effect=[
+                    mock.Mock(returncode=0,stdout="",stderr=""),
+                    mock.Mock(returncode=0,stdout="https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git\n",stderr=""),
+                ]
+                self.assertTrue(agent_ops._managed_upgrade_available(base))
+                run.side_effect=[
+                    mock.Mock(returncode=0,stdout="",stderr=""),
+                    mock.Mock(returncode=0,stdout="https://example.invalid/untrusted.git\n",stderr=""),
+                ]
+                self.assertFalse(agent_ops._managed_upgrade_available(base))
+                run.side_effect=[
+                    mock.Mock(returncode=0,stdout=" M README.md\n",stderr=""),
+                ]
+                self.assertFalse(agent_ops._managed_upgrade_available(base))
 
     def test_managed_upgrade_uses_fixed_independent_worker_arguments(self):
         action={"id":17,"action_type":"managed_upgrade","params":{"expected_node_id":"node","revision":"a"*40,"version":"1.7.0"}}

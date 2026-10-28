@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import ssl
@@ -22,6 +23,48 @@ except ImportError:
 
 _config = {"services": []}
 _discoveries = []
+
+
+def _managed_upgrade_available(base=Path("/opt/narwhal-monitor")):
+    """Advertise managed upgrades only when the pinned repository is usable."""
+    script = base / "managed-client-update.sh"
+    config = base / "client-auto-update.env"
+    if not script.is_file() or not shutil.which("systemd-run") or not shutil.which("git") or not config.is_file():
+        return False
+    try:
+        repo_value = ""
+        for line in config.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "AUTO_UPDATE_REPO_DIR":
+                parsed = shlex.split(value, comments=False, posix=True)
+                if len(parsed) == 1:
+                    repo_value = parsed[0]
+                break
+        repo = Path(repo_value)
+        if not repo.is_absolute() or not (repo / ".git").is_dir():
+            return False
+        dirty = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        if dirty.returncode != 0 or dirty.stdout.strip():
+            return False
+        origin = subprocess.run(
+            ["git", "-C", str(repo), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return (
+            origin.returncode == 0
+            and origin.stdout.strip() == "https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git"
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
 
 
 def state_path():
@@ -159,7 +202,7 @@ def collect(security, containers, interval):
         try:maintenance=disk_cleanup.controller().summary()
         except (OSError,ValueError):maintenance['error']='cleanup state unavailable; no automatic deletion'
     return {"health":health,"services":services,"disk_cleanup":maintenance,"log_discovery":_discoveries,"architecture":platform.machine(),"interval_seconds":interval,"upgrade_result":upgrade_result,
-            "managed_upgrade":os.path.isfile("/opt/narwhal-monitor/managed-client-update.sh") and bool(shutil.which("systemd-run")),
+            "managed_upgrade":_managed_upgrade_available(),
             "capabilities":["operations-v1","service-probes","log-discovery","post-remediation-recheck"] + (["public-tcp-v2"] if tcp_probe.available() else []),"schema_version":1}
 
 

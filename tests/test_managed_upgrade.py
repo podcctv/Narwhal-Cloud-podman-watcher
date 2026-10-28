@@ -119,3 +119,21 @@ esac
 
     def test_dirty_checkout_preserved(self):
         self.run_worker(dirty=True)
+
+    def test_missing_checkout_writes_failure_receipt_instead_of_silent_timeout(self):
+        with tempfile.TemporaryDirectory(prefix="narwhal-upgrade-test-") as temp:
+            root=Path(temp); base=root/"base"; app=base/"client-agent"
+            (app/".venv"/"bin").mkdir(parents=True)
+            (base/"client.env").write_text("NARWHAL_VERSION=1.7.112\n")
+            script=root/"worker.sh"
+            source=(ROOT/"scripts"/"managed-client-update.sh").read_text(encoding="utf-8")
+            source=source.replace("/opt/narwhal-monitor",str(base)).replace("/run/narwhal-monitor-client-auto-update.lock",str(root/"auto-update.lock"))
+            script.write_text(source)
+            result=subprocess.run(["bash",str(script),"upgrade","a"*40,"1.7.117","2196"],text=True,capture_output=True,timeout=10)
+            self.assertNotEqual(result.returncode,0)
+            receipt=json.loads((base/"managed-update-result.json").read_text())
+            self.assertEqual(receipt["action_id"],2196)
+            self.assertEqual(receipt["status"],"failed")
+            self.assertEqual(receipt["version"],"1.7.112")
+            self.assertIn("no checkout configured",receipt["message"])
+            self.assertIn("no checkout configured",result.stderr)
