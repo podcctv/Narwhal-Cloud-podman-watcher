@@ -8287,27 +8287,36 @@ def _runman_firewall_readback() -> Dict[str, object]:
         "status": "unsupported" if os.name != "posix" else "unavailable",
         "observed_at": observed_at,
         "snapshot": None,
+        "reason": "platform_unsupported" if os.name != "posix" else "unknown",
     }
     if os.name != "posix":
         return result
-    connection = network_quarantine._UnixHTTP("/run/narwhal-agent/firewall.sock")
-    connection.timeout = 7
+    connection = None
     try:
+        connection = network_quarantine._UnixHTTP("/run/narwhal-agent/firewall.sock")
+        connection.timeout = 7
         connection.request("GET", "/v1/firewall/readback", headers={"Connection": "close"})
         response = connection.getresponse()
         raw = response.read(131073)
         if len(raw) > 131072:
+            result["reason"] = "response_too_large"
             return result
         if response.status == 404:
             result["status"] = "unsupported"
+            result["reason"] = "readback_endpoint_missing"
+            result["http_status"] = 404
             return result
         if response.status != 200:
+            result["reason"] = "readback_http_error"
+            result["http_status"] = int(response.status)
             return result
         try:
             snapshot = json.loads(raw.decode("utf-8")) if raw else None
         except (UnicodeDecodeError, ValueError):
+            result["reason"] = "invalid_json"
             return result
         if not isinstance(snapshot, dict):
+            result["reason"] = "invalid_payload"
             return result
         status = snapshot.get("status")
         policy_revision = snapshot.get("policy_revision")
@@ -8333,16 +8342,19 @@ def _runman_firewall_readback() -> Dict[str, object]:
             or type(capabilities_known) is not bool
             or not isinstance(raw_supported_protocols, list) or len(raw_supported_protocols) > 32
         ):
+            result["reason"] = "invalid_payload"
             return result
         protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto"}
         supported_protocols = [str(protocol).strip().lower() for protocol in raw_supported_protocols]
         if (len(set(supported_protocols)) != len(supported_protocols)
                 or any(protocol not in protocols for protocol in supported_protocols)
                 or (capabilities_known and not supported_protocols)):
+            result["reason"] = "invalid_payload"
             return result
         normalized_rules = []
         for rule in rules:
             if not isinstance(rule, dict):
+                result["reason"] = "invalid_payload"
                 return result
             if (
                 type(rule.get("id")) is not int or not 1 <= rule["id"] <= 2**63 - 1
@@ -8357,6 +8369,7 @@ def _runman_firewall_readback() -> Dict[str, object]:
                 or rule.get("origin") not in {"platform", "manual"}
                 or rule.get("sync_state") not in {"manual", "in_sync", "drifted", "orphaned"}
             ):
+                result["reason"] = "invalid_payload"
                 return result
             item: Dict[str, object] = {
                 "id": rule["id"], "priority": rule["priority"], "direction": rule["direction"],
@@ -8367,31 +8380,38 @@ def _runman_firewall_readback() -> Dict[str, object]:
             managed_key = rule.get("managed_key")
             if rule["origin"] == "platform":
                 if not isinstance(managed_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", managed_key):
+                    result["reason"] = "invalid_payload"
                     return result
                 item["managed_key"] = managed_key
             if rule["ip_type"] == "cidr":
                 try:
                     item["ip"] = str(ipaddress.ip_network(str(rule.get("ip") or "").strip(), strict=False))
                 except ValueError:
+                    result["reason"] = "invalid_payload"
                     return result
             elif rule["ip_type"] == "geoip":
                 countries = rule.get("countries")
                 if not isinstance(countries, list) or not 1 <= len(countries) <= 30:
+                    result["reason"] = "invalid_payload"
                     return result
                 codes = sorted({str(country).strip().upper() for country in countries})
                 if any(not re.fullmatch(r"[A-Z]{2}", code) for code in codes):
+                    result["reason"] = "invalid_payload"
                     return result
                 item["countries"] = codes
             normalized_rules.append(item)
         normalized_expected = []
         for expected in expected_rules:
             if not isinstance(expected, dict) or not isinstance(expected.get("key"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", expected["key"]):
+                result["reason"] = "invalid_payload"
                 return result
             if expected.get("sync_state") not in {"in_sync", "drifted", "missing"}:
+                result["reason"] = "invalid_payload"
                 return result
             expected_item = {"key": expected["key"], "sync_state": expected["sync_state"]}
             if "id" in expected:
                 if type(expected["id"]) is not int or not 1 <= expected["id"] <= 2**63 - 1:
+                    result["reason"] = "invalid_payload"
                     return result
                 expected_item["id"] = expected["id"]
             normalized_expected.append(expected_item)
@@ -8409,12 +8429,26 @@ def _runman_firewall_readback() -> Dict[str, object]:
             "rules": normalized_rules,
             "expected_rules": normalized_expected,
         }
-        result.update({"status": "ready", "snapshot": normalized_snapshot})
+        result.update({"status": "ready", "snapshot": normalized_snapshot, "reason": ""})
+        return result
+    except FileNotFoundError:
+        result["reason"] = "socket_missing"
+        return result
+    except PermissionError:
+        result["reason"] = "socket_permission_denied"
+        return result
+    except ConnectionRefusedError:
+        result["reason"] = "socket_refused"
+        return result
+    except (socket.timeout, TimeoutError):
+        result["reason"] = "socket_timeout"
         return result
     except (OSError, ValueError, http.client.HTTPException):
+        result["reason"] = "socket_error"
         return result
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def _runman_firewall_events(cursor: str = "") -> Dict[str, object]:

@@ -506,6 +506,7 @@ export interface HostFirewallLiveRule {
 
 export interface HostFirewallLiveReadback {
   status: 'ready' | 'unavailable' | 'unsupported' | 'unknown';
+  reason?: string;
   observed_at: number;
   last_success_at: number;
   age_seconds?: number | null;

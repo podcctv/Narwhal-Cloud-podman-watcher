@@ -63,6 +63,23 @@ const protocolLabels: Record<string, string> = {
 const readbackStatusLabel: Record<string, string> = {
   ready: 'RFW 读回可用', unavailable: 'RFW 读回不可用', unsupported: '需更新组件', unknown: '等待首次读回',
 };
+const readbackReasonLabel: Record<string, string> = {
+  platform_unsupported: '系统不支持本机 Unix 接口', unknown: 'Agent 未提供失败原因',
+  response_too_large: 'RFW 返回数据超出限制', readback_endpoint_missing: 'Runman 未提供 RFW 读回接口',
+  readback_http_error: 'Runman 的 RFW 接口返回错误', invalid_json: 'RFW 返回内容不是有效 JSON',
+  invalid_payload: 'RFW 返回字段不完整或格式不兼容', socket_missing: '缺少 Runman 防火墙 socket',
+  socket_permission_denied: 'Agent 无权访问 Runman 防火墙 socket', socket_refused: 'Runman 防火墙接口未接收连接',
+  socket_timeout: 'Runman 防火墙接口响应超时', socket_error: '连接 Runman 防火墙接口失败',
+};
+const readbackReasonHelp: Record<string, string> = {
+  readback_endpoint_missing: '更新 Runman 到提供 /v1/firewall/readback 的版本并重启服务。',
+  socket_missing: '检查 Runman 的防火墙接口服务是否安装并运行；确认 /run/narwhal-agent/firewall.sock 已创建后刷新。',
+  socket_permission_denied: '检查 Runman socket 的属主、组和权限，确保 Agent 服务账号可读写，然后刷新。',
+  socket_refused: '检查 Runman 防火墙接口服务状态；socket 存在但当前没有服务接收请求。',
+  socket_timeout: '检查 Runman/RFW 服务是否卡住，恢复接口后刷新。',
+  invalid_payload: '确认 Agent 与 Runman/RFW 版本兼容；更新相关组件后等待下一次状态上报。',
+  readback_http_error: '检查 Runman 防火墙接口日志及 RFW 服务状态。',
+};
 const syncStatusLabel: Record<string, string> = {
   in_sync: '与平台期望一致', drifted: '发现策略偏差', unknown: '尚无同步结果',
 };
@@ -694,6 +711,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         </details>
         {selectedHost?.stale && <p className="mt-3 text-xs leading-5 text-amber-200">母机当前离线。可以保存期望配置，Agent 恢复连接后会自动执行。</p>}
         {snapshot?.agent_ready && !runtimeReady && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/80">{runtimeStatusHelp(snapshot?.runtime_status)} 如果 RFW 读回同时显示不可用或过期，那是另一条链路；先分别检查 Runman 控制 socket 和 RFW API，再刷新状态。</p>}
+        {snapshot?.live_readback && snapshot.live_readback.status !== 'ready' && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/90"><strong>{readbackReasonLabel[snapshot.live_readback.reason || ''] || 'RFW 读回原因未知'}。</strong> {readbackReasonHelp[snapshot.live_readback.reason || ''] || '检查 Agent、Runman 和 RFW 接口状态；恢复后刷新并等待新读回。'} 最近成功读回的留存规则不能证明当前规则仍生效。</p>}
         {snapshot?.live_readback?.mtproto_support === 'unsupported' && !snapshot.live_readback.stale && <p className="mt-3 rounded-lg border border-rose-900/70 bg-rose-950/30 p-3 text-xs leading-5 text-rose-100/90">这台母机当前运行的 RFW 能力清单没有 MTProto。需要先发布并安装包含 MTProto 检测能力的 RFW 构建，再刷新并确认能力读回；只升级 Watcher Agent 或 Runman 不会补上 RFW 的协议识别实现。</p>}
         {snapshot?.live_readback?.mtproto_support === 'unknown' && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/90">这台母机还没有新鲜的 MTProto 能力读回。先刷新状态并等待节点上报；未知状态下系统不会排队应用 MTProto 规则。</p>}
         {fleetAuthoritative && <p className="mt-3 text-xs leading-5 text-sky-200">全局模板版本 #{fleetSnapshot?.revision} 已启用并作为统一期望策略；此处单机编辑已锁定。请在下方编辑并同步全局模板。</p>}
@@ -777,13 +795,14 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               <span className={`rounded-full border px-2 py-0.5 text-[10px] ${host.state === 'last_apply_succeeded' || host.state === 'ready' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : host.state === 'apply_failed' || host.state === 'runman_update_required' || host.state === 'rfw_protocol_update_required' || host.state === 'drifted' ? 'border-rose-800 bg-rose-950/40 text-rose-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>{fleetStateLabel[host.state] || host.state}</span>
               <span className={`text-[10px] ${host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-500'}`}>{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '网卡清单过期/未采集' : `${host.container_interfaces.by_runtime.incus.length ? `Incus ${host.container_interfaces.by_runtime.incus.length}` : ''}${host.container_interfaces.by_runtime.incus.length && host.container_interfaces.by_runtime.podman.length ? ' · ' : ''}${host.container_interfaces.by_runtime.podman.length ? `Podman ${host.container_interfaces.by_runtime.podman.length}` : ''}${!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length ? '无可用容器网桥' : ''}`}</span>
               <span className="text-[10px] text-slate-500">Watcher {host.agent_version}</span>
-              <span className={`text-[10px] ${host.live_readback.sync_status === 'drifted' && !host.live_readback.stale ? 'text-rose-300' : host.live_readback.status === 'ready' && !host.live_readback.stale ? 'text-emerald-300' : 'text-amber-300'}`}>{readbackStatusLabel[host.live_readback.status] || '等待读回'}{host.live_readback.stale ? ' · 过期' : ''}</span>
+              <span className={`text-[10px] ${host.live_readback.sync_status === 'drifted' && !host.live_readback.stale ? 'text-rose-300' : host.live_readback.status === 'ready' && !host.live_readback.stale ? 'text-emerald-300' : 'text-amber-300'}`} title={readbackReasonLabel[host.live_readback.reason || ''] || ''}>{readbackStatusLabel[host.live_readback.status] || '等待读回'}{host.live_readback.stale ? ' · 过期' : ''}{host.live_readback.status !== 'ready' && host.live_readback.reason ? ` · ${readbackReasonLabel[host.live_readback.reason] || host.live_readback.reason}` : ''}</span>
             </summary>
             <div className="grid gap-2 border-t border-slate-800 px-3 py-3 text-[10px] sm:grid-cols-2">
               <div className="text-slate-400">本地修订 <span className="font-mono tabular-nums text-slate-200">#{host.local_revision}</span> · 全局修订 <span className="font-mono tabular-nums text-slate-200">#{host.fleet_revision}</span></div>
               <div className={host.control_api_stale || host.control_api === 'unavailable' || host.control_api === 'unsupported' ? 'text-amber-300' : 'text-slate-400'}>
                 Runman 控制接口：{host.control_api_stale ? '状态过期' : host.control_api === 'ready' ? '可用' : host.control_api === 'unsupported' ? '需更新' : host.control_api === 'unavailable' ? '不可用' : '未知'} · {runtimeReasonLabel[host.control_api_reason || ''] || '旧版 Agent 未提供原因'}{host.control_api_http_status ? '（HTTP ' + host.control_api_http_status + '）' : ''}
               </div>
+              {host.live_readback.status !== 'ready' && <div className="text-amber-300">RFW 读回：{readbackReasonLabel[host.live_readback.reason || ''] || '旧版 Agent 未提供失败原因'}。{readbackReasonHelp[host.live_readback.reason || ''] || '检查 Agent、Runman 与 RFW 接口后刷新。'}</div>}
               <div className={host.unsupported_protocols?.length ? 'text-rose-300' : host.unknown_protocols?.length ? 'text-amber-300' : 'text-emerald-300'}>
                 {host.required_protocols?.length
                   ? host.unsupported_protocols?.length

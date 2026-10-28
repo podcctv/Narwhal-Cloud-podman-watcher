@@ -298,7 +298,8 @@ def init_db() -> None:
             status TEXT NOT NULL DEFAULT 'unknown',
             observed_at INTEGER NOT NULL DEFAULT 0,
             last_success_at INTEGER NOT NULL DEFAULT 0,
-            snapshot_json TEXT NOT NULL DEFAULT '{}'
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            readback_reason TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS security_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -439,6 +440,11 @@ def init_db() -> None:
         conn.execute(
             "ALTER TABLE host_firewall_policies ADD COLUMN source_fleet_revision INTEGER NOT NULL DEFAULT 0"
         )
+    firewall_readback_cols = {
+        str(c["name"]) for c in conn.execute("PRAGMA table_info(host_firewall_readbacks)").fetchall()
+    }
+    if "readback_reason" not in firewall_readback_cols:
+        conn.execute("ALTER TABLE host_firewall_readbacks ADD COLUMN readback_reason TEXT NOT NULL DEFAULT ''")
     bot_cols = {str(c["name"]) for c in conn.execute("PRAGMA table_info(notification_bots)").fetchall()}
     if "last_delivery_status" not in bot_cols:
         conn.execute("ALTER TABLE notification_bots ADD COLUMN last_delivery_status TEXT NOT NULL DEFAULT 'never'")
@@ -2269,18 +2275,30 @@ def _empty_host_firewall_policy() -> Dict[str, Any]:
     return {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": [], "runtimes": []}}
 
 
+HOST_FIREWALL_READBACK_REASONS = {
+    "platform_unsupported", "unknown", "response_too_large", "readback_endpoint_missing",
+    "readback_http_error", "invalid_json", "invalid_payload", "socket_missing",
+    "socket_permission_denied", "socket_refused", "socket_timeout", "socket_error",
+}
+
+
 def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     status = str(payload.get("status") or "")
     if status not in {"ready", "unavailable", "unsupported"}:
         return None
-    clean: Dict[str, Any] = {"status": status, "observed_at": report_ts, "snapshot": None}
+    raw_reason = payload.get("reason")
+    reason = raw_reason if isinstance(raw_reason, str) and raw_reason in HOST_FIREWALL_READBACK_REASONS else ""
+    clean: Dict[str, Any] = {
+        "status": status, "observed_at": report_ts, "snapshot": None,
+        "reason": "" if status == "ready" else reason or "unknown",
+    }
     if status != "ready":
         return clean
     snapshot = payload.get("snapshot")
     if not isinstance(snapshot, dict):
-        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
     sync_status = snapshot.get("status")
     policy_revision = snapshot.get("policy_revision")
     rule_count = snapshot.get("rule_count")
@@ -2305,18 +2323,18 @@ def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, 
         or type(capabilities_known) is not bool
         or not isinstance(raw_supported_protocols, list) or len(raw_supported_protocols) > 32
     ):
-        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
     protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto"}
     supported_protocols = [str(protocol).strip().lower() for protocol in raw_supported_protocols]
     if (len(set(supported_protocols)) != len(supported_protocols)
             or any(protocol not in protocols for protocol in supported_protocols)
             or (capabilities_known and not supported_protocols)):
-        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
     rules: List[Dict[str, Any]] = []
     seen_ids = set()
     for raw in raw_rules:
         if not isinstance(raw, dict):
-            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
         rule_id = raw.get("id")
         priority = raw.get("priority")
         port_start = raw.get("port_start")
@@ -2333,7 +2351,7 @@ def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, 
             or raw.get("origin") not in {"platform", "manual"}
             or raw.get("sync_state") not in {"manual", "in_sync", "drifted", "orphaned"}
         ):
-            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
         seen_ids.add(rule_id)
         item: Dict[str, Any] = {
             "id": rule_id, "priority": priority, "direction": raw["direction"],
@@ -2344,20 +2362,20 @@ def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, 
         managed_key = raw.get("managed_key")
         if raw["origin"] == "platform":
             if not isinstance(managed_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", managed_key):
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
             item["managed_key"] = managed_key
         if raw["ip_type"] == "cidr":
             try:
                 item["ip"] = str(ipaddress.ip_network(str(raw.get("ip") or "").strip(), strict=False))
             except ValueError:
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
         elif raw["ip_type"] == "geoip":
             countries = raw.get("countries")
             if not isinstance(countries, list) or not 1 <= len(countries) <= 30:
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
             codes = sorted({str(code).strip().upper() for code in countries})
             if any(not re.fullmatch(r"[A-Z]{2}", code) for code in codes):
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
             item["countries"] = codes
         rules.append(item)
     expected_rules: List[Dict[str, Any]] = []
@@ -2370,12 +2388,12 @@ def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, 
             or raw["key"] in expected_keys
             or raw.get("sync_state") not in {"in_sync", "drifted", "missing"}
         ):
-            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
         expected_keys.add(raw["key"])
         item = {"key": raw["key"], "sync_state": raw["sync_state"]}
         if "id" in raw:
             if type(raw["id"]) is not int or not 1 <= raw["id"] <= 2**63 - 1:
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None}
+                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
             item["id"] = raw["id"]
         expected_rules.append(item)
     clean["snapshot"] = {
@@ -2407,27 +2425,28 @@ def _store_host_firewall_readback(
     if readback["status"] == "ready":
         snapshot_json = json.dumps(readback["snapshot"], ensure_ascii=False, separators=(",", ":"))
         conn.execute(
-            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json) VALUES(?,?,?,?,?) "
+            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json,readback_reason) VALUES(?,?,?,?,?,'') "
             "ON CONFLICT(host_id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at,"
-            "last_success_at=excluded.last_success_at,snapshot_json=excluded.snapshot_json",
+            "last_success_at=excluded.last_success_at,snapshot_json=excluded.snapshot_json,readback_reason=''",
             (host_id, "ready", report_ts, report_ts, snapshot_json),
         )
     else:
         conn.execute(
-            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json) VALUES(?,?,?,0,'{}') "
-            "ON CONFLICT(host_id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at",
-            (host_id, readback["status"], report_ts),
+            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json,readback_reason) VALUES(?,?,?,0,'{}',?) "
+            "ON CONFLICT(host_id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at,readback_reason=excluded.readback_reason",
+            (host_id, readback["status"], report_ts, readback["reason"]),
         )
 
 
 def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: int | None = None) -> Dict[str, Any]:
     row = conn.execute(
-        "SELECT status,observed_at,last_success_at,snapshot_json FROM host_firewall_readbacks WHERE host_id=?",
+        "SELECT status,observed_at,last_success_at,snapshot_json,readback_reason FROM host_firewall_readbacks WHERE host_id=?",
         (host_id,),
     ).fetchone()
     if row is None:
         return {
             "status": "unknown", "observed_at": 0, "last_success_at": 0, "stale": True,
+            "reason": "unknown",
             "sync_status": "unknown", "rule_count": 0, "managed_rule_count": 0,
             "drift_count": 0, "missing_count": 0, "rfw_api_version": "",
             "capabilities_known": False, "supported_protocols": [],
@@ -2462,6 +2481,7 @@ def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: in
         mtproto_support = "supported" if "mtproto" in supported_protocols else "unsupported"
     return {
         "status": status,
+        "reason": str(row["readback_reason"] or "unknown") if status != "ready" else "",
         "observed_at": observed_at,
         "last_success_at": last_success_at,
         "age_seconds": max(0, now - observed_at) if observed_at else None,

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Activity } from 'lucide-react';
+import { Activity, ChevronDown, ChevronUp, Search } from 'lucide-react';
 import { AccessSource, SecurityStatusItem } from '../../api/types';
 import { api, fmtNetSpeed, fmtNumber } from '../../api/client';
 
@@ -111,17 +111,54 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   const [editing, setEditing] = useState<SecurityStatusItem | null>(null);
   const [deleting, setDeleting] = useState<SecurityStatusItem | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const pageSize = 4;
   if (!telemetry?.length) return null;
+  const query = search.trim().toLocaleLowerCase();
+  const filteredTelemetry = query
+    ? telemetry.filter(item => (item.host_id || '').toLocaleLowerCase().includes(query))
+    : telemetry;
+  const pageCount = Math.max(1, Math.ceil(filteredTelemetry.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleTelemetry = filteredTelemetry.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  const alertHostCount = telemetry.filter(item => !item.stale && item.enabled !== false
+    && (item.sample_alerts || []).some(alert => alert.severity === 'warning' || alert.severity === 'critical')).length;
+  const gfwBlockedCount = telemetry.filter(item => item.gfw_reachability?.status === 'blocked' && !item.gfw_reachability.stale).length;
+  const auditNeedsAttention = telemetry.filter(item => ['warning', 'critical'].includes(hostAuditLevel(item))).length;
+  const auditUnknown = telemetry.filter(item => hostAuditLevel(item) === 'unknown').length;
   return <section className="mb-6 min-w-0 rounded-2xl border border-slate-800 bg-slate-900/60 shadow-xs">
-    <header className="flex items-start gap-3 border-b border-slate-800 px-4 py-4">
-      <Activity className="mt-0.5 h-5 w-5 shrink-0 text-sky-400" />
-      <div className="min-w-0">
-        <h2 className="text-sm font-bold text-slate-100">主机网络与安全遥测</h2>
-        <p className="mt-1 text-xs leading-5 text-slate-300">按主机汇总受监控容器；HTTP 按日志来源展示。绿色正常 · 黄色警告 · 红色危险 · 灰色未采集或过期。</p>
+    <header className="flex flex-col gap-3 border-b border-slate-800 px-4 py-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="flex min-w-0 items-start gap-3">
+        <Activity className="mt-0.5 h-5 w-5 shrink-0 text-sky-400" />
+        <div className="min-w-0">
+          <h2 className="text-sm font-bold text-slate-100">主机网络与安全遥测</h2>
+          <p className="mt-1 text-xs leading-5 text-slate-300">主机状态摘要；展开后按名称筛选，每页查看 {pageSize} 台的网络证据与修复建议。</p>
+          <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+            <span className="rounded-full border border-slate-700 px-2 py-1 text-slate-300">主机 {telemetry.length}</span>
+            <span className={`rounded-full border px-2 py-1 ${alertHostCount ? 'border-amber-800 bg-amber-950/30 text-amber-200' : 'border-emerald-800 bg-emerald-950/30 text-emerald-200'}`}>采样告警 {alertHostCount}</span>
+            <span className={`rounded-full border px-2 py-1 ${gfwBlockedCount ? 'border-red-800 bg-red-950/30 text-red-200' : 'border-slate-700 text-slate-300'}`}>GFW 阻断 {gfwBlockedCount}</span>
+            <span className={`rounded-full border px-2 py-1 ${auditNeedsAttention ? 'border-amber-800 bg-amber-950/30 text-amber-200' : 'border-slate-700 text-slate-300'}`}>审计待处理 {auditNeedsAttention}</span>
+            {auditUnknown > 0 && <span className="rounded-full border border-slate-700 px-2 py-1 text-slate-300">审计未评估 {auditUnknown}</span>}
+          </div>
+        </div>
       </div>
+      <button type="button" aria-expanded={expanded} aria-controls="host-telemetry-details" onClick={() => setExpanded(value => !value)} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-800 bg-sky-950/40 px-3 text-xs font-semibold text-sky-200 hover:bg-sky-900/50 focus:outline-hidden focus:ring-2 focus:ring-sky-400">
+        {expanded ? <ChevronUp className="h-4 w-4" aria-hidden="true" /> : <ChevronDown className="h-4 w-4" aria-hidden="true" />}
+        {expanded ? '收起明细' : `查看主机明细（${telemetry.length}）`}
+      </button>
     </header>
-    <div className="space-y-4 p-3">
-      {telemetry.map(t => {
+    {expanded && <div id="host-telemetry-details" className="space-y-3 p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <label className="relative block w-full sm:max-w-sm">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+          <input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0); }} placeholder="按主机名称筛选…" aria-label="按名称筛选主机遥测" className="min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-hidden focus:ring-2 focus:ring-sky-400" />
+        </label>
+        <span className="text-[11px] text-slate-400">{filteredTelemetry.length ? `${currentPage * pageSize + 1}–${Math.min((currentPage + 1) * pageSize, filteredTelemetry.length)} / ${filteredTelemetry.length} 台` : '没有匹配的主机'}</span>
+      </div>
+      <div className="space-y-4">
+      {visibleTelemetry.map(t => {
         const thresholds = t.thresholds || {};
         const events = t.sample_alerts || [];
         const hostAudit = t.host_audit;
@@ -391,7 +428,13 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           </details>
         </article>;
       })}
-    </div>
+      </div>
+      {pageCount > 1 && <nav className="flex items-center justify-between gap-3 border-t border-slate-800 pt-3" aria-label="主机遥测分页">
+        <button type="button" disabled={currentPage <= 0} onClick={() => setPage(value => Math.max(0, value - 1))} className="min-h-9 rounded-lg border border-slate-700 px-3 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40">上一页</button>
+        <span className="text-xs tabular-nums text-slate-400">第 {currentPage + 1} / {pageCount} 页</span>
+        <button type="button" disabled={currentPage >= pageCount - 1} onClick={() => setPage(value => Math.min(pageCount - 1, value + 1))} className="min-h-9 rounded-lg border border-slate-700 px-3 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
+      </nav>}
+    </div>}
     {editing && <HostConfigDialog host={editing} busy={busy} onClose={() => setEditing(null)} onSave={async config => {
       setBusy(true); try { await api.updateHostConfig(editing.host_id, config); onToast('success', '配置已下发，将在节点下次轮询时生效。'); setEditing(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '配置下发失败'); } finally { setBusy(false); }
     }} />}

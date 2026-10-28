@@ -263,10 +263,11 @@ class HostFirewallPolicyTests(unittest.TestCase):
         self.assertEqual((live["status"], live["sync_status"], live["rule_count"]), ("ready", "in_sync", 1))
         self.assertFalse(live["stale"])
 
-        unavailable = {"status": "unavailable", "observed_at": self.now + 60, "snapshot": None}
+        unavailable = {"status": "unavailable", "observed_at": self.now + 60, "snapshot": None, "reason": "socket_missing"}
         server._store_host_firewall_readback(conn, "host-a", {"host_firewall": {"readback": unavailable}}, self.now + 60)
         live = server._host_firewall_live_readback(conn, "host-a", self.now + 60)
         self.assertEqual(live["status"], "unavailable")
+        self.assertEqual(live["reason"], "socket_missing")
         self.assertTrue(live["stale"])
         self.assertEqual(live["snapshot"]["rules"][0]["managed_key"], "wg-cn-out")
         self.assertEqual(live["last_success_at"], self.now)
@@ -276,10 +277,12 @@ class HostFirewallPolicyTests(unittest.TestCase):
 
         host_state = json.loads(server.get_host_firewall_policy("host-a").body)
         self.assertEqual(host_state["live_readback"]["status"], "unavailable")
+        self.assertEqual(host_state["live_readback"]["reason"], "socket_missing")
         self.assertEqual(host_state["live_readback"]["snapshot"]["rule_count"], 1)
         fleet_state = json.loads(server.get_fleet_firewall_policy().body)
         host = next(item for item in fleet_state["hosts"] if item["host_id"] == "host-a")
         self.assertEqual(host["live_readback"]["status"], "unavailable")
+        self.assertEqual(host["live_readback"]["reason"], "socket_missing")
         self.assertNotIn("snapshot", host["live_readback"])
 
     def test_live_rfw_readback_rejects_malformed_rule_data(self):
@@ -292,7 +295,13 @@ class HostFirewallPolicyTests(unittest.TestCase):
         }
         checked = server._validate_host_firewall_readback(invalid, self.now)
         self.assertEqual(checked["status"], "unavailable")
+        self.assertEqual(checked["reason"], "invalid_payload")
         self.assertIsNone(checked["snapshot"])
+
+        unsafe_reason = server._validate_host_firewall_readback({
+            "status": "unavailable", "reason": "socket secret /raw exception text",
+        }, self.now)
+        self.assertEqual(unsafe_reason["reason"], "unknown")
 
     def test_readback_capabilities_are_validated_and_legacy_nodes_remain_unknown(self):
         legacy = {"status": "ready", "snapshot": {
@@ -1063,10 +1072,17 @@ class HostFirewallPolicyTests(unittest.TestCase):
             self.assertEqual(result["status"], expected)
             self.assertEqual(connection.requested[:2], ("GET", "/v1/firewall/readback"))
             if expected == "ready":
+                self.assertEqual(result["reason"], "")
                 self.assertEqual(result["snapshot"]["status"], "drifted")
                 self.assertEqual(result["snapshot"]["rules"][0]["managed_key"], "mtproto-cn-out")
                 self.assertTrue(result["snapshot"]["capabilities_known"])
                 self.assertIn("mtproto", result["snapshot"]["supported_protocols"])
+            elif status == 404:
+                self.assertEqual(result["reason"], "readback_endpoint_missing")
+            elif status == 503:
+                self.assertEqual(result["reason"], "readback_http_error")
+            else:
+                self.assertEqual(result["reason"], "invalid_json")
 
         legacy_snapshot = {key: value for key, value in snapshot.items() if key not in {
             "rfw_api_version", "capabilities_known", "supported_protocols",
@@ -1079,6 +1095,12 @@ class HostFirewallPolicyTests(unittest.TestCase):
         self.assertEqual(legacy_result["status"], "ready")
         self.assertFalse(legacy_result["snapshot"]["capabilities_known"])
         self.assertEqual(legacy_result["snapshot"]["supported_protocols"], [])
+
+        with mock.patch.object(agent.os, "name", "posix"), mock.patch.object(
+            agent.network_quarantine, "_UnixHTTP", side_effect=FileNotFoundError()
+        ):
+            missing_socket = agent._runman_firewall_readback()
+        self.assertEqual(missing_socket["reason"], "socket_missing")
 
     def test_runman_firewall_event_parser_accepts_mtproto(self):
         page = {

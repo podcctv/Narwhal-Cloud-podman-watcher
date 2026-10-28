@@ -246,6 +246,9 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn('w-full min-w-0 rounded-xl border p-3', telemetry)
         self.assertIn("怎么处理", telemetry)
         self.assertIn("sudo apt update && sudo apt install --only-upgrade", telemetry)
+        self.assertIn('aria-expanded={expanded}', telemetry)
+        self.assertIn('const pageSize = 4', telemetry)
+        self.assertIn('按主机名称筛选', telemetry)
 
     def test_telemetry_distinguishes_single_container_and_aggregate_peaks(self):
         now = int(time.time())
