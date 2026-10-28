@@ -7,10 +7,13 @@ Rates are policers (excess packets are dropped), not queue-based shaping.
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -38,12 +41,12 @@ class BandwidthPolicyError(ValueError):
     pass
 
 
-def _runner(args: list[str], timeout: float = 8) -> tuple[int, str]:
+def _runner(args: list[str], timeout: float = 8, output_limit: int = 2000) -> tuple[int, str]:
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return 127, "command unavailable or timed out"
-    return result.returncode, (result.stdout or result.stderr or "").strip()[:2000]
+    return result.returncode, (result.stdout or result.stderr or "").strip()[:output_limit]
 
 
 def _valid_int(value: Any, minimum: int = 0, maximum: int = MAX_RATE_MBPS) -> int:
@@ -168,6 +171,7 @@ def _write_state(path: str, state: dict[str, Any]) -> None:
 
 def _container_target(
     item: dict[str, Any], containers: list[dict[str, Any]],
+    peer_inventory: list[tuple[str, str, str, int]] | None = None,
 ) -> tuple[list[str], int, str, str]:
     match = next((c for c in containers if
         c.get("runtime") == item["runtime"]
@@ -185,6 +189,7 @@ def _container_target(
             start_ticks = _proc_start_ticks(stream.read())
     except (OSError, IndexError, ValueError):
         raise BandwidthPolicyError("container process identity could not be verified") from None
+    _verify_container_namespace(item, pid, namespace_inode, containers, peer_inventory)
     prefix = ["nsenter", "--target", str(pid), "--net"]
     code, output = _runner(prefix + ["ip", "-j", "route", "show", "default"])
     if code != 0:
@@ -199,6 +204,119 @@ def _container_target(
     if not interface:
         raise BandwidthPolicyError("container has no verified default route interface")
     return prefix, pid, namespace_inode, start_ticks + ":" + interface
+
+
+def _running_container_inventory(containers: list[dict[str, Any]]) -> list[tuple[str, str, str, int]]:
+    """Read all running runtime peers, including containers excluded from monitoring."""
+    binaries: dict[str, set[str]] = {"incus": set(), "podman": set()}
+    for candidate in containers:
+        if not isinstance(candidate, dict) or candidate.get("runtime") not in binaries:
+            continue
+        runtime = str(candidate["runtime"])
+        binary = str(candidate.get("runtime_bin") or runtime)
+        if not re.fullmatch(r"[A-Za-z0-9_./+-]{1,240}", binary):
+            raise BandwidthPolicyError("container runtime executable could not be verified")
+        resolved = shutil.which(binary)
+        if not resolved:
+            raise BandwidthPolicyError("container runtime inventory executable is unavailable")
+        binaries[runtime].add(os.path.realpath(resolved))
+    # A runtime may contain only unmonitored peers and therefore be absent from
+    # `containers`. Query installed local runtimes as well as represented ones.
+    for runtime in binaries:
+        resolved = shutil.which(runtime)
+        if resolved:
+            binaries[runtime].add(os.path.realpath(resolved))
+    if not binaries["podman"]:
+        remote = shutil.which("podman-remote")
+        if remote:
+            binaries["podman"].add(os.path.realpath(remote))
+
+    peers: set[tuple[str, str, str, int]] = set()
+    max_output = 8 * 1024 * 1024
+    for runtime, commands in binaries.items():
+        for binary in sorted(commands):
+            if runtime == "incus":
+                code, output = _runner([binary, "list", "--all-projects", "type=container",
+                                        "status=running", "--format=csv", "--columns=nepst"],
+                                       output_limit=max_output + 1)
+                if code or len(output) > max_output:
+                    raise BandwidthPolicyError("all-running Incus inventory is unavailable")
+                try:
+                    rows = list(csv.reader(io.StringIO(output)))
+                    if len(rows) > 4096:
+                        raise ValueError
+                    for row in rows:
+                        if len(row) != 5:
+                            raise ValueError
+                        name, project, pid_text, status, instance_type = row
+                        if status.upper() != "RUNNING" or instance_type.upper() != "CONTAINER":
+                            raise ValueError
+                        project = project or "default"
+                        pid = int(pid_text or 0)
+                        if not name or pid <= 1:
+                            raise ValueError
+                        peers.add((runtime, project, name, pid))
+                except (csv.Error, TypeError, ValueError):
+                    raise BandwidthPolicyError("all-running Incus inventory could not be verified") from None
+            else:
+                code, output = _runner([binary, "ps", "--no-trunc", "--format", "{{.ID}}"],
+                                       output_limit=max_output + 1)
+                if code or len(output) > max_output:
+                    raise BandwidthPolicyError("all-running Podman inventory is unavailable")
+                ids = output.splitlines()
+                if len(ids) > 4096 or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in ids):
+                    raise BandwidthPolicyError("all-running Podman inventory could not be verified")
+                if not ids:
+                    continue
+                code, output = _runner([binary, "inspect", "--format", "{{.Id}}|{{.State.Pid}}", *ids],
+                                       output_limit=max_output + 1)
+                rows = output.splitlines()
+                if code or len(output) > max_output or len(rows) != len(ids):
+                    raise BandwidthPolicyError("all-running Podman process inventory is unavailable")
+                found_ids: set[str] = set()
+                for row in rows:
+                    fields = row.split("|")
+                    try:
+                        pid = int(fields[1]) if len(fields) == 2 else 0
+                    except ValueError:
+                        pid = 0
+                    if len(fields) != 2 or fields[0] not in ids or fields[0] in found_ids or pid <= 1:
+                        raise BandwidthPolicyError("all-running Podman process inventory could not be verified")
+                    found_ids.add(fields[0])
+                    peers.add((runtime, "", fields[0], pid))
+    return sorted(peers)
+
+
+def _verify_container_namespace(
+    item: dict[str, Any], pid: int, namespace_inode: str, containers: list[dict[str, Any]],
+    peer_inventory: list[tuple[str, str, str, int]] | None = None,
+) -> None:
+    try:
+        host_namespace = str(os.stat("/proc/1/ns/net").st_ino)
+    except OSError:
+        raise BandwidthPolicyError("host network namespace is unavailable; container isolation cannot be verified") from None
+    if namespace_inode == host_namespace:
+        raise BandwidthPolicyError("single-container limiting cannot target the host network namespace")
+    peers = _running_container_inventory(containers) if peer_inventory is None else peer_inventory
+    target_found = False
+    for runtime, project, container_id, peer_pid in peers:
+        is_target = (runtime == item["runtime"] and project == item["project"]
+                     and (container_id == item["container_id"] if runtime == "incus"
+                          else container_id.startswith(item["container_id"])))
+        if is_target and peer_pid != pid:
+            raise BandwidthPolicyError("container process changed during isolation verification")
+        try:
+            peer_namespace = str(os.stat(f"/proc/{peer_pid}/ns/net").st_ino)
+        except OSError:
+            raise BandwidthPolicyError("running container peer namespace is unavailable; isolation cannot be verified") from None
+        if is_target:
+            target_found = True
+            if peer_namespace != namespace_inode:
+                raise BandwidthPolicyError("container network namespace changed during verification")
+        elif peer_namespace == namespace_inode:
+            raise BandwidthPolicyError("single-container limiting cannot target a shared container network namespace")
+    if not target_found:
+        raise BandwidthPolicyError("container is absent from the verified all-running runtime inventory")
 
 
 def _container_process_pid(item: dict[str, Any], match: dict[str, Any]) -> int:
@@ -416,6 +534,7 @@ def _remove_filter(
 
 def _resolve_entry(
     host_id: str, item: dict[str, Any], containers: list[dict[str, Any]],
+    peer_inventory: list[tuple[str, str, str, int]] | None = None,
 ) -> dict[str, Any]:
     if item["scope"] == "host":
         interface = item["interface"]
@@ -430,7 +549,7 @@ def _resolve_entry(
         }
     identity = "\0".join((item["runtime"], item["project"], item["container_name"], item["container_id"]))
     key = "container:" + identity
-    prefix, pid, namespace_inode, generation = _container_target(item, containers)
+    prefix, pid, namespace_inode, generation = _container_target(item, containers, peer_inventory)
     interface = generation.split(":", 1)[1]
     code, output = _call(prefix, ["ip", "-j", "link", "show", "dev", interface])
     if code != 0:
@@ -1111,13 +1230,34 @@ def reconcile(
         status.update(state="rejected", message=str(exc))
         return status
     status["revision"] = normalized["revision"]
+    resolve_target = resolve
+    if resolve is _resolve_entry:
+        # One unfiltered runtime query per reconciliation, not per target.
+        # Retain a failed proof for this cycle so a transient API failure does
+        # not permit a later target to bypass the same isolation requirement.
+        peer_inventory: list[tuple[str, str, str, int]] | None = None
+        peer_inventory_error: BandwidthPolicyError | None = None
+
+        def resolve_target(host: str, item: dict[str, Any], inventory: list[dict[str, Any]]) -> dict[str, Any]:
+            nonlocal peer_inventory, peer_inventory_error
+            if item["scope"] == "container":
+                if peer_inventory_error is not None:
+                    raise peer_inventory_error
+                if peer_inventory is None:
+                    try:
+                        peer_inventory = _running_container_inventory(inventory)
+                    except BandwidthPolicyError as exc:
+                        peer_inventory_error = exc
+                        raise
+            return _resolve_entry(host, item, inventory, peer_inventory)
+
     host_limit = next((item for item in normalized["limits"] if item.get("scope") == "host"), None)
     automatic_limits, automatic_status = _automatic_limits(
         normalized.get("auto_throttle") or {}, host_limit, host_id, node_id,
         containers if isinstance(containers, list) else [],
         traffic_samples if isinstance(traffic_samples, list) else [],
         int(sample_at or 0), max(1, int(round(float(sample_interval_seconds or 1)))),
-        bridge_inventory if isinstance(bridge_inventory, list) else [], state, resolve,
+        bridge_inventory if isinstance(bridge_inventory, list) else [], state, resolve_target,
     )
     effective_limits = _merge_automatic_limits(normalized["limits"], automatic_limits)
     status["auto_throttle"] = automatic_status
@@ -1130,7 +1270,7 @@ def reconcile(
         else:
             requested_keys.add("container:" + "\0".join((item["runtime"], item["project"], item["container_name"], item["container_id"])))
         try:
-            target = resolve(host_id, item, containers)
+            target = resolve_target(host_id, item, containers)
             target["expected_node_id"] = node_id
             desired[target["key"]] = (item, target)
         except (BandwidthPolicyError, OSError, ValueError) as exc:

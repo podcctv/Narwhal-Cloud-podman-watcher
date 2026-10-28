@@ -19,6 +19,7 @@ CASES = [
     ("test_commerce_balances_ui.cjs", ["-m", "tests.commerce_preview"], 8793),
     ("test_disk_cleanup_ui.cjs", ["-m", "tests.disk_cleanup_preview"], 8788),
     ("test_echarts_security_ui.cjs", None, None),
+    ("test_firewall_host_switch_ui.cjs", None, None),
     ("test_header_ui.cjs", ["-m", "tests.tcping_auto_preview"], 8791),
     ("test_login_ui.cjs", ["-m", "tests.login_preview"], 8786),
     ("test_password_review_ui.cjs", ["-m", "tests.password_review_preview"], 8793),

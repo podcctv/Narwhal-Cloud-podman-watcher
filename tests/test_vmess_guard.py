@@ -12,6 +12,11 @@ from server import buyer_notifications
 
 class VmessPlanTests(unittest.TestCase):
     def setUp(self):
+        self.process_clock = mock.patch.object(
+            agent, '_protocol_process_start_epoch_lower_bound', return_value=1793140000.0,
+        )
+        self.process_clock.start()
+        self.addCleanup(self.process_clock.stop)
         self.config = [{
             "pid": 120,
             "process": "xray",
@@ -170,7 +175,7 @@ class VmessPlanTests(unittest.TestCase):
             "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
             "121 S gost /usr/bin/gost -C /etc/gost/config.json\n"
         )
-        metadata = "1:2:24:2026-10-28:2026-10-28"
+        metadata = "1:2:24:2026-10-28:2026-10-28|1793139000|1793139000"
         with mock.patch.object(agent, "run", side_effect=[
             "120", metadata, '{"inbounds":[]}', metadata, "120",
         ]):
@@ -191,14 +196,14 @@ class VmessPlanTests(unittest.TestCase):
         )
         with mock.patch.object(agent, "run", side_effect=[
             "120",
-            "1:2:120:2026-10-28:2026-10-28",
+            "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":443,"streamSettings":{"network":"tcp"}}]}',
-            "1:2:120:2026-10-28:2026-10-28",
+            "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             "120",
             "121",
-            "1:3:20:2026-10-28:2026-10-28",
+            "1:3:20:2026-10-28:2026-10-28|1793139000|1793139000",
             '{invalid',
-            "1:3:20:2026-10-28:2026-10-28",
+            "1:3:20:2026-10-28:2026-10-28|1793139000|1793139000",
             "121",
         ]):
             result = agent._collect_socks_config_evidence(
@@ -218,12 +223,12 @@ class VmessPlanTests(unittest.TestCase):
         with mock.patch.object(agent, "run", side_effect=[
             "/etc/xray/conf.d/inbound.json\n/etc/xray/conf.d/inbound-link.json\n@@CONFIG_DIR_SCAN_OK@@",
             "120",
-            "1:4:90:2026-10-28:2026-10-28",
+            "1:4:90:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":8443,"streamSettings":{"network":"tcp"}}]}',
-            "1:4:90:2026-10-28:2026-10-28",
-            "1:2:120:2026-10-28:2026-10-28",
+            "1:4:90:2026-10-28:2026-10-28|1793139000|1793139000",
+            "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vless","port":443,"streamSettings":{"network":"tcp"}}]}',
-            "1:2:120:2026-10-28:2026-10-28",
+            "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             "120",
         ]) as run:
             result = agent._collect_socks_config_evidence(
@@ -253,9 +258,9 @@ class VmessPlanTests(unittest.TestCase):
         process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
         with mock.patch.object(agent, "run", side_effect=[
             "120",
-            "1:2:120:2026-10-28:2026-10-28",
+            "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":443}]}',
-            "1:2:120:2026-10-28:2026-10-28",
+            "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             "121",
         ]):
             result = agent._collect_socks_config_evidence(
@@ -271,9 +276,9 @@ class VmessPlanTests(unittest.TestCase):
         process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
         with mock.patch.object(agent, "run", side_effect=[
             "120",
-            "1:2:120:2026-10-28:2026-10-28",
+            "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":443}]}',
-            "1:3:140:2026-10-28:2026-10-28",
+            "1:3:140:2026-10-28:2026-10-28|1793139000|1793139000",
             "120",
         ]):
             result = agent._collect_socks_config_evidence(
@@ -282,6 +287,63 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(result["protocol_inventory_state"], "partial")
         self.assertEqual(result["protocol_process_scan_states"][0]["reason"],
                          "config_file_changed_during_scan")
+
+    def test_stable_config_rewritten_after_start_cannot_be_a_vmess_block_basis(self):
+        for mtime, ctime in [(1793140100, 1793140100), (1793139000, 1793140100),
+                             (1793139997, 1793139997)]:
+            with self.subTest(mtime=mtime, ctime=ctime):
+                metadata = f'1:2:120:stable|{mtime}|{ctime}'
+                with mock.patch.object(agent, 'run', side_effect=[
+                    '120', metadata, '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata, '120',
+                ]):
+                    evidence = agent._collect_socks_config_evidence(
+                        'incus', 'fixture', 'default', False,
+                        '120 S xray /usr/bin/xray -config /etc/xray/config.json\n',
+                    )
+                self.assertEqual(evidence['protocol_inventory_state'], 'partial')
+                self.assertEqual(evidence['configured_inbound_protocols'][0]['protocol'], 'vmess')
+                self.assertEqual(evidence['protocol_process_scan_states'][0]['reason'],
+                                 'config_not_known_before_process_start')
+                planned = vmess_guard.plan(
+                    'incus', evidence['configured_inbound_protocols'], [self.listener], [],
+                    evidence['protocol_inventory_state'],
+                    process_scan_states=evidence['protocol_process_scan_states'],
+                    listener_inventory_complete=True,
+                )
+                self.assertEqual(planned['blocked_endpoints'], [])
+
+    def test_config_with_unavailable_process_clock_remains_detected_but_unverified(self):
+        metadata = '1:2:120:stable|1793139000|1793139000'
+        with mock.patch.object(agent, '_protocol_process_start_epoch_lower_bound', return_value=None), \
+                mock.patch.object(agent, 'run', side_effect=[
+                    '120', metadata, '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata, '120',
+                ]):
+            evidence = agent._collect_socks_config_evidence(
+                'incus', 'fixture', 'default', False,
+                '120 S xray /usr/bin/xray -config /etc/xray/config.json\n',
+            )
+        self.assertEqual(evidence['protocol_inventory_state'], 'partial')
+        self.assertEqual(evidence['configured_inbound_protocols'][0]['protocol'], 'vmess')
+        self.assertEqual(evidence['protocol_process_scan_states'][0]['reason'],
+                         'config_process_clock_unavailable')
+
+    def test_old_unchanged_config_with_clock_evidence_is_eligible(self):
+        metadata = '1:2:120:stable|1793139000|1793139000'
+        with mock.patch.object(agent, 'run', side_effect=[
+            '120', metadata, '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata, '120',
+        ]):
+            evidence = agent._collect_socks_config_evidence(
+                'incus', 'fixture', 'default', False,
+                '120 S xray /usr/bin/xray -config /etc/xray/config.json\n',
+            )
+        self.assertEqual(evidence['protocol_inventory_state'], 'complete')
+        planned = vmess_guard.plan(
+            'incus', evidence['configured_inbound_protocols'], [self.listener], [],
+            evidence['protocol_inventory_state'],
+            process_scan_states=evidence['protocol_process_scan_states'],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(planned['blocked_endpoints'][0]['port'], 443)
 
     def test_customer_banner_copy_says_only_port_is_blocked(self):
         title, detail, extra, advice = security_banner.customer_copy({
@@ -315,6 +377,48 @@ class VmessPlanTests(unittest.TestCase):
         pending = agent._vmess_endpoint_label({"process":"xray","pid":120,"proto":"tcp","port":443}, pending=True)
         self.assertEqual(pending, "xray（容器内 PID 120），待核实 TCP/443")
         self.assertEqual(agent._vmess_endpoint_label({"process":"gost","pid":121,"proto":"udp","port":53}), "UDP/53")
+
+
+class VmessConfigClockTests(unittest.TestCase):
+    def _start_bound(self, namespaces='time:[42]\ntime:[42]\n', elapsed=0.01,
+                     clock_id=7, ticks='90000'):
+        with mock.patch.object(agent.os, 'readlink', return_value='time:[42]'), \
+                mock.patch.object(agent.os, 'sysconf', return_value=100, create=True), \
+                mock.patch.object(agent.time, 'CLOCK_BOOTTIME', clock_id, create=True), \
+                mock.patch.object(agent.time, 'clock_gettime', return_value=1000.0, create=True), \
+                mock.patch.object(agent.time, 'time', side_effect=[1700001000.0, 1700001000.0 + elapsed]), \
+                mock.patch.object(agent, 'run', return_value=namespaces) as execute:
+            bound = agent._protocol_process_start_epoch_lower_bound(
+                'incus', 'fixture', 'default', 120, ticks,
+            )
+        return bound, execute
+
+    def test_same_time_namespace_clock_gives_a_conservative_start_bound(self):
+        bound, execute = self._start_bound()
+        self.assertAlmostEqual(bound, 1700000899.99, places=4)
+        command = execute.call_args.args[0][-1]
+        self.assertIn('readlink /proc/120/ns/time', command)
+        self.assertNotIn('date ', command)
+        self.assertNotIn('getconf ', command)
+        self.assertTrue(agent._protocol_config_predates_process(
+            '1:2:100:stable|1700000800|1700000800', bound,
+        ))
+
+    def test_independent_time_namespace_is_not_combined_with_host_clock(self):
+        for namespaces in ['time:[42]\ntime:[43]\n', 'time:[43]\ntime:[42]\n', '']:
+            with self.subTest(namespaces=namespaces):
+                self.assertIsNone(self._start_bound(namespaces=namespaces)[0])
+
+    def test_unavailable_or_unstable_clock_basis_is_rejected(self):
+        self.assertIsNone(self._start_bound(clock_id=None)[0])
+        self.assertIsNone(self._start_bound(elapsed=-1)[0])
+        self.assertIsNone(self._start_bound(elapsed=0.5)[0])
+        self.assertIsNone(self._start_bound(ticks='100001')[0])
+
+    def test_missing_epoch_metadata_does_not_prove_loaded_configuration(self):
+        self.assertFalse(agent._protocol_config_predates_process('1:2:100:human-times', 1700000900.0))
+        self.assertFalse(agent._protocol_config_predates_process('1:2:100|bad|1700000800', 1700000900.0))
+        self.assertFalse(agent._protocol_config_predates_process('1:2:100|1700000800|1700000800', None))
 
 
 class VmessReconcileTests(unittest.TestCase):

@@ -1,7 +1,9 @@
 import json
+from contextlib import ExitStack
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 import uuid
 
 from client import manual_bandwidth as limiter
@@ -42,6 +44,138 @@ class ManualBandwidthTests(unittest.TestCase):
         with patch.object(limiter, "_runner", return_value=(0, "def456789abc|42")):
             with self.assertRaises(limiter.BandwidthPolicyError):
                 limiter._container_process_pid(item, match)
+
+    def reconcile_container(self, *, host_network=False, shared_peer=False,
+                            unreadable_peer=False, inventory_failure=False,
+                            incus_peer=False, malformed_incus_inventory=False):
+        container_id, peer_id = "a" * 64, "b" * 64
+        inventory = [{"runtime": "podman", "runtime_bin": "podman", "project": "",
+                      "name": "proxy", "id": container_id, "pid": "42"}]
+        policy = {**TARGET, "limits": [{"scope": "container", "runtime": "podman",
+                  "project": "", "container_name": "proxy", "container_id": container_id,
+                  "upload_mbps": 5, "download_mbps": 10}]}
+        proc_stat = "42 (container init) " + " ".join(["S"] + ["0"] * 18 + ["987654"])
+        original_stat, original_open = limiter.os.stat, open
+
+        def stat(path, *args, **kwargs):
+            inodes = {"/proc/1/ns/net": 1, "/proc/42/ns/net": 1 if host_network else 42,
+                      "/proc/43/ns/net": 42 if shared_peer or incus_peer else 43}
+            if str(path) in inodes:
+                if unreadable_peer and str(path) == "/proc/43/ns/net":
+                    raise PermissionError("peer namespace denied")
+                return SimpleNamespace(st_ino=inodes[str(path)])
+            return original_stat(path, *args, **kwargs)
+
+        def read(path, *args, **kwargs):
+            if str(path) == "/proc/42/stat":
+                return mock_open(read_data=proc_stat)()
+            return original_open(path, *args, **kwargs)
+
+        def which(binary):
+            return "/usr/bin/" + binary if binary == "podman" or (incus_peer and binary == "incus") else None
+
+        def run(args, **kwargs):
+            if args[1] == "ps":
+                return (1, "runtime unavailable") if inventory_failure else (0, container_id + ("\n" + peer_id if not incus_peer else ""))
+            if args[1] == "inspect":
+                return 0, container_id + "|42" + ("\n" + peer_id + "|43" if not incus_peer else "")
+            if args[1] == "list":
+                if inventory_failure:
+                    return 1, "Incus inventory unavailable"
+                if malformed_incus_inventory:
+                    return 0, "not-monitored,other-project,43,STOPPED,CONTAINER\n"
+                return 0, "not-monitored,other-project,43,RUNNING,CONTAINER\n"
+            if args[-5:] == ["ip", "-j", "route", "show", "default"]:
+                return 0, '[{"dev":"eth0"}]'
+            if args[-6:] == ["ip", "-j", "link", "show", "dev", "eth0"]:
+                return 0, '[{"ifindex":2,"link_index":7}]'
+            raise AssertionError(f"unexpected command: {args}")
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(limiter.os, "stat", side_effect=stat))
+            stack.enter_context(patch("builtins.open", side_effect=read))
+            stack.enter_context(patch.object(limiter.shutil, "which", side_effect=which))
+            runtime_query = stack.enter_context(patch.object(limiter, "_runner", side_effect=run))
+            clsact = stack.enter_context(patch.object(limiter, "_ensure_clsact"))
+            apply = stack.enter_context(patch.object(limiter, "_apply_filter", return_value=49150))
+            result = limiter.reconcile(policy, HOST, NODE, inventory, state_path=self.state_path())
+        return result, clsact, apply, runtime_query
+
+    def test_manual_container_limit_rejects_host_namespace_before_tc(self):
+        result, clsact, apply, _ = self.reconcile_container(host_network=True)
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("host network namespace", result["items"][0]["message"])
+        clsact.assert_not_called()
+        apply.assert_not_called()
+
+    def test_manual_limit_rejects_unmonitored_podman_namespace_peer(self):
+        result, clsact, apply, query = self.reconcile_container(shared_peer=True)
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("shared container network namespace", result["items"][0]["message"])
+        self.assertTrue(any(call.args[0][1] == "ps" for call in query.call_args_list))
+        clsact.assert_not_called()
+        apply.assert_not_called()
+
+    def test_manual_limit_rejects_unmonitored_incus_namespace_peer(self):
+        result, clsact, apply, query = self.reconcile_container(incus_peer=True)
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("shared container network namespace", result["items"][0]["message"])
+        self.assertTrue(any("--all-projects" in call.args[0] for call in query.call_args_list))
+        incus_query = next(call.args[0] for call in query.call_args_list if call.args[0][1] == "list")
+        self.assertIn("--format=csv", incus_query)
+        self.assertIn("--columns=nepst", incus_query)
+        self.assertNotIn("--format=json", incus_query)
+        clsact.assert_not_called()
+        apply.assert_not_called()
+
+    def test_manual_container_limit_requires_complete_incus_inventory(self):
+        result, clsact, apply, _ = self.reconcile_container(
+            incus_peer=True, inventory_failure=True,
+        )
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("Incus inventory is unavailable", result["items"][0]["message"])
+        clsact.assert_not_called()
+        apply.assert_not_called()
+
+    def test_manual_container_limit_rejects_unexpected_incus_inventory_row(self):
+        result, clsact, apply, _ = self.reconcile_container(
+            incus_peer=True, malformed_incus_inventory=True,
+        )
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("Incus inventory could not be verified", result["items"][0]["message"])
+        clsact.assert_not_called()
+        apply.assert_not_called()
+
+    def test_manual_container_limit_requires_complete_runtime_inventory(self):
+        result, clsact, apply, _ = self.reconcile_container(inventory_failure=True)
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("inventory is unavailable", result["items"][0]["message"])
+        clsact.assert_not_called()
+        apply.assert_not_called()
+
+    def test_manual_container_limit_rejects_unreadable_peer_namespace(self):
+        result, clsact, apply, _ = self.reconcile_container(unreadable_peer=True)
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("peer namespace is unavailable", result["items"][0]["message"])
+        clsact.assert_not_called()
+        apply.assert_not_called()
+
+    def test_manual_container_limit_applies_to_proven_isolated_namespace(self):
+        result, clsact, apply, query = self.reconcile_container()
+        self.assertEqual(result["state"], "applied")
+        clsact.assert_called_once_with(["nsenter", "--target", "42", "--net"], "eth0")
+        self.assertEqual(apply.call_count, 2)
+        self.assertEqual(sum(call.args[0][1] == "ps" for call in query.call_args_list), 1)
+
+    def test_explicit_host_limit_does_not_require_container_isolation_inventory(self):
+        policy = {**TARGET, "auto_throttle": {"enabled": False}}
+        with patch.object(limiter.socket, "if_nametoindex", return_value=2), \
+                patch.object(limiter, "_running_container_inventory") as inventory, \
+                patch.object(limiter, "_ensure_clsact"), patch.object(limiter, "_apply_filter") as apply:
+            result = limiter.reconcile(policy, HOST, NODE, [], state_path=self.state_path())
+        self.assertEqual(result["state"], "applied")
+        self.assertEqual(apply.call_count, 2)
+        inventory.assert_not_called()
 
     def test_apply_and_remove_use_only_policy_owned_filters(self):
         path = self.state_path()

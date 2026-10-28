@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, Clock3, Layers, LoaderCircle, Network, Plus, RefreshCw, Server, Shield, Trash2 } from 'lucide-react';
 import { ContainerItem, FleetFirewallPolicyResponse, HostFirewallAbusePolicy, HostFirewallLiveRule, HostFirewallPolicyResponse, HostFirewallRule, SecurityStatusItem } from '../../api/types';
 import { api } from '../../api/client';
@@ -132,6 +132,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [scope, setScope] = useState<FirewallScope>('host');
   const [pendingScope, setPendingScope] = useState<FirewallScope | null>(null);
   const [scopeConfirmOpen, setScopeConfirmOpen] = useState(false);
+  const [pendingHostId, setPendingHostId] = useState<string | null>(null);
   const [hostSearch, setHostSearch] = useState('');
   const [hostFilter, setHostFilter] = useState<FirewallNodeFilter>('all');
   const [fleetHostSearch, setFleetHostSearch] = useState('');
@@ -158,10 +159,18 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const [deletingManualRuleId, setDeletingManualRuleId] = useState<number | null>(null);
   const [recoveryIntent, setRecoveryIntent] = useState<'retry' | 'rollback' | null>(null);
   const [recoveringPolicy, setRecoveringPolicy] = useState(false);
+  const [copyingHostPolicy, setCopyingHostPolicy] = useState(false);
+  const selectionRef = useRef({ hostId, scope });
+  selectionRef.current = { hostId, scope };
+  const policyRequestRef = useRef(0);
+  const policyLoadingRef = useRef<{ hostId: string; request: number } | null>(null);
+  const mutationInFlightRef = useRef(false);
+  const snapshotMatchesHost = Boolean(hostId && snapshot?.host_id === hostId);
+  const mutationBusy = saving || fleetSaving || recoveringPolicy || copyingHostPolicy || deletingManualRuleId !== null;
 
   const selectedHost = hosts.find((host) => host.host_id === hostId);
   const protocolCapability = (protocol: string): 'supported' | 'unsupported' | 'unknown' => {
-    const readback = snapshot?.live_readback;
+    const readback = snapshotMatchesHost ? snapshot?.live_readback : undefined;
     if (!readback || readback.status !== 'ready' || readback.stale || !readback.capabilities_known) return 'unknown';
     const capability = readback.protocol_capabilities?.[protocol];
     if (capability) return capability;
@@ -173,7 +182,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     if (capability === 'unknown') return `尚未拿到当前母机新鲜的 RFW ${protocolLabels[protocol] || protocol} 能力读回；刷新状态并等待节点上报后再配置。`;
     return '';
   };
-  const interfaceInventory = snapshot?.interface_inventory;
+  const interfaceInventory = snapshotMatchesHost ? snapshot?.interface_inventory : undefined;
   const eligibleInterfaces = useMemo(
     () => (interfaceInventory?.interfaces || []).filter((item) => item.firewall_eligible && item.runtimes.length > 0),
     [interfaceInventory],
@@ -221,15 +230,22 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     currentFleetNodePage * FLEET_NODE_PAGE_SIZE,
     (currentFleetNodePage + 1) * FLEET_NODE_PAGE_SIZE,
   );
-  const activeAction = snapshot?.latest_action;
+  const activeAction = snapshotMatchesHost ? snapshot?.latest_action : undefined;
   const pending = Boolean(activeAction && ['queued', 'dispatched', 'running'].includes(activeAction.status));
-  const liveReadbackReady = Boolean(snapshot?.live_readback?.status === 'ready' && !snapshot.live_readback.stale);
-  const hostRecoveryEditable = Boolean(snapshot?.agent_ready && snapshot?.runtime_status?.control_api === 'ready'
+  const liveReadbackReady = Boolean(snapshotMatchesHost && snapshot?.live_readback?.status === 'ready' && !snapshot.live_readback.stale);
+  const hostRecoveryEditable = Boolean(snapshotMatchesHost && !mutationBusy && snapshot?.agent_ready && snapshot?.runtime_status?.control_api === 'ready'
     && fleetSnapshot && fleetSnapshot.revision === 0);
   const canRetryPolicy = Boolean(hostRecoveryEditable && !selectedHost?.stale && liveReadbackReady && !pending
     && (activeAction?.status === 'failed' || snapshot?.live_readback?.sync_status === 'drifted'));
   const canRollbackPolicy = Boolean(hostRecoveryEditable && !selectedHost?.stale && liveReadbackReady && !pending
     && (snapshot?.policy_history?.length || 0) > 0);
+  const runtimeReady = Boolean(snapshotMatchesHost && snapshot?.runtime_status?.control_api === 'ready' && !snapshot.runtime_status.stale);
+  const fleetAuthoritative = (fleetSnapshot?.revision ?? 0) > 0;
+  const canEdit = !mutationBusy && (scope === 'host'
+    ? Boolean(snapshotMatchesHost && snapshot?.agent_ready && runtimeReady && fleetSnapshot && !fleetAuthoritative)
+    : Boolean(fleetSnapshot));
+  const canDeleteManualRules = Boolean(scope === 'host' && snapshotMatchesHost && !mutationBusy && snapshot?.agent_ready && runtimeReady
+    && !selectedHost?.stale && snapshot?.live_readback?.status === 'ready' && !snapshot.live_readback.stale);
 
   useEffect(() => setFleetNodePage(0), [fleetHostFilter, fleetHostSearch]);
   useEffect(() => setFleetNodePage((page) => Math.min(page, fleetPageCount - 1)), [fleetPageCount]);
@@ -243,10 +259,18 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   }, [hosts, hostId]);
 
   const loadPolicy = useCallback(async (replaceDraft = true) => {
-    if (!hostId) return;
+    if (!hostId || scope !== 'host' || selectionRef.current.hostId !== hostId || selectionRef.current.scope !== 'host') return;
+    if (policyLoadingRef.current?.hostId === hostId && policyLoadingRef.current.request === policyRequestRef.current) return;
+    const requestedHostId = hostId;
+    const request = ++policyRequestRef.current;
+    policyLoadingRef.current = { hostId: requestedHostId, request };
+    const stillSelected = () => request === policyRequestRef.current
+      && selectionRef.current.hostId === requestedHostId && selectionRef.current.scope === 'host';
     setLoading(true);
     try {
-      const result = await api.getHostFirewallPolicy(hostId);
+      const result = await api.getHostFirewallPolicy(requestedHostId);
+      if (!stillSelected()) return;
+      if (result.host_id !== requestedHostId) throw new Error('返回的策略不属于当前母机，请刷新后重试。');
       setSnapshot(result);
       if (replaceDraft) {
         setRules(result.policy?.rules || []);
@@ -255,11 +279,14 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         setDirty(false);
       }
     } catch (error: any) {
-      onToast('error', `读取母机防火墙配置失败：${error.message || error}`);
+      if (stillSelected()) onToast('error', `读取母机防火墙配置失败：${error.message || error}`);
     } finally {
-      setLoading(false);
+      if (stillSelected()) {
+        policyLoadingRef.current = null;
+        setLoading(false);
+      }
     }
-  }, [hostId, onToast]);
+  }, [hostId, onToast, scope]);
 
   const loadFleetPolicy = useCallback(async () => {
     setFleetLoading(true);
@@ -285,12 +312,22 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   }, [fleetSnapshot, dirty, scope]);
 
   useEffect(() => {
-    if (scope !== 'host') return;
+    if (scope !== 'host') {
+      setLoading(false);
+      return;
+    }
     setSnapshot(null);
     setRules([]);
     setAbuse(emptyAbuse);
     setDirty(false);
-    if (hostId) loadPolicy(true);
+    setConfirmOpen(false);
+    setPendingManualDelete(null);
+    setRecoveryIntent(null);
+    setPendingHostId(null);
+    setRuleDraft(defaultDraft());
+    setFormError('');
+    if (hostId) void loadPolicy(true);
+    return () => { policyRequestRef.current += 1; };
   }, [hostId, loadPolicy, scope]);
 
   useEffect(() => {
@@ -426,13 +463,16 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   };
 
   const confirmManualRuleDelete = useCallback(async () => {
-    if (!hostId || !pendingManualDelete || deletingManualRuleId !== null) return;
+    if (!hostId || !pendingManualDelete || !canDeleteManualRules || mutationInFlightRef.current) return;
+    const requestedHostId = hostId;
     const rule = pendingManualDelete;
+    mutationInFlightRef.current = true;
     setDeletingManualRuleId(rule.id);
     try {
-      const result = await api.deleteHostFirewallRule(hostId, rule.id);
+      const result = await api.deleteHostFirewallRule(requestedHostId, rule.id);
+      if (selectionRef.current.hostId !== requestedHostId || selectionRef.current.scope !== 'host') return;
       setPendingManualDelete(null);
-      setSnapshot((current) => current ? {
+      setSnapshot((current) => current?.host_id === requestedHostId ? {
         ...current,
         latest_action: { id: result.action_id, status: 'queued', message: `手工 RFW 规则 #${rule.id} 删除已排队`, updated_at_utc8: '' },
       } : current);
@@ -441,9 +481,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     } catch (error: any) {
       onToast('error', `RFW 规则未删除：${error.message || error}`);
     } finally {
+      mutationInFlightRef.current = false;
       setDeletingManualRuleId(null);
     }
-  }, [deletingManualRuleId, hostId, loadPolicy, onToast, pendingManualDelete]);
+  }, [canDeleteManualRules, hostId, loadPolicy, onToast, pendingManualDelete]);
 
   const addCnRiskPolicyPreset = () => {
     const directions: Array<'in' | 'out'> = cnRiskDirection === 'both'
@@ -509,7 +550,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   };
 
   const confirmApply = useCallback(async () => {
-    if (!hostId || saving) return;
+    if (!hostId || scope !== 'host' || !canEdit || !snapshotMatchesHost || mutationInFlightRef.current) return;
+    const requestedHostId = hostId;
     const anyAbuseEnabled = abuse.speedtest || abuse.mining || abuse.bt;
     const interfaces = anyAbuseEnabled ? [...new Set((abuse.interfaces || []).map((item) => item.trim()).filter(Boolean))] : [];
     const knownInterfaces = new Set(eligibleInterfaces.map((item) => item.name));
@@ -520,10 +562,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       return;
     }
     const policyAbuse = { ...abuse, interfaces, runtimes: [] };
+    mutationInFlightRef.current = true;
     setSaving(true);
     try {
-      const result = await api.updateHostFirewallPolicy(hostId, { rules, abuse: policyAbuse });
-      setSnapshot((current) => current ? {
+      const result = await api.updateHostFirewallPolicy(requestedHostId, { rules, abuse: policyAbuse });
+      if (selectionRef.current.hostId !== requestedHostId || selectionRef.current.scope !== 'host') return;
+      setSnapshot((current) => current?.host_id === requestedHostId ? {
         ...current,
         revision: result.revision,
         policy: { rules, abuse: policyAbuse },
@@ -536,15 +580,20 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     } catch (error: any) {
       onToast('error', `策略未能排队：${error.message || error}`);
     } finally {
+      mutationInFlightRef.current = false;
       setSaving(false);
     }
-  }, [abuse, eligibleInterfaces, hostId, interfaceInventory, onToast, rules, saving]);
+  }, [abuse, canEdit, eligibleInterfaces, hostId, interfaceInventory, onToast, rules, scope, snapshotMatchesHost]);
 
   const confirmPolicyRecovery = useCallback(async () => {
-    if (!hostId || !recoveryIntent || recoveringPolicy) return;
+    if (!hostId || !recoveryIntent || !snapshotMatchesHost || scope !== 'host' || mutationInFlightRef.current
+      || (recoveryIntent === 'retry' ? !canRetryPolicy : !canRollbackPolicy)) return;
+    const requestedHostId = hostId;
+    mutationInFlightRef.current = true;
     setRecoveringPolicy(true);
     try {
-      const result = await api.recoverHostFirewallPolicy(hostId, recoveryIntent);
+      const result = await api.recoverHostFirewallPolicy(requestedHostId, recoveryIntent);
+      if (selectionRef.current.hostId !== requestedHostId || selectionRef.current.scope !== 'host') return;
       onToast('success', recoveryIntent === 'retry'
         ? `策略重试已排队，当前策略版本 #${result.revision}。`
         : `已将历史版本 #${result.restored_revision} 作为新版本 #${result.revision} 排队回滚。`);
@@ -553,12 +602,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     } catch (error: any) {
       onToast('error', `防火墙策略${recoveryIntent === 'retry' ? '重试' : '回滚'}未能排队：${error.message || error}`);
     } finally {
+      mutationInFlightRef.current = false;
       setRecoveringPolicy(false);
     }
-  }, [hostId, loadPolicy, onToast, recoveringPolicy, recoveryIntent]);
+  }, [canRetryPolicy, canRollbackPolicy, hostId, loadPolicy, onToast, recoveryIntent, scope, snapshotMatchesHost]);
 
   const confirmFleetApply = useCallback(async () => {
-    if (fleetSaving) return;
+    if (scope !== 'fleet' || !canEdit || mutationInFlightRef.current) return;
     const anyAbuseEnabled = abuse.speedtest || abuse.mining || abuse.bt;
     const runtimes = anyAbuseEnabled ? [...new Set(abuse.runtimes || [])] : [];
     const uncoveredRuntimes = runtimes.filter((runtime) => fleetNetworkCoverage[runtime] === 0);
@@ -569,10 +619,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         : `所选运行时目前没有任何节点报告可用网桥：${uncoveredRuntimes.map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join('、')}。请刷新节点清单或取消该选择。`);
       return;
     }
+    mutationInFlightRef.current = true;
     setFleetSaving(true);
     try {
       const policyAbuse = { ...abuse, interfaces: [], runtimes };
       const result = await api.updateFleetFirewallPolicy({ rules, abuse: policyAbuse });
+      if (selectionRef.current.scope !== 'fleet') return;
       setFleetConfirmOpen(false);
       setAbuse(policyAbuse);
       setDirty(false);
@@ -582,9 +634,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     } catch (error: any) {
       onToast('error', `全局策略未能保存：${error.message || error}`);
     } finally {
+      mutationInFlightRef.current = false;
       setFleetSaving(false);
     }
-  }, [abuse, fleetNetworkCoverage, fleetSaving, loadFleetPolicy, onToast, rules]);
+  }, [abuse, canEdit, fleetNetworkCoverage, loadFleetPolicy, onToast, rules, scope]);
 
   const loadFleetDraft = () => {
     if (!fleetSnapshot) return;
@@ -595,9 +648,15 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   };
 
   const applyScopeChange = (next: FirewallScope) => {
+    if (mutationInFlightRef.current) return;
+    policyRequestRef.current += 1;
     setScope(next);
     setFormError('');
     setDirty(false);
+    setConfirmOpen(false);
+    setFleetConfirmOpen(false);
+    setPendingManualDelete(null);
+    setRecoveryIntent(null);
     if (next === 'fleet') {
       if (fleetSnapshot && fleetSnapshot.revision > 0) {
         setRules(fleetSnapshot.policy.rules || []);
@@ -608,11 +667,11 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       }
       return;
     }
-    if (hostId) void loadPolicy(true);
   };
 
   const requestScopeChange = (next: FirewallScope) => {
     if (next === scope) return;
+    if (mutationInFlightRef.current) return;
     if (dirty) {
       setPendingScope(next);
       setScopeConfirmOpen(true);
@@ -621,10 +680,39 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     applyScopeChange(next);
   };
 
+  const applyHostChange = (next: string) => {
+    if (mutationInFlightRef.current) return;
+    policyRequestRef.current += 1;
+    setSnapshot(null);
+    setRules([]);
+    setAbuse(emptyAbuse);
+    setDirty(false);
+    setConfirmOpen(false);
+    setPendingManualDelete(null);
+    setRecoveryIntent(null);
+    setFormError('');
+    setHostInterfaceFilter('all');
+    setHostId(next);
+  };
+
+  const requestHostChange = (next: string) => {
+    if (next === hostId || mutationInFlightRef.current) return;
+    if (dirty) {
+      setPendingHostId(next);
+      return;
+    }
+    applyHostChange(next);
+  };
+
   const copyHostDraftToFleet = async () => {
-    if (!hostId || !snapshot) return;
+    if (!hostId || !snapshotMatchesHost || scope !== 'fleet' || mutationInFlightRef.current) return;
+    const requestedHostId = hostId;
+    mutationInFlightRef.current = true;
+    setCopyingHostPolicy(true);
     try {
-      const hostPolicy = await api.getHostFirewallPolicy(hostId);
+      const hostPolicy = await api.getHostFirewallPolicy(requestedHostId);
+      if (selectionRef.current.hostId !== requestedHostId || selectionRef.current.scope !== 'fleet') return;
+      if (hostPolicy.host_id !== requestedHostId) throw new Error('返回的策略不属于所选母机。');
       const selectedNames = new Set(hostPolicy.policy.abuse.interfaces || []);
       const runtimes = [...new Set((hostPolicy.interface_inventory?.interfaces || [])
         .filter((item) => selectedNames.has(item.name) && item.firewall_eligible)
@@ -635,6 +723,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       onToast('info', `已从 ${hostId} 复制规则；容器网卡已转换为运行时选择（${runtimes.map((item) => item === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未选择'}），请检查后再同步。`);
     } catch (error: any) {
       onToast('error', `复制单机策略失败：${error.message || error}`);
+    } finally {
+      mutationInFlightRef.current = false;
+      setCopyingHostPolicy(false);
     }
   };
 
@@ -648,13 +739,6 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
   const outboundProtocols: HostFirewallRule['protocol'][] = ['all', 'tcp', 'udp', 'socks', 'fet', 'wireguard', 'mtproto'];
   const protocols: HostFirewallRule['protocol'][] = ['all', 'tcp', 'udp', 'http', 'tls', 'socks', 'ssh', 'fet', 'wireguard', 'openvpn', 'quic', 'mtproto'];
-  const runtimeReady = snapshot?.runtime_status?.control_api === 'ready' && !snapshot.runtime_status.stale;
-  const fleetAuthoritative = (fleetSnapshot?.revision ?? 0) > 0;
-  const canEdit = scope === 'host'
-    ? Boolean(snapshot?.agent_ready && runtimeReady && fleetSnapshot && !fleetAuthoritative)
-    : Boolean(fleetSnapshot);
-  const canDeleteManualRules = Boolean(scope === 'host' && snapshot?.agent_ready && runtimeReady
-    && !selectedHost?.stale && snapshot?.live_readback?.status === 'ready' && !snapshot.live_readback.stale);
   const blockingRules = rules.filter((rule) => rule.enabled && rule.action === 'block').length;
   const enabledAbuse = Number(abuse.speedtest) + Number(abuse.mining) + Number(abuse.bt);
   const anyAbuseEnabled = enabledAbuse > 0;
@@ -669,7 +753,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">8792 是 Agent 面板端口；RFW API 默认仅监听 127.0.0.1:7734（地址可配置）。Watcher 通过 Agent 受限控制通道读回和同步，不需要将 RFW API 暴露到公网。</p>
         </div>
       </div>
-      <button type="button" onClick={() => scope === 'host' ? void loadPolicy(true) : void loadFleetPolicy()} disabled={scope === 'host' ? loading || !hostId : fleetLoading} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-200 transition-colors hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
+      <button type="button" onClick={() => scope === 'host' ? void loadPolicy(!dirty) : void loadFleetPolicy()} disabled={mutationBusy || (scope === 'host' ? loading || !hostId : fleetLoading)} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-200 transition-colors hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
         {(scope === 'host' ? loading : fleetLoading) ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}刷新状态
       </button>
     </header>
@@ -679,7 +763,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         {([
           ['host', '单台母鸡', '只改当前选中的节点', Server],
           ['fleet', '全体母鸡', '按每台节点的运行时自动匹配网卡', Layers],
-        ] as const).map(([key, title, description, Icon]) => <button key={key} type="button" role="tab" aria-selected={scope === key} onClick={() => requestScopeChange(key)} className={`flex min-h-16 items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${scope === key ? 'border-sky-600 bg-sky-950/50' : 'border-transparent bg-slate-950/40 hover:border-slate-700'}`}>
+        ] as const).map(([key, title, description, Icon]) => <button key={key} type="button" role="tab" disabled={mutationBusy} aria-selected={scope === key} onClick={() => requestScopeChange(key)} className={`flex min-h-16 items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${scope === key ? 'border-sky-600 bg-sky-950/50' : 'border-transparent bg-slate-950/40 hover:border-slate-700'}`}>
           <Icon className={`h-5 w-5 shrink-0 ${scope === key ? 'text-sky-300' : 'text-slate-500'}`} aria-hidden="true" />
           <span className="min-w-0"><span className="block text-sm font-semibold text-slate-100">{title}</span><span className="mt-0.5 block text-xs leading-4 text-slate-400">{description}</span></span>
           {scope === key && <Check className="ml-auto h-4 w-4 shrink-0 text-sky-300" aria-hidden="true" />}
@@ -689,6 +773,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
     {scope === 'host' && <section className="grid gap-4 lg:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.2fr)]">
       <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+        <fieldset disabled={mutationBusy} className="min-w-0">
         <FirewallNodePicker
           hosts={hosts}
           fleetHosts={fleetHosts}
@@ -697,8 +782,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           filter={hostFilter}
           onSearchChange={setHostSearch}
           onFilterChange={setHostFilter}
-          onSelect={setHostId}
+          onSelect={requestHostChange}
         />
+        </fieldset>
         <details className="mt-3 rounded-xl border border-slate-800 bg-slate-950/40 p-3">
           <summary className="cursor-pointer select-none text-xs font-medium text-slate-300">查看所选母机的能力与同步详情</summary>
           <div className="mt-3 flex flex-wrap gap-2 text-[10px]">
@@ -725,7 +811,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <h3 className="text-sm font-semibold text-amber-100">生效范围与保护边界</h3>
             <ul className="mt-2 space-y-1.5 text-xs leading-5 text-amber-100/80">
               <li>RFW 原生规则作用于母机 RFW 接口，可能影响这台母机上的所有业务和容器。</li>
-              <li>下方三项防滥用规则只匹配容器转发流量，不改宿主机 INPUT/OUTPUT；本地手工 RFW 规则不由本页面删除或覆盖。</li>
+              <li>下方三项防滥用规则只匹配容器转发流量，不改宿主机 INPUT/OUTPUT；本地手工 RFW 规则不会被自动删除或覆盖。</li>
               <li>本页只配置并核验经 Agent/RFW 接口登记的规则；不会管理 UFW、nftables、iptables、firewalld、云厂商安全组或其他独立防火墙，因此不能代表宿主机全部防火墙配置。</li>
               <li>Incus 与系统防火墙可能相互影响；本地手工 RFW 规则需逐条确认后才可删除。应用后请核对节点读回与实际网络状态。</li>
               <li>未启用进程强杀、容器文件陷阱、内核参数修改或任意脚本执行。</li>
@@ -745,7 +831,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           <button type="button" onClick={() => void loadFleetPolicy()} disabled={fleetLoading} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">{fleetLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}刷新全局状态</button>
           {fleetSnapshot && fleetSnapshot.revision > 0
             ? <button type="button" onClick={loadFleetDraft} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700">重新载入已保存模板</button>
-            : <button type="button" onClick={() => void copyHostDraftToFleet()} disabled={!snapshot || !hostId} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">从所选母鸡复制规则</button>}
+            : <button type="button" onClick={() => void copyHostDraftToFleet()} disabled={!snapshotMatchesHost || mutationBusy} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">从所选母鸡复制规则</button>}
         </div>
       </div>
       {fleetSnapshot && <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -866,6 +952,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       {snapshot?.live_readback?.snapshot && <p className="border-t border-slate-800 px-4 py-3 text-[10px] leading-5 text-slate-500 sm:px-5">读回版本 #{snapshot.live_readback.snapshot.policy_revision} · 平台规则 {snapshot.live_readback.snapshot.managed_rule_count} · 偏差 {snapshot.live_readback.snapshot.drift_count} · 缺失 {snapshot.live_readback.snapshot.missing_count}。读回证明 RFW 用户态规则表，不是内核 map 的逐项确认。</p>}
     </section>
 
+    <fieldset disabled={!canEdit} className="min-w-0 space-y-5" aria-label="防火墙策略编辑器">
     <section className="rounded-2xl border border-slate-800 bg-slate-900/70">
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
         <div>
@@ -1038,6 +1125,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       </div>
       <p className="mx-4 mb-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[10px] leading-4 text-slate-400 sm:mx-5 sm:mb-5">容器端口模板只覆盖 bridge 转发流量；host、pasta、macvlan / ipvlan 等网络模式不在此路径。母机级协议规则作用于 RFW 实例自身的接口范围，两种配置互不改变。应用后检查节点回执和 RFW 读回。</p>
     </section>
+    </fieldset>
 
 
 
@@ -1071,6 +1159,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     </section>
 
     <ConfirmDialog open={scopeConfirmOpen} title="切换配置范围？" description="当前草稿尚未保存。切换后会放弃这份草稿，并载入目标范围的已保存策略。" confirmLabel="放弃草稿并切换" tone="primary" onConfirm={() => { if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); setScopeConfirmOpen(false); }} onCancel={() => { setPendingScope(null); setScopeConfirmOpen(false); }} />
+    <ConfirmDialog open={pendingHostId !== null} title="切换母鸡？" description={`当前 ${hostId} 的草稿尚未保存。切换到 ${pendingHostId || ''} 后会放弃这份草稿，并读取目标母鸡自己的策略。`} confirmLabel="放弃草稿并切换母鸡" tone="primary" onConfirm={() => { if (pendingHostId) applyHostChange(pendingHostId); setPendingHostId(null); }} onCancel={() => setPendingHostId(null)} />
     <ConfirmDialog open={pendingManualDelete !== null} title="删除这条手工 RFW 规则？" description={`这只会删除 ${hostId} 上当前读回的 RFW 规则 #${pendingManualDelete?.id ?? ''}。执行前 Runman 会再次核对规则 ID 与完整规则内容；若规则已变化或已被平台接管，删除会被拒绝。`} confirmLabel="确认删除并排队" tone="danger" isSubmitting={deletingManualRuleId !== null} onConfirm={confirmManualRuleDelete} onCancel={() => { if (deletingManualRuleId === null) setPendingManualDelete(null); }}>
       {pendingManualDelete && <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">{pendingManualDelete.direction === 'in' ? '入站' : '出站'} {pendingManualDelete.protocol} · 端口 {pendingManualDelete.port_start === 0 && pendingManualDelete.port_end === 0 ? '任意' : pendingManualDelete.port_start === pendingManualDelete.port_end ? pendingManualDelete.port_start : `${pendingManualDelete.port_start}–${pendingManualDelete.port_end}`} · {pendingManualDelete.ip_type === 'any' ? '任意 IP' : pendingManualDelete.ip_type === 'cidr' ? pendingManualDelete.ip : (pendingManualDelete.countries || []).join(', ')} · {pendingManualDelete.action === 'block' ? '阻断' : '放行'} · P{pendingManualDelete.priority}</div>}
     </ConfirmDialog>

@@ -6,6 +6,15 @@ containers when it can prove all of the following in the same collection:
 - The exact supported `xray`, `v2ray`, or `sing-box` process has all of its
   discovered configuration files completely readable, with no unparsed config
   directory or omitted endpoint, and its configuration declares a VMess inbound.
+- Every configuration file is unchanged during collection, and both its mtime
+  and ctime are clearly earlier than the current process generation's start.
+  The Agent requires a reliable shared time-namespace/clock basis, accounts for
+  timestamp precision, and excludes files within the clock uncertainty margin.
+  A stable file rewritten after the engine started remains detection evidence;
+  it cannot authorize a new block because the engine may still be serving its
+  previous in-memory configuration. Unsupported or independently offset time
+  namespaces remain unverified. This check does not require `date` or `getconf`
+  inside a BusyBox container.
 - The configured PID, protocol, transport, and port match a live listener.
 - The live listener snapshot is complete, its process ownership is unambiguous,
   and the transport/port is not shared with another configured or live service.
@@ -34,6 +43,13 @@ the process or container, and it does not change other ports. The existing
 installer provides `nftables`, `iproute2`, and `util-linux` (for `nsenter`).
 The Agent pins the verified namespace before applying rules so a reused PID
 cannot redirect the operation to a different container.
+
+Filesystem evidence is not an engine runtime-API snapshot. A control panel can
+change an engine's in-memory inbounds independently of the files on disk; such
+setups need runtime-API evidence before claiming the disk document is the
+currently loaded configuration. The file-generation gate prevents a newer disk
+document from being mistaken for the older configuration still in memory; it
+does not claim to detect every possible out-of-band runtime change.
 
 If nftables rejects validation or application, the Agent reports a bounded
 reason category (for example permission denied, unsupported kernel operation,

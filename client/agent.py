@@ -3706,6 +3706,10 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "config_path_not_found_or_unreadable": "没有可验证的配置文件路径，或路径不可读",
                     "config_parse_failed_or_too_large": "配置文件格式不受支持、解析失败或超过大小上限",
                     "config_scan_timed_out": "配置扫描达到时间上限",
+                    "config_file_metadata_unavailable": "无法读取配置文件的完整时间与身份元数据",
+                    "config_file_changed_during_scan": "扫描期间配置文件发生变化，不能确认已加载的版本",
+                    "config_process_clock_unavailable": "无法用同一时钟基准确认配置文件与进程启动的先后顺序",
+                    "config_not_known_before_process_start": "配置文件在进程启动后更新、时间过于接近或时间元数据不完整，不能确认进程已加载此版本",
                     "process_changed_during_config_scan": "扫描期间进程发生变化，不能确认配置仍属于当前进程",
                     "endpoint_report_limit_exceeded": "入站端点数量超过上报上限",
                     "process_scan_limit_exceeded": "协议进程数量达到扫描上限",
@@ -3737,7 +3741,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 if reason_key == "configuration_scan_incomplete":
                     reason_key = str(vmess.get("protocol_inventory_reason") or reason_key)
                 reason = reason_labels.get(reason_key, "端口归属或规则生效状态未能确认")
-                detail = f"已从运行配置发现 VMess 入站，但未能安全确认端口保护：{reason}。未停止进程或容器。"
+                detail = f"已在进程关联的配置文件中发现 VMess 入站，但未能安全确认端口保护：{reason}。未停止进程或容器。"
                 if labels:
                     detail += f"待核实端口：{'、'.join(labels)}。"
                 socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
@@ -5140,6 +5144,62 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
     }
 
 
+def _protocol_process_start_epoch_lower_bound(
+    runtime: str, name: str, project: str, pid: int, start_ticks: str,
+) -> float | None:
+    """Map a stable process generation to a conservative file-clock bound.
+
+    /proc start ticks use the reader's boot clock.  Do not combine a host
+    clock with an independently offset container time namespace.  These
+    checks need only readlink and procfs in the container; neither date nor
+    getconf (often absent in BusyBox images) is required there.
+    """
+    if not start_ticks.isdigit() or int(start_ticks) <= 0:
+        return None
+    try:
+        host_time_namespace = os.readlink('/proc/self/ns/time')
+        if not re.fullmatch(r'time:\[\d+\]', host_time_namespace):
+            return None
+        namespaces = run(_runtime_exec_cmd(
+            runtime, name,
+            f"readlink /proc/self/ns/time 2>/dev/null; readlink /proc/{int(pid)}/ns/time 2>/dev/null",
+            project,
+        ), timeout=2).splitlines()
+        if namespaces != [host_time_namespace, host_time_namespace]:
+            return None
+        clock_id = getattr(time, 'CLOCK_BOOTTIME', None)
+        if clock_id is None:
+            return None
+        ticks_per_second = float(os.sysconf('SC_CLK_TCK'))
+        realtime_before = time.time()
+        boottime = time.clock_gettime(clock_id)
+        realtime_after = time.time()
+        process_start = int(start_ticks) / ticks_per_second
+        if not (1 <= ticks_per_second <= 100000 and 0 < process_start <= boottime
+                and 0 < boottime < 1e10 and realtime_before > 946684800
+                and 0 <= realtime_after - realtime_before <= 0.25
+                and os.readlink('/proc/self/ns/time') == host_time_namespace):
+            return None
+        # start_ticks has one-tick precision.  A lower bound keeps that
+        # uncertainty from making a just-written file appear old enough.
+        return realtime_before - boottime + process_start - 1 / ticks_per_second
+    except (AttributeError, OSError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+
+
+def _protocol_config_predates_process(metadata: str, process_start_bound: float | None) -> bool:
+    if process_start_bound is None:
+        return False
+    parts = metadata.rsplit('|', 2)
+    if len(parts) != 3 or not all(value.isdigit() for value in parts[1:]):
+        return False
+    # stat's epoch fields have one-second precision.  Include their full
+    # second plus a two-second clock/rounding margin, checking ctime as well
+    # as mtime so preserving an old mtime cannot hide a later rewrite.
+    changed_upper_bound = max(int(parts[1]), int(parts[2])) + 3
+    return 0 < min(int(parts[1]), int(parts[2])) and changed_upper_bound < process_start_bound
+
+
 def _collect_socks_config_evidence(
     runtime: str, name: str, project: str, enabled: bool, process_output: str = ''
 ) -> Dict[str, object]:
@@ -5284,6 +5344,9 @@ def _collect_socks_config_evidence(
             inventory_reason = inventory_reason or process_scan_reason
         start_ticks_before = run(_runtime_exec_cmd(runtime, name,
             f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if (enabled or is_protocol_process) else ''
+        process_start_bound = _protocol_process_start_epoch_lower_bound(
+            runtime, name, project, int(proc['pid']), start_ticks_before,
+        ) if is_protocol_process else None
         for path in scan_paths:
             if time.monotonic() >= scan_deadline:
                 documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
@@ -5297,7 +5360,7 @@ def _collect_socks_config_evidence(
             if is_protocol_process:
                 protocol_metadata_before = run(_runtime_exec_cmd(
                     runtime, name,
-                    f"stat -Lc '%d:%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null",
+                    f"stat -Lc '%d:%i:%s:%y:%z|%Y|%Z' {shlex.quote(path)} 2>/dev/null",
                     project,
                 ), timeout=2).strip()
                 if not protocol_metadata_before:
@@ -5310,7 +5373,7 @@ def _collect_socks_config_evidence(
             if is_protocol_process:
                 protocol_metadata_after = run(_runtime_exec_cmd(
                     runtime, name,
-                    f"stat -Lc '%d:%i:%s:%y:%z' {shlex.quote(path)} 2>/dev/null",
+                    f"stat -Lc '%d:%i:%s:%y:%z|%Y|%Z' {shlex.quote(path)} 2>/dev/null",
                     project,
                 ), timeout=2).strip()
                 if not protocol_metadata_after:
@@ -5326,6 +5389,20 @@ def _collect_socks_config_evidence(
                     protocol_complete = False
                     process_scan_reason = process_scan_reason or 'config_file_changed_during_scan'
                     inventory_reason = inventory_reason or process_scan_reason
+                if protocol_metadata_before and protocol_metadata_after == protocol_metadata_before:
+                    if process_start_bound is None:
+                        process_protocol_complete = False
+                        protocol_complete = False
+                        process_scan_reason = process_scan_reason or 'config_process_clock_unavailable'
+                        inventory_reason = inventory_reason or process_scan_reason
+                    elif not _protocol_config_predates_process(protocol_metadata_after, process_start_bound):
+                        # Stable on-disk content is not proof that this engine
+                        # has loaded it.  A post-start rewrite can declare
+                        # VMess while the still-running listener serves VLESS.
+                        process_protocol_complete = False
+                        protocol_complete = False
+                        process_scan_reason = process_scan_reason or 'config_not_known_before_process_start'
+                        inventory_reason = inventory_reason or process_scan_reason
             protocol_document = socks_detector.parse_inbound_protocols(raw, proc['process']) if is_protocol_process else {'parsed': True, 'endpoints': []}
             if is_protocol_process:
                 if not protocol_document.get('parsed'):
