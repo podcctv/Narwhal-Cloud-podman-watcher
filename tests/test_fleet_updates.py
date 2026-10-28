@@ -13,7 +13,7 @@ class FleetTests(unittest.TestCase):
         ops.initialize(self.c)
         for host,last,version in [('canary',1000,'1.7.46'),('old',1000,'1.7.41'),('offline',0,'1.7.41')]:
             self.c.execute('INSERT INTO hosts VALUES(?,?,?,?,?)',(host,last,version,host,'{}'))
-            self.c.execute('INSERT INTO ops_hosts VALUES(?,?,?,?)',(host,host,last,json.dumps({'managed_upgrade':True,'health':[{'source':'security','status':'healthy'}]})))
+            self.c.execute('INSERT INTO ops_hosts VALUES(?,?,?,?)',(host,host,last,json.dumps({'managed_upgrade':True,'health':[{'source':'network_counters','status':'healthy'},{'source':'security','status':'healthy'}],'services':[]})))
         self.c.commit()
 
     def tearDown(self):
@@ -85,6 +85,19 @@ class FleetTests(unittest.TestCase):
         self.c.execute("UPDATE ops_hosts SET payload=? WHERE host_id='canary'",(json.dumps({'managed_upgrade':True,'health':[{'source':'security','status':'failed'}]}),)); self.c.commit()
         self.tick(1130)
         self.assertEqual(len(self.actions()),1)
+
+    def test_confirmed_probe_only_canary_can_promote_without_container_security_scope(self):
+        self.tick(); self.verify()
+        payload={
+            'managed_upgrade':True,
+            'health':[{'source':'network_counters','status':'idle'},{'source':'security','status':'not_applicable'}],
+            'runtime_inventory':{'state':'empty','runtimes':[],'container_count':0},
+            'services':[],
+        }
+        self.c.execute("UPDATE ops_hosts SET payload=? WHERE host_id='canary'",(json.dumps(payload),)); self.c.commit()
+        self.tick(1130)
+        self.assertEqual(self.c.execute("SELECT status FROM ops_upgrades").fetchone()[0],'rollout')
+        self.assertEqual([a['host_id'] for a in self.actions()],['canary','old'])
 
     def test_automatic_campaign_replaces_offline_canary_without_bypassing_soak(self):
         self.tick()

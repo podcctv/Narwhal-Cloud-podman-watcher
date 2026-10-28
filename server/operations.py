@@ -13,9 +13,10 @@ import threading
 import tempfile
 import time
 try:
-    from server import disk_cleanup
+    from server import disk_cleanup, upgrade_health
 except ImportError:
     import disk_cleanup
+    import upgrade_health
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -400,8 +401,7 @@ def ingest(conn, host_id, node_id, ts, data):
             conn.execute("INSERT INTO ops_service_results VALUES(?,?,?) ON CONFLICT(service_id) DO UPDATE SET ts=excluded.ts,payload=excluded.payload", (service[0], ts, json.dumps(result)))
             event(conn, identity(node), f"service:{service[0]}", ts, {**result,"severity":"critical" if result.get("status")=="failed" else "warning"}, result.get("status") != "healthy")
     for upgrade in conn.execute("SELECT n.*,u.version FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign WHERE n.host_id=? AND n.status IN ('dispatched','failed')", (host_id,)).fetchall():
-        core_health=[x for x in operations.get("health",[]) if x.get("source") in {"network_counters","security"}]
-        healthy_scan = data.get("security",{}).get("enabled") is True and bool(core_health) and all(x.get("status") in {"healthy","idle"} for x in core_health) and all(x.get("status")=="healthy" for x in operations.get("services",[]))
+        healthy_scan, failed_sources = upgrade_health.check(operations, data)
         action=conn.execute('SELECT params_json,created_at FROM security_actions WHERE id=?',(upgrade['action_id'],)).fetchone()
         bound=action and loads(action['params_json']).get('expected_node_id')==node_id and ts>=action['created_at']
         if bound and data.get("agent_version") == upgrade["version"]:
@@ -409,13 +409,6 @@ def ingest(conn, host_id, node_id, ts, data):
                 conn.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
                 conn.execute("UPDATE security_actions SET status='succeeded',result_message='target version reported with healthy checks',updated_at=? WHERE id=?", (ts, upgrade["action_id"]))
             else:
-                failed_sources = [str(x.get("source") or "unknown") for x in core_health if x.get("status") not in {"healthy", "idle"}]
-                if not core_health:
-                    failed_sources.append("core health data unavailable")
-                if data.get("security",{}).get("enabled") is not True:
-                    failed_sources.append("security sampling disabled")
-                if any(x.get("status") != "healthy" for x in operations.get("services",[])):
-                    failed_sources.append("service health check failed")
                 reason = "升级后健康检查未通过：" + "、".join(dict.fromkeys(failed_sources))
                 conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
                 conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?", (reason[:400], ts, upgrade["action_id"]))

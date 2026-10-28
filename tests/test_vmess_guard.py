@@ -11,6 +11,11 @@ from server import buyer_notifications
 
 
 class VmessPlanTests(unittest.TestCase):
+    @staticmethod
+    def _proc_stat(pid, ticks):
+        fields = ['S'] + ['0'] * 18 + [str(ticks)]
+        return f"{pid} (proxy worker ({pid})) {' '.join(fields)}"
+
     def setUp(self):
         self.process_clock = mock.patch.object(
             agent, '_protocol_process_start_epoch_lower_bound', return_value=1793140000.0,
@@ -222,7 +227,7 @@ class VmessPlanTests(unittest.TestCase):
         )
         metadata = "1:2:24:2026-10-28:2026-10-28|1793139000|1793139000"
         with mock.patch.object(agent, "run", side_effect=[
-            "120", metadata, '{"inbounds":[]}', metadata, "120",
+            self._proc_stat(120, 120), metadata, '{"inbounds":[]}', metadata, self._proc_stat(120, 120),
         ]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
@@ -240,16 +245,16 @@ class VmessPlanTests(unittest.TestCase):
             "121 S v2ray /usr/bin/v2ray -config /etc/v2ray/config.json\n"
         )
         with mock.patch.object(agent, "run", side_effect=[
-            "120",
+            self._proc_stat(120, 120),
             "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":443,"streamSettings":{"network":"tcp"}}]}',
             "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
-            "120",
-            "121",
+            self._proc_stat(120, 120),
+            self._proc_stat(121, 121),
             "1:3:20:2026-10-28:2026-10-28|1793139000|1793139000",
             '{invalid',
             "1:3:20:2026-10-28:2026-10-28|1793139000|1793139000",
-            "121",
+            self._proc_stat(121, 121),
         ]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
@@ -267,14 +272,14 @@ class VmessPlanTests(unittest.TestCase):
         process_output = "120 S xray /usr/bin/xray run -confdir /etc/xray/conf.d\n"
         with mock.patch.object(agent, "run", side_effect=[
             "/etc/xray/conf.d/inbound.json\n/etc/xray/conf.d/inbound-link.json\n@@CONFIG_DIR_SCAN_OK@@",
-            "120",
+            self._proc_stat(120, 120),
             "1:4:90:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":8443,"streamSettings":{"network":"tcp"}}]}',
             "1:4:90:2026-10-28:2026-10-28|1793139000|1793139000",
             "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vless","port":443,"streamSettings":{"network":"tcp"}}]}',
             "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
-            "120",
+            self._proc_stat(120, 120),
         ]) as run:
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
@@ -291,7 +296,7 @@ class VmessPlanTests(unittest.TestCase):
 
     def test_unreadable_xray_config_directory_reports_actionable_reason(self):
         process_output = "120 S xray /usr/bin/xray run -confdir /etc/xray/conf.d\n"
-        with mock.patch.object(agent, "run", side_effect=["", "120", "120"]):
+        with mock.patch.object(agent, "run", side_effect=["", self._proc_stat(120, 120), self._proc_stat(120, 120)]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
             )
@@ -302,11 +307,11 @@ class VmessPlanTests(unittest.TestCase):
     def test_engine_restart_during_config_scan_invalidates_generation_evidence(self):
         process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
         with mock.patch.object(agent, "run", side_effect=[
-            "120",
+            self._proc_stat(120, 120),
             "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":443}]}',
             "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
-            "121",
+            self._proc_stat(120, 121),
         ]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
@@ -320,11 +325,11 @@ class VmessPlanTests(unittest.TestCase):
     def test_config_replacement_during_read_invalidates_protocol_evidence(self):
         process_output = "120 S xray /usr/bin/xray -config /etc/xray/config.json\n"
         with mock.patch.object(agent, "run", side_effect=[
-            "120",
+            self._proc_stat(120, 120),
             "1:2:120:2026-10-28:2026-10-28|1793139000|1793139000",
             '{"inbounds":[{"protocol":"vmess","port":443}]}',
             "1:3:140:2026-10-28:2026-10-28|1793139000|1793139000",
-            "120",
+            self._proc_stat(120, 120),
         ]):
             result = agent._collect_socks_config_evidence(
                 "incus", "fixture", "default", False, process_output
@@ -339,7 +344,9 @@ class VmessPlanTests(unittest.TestCase):
             with self.subTest(mtime=mtime, ctime=ctime):
                 metadata = f'1:2:120:stable|{mtime}|{ctime}'
                 with mock.patch.object(agent, 'run', side_effect=[
-                    '120', metadata, '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata, '120',
+                    self._proc_stat(120, 120), metadata,
+                    '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata,
+                    self._proc_stat(120, 120),
                 ]):
                     evidence = agent._collect_socks_config_evidence(
                         'incus', 'fixture', 'default', False,
@@ -361,7 +368,9 @@ class VmessPlanTests(unittest.TestCase):
         metadata = '1:2:120:stable|1793139000|1793139000'
         with mock.patch.object(agent, '_protocol_process_start_epoch_lower_bound', return_value=None), \
                 mock.patch.object(agent, 'run', side_effect=[
-                    '120', metadata, '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata, '120',
+                    self._proc_stat(120, 120), metadata,
+                    '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata,
+                    self._proc_stat(120, 120),
                 ]):
             evidence = agent._collect_socks_config_evidence(
                 'incus', 'fixture', 'default', False,
@@ -375,7 +384,9 @@ class VmessPlanTests(unittest.TestCase):
     def test_old_unchanged_config_with_clock_evidence_is_eligible(self):
         metadata = '1:2:120:stable|1793139000|1793139000'
         with mock.patch.object(agent, 'run', side_effect=[
-            '120', metadata, '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata, '120',
+            self._proc_stat(120, 120), metadata,
+            '{"inbounds":[{"protocol":"vmess","port":443}]}', metadata,
+            self._proc_stat(120, 120),
         ]):
             evidence = agent._collect_socks_config_evidence(
                 'incus', 'fixture', 'default', False,
@@ -425,8 +436,13 @@ class VmessPlanTests(unittest.TestCase):
 
 
 class VmessConfigClockTests(unittest.TestCase):
-    def _start_bound(self, snapshot='time:[42]\ntime:[42]\n1000.00 500.00\n', elapsed=0.01,
-                     ticks='90000'):
+    def _snapshot(self, ticks='90000', uptime='1000.00 500.00', comm='xray worker ) helper'):
+        fields = ['S'] + ['0'] * 18 + [str(ticks)]
+        return f"120 ({comm}) {' '.join(fields)}\n\n@@UPTIME@@\n{uptime}\n"
+
+    def _start_bound(self, snapshot=None, elapsed=0.01, ticks='90000'):
+        if snapshot is None:
+            snapshot = self._snapshot(ticks=ticks)
         with mock.patch.object(agent.os, 'sysconf', return_value=100, create=True), \
                 mock.patch.object(agent.time, 'time', side_effect=[1700001000.0, 1700001000.0 + elapsed]), \
                 mock.patch.object(agent, 'run', return_value=snapshot) as execute:
@@ -439,24 +455,29 @@ class VmessConfigClockTests(unittest.TestCase):
         bound, execute = self._start_bound()
         self.assertAlmostEqual(bound, 1700000899.98, places=4)
         command = execute.call_args.args[0][-1]
-        self.assertIn('readlink /proc/120/ns/time', command)
+        self.assertIn('cat /proc/120/stat', command)
         self.assertIn('cat /proc/uptime', command)
-        self.assertNotIn('date ', command)
+        self.assertIn('@@UPTIME@@', command)
+        self.assertNotIn('readlink /proc/self/ns/time', command)
         self.assertNotIn('getconf ', command)
         self.assertTrue(agent._protocol_config_predates_process(
             '1:2:100:stable|1700000800|1700000800', bound,
         ))
 
-    def test_independent_time_namespace_uses_its_own_uptime_and_start_ticks(self):
-        snapshot = 'time:[77]\ntime:[77]\n605800.00 500.00\n'
+    def test_container_time_namespace_uses_its_own_uptime_and_start_ticks(self):
+        snapshot = self._snapshot(ticks='60570000', uptime='605800.00 500.00')
         bound, _ = self._start_bound(snapshot=snapshot, ticks='60570000')
         self.assertAlmostEqual(bound, 1700000899.98, places=4)
 
-    def test_mismatched_process_time_namespace_is_rejected(self):
+    def test_missing_namespace_links_do_not_break_a_same_exec_clock_pair(self):
+        bound, _ = self._start_bound(snapshot=self._snapshot())
+        self.assertIsNotNone(bound)
+
+    def test_malformed_or_changed_proc_snapshot_is_rejected(self):
         for snapshot in [
-            'time:[42]\ntime:[43]\n1000.00 500.00\n',
-            'time:[43]\ntime:[42]\n1000.00 500.00\n',
-            'time:[42]\ntime:[42]\n',
+            self._snapshot(ticks='90001'),
+            self._snapshot(uptime=''),
+            self._snapshot(ticks='200000', uptime='1000.00 500.00'),
             '',
         ]:
             with self.subTest(snapshot=snapshot):
@@ -467,6 +488,9 @@ class VmessConfigClockTests(unittest.TestCase):
         self.assertIsNone(self._start_bound(elapsed=0.5)[0])
         self.assertIsNone(self._start_bound(ticks='100001')[0])
         self.assertIsNone(self._start_bound(snapshot='time:[42]\ntime:[42]\n0.00 0.00\n')[0])
+
+    def test_proc_stat_start_ticks_handle_spaces_and_parentheses_in_comm(self):
+        self.assertEqual(agent._proc_stat_start_ticks(self._snapshot()), '90000')
 
     def test_missing_epoch_metadata_does_not_prove_loaded_configuration(self):
         self.assertFalse(agent._protocol_config_predates_process('1:2:100:human-times', 1700000900.0))

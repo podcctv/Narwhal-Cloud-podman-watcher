@@ -13,10 +13,12 @@ try:
     from . import operations as ops
     from . import fleet_updates
     from . import inbound_assessment, ip_reputation
+    from . import upgrade_health
 except ImportError:
     import operations as ops
     import fleet_updates
     import inbound_assessment, ip_reputation
+    import upgrade_health
 
 
 def attach(app, db, database_path, storage, cleanup, version, admin_name):
@@ -943,10 +945,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             if not host or not ops_report or not latest_report or int(ops_report["ts"] or 0) < int(time.time())-900 or int(latest_report["ts"] or 0) < int(time.time())-900:
                 raise HTTPException(409, "灰度节点上报已过期，暂不能恢复发布")
             operation_data = ops.loads(ops_report["payload"], {})
-            core = [item for item in operation_data.get("health", []) if item.get("source") in {"network_counters", "security"}]
-            services = operation_data.get("services", [])
-            security = ops.loads(latest_report["payload_json"], {}).get("security", {})
-            healthy = security.get("enabled") is True and bool(core) and all(item.get("status") in {"healthy", "idle"} for item in core) and all(item.get("status") == "healthy" for item in services)
+            report_data = ops.loads(latest_report["payload_json"], {})
+            healthy, _ = upgrade_health.check(operation_data, report_data)
             if not healthy:
                 raise HTTPException(409, "最新主机审计或安全采样仍未通过；发布保持暂停")
             next_status = metadata.get("paused_from_status") if metadata.get("paused_from_status") in {"canary", "rollout"} else "canary"

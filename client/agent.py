@@ -5216,11 +5216,11 @@ def _protocol_process_start_epoch_lower_bound(
 ) -> float | None:
     """Map process start ticks to epoch using clocks from one container time namespace.
 
-    Both /proc/PID/stat start ticks and /proc/uptime are virtualized for the
-    reader's time namespace. Read uptime inside the container and require the
-    exec process and target PID to share that namespace before combining the
-    values with host CLOCK_REALTIME. This supports isolated time namespaces
-    without mixing their boot clock with the host's CLOCK_BOOTTIME.
+    Linux reports both /proc/PID/stat start ticks and /proc/uptime in the
+    reading process's time namespace. Read both from the same runtime exec;
+    never mix container boottime with the host's CLOCK_BOOTTIME. Namespace
+    symlink inspection is deliberately avoided because minimal container
+    images may not include readlink or expose time namespace links.
     """
     if not start_ticks.isdigit() or int(start_ticks) <= 0:
         return None
@@ -5228,20 +5228,21 @@ def _protocol_process_start_epoch_lower_bound(
         realtime_before = time.time()
         snapshot = run(_runtime_exec_cmd(
             runtime, name,
-            f"readlink /proc/self/ns/time 2>/dev/null; "
-            f"readlink /proc/{int(pid)}/ns/time 2>/dev/null; cat /proc/uptime 2>/dev/null",
+            f"cat /proc/{int(pid)}/stat 2>/dev/null; "
+            "printf '\\n@@UPTIME@@\\n'; cat /proc/uptime 2>/dev/null",
             project,
         ), timeout=2).splitlines()
         realtime_after = time.time()
-        if len(snapshot) != 3:
+        # run() returns a line-oriented string; joining first keeps unusual
+        # command names in /proc/PID/stat from shifting the uptime boundary.
+        raw_snapshot = "\n".join(snapshot)
+        process_stat, separator, uptime_text = raw_snapshot.partition("@@UPTIME@@\n")
+        if not separator:
             return None
-        exec_time_namespace, process_time_namespace = snapshot[:2]
-        if (
-            not re.fullmatch(r'time:\[\d+\]', exec_time_namespace)
-            or process_time_namespace != exec_time_namespace
-        ):
+        observed_start_ticks = _proc_stat_start_ticks(process_stat)
+        if observed_start_ticks != start_ticks:
             return None
-        uptime_fields = snapshot[2].split()
+        uptime_fields = uptime_text.split()
         if len(uptime_fields) != 2:
             return None
         namespace_boottime = float(uptime_fields[0])
@@ -5259,6 +5260,26 @@ def _protocol_process_start_epoch_lower_bound(
         return realtime_before - namespace_boottime + process_start - 1 / ticks_per_second - 0.01
     except (AttributeError, OSError, TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
+
+
+def _proc_stat_start_ticks(stat_text: str) -> str:
+    """Extract field 22 from proc stat even when comm contains spaces or ')' characters."""
+    raw = str(stat_text or "").strip()
+    closing = raw.rfind(")")
+    if closing < 0 or raw[closing + 1:closing + 2] != " ":
+        return ""
+    fields = raw[closing + 2:].split()
+    if len(fields) <= 19:
+        return ""
+    ticks = fields[19]
+    return ticks if ticks.isdigit() and int(ticks) > 0 else ""
+
+
+def _protocol_process_start_ticks(runtime: str, name: str, project: str, pid: int) -> str:
+    output = run(_runtime_exec_cmd(
+        runtime, name, f"cat /proc/{int(pid)}/stat 2>/dev/null", project,
+    ), timeout=2)
+    return _proc_stat_start_ticks(output)
 
 
 def _protocol_config_predates_process(metadata: str, process_start_bound: float | None) -> bool:
@@ -5416,8 +5437,9 @@ def _collect_socks_config_evidence(
             protocol_complete = False
             process_scan_reason = process_scan_reason or 'config_path_not_found_or_unreadable'
             inventory_reason = inventory_reason or process_scan_reason
-        start_ticks_before = run(_runtime_exec_cmd(runtime, name,
-            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if (enabled or is_protocol_process) else ''
+        start_ticks_before = _protocol_process_start_ticks(
+            runtime, name, project, int(proc['pid']),
+        ) if (enabled or is_protocol_process) else ''
         process_start_bound = _protocol_process_start_epoch_lower_bound(
             runtime, name, project, int(proc['pid']), start_ticks_before,
         ) if is_protocol_process else None
@@ -5517,8 +5539,9 @@ def _collect_socks_config_evidence(
                 documents.append(document)
             if enabled and document['endpoints']:
                 files.add(path)
-        start_ticks_after = run(_runtime_exec_cmd(runtime, name,
-            f"awk '{{print $22}}' /proc/{proc['pid']}/stat 2>/dev/null", project), timeout=2).strip() if (enabled or is_protocol_process) else ''
+        start_ticks_after = _protocol_process_start_ticks(
+            runtime, name, project, int(proc['pid']),
+        ) if (enabled or is_protocol_process) else ''
         start_ticks = (
             start_ticks_before
             if start_ticks_before.isdigit() and start_ticks_after == start_ticks_before
@@ -10103,7 +10126,9 @@ def main() -> None:
             "podman_network": {"ipv4_ok": v4, "ipv6_ok": v6},
             "containers": collected,
             "security": security,
-            "operations": node_operations.collect(security, collected, security_interval),
+            "operations": node_operations.collect(
+                security, collected, security_interval, runtime_inventory=list(get_runtime_bins().keys()),
+            ),
         }
         try:
             push(args.server, args.secret, payload)

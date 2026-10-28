@@ -177,7 +177,7 @@ def probe(service):
         return result
 
 
-def collect(security, containers, interval):
+def collect(security, containers, interval, runtime_inventory=None):
     # Notice-only Docker entries intentionally have no network counters. Keep
     # them visible, but do not classify the monitored runtime scan as broken.
     monitored = [c for c in containers if not (c.get('runtime') == 'docker' and c.get('monitor_mode') == 'notice')]
@@ -192,9 +192,19 @@ def collect(security, containers, interval):
         log_status="parse_error"
     else:
         log_status="healthy" if access.get("requests") else "idle"
+    runtime_inventory_known = isinstance(runtime_inventory, (list, tuple))
+    runtime_names = sorted({str(name).strip().lower() for name in runtime_inventory
+                            if isinstance(name, str) and name.strip()}) if runtime_inventory_known else []
+    runtime_state = "available" if runtime_names else "empty" if runtime_inventory_known else "unknown"
+    runtime_snapshot = {"state": runtime_state, "runtimes": runtime_names[:8],
+                        "container_count": len(containers) if isinstance(containers, list) else 0}
+    security_status = "healthy" if security.get("enabled") else "disabled"
+    if (not security.get("enabled") and runtime_state == "empty"
+            and isinstance(containers, list) and not containers):
+        security_status = "not_applicable"
     health=[{"source":"http_logs","status":log_status,"details":{k:access.get(k,0) for k in ("readable_files","missing_files","unreadable_files","parse_errors","requests")},"guidance":"使用日志向导发现路径，确认 JSON/combined 格式和 Agent 读取权限"},
             {"source":"network_counters","status":"healthy" if all(c.get("traffic_counters",{}).get("available") for c in monitored) and monitored else "partial" if monitored else "idle","details":{"containers":len(monitored),"available":sum(bool(c.get("traffic_counters",{}).get("available")) for c in monitored),"notice_only":len(containers)-len(monitored)},"guidance":"检查运行时统计接口、/proc 网络命名空间权限；首采样不产生速率"},
-            {"source":"security","status":"healthy" if security.get("enabled") else "disabled","guidance":"启用 SECURITY_MONITOR_ENABLED；执行复查要求新安全样本"}]
+            {"source":"security","status":security_status,"guidance":"无容器运行时的探针节点不适用容器安全采样；其他节点请启用 SECURITY_MONITOR_ENABLED"}]
     with ThreadPoolExecutor(max_workers=4) as pool:
         services=list(pool.map(probe,_config.get("services",[])[:20]))
     upgrade_result={}
@@ -206,7 +216,7 @@ def collect(security, containers, interval):
     if disk_cleanup.available():
         try:maintenance=disk_cleanup.controller().summary()
         except (OSError,ValueError):maintenance['error']='cleanup state unavailable; no automatic deletion'
-    return {"health":health,"services":services,"disk_cleanup":maintenance,"log_discovery":_discoveries,"architecture":platform.machine(),"interval_seconds":interval,"upgrade_result":upgrade_result,
+    return {"health":health,"runtime_inventory":runtime_snapshot,"services":services,"disk_cleanup":maintenance,"log_discovery":_discoveries,"architecture":platform.machine(),"interval_seconds":interval,"upgrade_result":upgrade_result,
             "managed_upgrade":_managed_upgrade_available(),
             "capabilities":["operations-v1","service-probes","log-discovery","post-remediation-recheck"] + (["public-tcp-v2"] if tcp_probe.available() else []),"schema_version":1}
 

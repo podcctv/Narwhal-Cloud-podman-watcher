@@ -6,6 +6,10 @@ import os
 import re
 import time
 import urllib.request
+try:
+    from server import upgrade_health
+except ImportError:
+    import upgrade_health
 
 REPOSITORY = 'podcctv/Narwhal-Cloud-podman-watcher'
 ACTIVE = ('queued', 'dispatched', 'running')
@@ -206,9 +210,7 @@ def reconcile(conn, version, revision, now=None):
     h = eligible.get(meta['canary'])
     promote = bool(canary and canary['status'] == 'verified' and h and h['agent_version'] == version and 0<=now-h['ops_ts']<=900 and canary['updated_at'] and now>=canary['updated_at']+120 and h['ops_ts'] >= canary['updated_at']+120)
     if promote:
-        health = json.loads(h['ops_payload']).get('health', [])
-        core = [x for x in health if x.get('source') in {'network_counters', 'security'}]
-        promote = bool(core) and all(x.get('status') in {'healthy', 'idle'} for x in core)
+        promote, _ = upgrade_health.check(json.loads(h['ops_payload']))
     if promote:
         conn.execute("UPDATE ops_upgrades SET status='rollout' WHERE id=?", (ident,))
     permitted = campaign['status'] in {'rollout', 'verified'} or promote

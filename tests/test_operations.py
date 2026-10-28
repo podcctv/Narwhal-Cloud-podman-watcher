@@ -294,7 +294,7 @@ class OperationsTests(unittest.TestCase):
         data=self.data()
         self.conn.execute("UPDATE security_actions SET params_json=? WHERE id=9",(json.dumps({'expected_node_id':'node'}),))
         data["agent_version"]="1.7.0"
-        data["operations"]["health"]=[{"source":"network_counters","status":"partial"}]
+        data["operations"]["health"]=[{"source":"network_counters","status":"partial"},{"source":"security","status":"healthy"}]
         self.ingest(self.now,data)
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"failed")
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrades WHERE id=1").fetchone()[0],"paused")
@@ -302,6 +302,33 @@ class OperationsTests(unittest.TestCase):
         self.ingest(self.now+300,data)
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"verified")
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrades WHERE id=1").fetchone()[0],"paused")
+
+    def test_probe_only_agent_with_explicit_empty_runtime_scope_can_verify_upgrade(self):
+        self.conn.execute("INSERT INTO ops_upgrades VALUES(1,'1.7.0',?,'rollout',?,'{}')",("a"*40,self.now))
+        self.conn.execute("INSERT INTO ops_upgrade_nodes VALUES(1,'h',9,'dispatched','1.6.74')")
+        self.conn.execute("INSERT INTO security_actions(id,alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(9,0,'h','host','','__host__','managed_upgrade',?,'running','test',?,?)",(json.dumps({"expected_node_id":"node"}),self.now,self.now))
+        data=self.data()
+        data["agent_version"]="1.7.0"
+        data["client_config"]["security_monitor_enabled"]=False
+        data["security"]["enabled"]=False
+        data["containers"]=[]
+        data["operations"].update(
+            health=[{"source":"network_counters","status":"idle"},{"source":"security","status":"not_applicable"}],
+            runtime_inventory={"state":"empty","runtimes":[],"container_count":0},
+        )
+        self.ingest(self.now,data)
+        self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"verified")
+
+    def test_not_applicable_security_fails_closed_for_runtime_or_container_inventory(self):
+        from server.upgrade_health import check
+        operations={"health":[{"source":"network_counters","status":"idle"},{"source":"security","status":"not_applicable"}],
+                    "runtime_inventory":{"state":"empty","runtimes":[],"container_count":0},"services":[]}
+        self.assertEqual(check(operations, {"security":{"enabled":False},"containers":[]}), (True, []))
+        self.assertFalse(check(operations, {"security":{"enabled":False},"containers":[{"runtime":"incus"}]})[0])
+        self.assertFalse(check({**operations,"runtime_inventory":{"state":"available","runtimes":["incus"],"container_count":0}},
+                               {"security":{"enabled":False},"containers":[]})[0])
+        self.assertFalse(check({k:v for k,v in operations.items() if k!="runtime_inventory"},
+                               {"security":{"enabled":False},"containers":[]})[0])
 
     def test_signed_report_keeps_usage_but_does_not_notify_quota(self):
         self.conn.execute("INSERT INTO ops_policies VALUES(?,?,?,?)",(self.entity,"general",json.dumps({"monthly_quota_bytes":1000}),self.now))
@@ -328,6 +355,18 @@ class OperationsTests(unittest.TestCase):
 
 
 class NodeOperationsTests(unittest.TestCase):
+    def test_security_sampling_not_applicable_only_for_confirmed_probe_only_host(self):
+        with mock.patch.dict(agent_ops._config, {'services': []}):
+            result = agent_ops.collect({'enabled': False}, [], 300, runtime_inventory=[])
+            statuses = {item['source']: item['status'] for item in result['health']}
+            self.assertEqual(statuses['security'], 'not_applicable')
+            self.assertEqual(result['runtime_inventory'], {'state': 'empty', 'runtimes': [], 'container_count': 0})
+
+            runtime = agent_ops.collect({'enabled': False}, [], 300, runtime_inventory=['incus'])
+            self.assertEqual(next(item for item in runtime['health'] if item['source'] == 'security')['status'], 'disabled')
+            unknown = agent_ops.collect({'enabled': False}, [], 300)
+            self.assertEqual(next(item for item in unknown['health'] if item['source'] == 'security')['status'], 'disabled')
+
     def test_notice_only_docker_does_not_block_monitored_scan_health(self):
         clean = {'runtime': 'incus', 'traffic_counters': {'available': True}}
         notice = {'runtime': 'docker', 'monitor_mode': 'notice'}
