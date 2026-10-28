@@ -465,8 +465,9 @@ class VmessConfigClockTests(unittest.TestCase):
         ))
 
     def test_slow_but_bounded_runtime_exec_keeps_conservative_clock_evidence(self):
-        bound, _ = self._start_bound(elapsed=0.5)
-        self.assertAlmostEqual(bound, 1700000899.48, places=4)
+        bound, execute = self._start_bound(elapsed=5.5)
+        self.assertAlmostEqual(bound, 1700000894.48, places=4)
+        self.assertEqual(execute.call_args.kwargs["timeout"], 8.0)
         self.assertTrue(agent._protocol_config_predates_process(
             '1:2:100:stable|1700000800|1700000800', bound,
         ))
@@ -492,7 +493,7 @@ class VmessConfigClockTests(unittest.TestCase):
 
     def test_unavailable_or_unstable_clock_basis_is_rejected(self):
         self.assertIsNone(self._start_bound(elapsed=-1)[0])
-        self.assertIsNone(self._start_bound(elapsed=3.01)[0])
+        self.assertIsNone(self._start_bound(elapsed=8.01)[0])
         self.assertIsNone(self._start_bound(ticks='100001')[0])
         self.assertIsNone(self._start_bound(snapshot='time:[42]\ntime:[42]\n0.00 0.00\n')[0])
 

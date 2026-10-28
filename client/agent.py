@@ -5211,7 +5211,11 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
     }
 
 
-_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS = 3.0
+# Incus exec can take several seconds on busy or low-powered hosts. Keep the
+# paired in-container clocks on one command, but allow enough bounded time for
+# the command to return; the measured latency is subtracted from the resulting
+# process-start lower bound so a slower sample never weakens the proof.
+_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS = 8.0
 
 
 def _protocol_process_start_epoch_lower_bound(

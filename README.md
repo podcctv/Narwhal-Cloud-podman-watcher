@@ -1,6 +1,11 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.123**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.124**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.124：修复慢 Incus 节点的 VMess 时钟采样超时
+
+- 生产复核发现部分慢节点的 Xray 进程 tick 可读，但同一容器内配对读取 `/proc/uptime` 的 `incus exec` 超过 v1.7.122 的 3 秒限制，仍导致 VMess 端口待核实。本版将该单次时钟采样上限提高到 8 秒。
+- 采样仍在同一次容器执行中读取进程 tick 与 uptime，实际命令耗时继续从进程启动时间下界中扣除；超时、时钟不一致、配置/进程/监听证据不完整时仍不封锁。
 
 ### v1.7.123：回收已终止发布中的过期升级名额
 
