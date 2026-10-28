@@ -34,6 +34,8 @@ PROTECTION_ONLY_ALERT_TYPES = frozenset({
     "traffic_imbalance", "ops_policy_signal", "ops_bandwidth_saturation",
     "ops_baseline_anomaly", "ops_connection_guard",
 })
+RESOURCE_PROTECTION_ALERT_TYPES = frozenset({"cpu_pressure_protection", "io_pressure_protection"})
+NON_ABUSE_ALERT_TYPES = PROTECTION_ONLY_ALERT_TYPES | RESOURCE_PROTECTION_ALERT_TYPES
 
 
 def clean(value, limit=500):

@@ -902,6 +902,16 @@ def process_security_alerts(
                 if alert_type == 'container_connection_count':
                     was_escalated = _alert_details(existing['details_json']).get('connection_policy', {}).get('escalated')
                     should_notify = should_notify or bool(raw_alert.get('connection_policy', {}).get('escalated') and not was_escalated)
+                if alert_type in {"cpu_pressure_protection", "io_pressure_protection"}:
+                    previous_details = _alert_details(existing["details_json"])
+                    guard_key = "cpu_guard" if alert_type == "cpu_pressure_protection" else "io_guard"
+                    try:
+                        previous_tier = int((previous_details.get(guard_key) or {}).get("tier") or 0)
+                        current_tier = int((raw_alert.get(guard_key) or {}).get("tier") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        previous_tier = current_tier = 0
+                    if current_tier > previous_tier and current_tier > 1:
+                        should_notify = True
                 if alert_type in {"host_vulnerability", "host_security_finding"}:
                     previous_details = _alert_details(existing["details_json"])
                     previous_ids = previous_details.get("finding_keys") or previous_details.get("finding_ids")

@@ -174,7 +174,9 @@ def issue(alert, details):
         if applied:
             original = clean(action.get("original_limit") or "原配额", 80)
             active = clean(action.get("active_limit") or "临时配额", 80)
-            facts.append(f"容器 CPU 配额：{original} → {active}")
+            tier = max(1, min(3, int(num(cpu.get("tier")) or num(action.get("tier")) or 1)))
+            ratio = int(num(cpu.get("tier_percent_of_original")) or {1: 50, 2: 25, 3: 10}.get(tier, 50))
+            facts.append(f"容器 CPU 第 {tier} 阶保护：约为原有效 CPU 容量 {ratio}%（{original} → {active}）")
             if restore_failed:
                 facts.append("原 CPU 配额自动恢复失败；临时保护配额仍在生效")
         else:
@@ -186,6 +188,47 @@ def issue(alert, details):
         )
         if restore_failed:
             advice = "临时 CPU 配额仍在保护容器，但原配额未能自动恢复。请管理员检查容器运行时配置后手动恢复；系统没有停止进程或容器。"
+        return title, "；".join(facts) + "。", advice
+    if kind == "io_pressure_protection":
+        io = details.get("io_guard") if isinstance(details.get("io_guard"), dict) else {}
+        action = details.get("automatic_remediation") if isinstance(details.get("automatic_remediation"), dict) else {}
+        applied = action.get("succeeded") is True and io.get("limit_applied") is not False
+        restore_failed = io.get("restore_failed") is True or io.get("state") == "restore_failed"
+        if restore_failed:
+            title = "服务器磁盘 I/O 压力已回落，但原限额未能恢复"
+        elif applied:
+            title = "服务器持续磁盘 I/O 繁忙，已启用容器保护"
+        else:
+            title = "服务器磁盘 I/O 保护未能确认生效"
+        facts = []
+        if io.get("device"):
+            facts.append(f"受影响磁盘设备 {clean(io.get('device'), 32)}")
+        if io.get("device_busy_percent") is not None:
+            facts.append(f"设备繁忙 {fmt(io.get('device_busy_percent'))}%")
+        rates = io.get("container_rates") if isinstance(io.get("container_rates"), dict) else io.get("observed_rates")
+        if isinstance(rates, dict):
+            facts.append(
+                f"容器采样读写约 {fmt(num(rates.get('rbps'))/1024/1024)} / {fmt(num(rates.get('wbps'))/1024/1024)} MiB/s，"
+                f"{fmt(rates.get('riops'))} / {fmt(rates.get('wiops'))} IOPS"
+            )
+        if io.get("dominant_share_percent") is not None:
+            facts.append(f"容器占该设备采样 I/O {fmt(io.get('dominant_share_percent'))}%")
+        if io.get("confirmed_duration_seconds") is not None:
+            facts.append(f"持续确认 {fmt(num(io.get('confirmed_duration_seconds'))/60)} 分钟（有效采样 {fmt(io.get('sample_count'))}/{fmt(io.get('required_samples'))} 次）")
+        if applied:
+            tier = max(1, min(3, int(num(io.get("tier")) or 1)))
+            ratio = int(num(io.get("tier_percent_of_baseline")) or {1: 50, 2: 25, 3: 10}.get(tier, 50))
+            facts.append(f"第 {tier} 阶设备级读写限额约为触发基线的 {ratio}%")
+            facts.append("限额只作用于该容器在该磁盘设备上的 I/O；没有停止进程或容器")
+        else:
+            facts.append("系统未确认容器级 I/O 限额生效；没有停止进程或容器")
+        advice = (
+            "这是宿主机资源保护提醒，不代表认定客户滥用。限额会在设备压力与容器 I/O 持续回落后自动恢复；请检查容器内的数据库、日志、下载或备份任务。"
+            if applied and not restore_failed else
+            "这是宿主机资源保护提醒，不代表认定客户滥用。请管理员核查 cgroup v2 设备归属、io.max 写入和读回结果。"
+        )
+        if restore_failed:
+            advice = "原磁盘 I/O 限额未能自动恢复；临时保护仍可能生效。请管理员检查 cgroup v2 io.max 后手动恢复原值。"
         return title, "；".join(facts) + "。", advice
     if kind in METRICS:
         description, label, unit, advice = METRICS[kind]
@@ -346,9 +389,9 @@ def render(alert, state, node="", action=None):
     outcome = execution_text(details, action)
     if alert.get("alert_type") == "vmess_port_blocked" and vmess_block_evidence(details):
         outcome = ""
-    if alert.get("alert_type") == "cpu_pressure_protection":
+    if alert.get("alert_type") in {"cpu_pressure_protection", "io_pressure_protection"}:
         outcome = ""
-    subject = "服务器服务策略提醒" if alert.get("alert_type") == "vmess_port_blocked" else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency", "cpu_pressure_protection"} else "服务器安全提醒"
+    subject = "服务器服务策略提醒" if alert.get("alert_type") == "vmess_port_blocked" else "服务器资源保护提醒" if alert.get("alert_type") in {"cpu_pressure_protection", "io_pressure_protection"} else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
     if state == "verified":
         subject = "服务器安全复查通知"
         text = f"{identity}此前{description}。\n本次复查未再发现该问题。请保持安全设置，并留意后续使用情况。"

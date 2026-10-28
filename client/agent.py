@@ -23,7 +23,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, gfw_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth, cpu_guard
+    from client import operations as node_operations, security_banner, tcp_probe, gfw_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth, cpu_guard, io_guard
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 except ImportError:
     import operations as node_operations
@@ -36,6 +36,7 @@ except ImportError:
     import vmess_guard
     import manual_bandwidth
     import cpu_guard
+    import io_guard
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 
 try:
@@ -3518,6 +3519,19 @@ def _collect_cpu_guard(containers: List[Dict[str, object]], interval_seconds: fl
         print(f"cpu guard collection failed: {error}")
 
 
+def _collect_io_guard(containers: List[Dict[str, object]], interval_seconds: float, summary: Dict[str, object], allow_new_limits: bool) -> None:
+    try:
+        result = io_guard.observe(containers, interval_seconds, allow_new_limits=allow_new_limits)
+        summary["io_guard"] = {key: value for key, value in result.items() if key != "alerts"}
+        alerts = result.get("alerts")
+        summary_alerts = summary.get("alerts")
+        if isinstance(alerts, list) and isinstance(summary_alerts, list):
+            summary_alerts.extend(item for item in alerts if isinstance(item, dict))
+    except Exception as error:
+        summary["io_guard"] = {"enabled": True, "state": "unavailable", "message": str(error)[:240]}
+        print(f"io guard collection failed: {error}")
+
+
 def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float) -> Dict[str, object]:
     global _pending_firewall_event_cursor
     enabled = os.getenv("SECURITY_MONITOR_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
@@ -3557,6 +3571,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     # signals even when SECURITY_MONITOR_ENABLED is disabled.
     if not enabled:
         _collect_cpu_guard(containers, interval_seconds, summary, allow_new_limits=False)
+        _collect_io_guard(containers, interval_seconds, summary, allow_new_limits=False)
         return summary
 
     try:
@@ -4572,6 +4587,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
 
     summary["alerts"] = alerts
     _collect_cpu_guard(containers, interval_seconds, summary, allow_new_limits=True)
+    _collect_io_guard(containers, interval_seconds, summary, allow_new_limits=True)
     return summary
 
 

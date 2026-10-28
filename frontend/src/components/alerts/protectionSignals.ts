@@ -19,7 +19,13 @@ const PROTECTION_ONLY_ALERT_TYPES = new Set([
   'ops_baseline_anomaly', 'ops_connection_guard',
 ]);
 
+const RESOURCE_PROTECTION_ALERT_TYPES = new Set([
+  'cpu_pressure_protection', 'io_pressure_protection',
+]);
+
 export const isProtectionOnlySignal = (alert: SecurityAlert): boolean =>
-  typeof alert.protection_only === 'boolean'
+  RESOURCE_PROTECTION_ALERT_TYPES.has(alert.type)
+    ? true
+    : typeof alert.protection_only === 'boolean'
     ? alert.protection_only
     : PROTECTION_ONLY_ALERT_TYPES.has(alert.type);

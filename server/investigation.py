@@ -69,7 +69,7 @@ def _key(host_key, identity, container=None):
 
 
 def category(kind):
-    if kind in buyer_notifications.PROTECTION_ONLY_ALERT_TYPES:
+    if kind in buyer_notifications.NON_ABUSE_ALERT_TYPES:
         return "protection_signal"
     if kind in {"socks_weak_auth", "unauthorized_panel_pairing", "malicious_process", "container_security_risk"}:
         return "security"
@@ -292,7 +292,7 @@ def overview(conn, host, start, end, query="", user=None, identity_key="", offse
     # Reclassify retained historical network alerts at read time as well as at
     # ingestion, so pre-existing rows stop inflating customer-abuse statistics.
     for item in incidents:
-        if item["alert_type"] in buyer_notifications.PROTECTION_ONLY_ALERT_TYPES:
+        if item["alert_type"] in buyer_notifications.NON_ABUSE_ALERT_TYPES:
             item["category"] = "protection_signal"
     groups = {}
     def group(owner):
@@ -346,7 +346,7 @@ def overview(conn, host, start, end, query="", user=None, identity_key="", offse
     def hydrate(items):
         hydrated = [_items(conn.execute("SELECT * FROM investigation_incidents WHERE id=?", (i["id"],)))[0] for i in items]
         for item in hydrated:
-            if item["alert_type"] in buyer_notifications.PROTECTION_ONLY_ALERT_TYPES:
+            if item["alert_type"] in buyer_notifications.NON_ABUSE_ALERT_TYPES:
                 item["category"] = "protection_signal"
         return hydrated
     details = hydrate(visible[offset:offset + limit])

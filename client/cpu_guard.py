@@ -83,15 +83,17 @@ def sample_host_cpu() -> dict[str, Any]:
     return result
 
 
-def _read_state(path: str) -> dict[str, Any]:
+def _read_state(path: str) -> tuple[dict[str, Any], str]:
     try:
         with open(path, "r", encoding="utf-8") as stream:
             state = json.load(stream)
-    except (OSError, ValueError, TypeError):
-        return {"schema": 1, "instances": {}}
+    except FileNotFoundError:
+        return {"schema": 1, "instances": {}}, ""
+    except (OSError, ValueError, TypeError) as exc:
+        return {"schema": 1, "instances": {}}, f"CPU protection state is unreadable ({type(exc).__name__}); no new automatic limit will be applied."
     if not isinstance(state, dict) or state.get("schema") != 1 or not isinstance(state.get("instances"), dict):
-        return {"schema": 1, "instances": {}}
-    return state
+        return {"schema": 1, "instances": {}}, "CPU protection state format is invalid; no new automatic limit will be applied."
+    return state, ""
 
 
 def _write_state(path: str, state: dict[str, Any]) -> None:
@@ -196,15 +198,15 @@ def _limit_cpus(runtime: str, limit: dict[str, Any] | str, effective_cpus: float
 
 
 def _half_limit(
-    runtime: str, limit: dict[str, Any] | str, effective_cpus: float, cpu_percent: float
+    runtime: str, limit: dict[str, Any] | str, effective_cpus: float
 ) -> tuple[dict[str, Any] | str | None, float]:
     ratio = min(0.75, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_TARGET_RATIO", "0.5"), 0.5)))
-    measured_cpus = max(0.0, _finite_number(cpu_percent, 0.0)) / 100.0
+    available_cpus = max(0.0, _finite_number(effective_cpus, 0.0))
     if runtime == "incus":
         value = str(limit or "").strip().lower()
         hard = re.fullmatch(r"\s*(\d+(?:\.\d+)?)ms\s*/\s*(\d+(?:\.\d+)?)ms\s*", value)
-        baseline = float(hard.group(1)) / float(hard.group(2)) if hard and float(hard.group(2)) > 0 else effective_cpus
-        baseline = min(baseline, measured_cpus)
+        configured_cpus = float(hard.group(1)) / float(hard.group(2)) if hard and float(hard.group(2)) > 0 else available_cpus
+        baseline = min(configured_cpus, available_cpus) if available_cpus > 0 else configured_cpus
         if baseline <= 0:
             return None, 0.0
         if hard:
@@ -219,7 +221,8 @@ def _half_limit(
         return None, 0.0
     if period <= 0:
         period = 100_000
-    baseline = min(quota / period if quota > 0 else effective_cpus, measured_cpus)
+    configured_cpus = quota / period if quota > 0 else available_cpus
+    baseline = min(configured_cpus, available_cpus) if available_cpus > 0 else configured_cpus
     if baseline <= 0:
         return None, 0.0
     applied_quota = max(1000, int(baseline * ratio * period))
@@ -231,6 +234,37 @@ def _half_limit(
         "nano_cpus": int(limit.get("nano_cpus") or 0),
         "cpuset_cpus": str(limit.get("cpuset_cpus") or ""),
     }, applied_quota / period
+
+
+def _scale_limit(runtime: str, value: dict[str, Any] | str, ratio: float) -> tuple[dict[str, Any] | str | None, float]:
+    """Tighten an already confirmed hard CPU limit while preserving its period."""
+    ratio = min(0.9, max(0.1, _finite_number(ratio, 0.5)))
+    if runtime == "incus":
+        hard = re.fullmatch(r"\s*(\d+(?:\.\d+)?)ms\s*/\s*(\d+(?:\.\d+)?)ms\s*", str(value or "").strip().lower())
+        if not hard:
+            return None, 0.0
+        quota, period = float(hard.group(1)), float(hard.group(2))
+        if quota <= 0 or period <= 0:
+            return None, 0.0
+        next_quota = max(1, int(math.floor(quota * ratio)))
+        if next_quota >= quota:
+            return None, 0.0
+        return f"{next_quota}ms/{max(1, int(period))}ms", next_quota / period
+    if not isinstance(value, dict):
+        return None, 0.0
+    quota = int(value.get("cpu_quota") or 0)
+    period = int(value.get("cpu_period") or 0)
+    if quota <= 0 or period <= 0 or int(value.get("nano_cpus") or 0) > 0:
+        return None, 0.0
+    next_quota = max(1000, int(math.floor(quota * ratio)))
+    if next_quota >= quota:
+        return None, 0.0
+    return {
+        "cpu_quota": next_quota,
+        "cpu_period": period,
+        "nano_cpus": 0,
+        "cpuset_cpus": str(value.get("cpuset_cpus") or ""),
+    }, next_quota / period
 
 
 def _matches(runtime: str, current: dict[str, Any] | str | None, expected: dict[str, Any] | str) -> bool:
@@ -291,7 +325,7 @@ def _alert(
     *, alert_type: str, container: dict[str, Any], host_cpu: dict[str, Any],
     cpu_percent: float, effective_cpus: float, threshold_percent: float,
     high_samples: int, required_samples: int, duration: int, process: dict[str, Any],
-    action: dict[str, Any], instance_id: str, error: str = "",
+    action: dict[str, Any], instance_id: str, error: str = "", tier: int = 1,
 ) -> dict[str, Any]:
     limited = action.get("succeeded") is True
     restore_failed = action.get("restore_succeeded") is False
@@ -331,6 +365,8 @@ def _alert(
             "host_busy_threshold_percent": round(_finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80), 2),
             "top_process": top_process,
             "limit_applied": limited,
+            "tier": max(1, min(3, int(tier or 1))),
+            "tier_percent_of_original": {1: 50, 2: 25, 3: 10}.get(max(1, min(3, int(tier or 1)))),
             "restore_failed": restore_failed,
             "reason_is_user_abuse": False,
         },
@@ -358,13 +394,19 @@ def observe(
     high_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "90"), 90.0)))
     host_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80.0)))
     recovery_ratio = min(0.8, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_RATIO", "0.5"), 0.5)))
+    recovery_host_threshold = min(99.0, max(0.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_HOST_BUSY_PERCENT", "70"), 70.0)))
     required_duration = max(600, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_REQUIRED_SECONDS", "600"), 600)))
+    escalation_duration = max(300, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_ESCALATION_SECONDS", "300"), 300)))
+    recovery_duration = max(600, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_SECONDS", "600"), 600)))
     min_samples = max(3, int(math.ceil(required_duration / interval)) + 1)
     max_gap = max(180, int(interval * 2.5))
-    recovery_samples = max(2, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_SAMPLES", "2"), 2)))
+    escalation_samples = max(2, int(math.ceil(escalation_duration / interval)) + 1)
+    recovery_samples = max(3, int(math.ceil(recovery_duration / interval)) + 1,
+                           int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_SAMPLES", "3"), 3)))
     retry_seconds = max(300, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RETRY_SECONDS", "600"), 600)))
     path = state_path or STATE_PATH
-    state = _read_state(path)
+    state, state_error = _read_state(path)
+    allow_new_limits = allow_new_limits and not state_error
     instances = state["instances"]
     seen: set[str] = set()
     candidates: list[tuple[float, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
@@ -388,7 +430,7 @@ def observe(
         container["security"] = security
         record = instances.get(key)
 
-        if isinstance(record, dict) and record.get("stage") in {"applying", "active", "restoring", "restore_failed", "apply_unverified", "manual_override"}:
+        if isinstance(record, dict) and record.get("stage") in {"applying", "escalating", "active", "restoring", "restore_failed", "apply_unverified", "manual_override"}:
             current, read_error = _read_limit(runtime, binary, project, name)
             original = record.get("original")
             applied = record.get("applied")
@@ -431,6 +473,33 @@ def observe(
                     security["cpu_guard"] = {"state": "manual_override", "message": record["last_error"]}
                     continue
 
+            if isinstance(record, dict) and record.get("stage") == "escalating":
+                pending = record.get("pending_applied")
+                if _matches(runtime, current, pending):
+                    record["applied"] = pending
+                    record["applied_cpus"] = _finite_number(record.get("pending_applied_cpus"), 0.0)
+                    record["tier"] = int(record.get("pending_tier") or int(record.get("tier") or 1) + 1)
+                    record["stage"] = "active"
+                    record["pending_applied"] = None
+                    record["last_step_at"] = timestamp
+                    record["last_error"] = ""
+                elif _matches(runtime, current, applied):
+                    # The write was not confirmed. Keep the old enforced tier
+                    # and require a fresh full escalation window before retrying.
+                    record["stage"] = "active"
+                    record["pending_applied"] = None
+                    record["last_escalation_attempt"] = timestamp
+                    record["escalation_high_samples"] = 0
+                    record["escalation_high_since"] = 0
+                    record["escalation_last_high"] = 0
+                else:
+                    record["stage"] = "manual_override"
+                    record["last_error"] = "CPU 配置在阶梯限额期间变为其他值；不覆盖人工设置"
+                    record["last_seen"] = timestamp
+                    security["cpu_guard"] = {"state": "manual_override", "message": record["last_error"]}
+                    continue
+                applied = record.get("applied")
+
             if isinstance(record, dict) and record.get("stage") == "manual_override":
                 if _matches(runtime, current, original):
                     instances.pop(key, None)
@@ -472,11 +541,88 @@ def observe(
                 record["last_seen"] = timestamp
                 applied_cpus = max(0.001, _finite_number(record.get("applied_cpus"), effective_cpus * 0.5))
                 ratio = metrics_cpu / (applied_cpus * 100.0) if metrics_cpu >= 0 else -1.0
-                if record.get("stage") != "candidate" and 0 <= ratio <= recovery_ratio:
+                tier = max(1, min(3, int(record.get("tier") or 1)))
+                high_now = record.get("stage") == "active" and ratio * 100.0 >= high_threshold and host_busy >= host_threshold
+                if high_now and tier < 3:
+                    last_high = int(record.get("escalation_last_high") or 0)
+                    if last_high <= 0 or timestamp <= last_high or timestamp - last_high > max_gap:
+                        record["escalation_high_since"] = timestamp
+                        record["escalation_high_samples"] = 1
+                    else:
+                        record["escalation_high_samples"] = int(record.get("escalation_high_samples") or 0) + 1
+                    record["escalation_last_high"] = timestamp
+                    high_since = int(record.get("escalation_high_since") or timestamp)
+                    step_ratio = 0.5 if tier == 1 else 0.4
+                    target, target_cpus = _scale_limit(runtime, applied, step_ratio)
+                    if (target is not None and target_cpus > 0
+                            and int(record.get("escalation_high_samples") or 0) >= escalation_samples
+                            and timestamp - high_since >= escalation_duration
+                            and timestamp - int(record.get("last_step_at") or record.get("applied_at") or timestamp) >= escalation_duration):
+                        record["stage"] = "escalating"
+                        record["pending_applied"] = target
+                        record["pending_applied_cpus"] = target_cpus
+                        record["pending_tier"] = tier + 1
+                        try:
+                            _write_state(path, state)
+                        except OSError as exc:
+                            record["stage"] = "active"
+                            record["pending_applied"] = None
+                            record["last_error"] = f"无法持久化下一阶 CPU 限额：{exc}"[:300]
+                        else:
+                            before, before_error = _read_limit(runtime, binary, project, name)
+                            if before_error or not _matches(runtime, before, applied):
+                                record["stage"] = "manual_override"
+                                record["last_error"] = before_error or "CPU 配额在阶梯保护执行前发生人工更改；未覆盖。"
+                            else:
+                                changed, change_output = _set_limit(runtime, binary, project, name, target)
+                                after, after_error = _read_limit(runtime, binary, project, name)
+                                if changed and not after_error and _matches(runtime, after, target):
+                                    record["applied"] = target
+                                    record["applied_cpus"] = target_cpus
+                                    record["tier"] = tier + 1
+                                    record["stage"] = "active"
+                                    record["pending_applied"] = None
+                                    record["last_step_at"] = timestamp
+                                    record["escalation_high_samples"] = 0
+                                    record["escalation_high_since"] = 0
+                                    record["last_error"] = ""
+                                    applied = target
+                                    applied_cpus = target_cpus
+                                    ratio = metrics_cpu / (applied_cpus * 100.0) if metrics_cpu >= 0 else -1.0
+                                    tier += 1
+                                elif not after_error and _matches(runtime, after, applied):
+                                    record["stage"] = "active"
+                                    record["pending_applied"] = None
+                                    record["last_escalation_attempt"] = timestamp
+                                    record["escalation_high_samples"] = 0
+                                    record["escalation_high_since"] = 0
+                                    record["escalation_last_high"] = 0
+                                    record["last_error"] = change_output or "下一阶 CPU 配额未生效；保留当前已确认限额。"
+                                else:
+                                    # Leave the durable intent for the next
+                                    # report to reconcile against actual state.
+                                    record["last_error"] = change_output or after_error or "下一阶 CPU 配额等待读回确认。"
+                else:
+                    record["escalation_high_samples"] = 0
+                    record["escalation_high_since"] = 0
+                    record["escalation_last_high"] = 0
+
+                recovering = (
+                    record.get("stage") in {"active", "restore_failed"}
+                    and 0 <= ratio <= recovery_ratio
+                    and host_cpu.get("status") == "ready"
+                    and host_busy < recovery_host_threshold
+                )
+                if record.get("stage") != "candidate" and recovering:
+                    if not int(record.get("low_since") or 0):
+                        record["low_since"] = timestamp
                     record["low_samples"] = int(record.get("low_samples") or 0) + 1
                 elif record.get("stage") != "candidate":
                     record["low_samples"] = 0
-                if record.get("stage") != "candidate" and int(record.get("low_samples") or 0) >= recovery_samples:
+                    record["low_since"] = 0
+                if (record.get("stage") != "candidate"
+                        and int(record.get("low_samples") or 0) >= recovery_samples
+                        and timestamp - int(record.get("low_since") or timestamp) >= recovery_duration):
                     record["stage"] = "restoring"
                     try:
                         _write_state(path, state)
@@ -499,36 +645,52 @@ def observe(
                     # samples and retry only after the configured backoff.
                     record["low_samples"] = 0
                 else:
+                    if record.get("stage") == "manual_override":
+                        security["cpu_guard"] = {"state": "manual_override", "message": record.get("last_error") or "检测到人工更改 CPU 配置；系统保留该配置。"}
+                        continue
                     process = record.get("top_process") if isinstance(record.get("top_process"), dict) else {}
                     status = {
-                        "state": "limited" if record.get("stage") == "active" else "restore_failed",
+                        "state": "limited" if record.get("stage") == "active" else "limit_unverified" if record.get("stage") == "escalating" else "restore_failed",
                         "original_limit": _format_limit(runtime, original),
                         "active_limit": _format_limit(runtime, applied),
+                        "tier": tier,
+                        "tier_percent_of_original": {1: 50, 2: 25, 3: 10}.get(tier),
                         "applied_at": int(record.get("applied_at") or timestamp),
                         "low_samples": int(record.get("low_samples") or 0),
                         "recovery_samples_required": recovery_samples,
+                        "recovery_duration_seconds": recovery_duration,
                         "current_cpu_percent": round(metrics_cpu, 2) if metrics_cpu >= 0 else None,
                         "current_cpu_saturation_percent": round(max(0.0, ratio) * 100.0, 2),
+                        "escalation_samples": int(record.get("escalation_high_samples") or 0),
+                        "escalation_required_samples": escalation_samples,
+                        "escalation_duration_seconds": max(0, timestamp - int(record.get("escalation_high_since") or timestamp)),
                         "trigger_basis": record.get("trigger_basis"),
                         "top_process": process,
                         "reason_is_user_abuse": False,
                     }
                     security["cpu_guard"] = status
-                    message = "CPU 限额仍在生效；原配置会在容器 CPU 持续恢复后自动还原。"
+                    message = f"CPU 第 {tier} 阶保护限额仍在生效（约为原有效 CPU 容量的 {status['tier_percent_of_original']}%）；容器 CPU 与主机压力持续恢复后自动还原。"
                     if record.get("stage") == "restore_failed":
                         message = "CPU 已恢复正常但原配置还原失败，当前保护限额仍保留，需管理员检查。"
+                    if record.get("stage") == "escalating":
+                        message = record.get("last_error") or "下一阶 CPU 限额正在等待运行时读回确认；系统保留已确认限额。"
+                    succeeded = record.get("stage") == "active"
                     alerts.append(_alert(alert_type="cpu_pressure_protection", container=container, host_cpu=host_cpu,
                         cpu_percent=metrics_cpu, effective_cpus=max(0.0, effective_cpus),
                         high_samples=int(record.get("high_samples") or min_samples),
                         required_samples=min_samples,
                         duration=max(0, timestamp - int(record.get("high_since") or timestamp)),
                         process=process,
-                        action={"attempted": True, "succeeded": True, "restore_succeeded": record.get("stage") != "restore_failed", "message": message,
-                                "original_limit": _format_limit(runtime, original), "active_limit": _format_limit(runtime, applied)},
+                        action={"attempted": True, "succeeded": succeeded, "restore_succeeded": record.get("stage") != "restore_failed", "message": message,
+                                "original_limit": _format_limit(runtime, original), "active_limit": _format_limit(runtime, applied), "tier": tier},
                         instance_id=instance_id,
-                        threshold_percent=_finite_number(record.get("trigger_threshold_percent"), max(0.0, effective_cpus * high_threshold))))
+                        threshold_percent=_finite_number(record.get("trigger_threshold_percent"), max(0.0, effective_cpus * high_threshold)),
+                        error=record.get("last_error", "") if record.get("stage") != "active" else "", tier=tier))
                     continue
 
+        if state_error:
+            security["cpu_guard"] = {"state": "state_unavailable", "message": state_error, "reason_is_user_abuse": False}
+            continue
         if not allow_new_limits:
             instances.pop(key, None)
             security["cpu_guard"] = {"state": "disabled", "reason_is_user_abuse": False}
@@ -629,7 +791,7 @@ def observe(
         else:
             original, read_error = _read_limit(runtime, binary, project, name)
             applied, applied_cpus = _half_limit(
-                runtime, original, identity["effective_cpus"], identity["cpu_percent"]
+                runtime, original, identity["effective_cpus"]
             ) if original is not None else (None, 0.0)
             if read_error or original is None or applied is None or applied_cpus <= 0:
                 candidate["last_attempt"] = timestamp
@@ -650,7 +812,9 @@ def observe(
                     "high_samples": int(candidate.get("high_samples") or 0),
                     "high_since": int(candidate.get("high_since") or timestamp),
                     "last_high": timestamp, "last_seen": timestamp,
-                    "last_attempt": timestamp, "low_samples": 0,
+                    "last_attempt": timestamp, "last_step_at": timestamp,
+                    "tier": 1, "low_samples": 0, "low_since": 0,
+                    "escalation_high_samples": 0, "escalation_high_since": 0,
                     "top_process": process, "applied_at": timestamp,
                 }
                 instances[identity["runtime"] + "|" + identity["project"] + "|" + instance_id] = record
@@ -681,7 +845,7 @@ def observe(
                             active_keys.add(identity["runtime"] + "|" + identity["project"] + "|" + instance_id)
                             result_action = {"attempted": True, "succeeded": True,
                                 "action_type": "set_cpu_quota",
-                                "message": "已读回确认硬 CPU 配额降至原有效配额的一半；没有停止进程或容器。",
+                                "message": "已读回确认第一阶 CPU 保护限额生效（约为原有效 CPU 容量的 50%）；没有停止进程或容器。",
                                 "original_limit": _format_limit(runtime, original),
                                 "active_limit": _format_limit(runtime, applied)}
                             action_error = ""
@@ -711,6 +875,8 @@ def observe(
             "host_iowait_percent": host_cpu.get("iowait_percent"),
             "host_busy_threshold_percent": host_threshold,
             "threshold_percent_of_one_cpu": high_threshold,
+            "tier": 1,
+            "tier_percent_of_original": 50,
             "trigger_basis": identity.get("trigger_basis"),
             "top_process": process,
             "reason_is_user_abuse": False,
@@ -723,13 +889,14 @@ def observe(
             required_samples=min_samples,
             duration=max(0, timestamp - int(candidate.get("high_since") or timestamp)),
             process=process, action=result_action, instance_id=instance_id,
-            error=action_error))
+            error=action_error, tier=1))
         # The local runtime action and restore state are durable before any network notification.
 
-    try:
-        _write_state(path, state)
-    except OSError as exc:
-        print(f"cpu guard state could not be saved: {exc}")
+    if not state_error:
+        try:
+            _write_state(path, state)
+        except OSError as exc:
+            print(f"cpu guard state could not be saved: {exc}")
     summary = {
         "enabled": cpu_auto_enabled and allow_new_limits,
         "limited_containers": len(active_keys),
@@ -740,11 +907,17 @@ def observe(
             "required_duration_seconds": required_duration,
             "required_samples": min_samples,
             "target_cpu_ratio": min(0.75, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_TARGET_RATIO", "0.5"), 0.5))),
+            "tier_percent_of_original": [50, 25, 10],
+            "escalation_required_duration_seconds": escalation_duration,
+            "escalation_required_samples": escalation_samples,
+            "recovery_required_duration_seconds": recovery_duration,
             "recovery_ratio_of_limited_capacity": recovery_ratio,
+            "recovery_host_busy_percent": recovery_host_threshold,
             "recovery_samples": recovery_samples,
             "max_simultaneous_container_limits": 1,
         },
         "host_cpu": host_cpu,
+        "state_error": state_error,
         "alerts": alerts,
     }
     return summary
