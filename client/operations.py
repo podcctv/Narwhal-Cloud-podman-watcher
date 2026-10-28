@@ -26,20 +26,25 @@ _discoveries = []
 
 
 def _managed_upgrade_available(base=Path("/opt/narwhal-monitor")):
-    """Advertise managed upgrades only when the pinned repository is usable."""
+    """Advertise managed upgrades only when a fixed-origin update path is usable."""
     script = base / "managed-client-update.sh"
     config = base / "client-auto-update.env"
-    if not script.is_file() or not shutil.which("systemd-run") or not shutil.which("git") or not config.is_file():
+    if not script.is_file() or not shutil.which("systemd-run") or not config.is_file():
         return False
     try:
-        repo_value = ""
+        values = {}
         for line in config.read_text(encoding="utf-8").splitlines():
             key, separator, value = line.partition("=")
-            if separator and key.strip() == "AUTO_UPDATE_REPO_DIR":
+            if separator:
                 parsed = shlex.split(value, comments=False, posix=True)
-                if len(parsed) == 1:
-                    repo_value = parsed[0]
-                break
+                if len(parsed) <= 1:
+                    values[key.strip()] = parsed[0] if parsed else ""
+        mode = values.get("AUTO_UPDATE_MODE", "git")
+        if mode == "archive":
+            return (base / "update_archive.py").is_file() and bool(shutil.which("python3"))
+        if mode != "git" or not shutil.which("git"):
+            return False
+        repo_value = values.get("AUTO_UPDATE_REPO_DIR", "")
         repo = Path(repo_value)
         if not repo.is_absolute() or not (repo / ".git").is_dir():
             return False

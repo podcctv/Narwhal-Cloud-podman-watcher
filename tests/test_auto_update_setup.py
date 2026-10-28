@@ -31,7 +31,10 @@ class AutoUpdateSetupTests(unittest.TestCase):
             git("-C", str(seed), "config", "user.name", "Narwhal Test")
             git("-C", str(seed), "config", "user.email", "narwhal-test@example.invalid")
             (seed / "scripts" / "auto-update.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (seed / "scripts" / "update_archive.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            (seed / "VERSION").write_text("1.7.0\n", encoding="ascii")
             git("-C", str(seed), "add", "scripts/auto-update.sh")
+            git("-C", str(seed), "add", "scripts/update_archive.py", "VERSION")
             git("-C", str(seed), "commit", "-m", "test fixture")
             git("-C", str(seed), "branch", "-M", "main")
             git("-C", str(seed), "remote", "add", "origin", str(origin))
@@ -70,4 +73,42 @@ class AutoUpdateSetupTests(unittest.TestCase):
             self.assertTrue((fallback / ".git").is_dir())
             self.assertEqual(git("-C", str(fallback), "remote", "get-url", "origin").stdout.strip(), str(origin))
             self.assertTrue((base / "auto-update.sh").is_file())
+            self.assertTrue((base / "update_archive.py").is_file())
+            self.assertTrue((units / "narwhal-monitor-client-update.timer").is_file())
+
+    def test_git_transport_failure_falls_back_to_archive_mode(self):
+        with tempfile.TemporaryDirectory(prefix="narwhal-auto-update-archive-") as temp:
+            root = Path(temp)
+            base, units, fake_bin = root / "base", root / "units", root / "bin"
+            source = root / "source"
+            for path in (base, units, fake_bin, source / "scripts"):
+                path.mkdir(parents=True, exist_ok=True)
+            (source / "VERSION").write_text("1.7.119\n", encoding="ascii")
+            (source / "scripts" / "auto-update.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (source / "scripts" / "update_archive.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            git = fake_bin / "git"
+            git.write_text("#!/bin/sh\necho 'simulated GitHub smart-HTTP failure' >&2\nexit 1\n", encoding="utf-8")
+            git.chmod(0o755)
+            systemctl = fake_bin / "systemctl"
+            systemctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            systemctl.chmod(0o755)
+
+            source_text = (ROOT / "scripts" / "setup-auto-update.sh").read_text(encoding="utf-8")
+            source_text = source_text.replace('BASE_DIR="/opt/narwhal-monitor"', f'BASE_DIR="{base}"')
+            source_text = source_text.replace('cat >"/etc/systemd/system/$SERVICE_NAME"', f'cat >"{units}/$SERVICE_NAME"')
+            source_text = source_text.replace('cat >"/etc/systemd/system/$TIMER_NAME"', f'cat >"{units}/$TIMER_NAME"')
+            source_text = source_text.replace(
+                'if [[ ${EUID:-$(id -u)} -ne 0 ]]; then\n  echo "setup-auto-update.sh must run as root" >&2\n  exit 1\nfi\n', "")
+            script = root / "setup-auto-update.sh"
+            script.write_text(source_text, encoding="utf-8")
+            env = {**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]}
+            result = subprocess.run(["bash", str(script), "client", str(source)], env=env,
+                                    text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            config = (base / "client-auto-update.env").read_text(encoding="utf-8")
+            self.assertIn("AUTO_UPDATE_MODE=archive", config)
+            self.assertIn("AUTO_UPDATE_REPO_DIR=''", config)
+            self.assertIn("mode=archive", result.stdout)
+            self.assertEqual((base / "client-auto-update.version").read_text().strip(), "version:1.7.119")
+            self.assertTrue((base / "update_archive.py").is_file())
             self.assertTrue((units / "narwhal-monitor-client-update.timer").is_file())

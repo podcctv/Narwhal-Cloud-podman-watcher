@@ -26,7 +26,7 @@ class ClientPackagingTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name=="posix" and shutil.which("bash") and shutil.which("flock"),"Linux shell integration")
 class ManagedUpgradeTests(unittest.TestCase):
-    def run_worker(self, fail=False, dirty=False, unstable=False):
+    def run_worker(self, fail=False, dirty=False, unstable=False, update_mode="git"):
         with tempfile.TemporaryDirectory(prefix="narwhal-upgrade-test-") as temp:
             root=Path(temp)
             base=root/"base"
@@ -43,11 +43,13 @@ class ManagedUpgradeTests(unittest.TestCase):
             (app/"operations.py").write_text("old_operations=True\n")
             (app/"requirements.txt").write_text("")
             (base/"client.env").write_text("NARWHAL_VERSION=1.6.74\n")
-            (base/"client-auto-update.env").write_text("AUTO_UPDATE_REPO_DIR="+shlex.quote(str(repo))+"\n")
+            (base/"client-auto-update.env").write_text("AUTO_UPDATE_MODE="+update_mode+"\nAUTO_UPDATE_REPO_DIR="+shlex.quote(str(repo))+"\n")
             (fixture/"client"/"agent.py").write_text("new_agent=True\n")
             (fixture/"client"/"operations.py").write_text("new_operations=True\n")
             (fixture/"client"/"security_banner.py").write_text("new_banner=True\n")
             (fixture/"client"/"requirements.txt").write_text("")
+            (fixture/"VERSION").write_text("1.7.0\n")
+            (fixture/"scripts"/"update_archive.py").write_text("fixture archive updater")
             executable(fixture/"scripts"/"install-client.sh",f"#!/bin/bash\ncp {shlex.quote(str(fixture/'client'/'agent.py'))} {shlex.quote(str(app/'agent.py'))}\nprintf 'NARWHAL_VERSION=1.7.0\\n' >{shlex.quote(str(base/'client.env'))}\nsystemctl restart narwhal-monitor-client.service\nexit {1 if fail else 0}\n")
             executable(app/".venv"/"bin"/"python","#!/bin/bash\nexit 0\n")
             executable(app/".venv"/"bin"/"pip","#!/bin/bash\nexit 0\n")
@@ -82,6 +84,14 @@ case "$1" in
  *) exit 2 ;;
 esac
 """)
+            if update_mode == "archive":
+                executable(bins/"python3",f"""#!/bin/bash
+helper="$1"; command="$2"
+if [[ "$command" == resolve ]]; then printf '%s\\n' {'a'*40}; exit 0; fi
+if [[ "$command" == download ]]; then cp -R {shlex.quote(str(fixture))}/. "$4"/; exit 0; fi
+exit 2
+""")
+                executable(base/"update_archive.py","#!/bin/sh\nexit 0\n")
             script=root/"worker.sh"
             source=(ROOT/"scripts"/"managed-client-update.sh").read_text(encoding="utf-8")
             source=source.replace("/opt/narwhal-monitor",str(base)).replace("/run/narwhal-monitor-client-auto-update.lock",str(root/"auto-update.lock"))
@@ -110,6 +120,9 @@ esac
 
     def test_success_and_explicit_rollback(self):
         self.run_worker()
+
+    def test_archive_mode_works_without_a_git_checkout(self):
+        self.run_worker(update_mode="archive")
 
     def test_installer_failure_restores_previous(self):
         self.run_worker(fail=True)

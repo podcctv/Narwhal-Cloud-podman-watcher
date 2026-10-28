@@ -116,14 +116,7 @@ config="$base/client-auto-update.env"
 # Locally installed root-owned configuration, never a network-provided script.
 source "$config"
 repo=${AUTO_UPDATE_REPO_DIR:-}
-[[ -n "$repo" && "$repo" == /* && -d "$repo/.git" ]] || fail_preflight 'configured update checkout is missing or invalid'
-origin=$(git -C "$repo" remote get-url origin) || fail_preflight 'could not read update checkout origin'
-[[ "$origin" == https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git ]] || fail_preflight 'untrusted update checkout origin'
-[[ -z $(git -C "$repo" status --porcelain) ]] || fail_preflight 'preserving local changes; refusing upgrade'
-git -C "$repo" fetch origin main
-[[ $(git -C "$repo" rev-parse origin/main) == "$revision" ]] || fail_preflight 'main changed; create a new campaign'
-git -C "$repo" merge-base --is-ancestor HEAD "$revision" || fail_preflight 'checkout diverged; preserving local commits'
-[[ $(git -C "$repo" show "$revision:VERSION" | tr -d '[:space:]') == "$version" ]] || fail_preflight 'target VERSION does not match the release'
+update_mode=${AUTO_UPDATE_MODE:-git}
 stage=$(mktemp -d "$base/managed-stage.XXXXXX")
 cleanup_stage() {
   local resolved
@@ -132,7 +125,27 @@ cleanup_stage() {
   rm -rf -- "$resolved"
 }
 trap cleanup_stage EXIT
-git -C "$repo" archive "$revision" | tar -x -C "$stage"
+if [[ "$update_mode" == git ]]; then
+  [[ -n "$repo" && "$repo" == /* && -d "$repo/.git" ]] || fail_preflight 'configured update checkout is missing or invalid'
+  origin=$(git -C "$repo" remote get-url origin) || fail_preflight 'could not read update checkout origin'
+  [[ "$origin" == https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git ]] || fail_preflight 'untrusted update checkout origin'
+  [[ -z $(git -C "$repo" status --porcelain) ]] || fail_preflight 'preserving local changes; refusing upgrade'
+  git -C "$repo" fetch origin main
+  [[ $(git -C "$repo" rev-parse origin/main) == "$revision" ]] || fail_preflight 'main changed; create a new campaign'
+  git -C "$repo" merge-base --is-ancestor HEAD "$revision" || fail_preflight 'checkout diverged; preserving local commits'
+  [[ $(git -C "$repo" show "$revision:VERSION" | tr -d '[:space:]') == "$version" ]] || fail_preflight 'target VERSION does not match the release'
+  git -C "$repo" archive "$revision" | tar -x -C "$stage"
+elif [[ "$update_mode" == archive ]]; then
+  helper="$base/update_archive.py"
+  [[ -f "$helper" && -x "$helper" ]] || fail_preflight 'fixed-origin archive updater is missing'
+  command -v python3 >/dev/null 2>&1 || fail_preflight 'Python 3 is unavailable for archive upgrade'
+  current_main=$(python3 "$helper" resolve) || fail_preflight 'could not verify current GitHub main revision'
+  [[ "$current_main" == "$revision" ]] || fail_preflight 'main changed; create a new campaign'
+  python3 "$helper" download "$revision" "$stage" || fail_preflight 'could not download immutable update archive'
+  [[ $(tr -d '[:space:]' <"$stage/VERSION") == "$version" ]] || fail_preflight 'target VERSION does not match the release'
+else
+  fail_preflight 'invalid automatic update mode'
+fi
 for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard manual_bandwidth; do
   "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
 done
@@ -151,7 +164,11 @@ done
 [[ ! -f "$app_dir/gfw_probe.py" ]] || install -m 0644 "$app_dir/gfw_probe.py" "$snapshot/gfw_probe.py"
 install -m 0644 "$app_dir/requirements.txt" "$snapshot/requirements.txt"
 install -m 0600 "$base/client.env" "$snapshot/client.env"
-git -C "$repo" rev-parse HEAD >"$snapshot/revision"
+if [[ "$update_mode" == git ]]; then
+  git -C "$repo" rev-parse HEAD >"$snapshot/revision"
+else
+  tr -d '[:space:]' <"$base/client-auto-update.version" >"$snapshot/revision" 2>/dev/null || true
+fi
 snapshot_ready=1
 # Explicit managed rollout takes over from the unconditional 15-minute timer.
 systemctl stop narwhal-monitor-client-update.timer
@@ -159,7 +176,9 @@ systemctl disable narwhal-monitor-client-update.timer
 deployment_started=1
 if NARWHAL_MANAGED_UPDATE=1 NARWHAL_AUTO_UPDATE=1 bash "$stage/scripts/install-client.sh" update && wait_for_client_stable; then
   # Keep the checkout and deployment marker aligned without discarding edits.
-  git -C "$repo" merge --ff-only "$revision"
+  if [[ "$update_mode" == git ]]; then
+    git -C "$repo" merge --ff-only "$revision"
+  fi
   printf '%s\n' "$revision" >"$base/client-auto-update.version"
   chmod 0600 "$base/client-auto-update.version"
   write_result installed

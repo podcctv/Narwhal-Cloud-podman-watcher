@@ -9,11 +9,14 @@ CONFIG_FILE="$BASE_DIR/${SIDE}-auto-update.env"
 SERVICE_NAME="narwhal-monitor-${SIDE}-update.service"
 TIMER_NAME="narwhal-monitor-${SIDE}-update.timer"
 TRUSTED_REPO="https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git"
+UPDATE_MODE="git"
 
 if [[ "$SIDE" != "server" && "$SIDE" != "client" ]]; then
   echo "usage: $0 server|client /absolute/repository/path" >&2
   exit 2
 fi
+SOURCE_DIR="$REPO_DIR"
+existing_mode="$(awk -F= '$1=="AUTO_UPDATE_MODE"{print $2;exit}' "$CONFIG_FILE" 2>/dev/null || true)"
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "setup-auto-update.sh must run as root" >&2
   exit 1
@@ -23,28 +26,28 @@ bootstrap_update_checkout() {
   local staging="" resolved_base="" resolved_staging="" current_origin=""
 
   if [[ -L "$fallback" ]]; then
-    echo "[WARN] $fallback is a symbolic link; preserving it and leaving automatic $SIDE updates disabled."
+    echo "[WARN] $fallback is a symbolic link; preserving it and falling back to fixed-origin archives."
     return 1
   fi
   if [[ -d "$fallback/.git" ]]; then
     current_origin="$(git -C "$fallback" remote get-url origin 2>/dev/null || true)"
     if [[ "$current_origin" != "$TRUSTED_REPO" ]]; then
-      echo "[WARN] Existing $fallback checkout has an unexpected origin; preserving it and leaving automatic $SIDE updates disabled."
+      echo "[WARN] Existing $fallback checkout has an unexpected origin; preserving it and falling back to fixed-origin archives."
       return 1
     fi
     if [[ -n "$(git -C "$fallback" status --porcelain 2>/dev/null || true)" ]]; then
-      echo "[WARN] Existing $fallback checkout has local changes; preserving it and leaving automatic $SIDE updates disabled."
+      echo "[WARN] Existing $fallback checkout has local changes; preserving it and falling back to fixed-origin archives."
       return 1
     fi
     REPO_DIR="$fallback"
     return 0
   fi
   if [[ -e "$fallback" ]]; then
-    echo "[WARN] $fallback exists but is not a Git checkout; preserving it and leaving automatic $SIDE updates disabled."
+    echo "[WARN] $fallback exists but is not a Git checkout; preserving it and falling back to fixed-origin archives."
     return 1
   fi
   if ! command -v git >/dev/null 2>&1; then
-    echo "[WARN] Git is unavailable; automatic $SIDE updates were not enabled."
+    echo "[WARN] Git is unavailable; using the fixed-origin archive updater."
     return 1
   fi
 
@@ -97,17 +100,48 @@ bootstrap_update_checkout() {
 }
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then
-  if ! bootstrap_update_checkout; then
-    exit 0
+  if [[ "$existing_mode" == "archive" ]]; then
+    UPDATE_MODE="archive"
+  elif bootstrap_update_checkout; then
+    UPDATE_MODE="git"
+  else
+    # Some supported hosts cannot use GitHub's smart-HTTP endpoint or do not
+    # have Git installed. Keep the updater pinned to this project's public
+    # GitHub archive endpoint instead of silently disabling future updates.
+    UPDATE_MODE="archive"
+    echo "[INFO] Enabling fixed-origin archive updates for $SIDE (no usable Git checkout)."
+  fi
+fi
+if [[ "$UPDATE_MODE" == "git" ]]; then
+  current_origin="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+  current_changes="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null || true)"
+  if [[ "$current_origin" != "$TRUSTED_REPO" || -n "$current_changes" ]]; then
+    echo "[WARN] Update checkout origin or working tree is not trusted; preserving it and using fixed-origin archives."
+    UPDATE_MODE="archive"
   fi
 fi
 
 mkdir -p "$BASE_DIR"
-install -m 0755 "$REPO_DIR/scripts/auto-update.sh" "$UPDATER"
+if [[ "$UPDATE_MODE" == "git" ]]; then
+  REPO_DIR="${REPO_DIR:-$BASE_DIR/${SIDE}-update-repo}"
+  install -m 0755 "$REPO_DIR/scripts/auto-update.sh" "$UPDATER"
+  install -m 0755 "$REPO_DIR/scripts/update_archive.py" "$BASE_DIR/update_archive.py"
+else
+  if [[ ! -f "$REPO_DIR/scripts/auto-update.sh" || ! -f "$REPO_DIR/scripts/update_archive.py" ]]; then
+    echo "[WARN] Installer source is missing the fixed-origin archive updater; automatic $SIDE updates were not enabled."
+    exit 0
+  fi
+  install -m 0755 "$REPO_DIR/scripts/auto-update.sh" "$UPDATER"
+  install -m 0755 "$REPO_DIR/scripts/update_archive.py" "$BASE_DIR/update_archive.py"
+  REPO_DIR=""
+fi
+
+mkdir -p "$BASE_DIR"
 existing_enabled="$(awk -F= '$1=="AUTO_UPDATE_ENABLED"{print $2;exit}' "$CONFIG_FILE" 2>/dev/null || true)"
 existing_enabled="${existing_enabled:-true}"
 {
   echo "AUTO_UPDATE_ENABLED=$existing_enabled"
+  echo "AUTO_UPDATE_MODE=$UPDATE_MODE"
   printf 'AUTO_UPDATE_REPO_DIR=%q\n' "$REPO_DIR"
   echo "AUTO_UPDATE_BRANCH=main"
 } >"$CONFIG_FILE"
@@ -149,12 +183,18 @@ Unit=$SERVICE_NAME
 WantedBy=timers.target
 EOF_TIMER
 
-current_commit="$(git -C "$REPO_DIR" rev-parse HEAD)"
-printf '%s\n' "$current_commit" >"$BASE_DIR/${SIDE}-auto-update.version"
+if [[ "$UPDATE_MODE" == "git" ]]; then
+  current_commit="$(git -C "$REPO_DIR" rev-parse HEAD)"
+  printf '%s\n' "$current_commit" >"$BASE_DIR/${SIDE}-auto-update.version"
+else
+  current_version="$(tr -d '[:space:]' <"$SOURCE_DIR/VERSION" 2>/dev/null || true)"
+  [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || current_version="unknown"
+  printf 'version:%s\n' "$current_version" >"$BASE_DIR/${SIDE}-auto-update.version"
+fi
 chmod 0600 "$BASE_DIR/${SIDE}-auto-update.version"
 systemctl daemon-reload
 systemctl enable "$TIMER_NAME" >/dev/null
 # A timer rewritten by its own updater can otherwise remain active(elapsed)
 # forever with no NextElapse timestamp on some systemd releases.
 systemctl restart "$TIMER_NAME"
-echo "[INFO] Automatic $SIDE updates enabled: $TIMER_NAME (origin/main, every 15 minutes)"
+echo "[INFO] Automatic $SIDE updates enabled: $TIMER_NAME (fixed GitHub main, mode=$UPDATE_MODE, every 15 minutes)"

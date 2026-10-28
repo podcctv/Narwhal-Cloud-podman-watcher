@@ -85,7 +85,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         return result
     if not listener_snapshot_complete:
         result.update(state="unverified", reason="listener_inventory_incomplete")
-        result["pending_endpoints"] = [{"port": item["port"], "process": item["process"], "reason": "listener_inventory_incomplete"} for item in vmess[:20]]
+        result["pending_endpoints"] = [{"pid": item["pid"], "port": item["port"], "process": item["process"], "reason": "listener_inventory_incomplete"} for item in vmess[:20]]
         return result
 
     process_states = None
@@ -98,7 +98,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         # Compatibility for callers that only provide the historical aggregate
         # scan state. The Agent now supplies process-scoped evidence below.
         result.update(state="unverified", reason="configuration_scan_incomplete")
-        result["pending_endpoints"] = [{"port": item["port"], "process": item["process"], "reason": "configuration_scan_incomplete"} for item in vmess[:20]]
+        result["pending_endpoints"] = [{"pid": item["pid"], "port": item["port"], "process": item["process"], "reason": "configuration_scan_incomplete"} for item in vmess[:20]]
         return result
 
     desired = {}
@@ -117,7 +117,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                         "process_start_generation_unavailable" if process_state_name == "complete"
                         else "configuration_scan_incomplete"
                     )
-                pending.append({"port": port, "process": process, "reason": reason})
+                pending.append({"pid": pid, "port": port, "process": process, "reason": reason})
                 continue
         configured_transports = None
         for item in configured_protocols:
@@ -140,7 +140,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                    and str(item.get("proto") or "").lower() in {"tcp", "udp"}
                    and (configured_transports is None or str(item.get("proto") or "").lower() in configured_transports)]
         if not matches:
-            pending.append({"port": port, "process": process, "reason": "live_listener_not_confirmed"})
+            pending.append({"pid": pid, "port": port, "process": process, "reason": "live_listener_not_confirmed"})
             continue
 
         for listener in matches:
@@ -148,7 +148,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
             protocols = listener.get("application_protocols")
             protocols = {str(value).lower() for value in protocols} if isinstance(protocols, list) else set()
             if listener.get("application_protocol_evidence") != "config_matches_live_pid_and_port" or protocols != {"vmess"}:
-                pending.append({"port": port, "process": process, "reason": "listener_protocol_or_owner_ambiguous"})
+                pending.append({"pid": pid, "port": port, "process": process, "reason": "listener_protocol_or_owner_ambiguous"})
                 continue
 
             config_collision = False
@@ -165,7 +165,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                     config_collision = True
                     break
             if config_collision:
-                pending.append({"port": port, "proto": transport, "process": process, "reason": "shared_configured_port"})
+                pending.append({"pid": pid, "port": port, "proto": transport, "process": process, "reason": "shared_configured_port"})
                 continue
 
             co_listeners = [item for item in listeners if isinstance(item, dict)
@@ -179,7 +179,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                 or {str(value).lower() for value in item["application_protocols"]} != {"vmess"}
                 for item in co_listeners
             ):
-                pending.append({"port": port, "proto": transport, "process": process, "reason": "shared_live_listener"})
+                pending.append({"pid": pid, "port": port, "proto": transport, "process": process, "reason": "shared_live_listener"})
                 continue
 
             if not _publicly_reachable_listener(listener, network_exposure):

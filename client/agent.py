@@ -3001,6 +3001,57 @@ def _vmess_endpoint_label(item: Dict[str, object], pending: bool = False) -> str
     return f"待核实 {endpoint}" if pending else endpoint
 
 
+def _vmess_unverified_reason_key(
+    vmess: Dict[str, object],
+    process_scan_states: List[Dict[str, object]],
+    pending_endpoints: List[Dict[str, object]],
+) -> str:
+    """Prefer the concrete process-scan failure over a broad listener status."""
+    reason = str(vmess.get("reason") or "")
+    if reason == "configuration_scan_incomplete":
+        reason = str(vmess.get("protocol_inventory_reason") or reason)
+    generic_reasons = {
+        "listener_inventory_incomplete",
+        "configuration_scan_incomplete",
+        "process_snapshot_unavailable",
+        "",
+    }
+    if reason not in generic_reasons:
+        return reason
+
+    target_pids: set[tuple[str, int]] = set()
+    target_processes: set[str] = set()
+    for endpoint in pending_endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        process = str(endpoint.get("process") or "").lower()
+        if process:
+            target_processes.add(process)
+        try:
+            pid = int(endpoint.get("pid") or 0)
+        except (TypeError, ValueError, OverflowError):
+            pid = 0
+        if process and pid > 1:
+            target_pids.add((process, pid))
+
+    for item in process_scan_states:
+        if not isinstance(item, dict) or item.get("state") == "complete":
+            continue
+        process = str(item.get("process") or "").lower()
+        try:
+            pid = int(item.get("pid") or 0)
+        except (TypeError, ValueError, OverflowError):
+            pid = 0
+        if target_pids and (process, pid) not in target_pids:
+            continue
+        if not target_pids and target_processes and process not in target_processes:
+            continue
+        scan_reason = str(item.get("reason") or "")
+        if scan_reason:
+            return scan_reason
+    return reason or "listener_inventory_incomplete"
+
+
 def _http_security_alerts(
     access: Dict[str, object], container: Dict[str, object] | None = None
 ) -> List[Dict[str, object]]:
@@ -3754,16 +3805,14 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "previous_guard_rule_preserved": "当前证据不足以确认旧 VMess 入口已消失，因此保留原端口阻断",
                 }
                 labels = pending_labels or [str(item.get("port")) for item in pending if isinstance(item, dict) and item.get("port")]
-                reason_key = str(vmess.get("reason") or "")
-                if reason_key == "configuration_scan_incomplete":
-                    reason_key = str(vmess.get("protocol_inventory_reason") or reason_key)
-                reason = reason_labels.get(reason_key, "端口归属或规则生效状态未能确认")
-                detail = f"已在进程关联的配置文件中发现 VMess 入站，但未能安全确认端口保护：{reason}。未停止进程或容器。"
-                if labels:
-                    detail += f"待核实端口：{'、'.join(labels)}。"
                 socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
                 scan_states = socks_proxy.get("protocol_process_scan_states") if isinstance(socks_proxy.get("protocol_process_scan_states"), list) else []
                 incomplete_scans = [item for item in scan_states if isinstance(item, dict) and item.get("state") != "complete"]
+                reason_key = _vmess_unverified_reason_key(vmess, scan_states, pending)
+                reason = reason_labels.get(reason_key, "端口归属或规则生效状态未能确认")
+                detail = f"已检测到 VMess 配置，但未能安全确认端口保护：{reason}。未停止进程或容器。"
+                if labels:
+                    detail += f"待核实端口：{'、'.join(labels)}。"
                 for item in incomplete_scans[:4]:
                     process = str(item.get("process") or "未知进程")[:40]
                     pid = int(item.get("pid") or 0) if str(item.get("pid") or "").isdigit() else 0
@@ -5165,42 +5214,49 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
 def _protocol_process_start_epoch_lower_bound(
     runtime: str, name: str, project: str, pid: int, start_ticks: str,
 ) -> float | None:
-    """Map a stable process generation to a conservative file-clock bound.
+    """Map process start ticks to epoch using clocks from one container time namespace.
 
-    /proc start ticks use the reader's boot clock.  Do not combine a host
-    clock with an independently offset container time namespace.  These
-    checks need only readlink and procfs in the container; neither date nor
-    getconf (often absent in BusyBox images) is required there.
+    Both /proc/PID/stat start ticks and /proc/uptime are virtualized for the
+    reader's time namespace. Read uptime inside the container and require the
+    exec process and target PID to share that namespace before combining the
+    values with host CLOCK_REALTIME. This supports isolated time namespaces
+    without mixing their boot clock with the host's CLOCK_BOOTTIME.
     """
     if not start_ticks.isdigit() or int(start_ticks) <= 0:
         return None
     try:
-        host_time_namespace = os.readlink('/proc/self/ns/time')
-        if not re.fullmatch(r'time:\[\d+\]', host_time_namespace):
-            return None
-        namespaces = run(_runtime_exec_cmd(
+        realtime_before = time.time()
+        snapshot = run(_runtime_exec_cmd(
             runtime, name,
-            f"readlink /proc/self/ns/time 2>/dev/null; readlink /proc/{int(pid)}/ns/time 2>/dev/null",
+            f"readlink /proc/self/ns/time 2>/dev/null; "
+            f"readlink /proc/{int(pid)}/ns/time 2>/dev/null; cat /proc/uptime 2>/dev/null",
             project,
         ), timeout=2).splitlines()
-        if namespaces != [host_time_namespace, host_time_namespace]:
-            return None
-        clock_id = getattr(time, 'CLOCK_BOOTTIME', None)
-        if clock_id is None:
-            return None
-        ticks_per_second = float(os.sysconf('SC_CLK_TCK'))
-        realtime_before = time.time()
-        boottime = time.clock_gettime(clock_id)
         realtime_after = time.time()
-        process_start = int(start_ticks) / ticks_per_second
-        if not (1 <= ticks_per_second <= 100000 and 0 < process_start <= boottime
-                and 0 < boottime < 1e10 and realtime_before > 946684800
-                and 0 <= realtime_after - realtime_before <= 0.25
-                and os.readlink('/proc/self/ns/time') == host_time_namespace):
+        if len(snapshot) != 3:
             return None
-        # start_ticks has one-tick precision.  A lower bound keeps that
-        # uncertainty from making a just-written file appear old enough.
-        return realtime_before - boottime + process_start - 1 / ticks_per_second
+        exec_time_namespace, process_time_namespace = snapshot[:2]
+        if (
+            not re.fullmatch(r'time:\[\d+\]', exec_time_namespace)
+            or process_time_namespace != exec_time_namespace
+        ):
+            return None
+        uptime_fields = snapshot[2].split()
+        if len(uptime_fields) != 2:
+            return None
+        namespace_boottime = float(uptime_fields[0])
+        ticks_per_second = float(os.sysconf('SC_CLK_TCK'))
+        process_start = int(start_ticks) / ticks_per_second
+        if not (1 <= ticks_per_second <= 100000 and 0 < process_start <= namespace_boottime
+                and 0 < namespace_boottime < 1e10 and realtime_before > 946684800
+                and 0 <= realtime_after - realtime_before <= 0.25
+                and realtime_after > 946684800):
+            return None
+        # /proc/uptime is printed to hundredths and start_ticks to clock ticks.
+        # Subtract both quantization bounds so a recent config write cannot
+        # appear older than the process by rounding alone. realtime_before is
+        # sampled before /proc/uptime, making the resulting epoch conservative.
+        return realtime_before - namespace_boottime + process_start - 1 / ticks_per_second - 0.01
     except (AttributeError, OSError, TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
 

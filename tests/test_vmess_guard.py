@@ -35,6 +35,37 @@ class VmessPlanTests(unittest.TestCase):
             "application_protocol_evidence": "config_matches_live_pid_and_port",
         }
 
+    def test_unverified_reason_prefers_process_scan_failure_over_broad_listener_status(self):
+        reason = agent._vmess_unverified_reason_key(
+            {"reason": "listener_inventory_incomplete"},
+            [{"pid": 120, "process": "xray", "state": "partial",
+              "reason": "config_process_clock_unavailable"}],
+            [{"pid": 120, "process": "xray", "port": 443}],
+        )
+        self.assertEqual(reason, "config_process_clock_unavailable")
+
+    def test_unverified_reason_preserves_specific_firewall_failure(self):
+        reason = agent._vmess_unverified_reason_key(
+            {"reason": "firewall_apply_failed"},
+            [{"pid": 120, "process": "xray", "state": "partial",
+              "reason": "config_process_clock_unavailable"}],
+            [{"pid": 120, "process": "xray", "port": 443}],
+        )
+        self.assertEqual(reason, "firewall_apply_failed")
+
+    def test_unverified_reason_does_not_use_an_unrelated_process_failure(self):
+        reason = agent._vmess_unverified_reason_key(
+            {"reason": "listener_inventory_incomplete"},
+            [
+                {"pid": 120, "process": "xray", "state": "partial",
+                 "reason": "config_process_clock_unavailable"},
+                {"pid": 121, "process": "sing-box", "state": "partial",
+                 "reason": "config_path_not_found_or_unreadable"},
+            ],
+            [{"pid": 120, "process": "xray", "port": 443}],
+        )
+        self.assertEqual(reason, "config_process_clock_unavailable")
+
     def test_only_config_and_live_listener_match_is_eligible(self):
         result = vmess_guard.plan("incus", self.config, [self.listener], [], "complete")
         self.assertEqual(result["state"], "candidate")
@@ -120,6 +151,7 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(result["state"], "unverified")
         self.assertEqual(result["blocked_endpoints"], [])
         self.assertEqual(result["pending_endpoints"][0]["reason"], "listener_inventory_incomplete")
+        self.assertEqual(result["pending_endpoints"][0]["pid"], 120)
 
     def test_unknown_or_shared_listener_owner_is_not_blocked(self):
         shared = {**self.listener, "pid": 121, "process": "other", "application_protocols": ["vless"]}
@@ -393,14 +425,11 @@ class VmessPlanTests(unittest.TestCase):
 
 
 class VmessConfigClockTests(unittest.TestCase):
-    def _start_bound(self, namespaces='time:[42]\ntime:[42]\n', elapsed=0.01,
-                     clock_id=7, ticks='90000'):
-        with mock.patch.object(agent.os, 'readlink', return_value='time:[42]'), \
-                mock.patch.object(agent.os, 'sysconf', return_value=100, create=True), \
-                mock.patch.object(agent.time, 'CLOCK_BOOTTIME', clock_id, create=True), \
-                mock.patch.object(agent.time, 'clock_gettime', return_value=1000.0, create=True), \
+    def _start_bound(self, snapshot='time:[42]\ntime:[42]\n1000.00 500.00\n', elapsed=0.01,
+                     ticks='90000'):
+        with mock.patch.object(agent.os, 'sysconf', return_value=100, create=True), \
                 mock.patch.object(agent.time, 'time', side_effect=[1700001000.0, 1700001000.0 + elapsed]), \
-                mock.patch.object(agent, 'run', return_value=namespaces) as execute:
+                mock.patch.object(agent, 'run', return_value=snapshot) as execute:
             bound = agent._protocol_process_start_epoch_lower_bound(
                 'incus', 'fixture', 'default', 120, ticks,
             )
@@ -408,25 +437,36 @@ class VmessConfigClockTests(unittest.TestCase):
 
     def test_same_time_namespace_clock_gives_a_conservative_start_bound(self):
         bound, execute = self._start_bound()
-        self.assertAlmostEqual(bound, 1700000899.99, places=4)
+        self.assertAlmostEqual(bound, 1700000899.98, places=4)
         command = execute.call_args.args[0][-1]
         self.assertIn('readlink /proc/120/ns/time', command)
+        self.assertIn('cat /proc/uptime', command)
         self.assertNotIn('date ', command)
         self.assertNotIn('getconf ', command)
         self.assertTrue(agent._protocol_config_predates_process(
             '1:2:100:stable|1700000800|1700000800', bound,
         ))
 
-    def test_independent_time_namespace_is_not_combined_with_host_clock(self):
-        for namespaces in ['time:[42]\ntime:[43]\n', 'time:[43]\ntime:[42]\n', '']:
-            with self.subTest(namespaces=namespaces):
-                self.assertIsNone(self._start_bound(namespaces=namespaces)[0])
+    def test_independent_time_namespace_uses_its_own_uptime_and_start_ticks(self):
+        snapshot = 'time:[77]\ntime:[77]\n605800.00 500.00\n'
+        bound, _ = self._start_bound(snapshot=snapshot, ticks='60570000')
+        self.assertAlmostEqual(bound, 1700000899.98, places=4)
+
+    def test_mismatched_process_time_namespace_is_rejected(self):
+        for snapshot in [
+            'time:[42]\ntime:[43]\n1000.00 500.00\n',
+            'time:[43]\ntime:[42]\n1000.00 500.00\n',
+            'time:[42]\ntime:[42]\n',
+            '',
+        ]:
+            with self.subTest(snapshot=snapshot):
+                self.assertIsNone(self._start_bound(snapshot=snapshot)[0])
 
     def test_unavailable_or_unstable_clock_basis_is_rejected(self):
-        self.assertIsNone(self._start_bound(clock_id=None)[0])
         self.assertIsNone(self._start_bound(elapsed=-1)[0])
         self.assertIsNone(self._start_bound(elapsed=0.5)[0])
         self.assertIsNone(self._start_bound(ticks='100001')[0])
+        self.assertIsNone(self._start_bound(snapshot='time:[42]\ntime:[42]\n0.00 0.00\n')[0])
 
     def test_missing_epoch_metadata_does_not_prove_loaded_configuration(self):
         self.assertFalse(agent._protocol_config_predates_process('1:2:100:human-times', 1700000900.0))

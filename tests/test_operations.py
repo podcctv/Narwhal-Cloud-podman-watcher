@@ -405,6 +405,13 @@ class NodeOperationsTests(unittest.TestCase):
                     mock.Mock(returncode=0,stdout=" M README.md\n",stderr=""),
                 ]
                 self.assertFalse(agent_ops._managed_upgrade_available(base))
+            config.write_text("AUTO_UPDATE_MODE=archive\nAUTO_UPDATE_REPO_DIR=''\n")
+            (base/"update_archive.py").write_text("#!/usr/bin/env python3\n")
+            with mock.patch.object(agent_ops.shutil,"which",side_effect=lambda name:"/bin/"+name if name in {"systemd-run","python3"} else None):
+                self.assertTrue(agent_ops._managed_upgrade_available(base))
+            (base/"update_archive.py").unlink()
+            with mock.patch.object(agent_ops.shutil,"which",side_effect=lambda name:"/bin/"+name if name in {"systemd-run","python3"} else None):
+                self.assertFalse(agent_ops._managed_upgrade_available(base))
 
     def test_managed_upgrade_uses_fixed_independent_worker_arguments(self):
         action={"id":17,"action_type":"managed_upgrade","params":{"expected_node_id":"node","revision":"a"*40,"version":"1.7.0"}}
