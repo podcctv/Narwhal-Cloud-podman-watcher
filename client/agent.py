@@ -5211,6 +5211,9 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
     }
 
 
+_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS = 3.0
+
+
 def _protocol_process_start_epoch_lower_bound(
     runtime: str, name: str, project: str, pid: int, start_ticks: str,
 ) -> float | None:
@@ -5231,7 +5234,7 @@ def _protocol_process_start_epoch_lower_bound(
             f"cat /proc/{int(pid)}/stat 2>/dev/null; "
             "printf '\\n@@UPTIME@@\\n'; cat /proc/uptime 2>/dev/null",
             project,
-        ), timeout=2).splitlines()
+        ), timeout=_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS).splitlines()
         realtime_after = time.time()
         # run() returns a line-oriented string; joining first keeps unusual
         # command names in /proc/PID/stat from shifting the uptime boundary.
@@ -5250,14 +5253,19 @@ def _protocol_process_start_epoch_lower_bound(
         process_start = int(start_ticks) / ticks_per_second
         if not (1 <= ticks_per_second <= 100000 and 0 < process_start <= namespace_boottime
                 and 0 < namespace_boottime < 1e10 and realtime_before > 946684800
-                and 0 <= realtime_after - realtime_before <= 0.25
+                and 0 <= realtime_after - realtime_before <= _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS
                 and realtime_after > 946684800):
             return None
         # /proc/uptime is printed to hundredths and start_ticks to clock ticks.
         # Subtract both quantization bounds so a recent config write cannot
         # appear older than the process by rounding alone. realtime_before is
         # sampled before /proc/uptime, making the resulting epoch conservative.
-        return realtime_before - namespace_boottime + process_start - 1 / ticks_per_second - 0.01
+        # Runtime exec latency is bounded above and subtracted as additional
+        # uncertainty. The earlier realtime sample already makes this a lower
+        # bound, while the extra subtraction keeps slower Incus/Podman execs
+        # from turning a valid clock pair into an unverified scan.
+        sample_elapsed = realtime_after - realtime_before
+        return realtime_before - namespace_boottime + process_start - sample_elapsed - 1 / ticks_per_second - 0.01
     except (AttributeError, OSError, TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
 

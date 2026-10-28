@@ -453,7 +453,7 @@ class VmessConfigClockTests(unittest.TestCase):
 
     def test_same_time_namespace_clock_gives_a_conservative_start_bound(self):
         bound, execute = self._start_bound()
-        self.assertAlmostEqual(bound, 1700000899.98, places=4)
+        self.assertAlmostEqual(bound, 1700000899.97, places=4)
         command = execute.call_args.args[0][-1]
         self.assertIn('cat /proc/120/stat', command)
         self.assertIn('cat /proc/uptime', command)
@@ -464,10 +464,17 @@ class VmessConfigClockTests(unittest.TestCase):
             '1:2:100:stable|1700000800|1700000800', bound,
         ))
 
+    def test_slow_but_bounded_runtime_exec_keeps_conservative_clock_evidence(self):
+        bound, _ = self._start_bound(elapsed=0.5)
+        self.assertAlmostEqual(bound, 1700000899.48, places=4)
+        self.assertTrue(agent._protocol_config_predates_process(
+            '1:2:100:stable|1700000800|1700000800', bound,
+        ))
+
     def test_container_time_namespace_uses_its_own_uptime_and_start_ticks(self):
         snapshot = self._snapshot(ticks='60570000', uptime='605800.00 500.00')
         bound, _ = self._start_bound(snapshot=snapshot, ticks='60570000')
-        self.assertAlmostEqual(bound, 1700000899.98, places=4)
+        self.assertAlmostEqual(bound, 1700000899.97, places=4)
 
     def test_missing_namespace_links_do_not_break_a_same_exec_clock_pair(self):
         bound, _ = self._start_bound(snapshot=self._snapshot())
@@ -485,7 +492,7 @@ class VmessConfigClockTests(unittest.TestCase):
 
     def test_unavailable_or_unstable_clock_basis_is_rejected(self):
         self.assertIsNone(self._start_bound(elapsed=-1)[0])
-        self.assertIsNone(self._start_bound(elapsed=0.5)[0])
+        self.assertIsNone(self._start_bound(elapsed=3.01)[0])
         self.assertIsNone(self._start_bound(ticks='100001')[0])
         self.assertIsNone(self._start_bound(snapshot='time:[42]\ntime:[42]\n0.00 0.00\n')[0])
 
