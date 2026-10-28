@@ -3792,6 +3792,18 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "realtime_clock_unavailable": "系统实时时钟不可用",
                     "clock_sample_elapsed_invalid": "运行时命令耗时超出安全范围",
                     "clock_sample_error": "读取容器进程时钟时发生错误",
+                    "host_process_identity_invalid": "宿主机进程映射缺少有效的容器 PID 身份",
+                    "host_process_snapshot_unavailable": "无法读取宿主机进程快照",
+                    "host_process_scope_incomplete": "宿主机进程清单不完整，无法核实 Xray PID",
+                    "host_process_owner_unverified": "宿主机进程清单中无法唯一匹配容器内的代理进程",
+                    "host_process_generation_changed": "宿主机进程在取证期间发生重启或 PID 被复用",
+                    "host_process_owner_changed": "宿主机 PID 对应的进程已变化",
+                    "host_process_namespace_pid_changed": "宿主机进程不再对应原容器 PID",
+                    "host_process_clock_unavailable": "宿主机进程启动时间或 uptime 无法读取",
+                    "host_process_uptime_invalid": "宿主机 uptime 样本无效",
+                    "host_process_start_outside_uptime": "宿主机进程启动 tick 超出 uptime 范围",
+                    "time_namespace_offset_unavailable": "无法核对目标进程与采样进程的 time namespace 偏移",
+                    "time_namespace_offset_inconsistent": "同一 time namespace 的 boottime 偏移在采样中不一致",
                     "config_not_known_before_process_start": "配置文件在进程启动后更新、时间过于接近或时间元数据不完整，不能确认进程已加载此版本",
                     "process_changed_during_config_scan": "扫描期间进程发生变化，不能确认配置仍属于当前进程",
                     "endpoint_report_limit_exceeded": "入站端点数量超过上报上限",
@@ -5235,18 +5247,50 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
 _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS = 8.0
 
 
+def _proc_boottime_namespace_offset(snapshot: str) -> float | None:
+    """Return CLOCK_BOOTTIME's time-namespace offset from procfs text."""
+    for line in str(snapshot or "").splitlines():
+        fields = line.split()
+        if len(fields) != 3 or fields[0] != "boottime":
+            continue
+        try:
+            seconds = int(fields[1])
+            nanoseconds = int(fields[2])
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not (-10**9 <= seconds <= 10**9 and 0 <= nanoseconds < 1_000_000_000):
+            return None
+        return seconds + nanoseconds / 1_000_000_000
+    return None
+
+
+def _normalize_proc_boottime_for_target(
+    reader_boottime: float,
+    target_offsets: str,
+    reader_offsets: str,
+    target_namespace_id: str,
+    reader_namespace_id: str,
+) -> Tuple[float | None, str]:
+    """Express a reader's uptime in the target process's time namespace."""
+    target_id = str(target_namespace_id or "").strip()
+    reader_id = str(reader_namespace_id or "").strip()
+    target_offset = _proc_boottime_namespace_offset(target_offsets)
+    reader_offset = _proc_boottime_namespace_offset(reader_offsets)
+    same_namespace = bool(target_id and reader_id and target_id == reader_id)
+    if same_namespace:
+        if target_offset is not None and reader_offset is not None and abs(target_offset - reader_offset) > 1e-9:
+            return None, "time_namespace_offset_inconsistent"
+        return reader_boottime, ""
+    if target_offset is None or reader_offset is None:
+        return None, "time_namespace_offset_unavailable"
+    return reader_boottime + target_offset - reader_offset, ""
+
+
 def _protocol_process_start_epoch_lower_bound(
     runtime: str, name: str, project: str, pid: int, start_ticks: str,
     diagnostics: Dict[str, str] | None = None,
 ) -> float | None:
-    """Map process start ticks to epoch from one runtime-exec procfs snapshot.
-
-    Both /proc/PID/stat field 22 and /proc/uptime are rendered against the
-    time namespace of the process reading procfs. Read them in one runtime
-    exec so their boottime basis matches. The target PID may itself belong to
-    another time namespace; applying that target namespace's offset here would
-    mix bases and can reject a valid process generation.
-    """
+    """Map process start ticks to epoch after normalizing time-namespace clocks."""
     def reject(reason: str) -> None:
         if diagnostics is not None:
             diagnostics["clock_sample_reason"] = reason
@@ -5259,7 +5303,11 @@ def _protocol_process_start_epoch_lower_bound(
         snapshot_text = run(_runtime_exec_cmd(
             runtime, name,
             f"cat /proc/{int(pid)}/stat 2>/dev/null; "
-            "printf '\\n@@UPTIME@@\\n'; cat /proc/uptime 2>/dev/null",
+            "printf '\\n@@UPTIME@@\\n'; cat /proc/uptime 2>/dev/null; "
+            f"printf '\\n@@TARGET_TIMENS@@\\n'; cat /proc/{int(pid)}/timens_offsets 2>/dev/null; "
+            "printf '\\n@@SELF_TIMENS@@\\n'; cat /proc/self/timens_offsets 2>/dev/null; "
+            f"printf '\\n@@TARGET_TIME_NS@@\\n'; stat -Lc '%d:%i' /proc/{int(pid)}/ns/time 2>/dev/null; "
+            "printf '\\n@@SELF_TIME_NS@@\\n'; stat -Lc '%d:%i' /proc/self/ns/time 2>/dev/null",
             project,
         ), timeout=_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS)
         realtime_after = time.time()
@@ -5281,7 +5329,23 @@ def _protocol_process_start_epoch_lower_bound(
         if observed_start_ticks != start_ticks:
             reject("process_generation_changed")
             return None
-        uptime_text = remaining_snapshot.strip()
+        uptime_text, separator, remaining_snapshot = remaining_snapshot.partition("@@TARGET_TIMENS@@")
+        if not separator:
+            reject("clock_snapshot_marker_missing")
+            return None
+        target_timens_text, separator, remaining_snapshot = remaining_snapshot.partition("@@SELF_TIMENS@@")
+        if not separator:
+            reject("clock_snapshot_marker_missing")
+            return None
+        self_timens_text, separator, remaining_snapshot = remaining_snapshot.partition("@@TARGET_TIME_NS@@")
+        if not separator:
+            reject("clock_snapshot_marker_missing")
+            return None
+        target_time_ns, separator, remaining_snapshot = remaining_snapshot.partition("@@SELF_TIME_NS@@")
+        if not separator:
+            reject("clock_snapshot_marker_missing")
+            return None
+        self_time_ns = remaining_snapshot
         uptime_fields = uptime_text.split()
         if len(uptime_fields) != 2:
             reject("uptime_snapshot_invalid")
@@ -5295,6 +5359,19 @@ def _protocol_process_start_epoch_lower_bound(
             return None
         if not 1 <= ticks_per_second <= 100000:
             reject("clock_tick_rate_invalid")
+            return None
+        if not 0 < namespace_boottime < 1e10:
+            reject("namespace_uptime_invalid")
+            return None
+        namespace_boottime, namespace_reason = _normalize_proc_boottime_for_target(
+            namespace_boottime,
+            target_timens_text,
+            self_timens_text,
+            target_time_ns.strip().splitlines()[-1].strip() if target_time_ns.strip() else "",
+            self_time_ns.strip().splitlines()[-1].strip() if self_time_ns.strip() else "",
+        )
+        if namespace_boottime is None:
+            reject(namespace_reason or "time_namespace_offset_unavailable")
             return None
         if not 0 < namespace_boottime < 1e10:
             reject("namespace_uptime_invalid")
@@ -5320,6 +5397,140 @@ def _protocol_process_start_epoch_lower_bound(
     except (AttributeError, OSError, TypeError, ValueError, ZeroDivisionError, OverflowError):
         reject("clock_sample_error")
         return None
+
+
+def _host_proc_protocol_process_start_epoch_lower_bound(
+    init_pid: int,
+    namespace_pid: int,
+    process_name: str,
+    host_process_snapshot: Tuple[Dict[str, object], List[Dict[str, object]]] | None = None,
+    diagnostics: Dict[str, str] | None = None,
+) -> Dict[str, object]:
+    """Resolve a container process through host /proc and pair its clock there.
+
+    Some runtime exec paths report a process start tick from a different procfs
+    clock basis than the container uptime sample. The host process snapshot maps
+    the container PID through NSpid and supplies a host PID/start tick pair; the
+    final stat and uptime read then happen from the Agent's own procfs reader.
+    This remains fail closed when the mapping, process generation, or host clock
+    sample is incomplete.
+    """
+    def reject(reason: str) -> Dict[str, object]:
+        if diagnostics is not None:
+            diagnostics["clock_sample_reason"] = reason
+        return {"start_ticks": "", "host_pid": 0, "epoch_lower_bound": None, "reason": reason}
+
+    if init_pid <= 1 or namespace_pid <= 1 or namespace_pid > 4194304:
+        return reject("host_process_identity_invalid")
+    if host_process_snapshot is None:
+        host_process_snapshot = _collect_host_proc_process_snapshot(init_pid, 200)
+    if not isinstance(host_process_snapshot, tuple) or len(host_process_snapshot) != 2:
+        return reject("host_process_snapshot_unavailable")
+    snapshot, processes = host_process_snapshot
+    if not isinstance(snapshot, dict) or snapshot.get("scope_complete") is not True:
+        return reject("host_process_scope_incomplete")
+    target_name = str(process_name or "").strip().lower()
+    matches = [
+        item for item in processes if isinstance(item, dict)
+        and int(item.get("pid") or 0) == namespace_pid
+        and str(item.get("process") or "").strip().lower() == target_name
+        and str(item.get("start_ticks") or "").isdigit()
+        and 1 < int(item.get("host_pid") or 0) <= 4194304
+    ]
+    if len(matches) != 1:
+        return reject("host_process_owner_unverified")
+
+    matched = matches[0]
+    host_pid = int(matched["host_pid"])
+    expected_ticks = str(matched["start_ticks"])
+    try:
+        realtime_before = time.time()
+        stat_before = _read_host_proc_text(f"/proc/{host_pid}/stat", 4096)
+        status = _read_host_proc_text(f"/proc/{host_pid}/status", 4096)
+        comm = _read_host_proc_text(f"/proc/{host_pid}/comm", 256).strip().lower()
+        uptime_text = _read_host_proc_text("/proc/uptime", 128)
+        stat_after = _read_host_proc_text(f"/proc/{host_pid}/stat", 4096)
+        target_timens_text = _read_host_proc_text(f"/proc/{host_pid}/timens_offsets", 256)
+        self_timens_text = _read_host_proc_text("/proc/self/timens_offsets", 256)
+        try:
+            target_time_stat = os.stat(f"/proc/{host_pid}/ns/time")
+            self_time_stat = os.stat("/proc/self/ns/time")
+            target_time_ns = f"{target_time_stat.st_dev}:{target_time_stat.st_ino}"
+            self_time_ns = f"{self_time_stat.st_dev}:{self_time_stat.st_ino}"
+        except OSError:
+            target_time_ns = self_time_ns = ""
+        realtime_after = time.time()
+        sample_elapsed = realtime_after - realtime_before
+        observed_ticks = _proc_stat_start_ticks(stat_before)
+        if not observed_ticks or observed_ticks != expected_ticks or _proc_stat_start_ticks(stat_after) != expected_ticks:
+            return reject("host_process_generation_changed")
+        if comm != target_name:
+            return reject("host_process_owner_changed")
+        namespace_match = re.search(r"(?m)^NSpid:\s+(.+)$", status)
+        namespace_values = re.findall(r"\d+", namespace_match.group(1)) if namespace_match else []
+        actual_namespace_pid = int(namespace_values[-1]) if namespace_values else host_pid
+        if actual_namespace_pid != namespace_pid:
+            return reject("host_process_namespace_pid_changed")
+        uptime_fields = uptime_text.split()
+        if len(uptime_fields) != 2:
+            return reject("host_process_uptime_invalid")
+        namespace_boottime = float(uptime_fields[0])
+        namespace_boottime, namespace_reason = _normalize_proc_boottime_for_target(
+            namespace_boottime, target_timens_text, self_timens_text,
+            target_time_ns, self_time_ns,
+        )
+        if namespace_boottime is None:
+            return reject(namespace_reason or "host_process_clock_unavailable")
+        ticks_per_second = float(os.sysconf("SC_CLK_TCK"))
+        process_start = int(expected_ticks) / ticks_per_second
+    except (AttributeError, OSError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return reject("host_process_clock_unavailable")
+
+    if not 1 <= ticks_per_second <= 100000:
+        return reject("clock_tick_rate_invalid")
+    if not 0 < namespace_boottime < 1e10:
+        return reject("host_process_uptime_invalid")
+    if not 0 < process_start <= namespace_boottime:
+        return reject("host_process_start_outside_uptime")
+    if not (realtime_before > 946684800 and realtime_after > 946684800):
+        return reject("realtime_clock_unavailable")
+    if not 0 <= sample_elapsed <= _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS:
+        return reject("clock_sample_elapsed_invalid")
+
+    lower_bound = (
+        realtime_before - namespace_boottime + process_start
+        - sample_elapsed - 1 / ticks_per_second - 0.01
+    )
+    return {
+        "start_ticks": expected_ticks,
+        "host_pid": host_pid,
+        "epoch_lower_bound": lower_bound,
+        "reason": "",
+    }
+
+
+def _host_proc_protocol_process_matches(
+    init_pid: int, namespace_pid: int, process_name: str, host_pid: int, start_ticks: str
+) -> bool:
+    """Confirm the host PID still maps to the same container process generation."""
+    if init_pid <= 1 or namespace_pid <= 1 or host_pid <= 1 or not str(start_ticks).isdigit():
+        return False
+    try:
+        if not os.path.isdir(f"/proc/{init_pid}"):
+            return False
+        stat = _read_host_proc_text(f"/proc/{host_pid}/stat", 4096)
+        status = _read_host_proc_text(f"/proc/{host_pid}/status", 4096)
+        comm = _read_host_proc_text(f"/proc/{host_pid}/comm", 256).strip().lower()
+        namespace_match = re.search(r"(?m)^NSpid:\s+(.+)$", status)
+        namespace_values = re.findall(r"\d+", namespace_match.group(1)) if namespace_match else []
+        actual_namespace_pid = int(namespace_values[-1]) if namespace_values else host_pid
+        return (
+            _proc_stat_start_ticks(stat) == start_ticks
+            and comm == str(process_name or "").strip().lower()
+            and actual_namespace_pid == namespace_pid
+        )
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def _proc_stat_start_ticks(stat_text: str) -> str:
@@ -5356,7 +5567,8 @@ def _protocol_config_predates_process(metadata: str, process_start_bound: float 
 
 
 def _collect_socks_config_evidence(
-    runtime: str, name: str, project: str, enabled: bool, process_output: str = ''
+    runtime: str, name: str, project: str, enabled: bool, process_output: str = '',
+    init_pid: int = 0,
 ) -> Dict[str, object]:
     result: Dict[str, object] = {
         "detected": False,
@@ -5435,7 +5647,10 @@ def _collect_socks_config_evidence(
     protocol_process_start_ticks: Dict[Tuple[int, str], str] = {}
     protocol_process_scan_reasons: Dict[Tuple[int, str], str] = {}
     protocol_process_clock_reasons: Dict[Tuple[int, str], str] = {}
+    protocol_process_clock_sources: Dict[Tuple[int, str], str] = {}
     protocol_process_scan_files: Dict[Tuple[int, str], List[str]] = {}
+    host_process_snapshot: Tuple[Dict[str, object], List[Dict[str, object]]] | None = None
+    host_process_snapshot_loaded = False
     if len(configured_processes) >= 8:
         protocol_complete = False
         inventory_reason = "process_scan_limit_exceeded"
@@ -5506,8 +5721,22 @@ def _collect_socks_config_evidence(
             runtime, name, project, int(proc['pid']), start_ticks_before,
             diagnostics=clock_diagnostics,
         ) if is_protocol_process else None
+        host_clock_evidence: Dict[str, object] = {}
+        if is_protocol_process and process_start_bound is None and init_pid > 1:
+            if not host_process_snapshot_loaded:
+                host_process_snapshot = _collect_host_proc_process_snapshot(init_pid, 200)
+                host_process_snapshot_loaded = True
+            host_clock_evidence = _host_proc_protocol_process_start_epoch_lower_bound(
+                init_pid, int(proc['pid']), str(proc['process']),
+                host_process_snapshot=host_process_snapshot,
+            )
+            candidate_bound = host_clock_evidence.get("epoch_lower_bound")
+            if isinstance(candidate_bound, (int, float)) and candidate_bound > 0:
+                process_start_bound = float(candidate_bound)
+                protocol_process_clock_sources[process_key] = "host_proc"
         if is_protocol_process and process_start_bound is None and clock_diagnostics.get('clock_sample_reason'):
-            protocol_process_clock_reasons[process_key] = clock_diagnostics['clock_sample_reason']
+            host_reason = str(host_clock_evidence.get("reason") or "")
+            protocol_process_clock_reasons[process_key] = host_reason or clock_diagnostics['clock_sample_reason']
         for path in scan_paths:
             if time.monotonic() >= scan_deadline:
                 documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
@@ -5607,9 +5836,19 @@ def _collect_socks_config_evidence(
         start_ticks_after = _protocol_process_start_ticks(
             runtime, name, project, int(proc['pid']),
         ) if (enabled or is_protocol_process) else ''
+        host_start_ticks = str(host_clock_evidence.get("start_ticks") or "")
+        host_generation_stable = (
+            not host_start_ticks or _host_proc_protocol_process_matches(
+                init_pid, int(proc['pid']), str(proc['process']),
+                int(host_clock_evidence.get("host_pid") or 0), host_start_ticks,
+            )
+        )
         start_ticks = (
-            start_ticks_before
-            if start_ticks_before.isdigit() and start_ticks_after == start_ticks_before
+            (host_start_ticks if host_start_ticks else start_ticks_before)
+            if start_ticks_before.isdigit()
+            and start_ticks_after == start_ticks_before
+            and (not host_start_ticks or host_start_ticks == start_ticks_before)
+            and host_generation_stable
             else ''
         )
         if is_protocol_process:
@@ -5672,6 +5911,8 @@ def _collect_socks_config_evidence(
                  "start_ticks": protocol_process_start_ticks.get((pid, process), ""),
                  "reason": protocol_process_scan_reasons.get((pid, process), ""),
                  "config_files": protocol_process_scan_files.get((pid, process), []),
+                 **({"clock_sample_source": protocol_process_clock_sources[(pid, process)]}
+                    if (pid, process) in protocol_process_clock_sources else {}),
                  **({"clock_sample_reason": protocol_process_clock_reasons[(pid, process)]}
                     if (pid, process) in protocol_process_clock_reasons else {})}
                 for (pid, process), state in sorted(protocol_process_scan_states.items())
@@ -5803,7 +6044,7 @@ def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, p
 
 
 def collect_panel_pairing_indicators(
-    name: str, runtime: str = "", project: str = "", image: str = ""
+    name: str, runtime: str = "", project: str = "", image: str = "", init_pid: int = 0
 ) -> Dict[str, object]:
     runtime = runtime or get_container_bin()
     result: Dict[str, object] = {
@@ -5835,7 +6076,8 @@ def collect_panel_pairing_indicators(
     combined_identity = f"{name} {image}".lower()
     socks_process = _socks_process_evidence(process_output, combined_identity)
     socks_config = _collect_socks_config_evidence(
-        runtime, name, project, bool(socks_process.get("candidate_found")), process_output
+        runtime, name, project, bool(socks_process.get("candidate_found")), process_output,
+        init_pid=init_pid,
     )
     socks_auth_modes = {str(socks_process.get("auth_mode") or "unknown"), str(socks_config.get("auth_mode") or "unknown")}
     socks_auth_mode = (
@@ -6909,7 +7151,7 @@ def collect_container(
     container_disk = collect_container_disk_usage(name, runtime, project)
     top_cpu_process = collect_top_cpu_process(name, runtime, project)
     suspicious_processes = collect_suspicious_processes(name, runtime, project)
-    panel_pairing = collect_panel_pairing_indicators(name, runtime, project, image)
+    panel_pairing = collect_panel_pairing_indicators(name, runtime, project, image, init_pid=pid)
     socks_proxy = panel_pairing.pop("socks_proxy", {})
     socket_security = _collect_socket_security(pid)
     connection_metrics = socket_security.get('connection_metrics') or {}

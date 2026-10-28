@@ -381,6 +381,103 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(evidence['protocol_process_scan_states'][0]['reason'],
                          'config_process_clock_unavailable')
 
+    def test_host_proc_fallback_completes_config_evidence_and_keeps_vless_untouched(self):
+        metadata = '1:2:120:stable|1793139000|1793139000'
+        host_snapshot = ({'scope_complete': True}, [{
+            'host_pid': 777, 'pid': 120, 'process': 'xray', 'start_ticks': '90000',
+        }])
+        host_clock = {
+            'host_pid': 777, 'start_ticks': '90000',
+            'epoch_lower_bound': 1793140000.0, 'reason': '',
+        }
+        with mock.patch.object(agent, '_protocol_process_start_epoch_lower_bound', return_value=None), \
+                mock.patch.object(agent, '_collect_host_proc_process_snapshot', return_value=host_snapshot), \
+                mock.patch.object(agent, '_host_proc_protocol_process_start_epoch_lower_bound', return_value=host_clock), \
+                mock.patch.object(agent, '_host_proc_protocol_process_matches', return_value=True), \
+                mock.patch.object(agent, 'run', side_effect=[
+                    self._proc_stat(120, 90000), metadata,
+                    '{"inbounds":[{"protocol":"vmess","port":443},'
+                    '{"protocol":"vless","port":8443}]}',
+                    metadata, self._proc_stat(120, 90000),
+                ]):
+            evidence = agent._collect_socks_config_evidence(
+                'incus', 'fixture', 'default', False,
+                '120 S xray /usr/bin/xray -config /etc/xray/config.json\n',
+                init_pid=100,
+            )
+
+        self.assertEqual(evidence['protocol_inventory_state'], 'complete')
+        self.assertEqual(evidence['protocol_process_scan_states'][0]['clock_sample_source'], 'host_proc')
+        self.assertEqual(evidence['protocol_process_scan_states'][0]['start_ticks'], '90000')
+        planned = vmess_guard.plan(
+            'incus', evidence['configured_inbound_protocols'], [self.listener], [],
+            evidence['protocol_inventory_state'],
+            process_scan_states=evidence['protocol_process_scan_states'],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(planned['blocked_endpoints'], [{
+            'proto': 'tcp', 'port': 443, 'pid': 120, 'process': 'xray',
+        }])
+        self.assertNotIn(8443, [item['port'] for item in planned['blocked_endpoints']])
+
+    def test_incomplete_host_proc_fallback_still_fails_closed(self):
+        metadata = '1:2:120:stable|1793139000|1793139000'
+        host_snapshot = ({'scope_complete': False}, [])
+        with mock.patch.object(agent, '_protocol_process_start_epoch_lower_bound', return_value=None), \
+                mock.patch.object(agent, '_collect_host_proc_process_snapshot', return_value=host_snapshot), \
+                mock.patch.object(agent, '_host_proc_protocol_process_start_epoch_lower_bound', return_value={
+                    'start_ticks': '', 'host_pid': 0, 'epoch_lower_bound': None,
+                    'reason': 'host_process_scope_incomplete',
+                }), \
+                mock.patch.object(agent, 'run', side_effect=[
+                    self._proc_stat(120, 90000), metadata,
+                    '{"inbounds":[{"protocol":"vmess","port":443}]}',
+                    metadata, self._proc_stat(120, 90000),
+                ]):
+            evidence = agent._collect_socks_config_evidence(
+                'incus', 'fixture', 'default', False,
+                '120 S xray /usr/bin/xray -config /etc/xray/config.json\n',
+                init_pid=100,
+            )
+
+        self.assertEqual(evidence['protocol_inventory_state'], 'partial')
+        self.assertEqual(evidence['protocol_process_scan_states'][0]['reason'],
+                         'config_process_clock_unavailable')
+        planned = vmess_guard.plan(
+            'incus', evidence['configured_inbound_protocols'], [self.listener], [],
+            evidence['protocol_inventory_state'],
+            process_scan_states=evidence['protocol_process_scan_states'],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(planned['blocked_endpoints'], [])
+
+    def test_host_proc_fallback_rejects_a_different_runtime_process_generation(self):
+        metadata = '1:2:120:stable|1793139000|1793139000'
+        host_snapshot = ({'scope_complete': True}, [{
+            'host_pid': 777, 'pid': 120, 'process': 'xray', 'start_ticks': '90001',
+        }])
+        with mock.patch.object(agent, '_protocol_process_start_epoch_lower_bound', return_value=None), \
+                mock.patch.object(agent, '_collect_host_proc_process_snapshot', return_value=host_snapshot), \
+                mock.patch.object(agent, '_host_proc_protocol_process_start_epoch_lower_bound', return_value={
+                    'host_pid': 777, 'start_ticks': '90001',
+                    'epoch_lower_bound': 1793140000.0, 'reason': '',
+                }), \
+                mock.patch.object(agent, '_host_proc_protocol_process_matches', return_value=True), \
+                mock.patch.object(agent, 'run', side_effect=[
+                    self._proc_stat(120, 90000), metadata,
+                    '{"inbounds":[{"protocol":"vmess","port":443}]}',
+                    metadata, self._proc_stat(120, 90000),
+                ]):
+            evidence = agent._collect_socks_config_evidence(
+                'incus', 'fixture', 'default', False,
+                '120 S xray /usr/bin/xray -config /etc/xray/config.json\n',
+                init_pid=100,
+            )
+
+        self.assertEqual(evidence['protocol_inventory_state'], 'partial')
+        self.assertEqual(evidence['protocol_process_scan_states'][0]['reason'],
+                         'process_changed_during_config_scan')
+
     def test_old_unchanged_config_with_clock_evidence_is_eligible(self):
         metadata = '1:2:120:stable|1793139000|1793139000'
         with mock.patch.object(agent, 'run', side_effect=[
@@ -438,9 +535,16 @@ class VmessPlanTests(unittest.TestCase):
 class VmessConfigClockTests(unittest.TestCase):
     def _snapshot(
         self, ticks='90000', uptime='1000.00 500.00', comm='xray worker ) helper',
+        target_offset='0 0', self_offset='0 0', target_time_ns='42:42', self_time_ns='42:42',
     ):
         fields = ['S'] + ['0'] * 18 + [str(ticks)]
-        return f"120 ({comm}) {' '.join(fields)}\n\n@@UPTIME@@\n{uptime}\n"
+        return (
+            f"120 ({comm}) {' '.join(fields)}\n\n@@UPTIME@@\n{uptime}\n"
+            f"@@TARGET_TIMENS@@\nboottime {target_offset}\n"
+            f"@@SELF_TIMENS@@\nboottime {self_offset}\n"
+            f"@@TARGET_TIME_NS@@\n{target_time_ns}\n"
+            f"@@SELF_TIME_NS@@\n{self_time_ns}\n"
+        )
 
     def _start_bound(self, snapshot=None, elapsed=0.01, ticks='90000'):
         if snapshot is None:
@@ -460,7 +564,7 @@ class VmessConfigClockTests(unittest.TestCase):
         self.assertIn('cat /proc/120/stat', command)
         self.assertIn('cat /proc/uptime', command)
         self.assertIn('@@UPTIME@@', command)
-        self.assertNotIn('timens_offsets', command)
+        self.assertIn('timens_offsets', command)
         self.assertNotIn('getconf ', command)
         self.assertTrue(agent._protocol_config_predates_process(
             '1:2:100:stable|1700000800|1700000800', bound,
@@ -474,17 +578,70 @@ class VmessConfigClockTests(unittest.TestCase):
             '1:2:100:stable|1700000800|1700000800', bound,
         ))
 
-    def test_target_process_namespace_does_not_rebase_reader_proc_clock_pair(self):
-        # /proc/PID/stat and /proc/uptime use the reader's clock basis. A
-        # target-process time namespace offset must not be applied a second time.
-        snapshot = self._snapshot(ticks='60460000', uptime='604700.00 500.00')
-        bound, _ = self._start_bound(snapshot=snapshot, ticks='60460000')
-        self.assertAlmostEqual(bound, 1700000899.97, places=4)
+    def test_target_process_time_namespace_offset_normalizes_reader_uptime(self):
+        snapshot = self._snapshot(
+            ticks='60570000', uptime='604700.00 500.00',
+            target_offset='1000 0', self_offset='0 0',
+            target_time_ns='43:43', self_time_ns='42:42',
+        )
+        bound, _ = self._start_bound(snapshot=snapshot, ticks='60570000')
+        self.assertAlmostEqual(bound, 1700000999.97, places=4)
 
-    def test_proc_clock_pair_needs_no_namespace_link_or_offset_files(self):
+    def test_same_time_namespace_offsets_are_not_double_applied(self):
         snapshot = self._snapshot()
         bound, _ = self._start_bound(snapshot=snapshot)
         self.assertIsNotNone(bound)
+
+    def test_different_time_namespaces_require_offsets(self):
+        snapshot = self._snapshot(
+            ticks='60570000', uptime='604700.00 500.00', target_offset='', self_offset='',
+            target_time_ns='43:43', self_time_ns='42:42',
+        )
+        diagnostics = {}
+        with mock.patch.object(agent.os, 'sysconf', return_value=100, create=True), \
+                mock.patch.object(agent.time, 'time', side_effect=[1700001000.0, 1700001000.01]), \
+                mock.patch.object(agent, 'run', return_value=snapshot):
+            bound = agent._protocol_process_start_epoch_lower_bound(
+                'incus', 'fixture', 'default', 120, '60570000', diagnostics=diagnostics,
+            )
+        self.assertIsNone(bound)
+        self.assertEqual(diagnostics['clock_sample_reason'], 'time_namespace_offset_unavailable')
+
+    def test_same_namespace_with_conflicting_offsets_is_rejected(self):
+        normalized, reason = agent._normalize_proc_boottime_for_target(
+            1000.0, 'boottime 1 0', 'boottime 0 0', '42:42', '42:42',
+        )
+        self.assertIsNone(normalized)
+        self.assertEqual(reason, 'time_namespace_offset_inconsistent')
+
+    def test_host_proc_fallback_maps_container_pid_and_normalizes_target_clock(self):
+        process_snapshot = ({'scope_complete': True}, [{
+            'host_pid': 777, 'pid': 120, 'process': 'xray', 'start_ticks': '60570000',
+        }])
+        stat_text = self._snapshot(ticks='60570000').split('@@UPTIME@@', 1)[0]
+        proc_text = {
+            '/proc/777/stat': stat_text,
+            '/proc/777/status': 'Name:\txray\nNSpid:\t1 120\n',
+            '/proc/777/comm': 'xray\n',
+            '/proc/uptime': '604700.00 500.00\n',
+            '/proc/777/timens_offsets': 'monotonic 0 0\nboottime 1000 0\n',
+            '/proc/self/timens_offsets': 'monotonic 0 0\nboottime 0 0\n',
+        }
+
+        def stat_for_namespace(path):
+            return mock.Mock(st_dev=1, st_ino=43 if path == '/proc/777/ns/time' else 42)
+
+        with mock.patch.object(agent, '_read_host_proc_text', side_effect=lambda path, limit=8192: proc_text.get(path, '')), \
+                mock.patch.object(agent.os, 'stat', side_effect=stat_for_namespace), \
+                mock.patch.object(agent.os, 'sysconf', return_value=100, create=True), \
+                mock.patch.object(agent.time, 'time', side_effect=[1700001000.0, 1700001000.01]):
+            evidence = agent._host_proc_protocol_process_start_epoch_lower_bound(
+                100, 120, 'xray', host_process_snapshot=process_snapshot,
+            )
+
+        self.assertEqual(evidence['host_pid'], 777)
+        self.assertEqual(evidence['start_ticks'], '60570000')
+        self.assertAlmostEqual(evidence['epoch_lower_bound'], 1700000999.97, places=4)
 
     def test_malformed_or_changed_proc_snapshot_is_rejected(self):
         for snapshot in [

@@ -1,6 +1,12 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.128**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.129**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.129：修正 VMess 进程 time namespace 时钟核验
+
+- 生产复核发现，即使在同一次运行时采样中读取，`/proc/<进程>/stat` 的启动 tick 仍可能按目标进程的 time namespace 显示，而 `/proc/uptime` 使用采样进程的时钟基准；直接比较会继续产生“进程启动时间超出 uptime”的待核实告警。本版读取两侧 namespace 标识及 boottime offset 后再比较。
+- 运行时证据不可用时，Agent 可通过宿主机 `/proc` 的 `NSpid` 精确映射容器 PID，并复核宿主 PID、进程名、启动 tick 和配置扫描前后的进程代次。映射不唯一、清单不完整、偏移缺失或进程变化时仍 fail closed。
+- 只有配置、进程代次、实时监听归属和端口独占性均确认后才阻断对应 VMess 端口；VLESS、共享端口以及其他业务不受影响。
 
 ### v1.7.128：修正 VMess 进程时钟命名空间误判
 
