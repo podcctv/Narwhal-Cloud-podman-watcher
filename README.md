@@ -1,6 +1,12 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.125**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.126**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.126：校正 VMess 进程与采样器的时钟命名空间
+
+- 生产诊断发现，部分容器内 Xray 的 `/proc/<pid>/stat` 启动 tick 大于采样进程的 `/proc/uptime`，导致 VMess 端口持续待核实；仅凭这两个值还不能区分进程使用不同时间命名空间还是其他时钟不一致。
+- 现在同一次采样会比较进程与采样器的时间命名空间；命名空间不同且双方偏移可读时，先校正 uptime 再验证配置文件是否早于进程启动。命名空间或偏移证据不可读时仍 fail closed，不封锁端口。
+- 不读取或上报配置内容、命令原始输出或凭据。VMess 与 VLESS 端口仍分别核验，只对完整确认的 VMess 监听应用保护。
 
 ### v1.7.125：定位 VMess 配置时钟证据缺失原因
 
