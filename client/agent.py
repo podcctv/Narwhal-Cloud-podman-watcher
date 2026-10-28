@@ -5220,6 +5220,7 @@ _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS = 8.0
 
 def _protocol_process_start_epoch_lower_bound(
     runtime: str, name: str, project: str, pid: int, start_ticks: str,
+    diagnostics: Dict[str, str] | None = None,
 ) -> float | None:
     """Map process start ticks to epoch using clocks from one container time namespace.
 
@@ -5229,36 +5230,65 @@ def _protocol_process_start_epoch_lower_bound(
     symlink inspection is deliberately avoided because minimal container
     images may not include readlink or expose time namespace links.
     """
+    def reject(reason: str) -> None:
+        if diagnostics is not None:
+            diagnostics["clock_sample_reason"] = reason
+
     if not start_ticks.isdigit() or int(start_ticks) <= 0:
+        reject("process_start_ticks_invalid")
         return None
     try:
         realtime_before = time.time()
-        snapshot = run(_runtime_exec_cmd(
+        snapshot_text = run(_runtime_exec_cmd(
             runtime, name,
             f"cat /proc/{int(pid)}/stat 2>/dev/null; "
             "printf '\\n@@UPTIME@@\\n'; cat /proc/uptime 2>/dev/null",
             project,
-        ), timeout=_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS).splitlines()
+        ), timeout=_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS)
         realtime_after = time.time()
+        sample_elapsed = realtime_after - realtime_before
+        if not snapshot_text.strip():
+            reject(
+                "runtime_exec_timeout" if sample_elapsed >= _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS * 0.95
+                else "runtime_exec_no_snapshot"
+            )
+            return None
         # run() returns a line-oriented string; joining first keeps unusual
         # command names in /proc/PID/stat from shifting the uptime boundary.
-        raw_snapshot = "\n".join(snapshot)
+        raw_snapshot = "\n".join(snapshot_text.splitlines())
         process_stat, separator, uptime_text = raw_snapshot.partition("@@UPTIME@@\n")
         if not separator:
+            reject("clock_snapshot_marker_missing")
             return None
         observed_start_ticks = _proc_stat_start_ticks(process_stat)
         if observed_start_ticks != start_ticks:
+            reject("process_generation_changed")
             return None
         uptime_fields = uptime_text.split()
         if len(uptime_fields) != 2:
+            reject("uptime_snapshot_invalid")
             return None
-        namespace_boottime = float(uptime_fields[0])
-        ticks_per_second = float(os.sysconf('SC_CLK_TCK'))
-        process_start = int(start_ticks) / ticks_per_second
-        if not (1 <= ticks_per_second <= 100000 and 0 < process_start <= namespace_boottime
-                and 0 < namespace_boottime < 1e10 and realtime_before > 946684800
-                and 0 <= realtime_after - realtime_before <= _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS
-                and realtime_after > 946684800):
+        try:
+            namespace_boottime = float(uptime_fields[0])
+            ticks_per_second = float(os.sysconf('SC_CLK_TCK'))
+            process_start = int(start_ticks) / ticks_per_second
+        except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+            reject("clock_snapshot_invalid")
+            return None
+        if not 1 <= ticks_per_second <= 100000:
+            reject("clock_tick_rate_invalid")
+            return None
+        if not 0 < namespace_boottime < 1e10:
+            reject("namespace_uptime_invalid")
+            return None
+        if not 0 < process_start <= namespace_boottime:
+            reject("process_start_outside_namespace_uptime")
+            return None
+        if not (realtime_before > 946684800 and realtime_after > 946684800):
+            reject("realtime_clock_unavailable")
+            return None
+        if not 0 <= sample_elapsed <= _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS:
+            reject("clock_sample_elapsed_invalid")
             return None
         # /proc/uptime is printed to hundredths and start_ticks to clock ticks.
         # Subtract both quantization bounds so a recent config write cannot
@@ -5268,9 +5298,9 @@ def _protocol_process_start_epoch_lower_bound(
         # uncertainty. The earlier realtime sample already makes this a lower
         # bound, while the extra subtraction keeps slower Incus/Podman execs
         # from turning a valid clock pair into an unverified scan.
-        sample_elapsed = realtime_after - realtime_before
         return realtime_before - namespace_boottime + process_start - sample_elapsed - 1 / ticks_per_second - 0.01
     except (AttributeError, OSError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        reject("clock_sample_error")
         return None
 
 
@@ -5386,6 +5416,7 @@ def _collect_socks_config_evidence(
     }
     protocol_process_start_ticks: Dict[Tuple[int, str], str] = {}
     protocol_process_scan_reasons: Dict[Tuple[int, str], str] = {}
+    protocol_process_clock_reasons: Dict[Tuple[int, str], str] = {}
     protocol_process_scan_files: Dict[Tuple[int, str], List[str]] = {}
     if len(configured_processes) >= 8:
         protocol_complete = False
@@ -5452,9 +5483,13 @@ def _collect_socks_config_evidence(
         start_ticks_before = _protocol_process_start_ticks(
             runtime, name, project, int(proc['pid']),
         ) if (enabled or is_protocol_process) else ''
+        clock_diagnostics: Dict[str, str] = {}
         process_start_bound = _protocol_process_start_epoch_lower_bound(
             runtime, name, project, int(proc['pid']), start_ticks_before,
+            diagnostics=clock_diagnostics,
         ) if is_protocol_process else None
+        if is_protocol_process and process_start_bound is None and clock_diagnostics.get('clock_sample_reason'):
+            protocol_process_clock_reasons[process_key] = clock_diagnostics['clock_sample_reason']
         for path in scan_paths:
             if time.monotonic() >= scan_deadline:
                 documents.append({'parsed': False, 'endpoints': [], 'single_purpose': False})
@@ -5618,7 +5653,9 @@ def _collect_socks_config_evidence(
                 {"pid": pid, "process": process, "state": state,
                  "start_ticks": protocol_process_start_ticks.get((pid, process), ""),
                  "reason": protocol_process_scan_reasons.get((pid, process), ""),
-                 "config_files": protocol_process_scan_files.get((pid, process), [])}
+                 "config_files": protocol_process_scan_files.get((pid, process), []),
+                 **({"clock_sample_reason": protocol_process_clock_reasons[(pid, process)]}
+                    if (pid, process) in protocol_process_clock_reasons else {})}
                 for (pid, process), state in sorted(protocol_process_scan_states.items())
             ],
             "review_processes": review_processes,
