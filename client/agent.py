@@ -3787,11 +3787,10 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "uptime_snapshot_invalid": "容器 uptime 时钟样本无效",
                     "clock_snapshot_invalid": "进程与 uptime 时钟数据无法解析",
                     "clock_tick_rate_invalid": "内核时钟频率不在安全范围",
-                    "namespace_uptime_invalid": "校正后的容器 uptime 不在安全范围",
-                    "process_start_outside_namespace_uptime": "进程启动时间超出采样命名空间的 uptime 范围",
+                    "namespace_uptime_invalid": "配对 uptime 样本不在安全范围",
+                    "process_start_outside_namespace_uptime": "进程启动时间超出同次采样的 uptime 范围",
                     "realtime_clock_unavailable": "系统实时时钟不可用",
                     "clock_sample_elapsed_invalid": "运行时命令耗时超出安全范围",
-                    "time_namespace_offset_unavailable": "进程与采样器使用不同的时间命名空间，且偏移无法核实",
                     "clock_sample_error": "读取容器进程时钟时发生错误",
                     "config_not_known_before_process_start": "配置文件在进程启动后更新、时间过于接近或时间元数据不完整，不能确认进程已加载此版本",
                     "process_changed_during_config_scan": "扫描期间进程发生变化，不能确认配置仍属于当前进程",
@@ -5236,34 +5235,17 @@ def _socks_process_evidence(process_output: str, combined_identity: str) -> Dict
 _PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS = 8.0
 
 
-def _proc_boottime_namespace_offset(snapshot: str) -> float | None:
-    """Return the CLOCK_BOOTTIME offset from a /proc/PID/timens_offsets file."""
-    for line in str(snapshot or "").splitlines():
-        fields = line.split()
-        if len(fields) != 3 or fields[0] != "boottime":
-            continue
-        try:
-            seconds = int(fields[1])
-            nanoseconds = int(fields[2])
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if not (-10**9 <= seconds <= 10**9 and 0 <= nanoseconds < 1_000_000_000):
-            return None
-        return seconds + nanoseconds / 1_000_000_000
-    return None
-
-
 def _protocol_process_start_epoch_lower_bound(
     runtime: str, name: str, project: str, pid: int, start_ticks: str,
     diagnostics: Dict[str, str] | None = None,
 ) -> float | None:
-    """Map process start ticks to epoch using clocks from one container time namespace.
+    """Map process start ticks to epoch from one runtime-exec procfs snapshot.
 
-    Linux reports both /proc/PID/stat start ticks and /proc/uptime in the
-    reading process's time namespace. Read both from the same runtime exec;
-    never mix container boottime with the host's CLOCK_BOOTTIME. Namespace
-    symlink inspection is deliberately avoided because minimal container
-    images may not include readlink or expose time namespace links.
+    Both /proc/PID/stat field 22 and /proc/uptime are rendered against the
+    time namespace of the process reading procfs. Read them in one runtime
+    exec so their boottime basis matches. The target PID may itself belong to
+    another time namespace; applying that target namespace's offset here would
+    mix bases and can reject a valid process generation.
     """
     def reject(reason: str) -> None:
         if diagnostics is not None:
@@ -5277,11 +5259,7 @@ def _protocol_process_start_epoch_lower_bound(
         snapshot_text = run(_runtime_exec_cmd(
             runtime, name,
             f"cat /proc/{int(pid)}/stat 2>/dev/null; "
-            "printf '\\n@@UPTIME@@\\n'; cat /proc/uptime 2>/dev/null; "
-            f"printf '\\n@@TARGET_TIMENS@@\\n'; cat /proc/{int(pid)}/timens_offsets 2>/dev/null; "
-            "printf '\\n@@SELF_TIMENS@@\\n'; cat /proc/self/timens_offsets 2>/dev/null; "
-            f"printf '\\n@@TARGET_TIME_NS@@\\n'; stat -Lc '%d:%i' /proc/{int(pid)}/ns/time 2>/dev/null; "
-            "printf '\\n@@SELF_TIME_NS@@\\n'; stat -Lc '%d:%i' /proc/self/ns/time 2>/dev/null",
+            "printf '\\n@@UPTIME@@\\n'; cat /proc/uptime 2>/dev/null",
             project,
         ), timeout=_PROTOCOL_CLOCK_SAMPLE_MAX_SECONDS)
         realtime_after = time.time()
@@ -5296,22 +5274,6 @@ def _protocol_process_start_epoch_lower_bound(
         # command names in /proc/PID/stat from shifting the uptime boundary.
         raw_snapshot = "\n".join(snapshot_text.splitlines())
         process_stat, separator, remaining_snapshot = raw_snapshot.partition("@@UPTIME@@")
-        if not separator:
-            reject("clock_snapshot_marker_missing")
-            return None
-        uptime_text, separator, remaining_snapshot = remaining_snapshot.partition("@@TARGET_TIMENS@@")
-        if not separator:
-            reject("clock_snapshot_marker_missing")
-            return None
-        target_timens_text, separator, remaining_snapshot = remaining_snapshot.partition("@@SELF_TIMENS@@")
-        if not separator:
-            reject("clock_snapshot_marker_missing")
-            return None
-        self_timens_text, separator, remaining_snapshot = remaining_snapshot.partition("@@TARGET_TIME_NS@@")
-        if not separator:
-            reject("clock_snapshot_marker_missing")
-            return None
-        target_time_ns, separator, self_time_ns = remaining_snapshot.partition("@@SELF_TIME_NS@@")
         if not separator:
             reject("clock_snapshot_marker_missing")
             return None
@@ -5332,25 +5294,6 @@ def _protocol_process_start_epoch_lower_bound(
             return None
         if not 1 <= ticks_per_second <= 100000:
             reject("clock_tick_rate_invalid")
-            return None
-        if not 0 < namespace_boottime < 1e10:
-            reject("namespace_uptime_invalid")
-            return None
-        target_offset = _proc_boottime_namespace_offset(target_timens_text)
-        self_offset = _proc_boottime_namespace_offset(self_timens_text)
-        target_time_ns_id = target_time_ns.strip().splitlines()[-1].strip() if target_time_ns.strip() else ""
-        self_time_ns_id = self_time_ns.strip().splitlines()[-1].strip() if self_time_ns.strip() else ""
-        if target_time_ns_id and target_time_ns_id == self_time_ns_id:
-            # Same namespace: /proc/uptime and the process start ticks already
-            # use the same boottime base.
-            pass
-        elif target_offset is not None and self_offset is not None:
-            # A process can run in a time namespace different from the runtime
-            # exec helper. Normalize the helper uptime to the target process's
-            # namespace before comparing it with /proc/PID/stat field 22.
-            namespace_boottime += target_offset - self_offset
-        else:
-            reject("time_namespace_offset_unavailable")
             return None
         if not 0 < namespace_boottime < 1e10:
             reject("namespace_uptime_invalid")
