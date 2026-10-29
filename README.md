@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.138**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.139**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.139：发布容器测速范围默认值界面
+
+- 重新生成并纳入服务器静态资源，确保防火墙页面显示测速保护默认选中 Incus / Podman、宿主机与 Docker 不在范围内，并明确提示只有保存应用后才下发。
 
 ### v1.7.138：测速保护默认限定 Incus / Podman 容器
 
