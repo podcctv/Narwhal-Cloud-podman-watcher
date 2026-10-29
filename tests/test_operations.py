@@ -266,10 +266,16 @@ class OperationsTests(unittest.TestCase):
     def test_upgrade_promotion_gate(self):
         self.ingest(self.now)
         self.conn.execute("INSERT INTO ops_upgrades VALUES(1,'1.7.0',?,'canary',?,'{}')",("a"*40,self.now))
-        self.conn.execute("INSERT INTO ops_upgrade_nodes VALUES(1,'h',NULL,'dispatched','1.6.74')")
+        action=self.conn.execute("INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,'h','host','','__host__','managed_upgrade',?,'succeeded','test',?,?)",(json.dumps({'expected_node_id':'node','campaign_id':1}),self.now,self.now)).lastrowid
+        self.conn.execute("INSERT INTO ops_upgrade_nodes VALUES(1,'h',?,'dispatched','1.6.74')",(action,))
         self.conn.commit()
         self.assertEqual(self.request("/api/v1/ops/upgrades/1/promote","POST")[0],409)
         self.conn.execute("UPDATE ops_upgrade_nodes SET status='verified'")
+        self.conn.execute("UPDATE hosts SET agent_version='1.7.0',last_seen=? WHERE host_id='h'",(self.now,))
+        healthy_ops={'managed_upgrade':True,'health':[{'source':'network_counters','status':'healthy'},{'source':'security','status':'healthy'}],'services':[],'runtime_inventory':{'state':'empty','runtimes':[],'container_count':0}}
+        self.conn.execute("UPDATE ops_hosts SET ts=?,payload=? WHERE host_id='h'",(self.now,json.dumps(healthy_ops)))
+        self.conn.execute("UPDATE security_actions SET updated_at=? WHERE id=?",(self.now-300,action))
+        self.conn.execute("INSERT INTO reports(host_id,container_name,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,podman_network_ok_v4,podman_network_ok_v6,ts,payload_json) VALUES('h','__host__',0,0,0,0,0,0,1,1,?,?)",(self.now,json.dumps({'containers':[]})))
         self.conn.commit()
         self.assertEqual(self.request("/api/v1/ops/upgrades/1/promote","POST")[0],200)
 

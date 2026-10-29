@@ -13,6 +13,8 @@ except ImportError:
 
 REPOSITORY = 'podcctv/Narwhal-Cloud-podman-watcher'
 ACTIVE = ('queued', 'dispatched', 'running')
+ROLLOUT_BATCH_SIZE = 3
+ROLLOUT_SOAK_SECONDS = 120
 
 
 def settings(conn):
@@ -102,8 +104,12 @@ def reconcile(conn, version, revision, now=None):
     hosts = conn.execute('SELECT h.*,o.payload AS ops_payload,o.ts AS ops_ts FROM hosts h JOIN ops_hosts o ON o.host_id=h.host_id AND o.node=h.node_id ORDER BY h.last_seen DESC,h.host_id LIMIT 500').fetchall()
     eligible = {h['host_id']: h for h in hosts if h['node_id'] and json.loads(h['ops_payload']).get('managed_upgrade') and h['host_id'] not in cfg['holds']}
     campaign = conn.execute("SELECT * FROM ops_upgrades WHERE version=? AND revision=? ORDER BY id DESC LIMIT 1", (version, revision)).fetchone()
-    # Manual campaigns remain under operator control. Never silently promote one.
-    if campaign and not json.loads(campaign['payload']).get('automatic'):
+    campaign_meta = json.loads(campaign['payload']) if campaign else {}
+    automatic = campaign_meta.get('automatic') is True
+    # Manual campaigns stay operator-controlled through canary approval. Once
+    # explicitly promoted, the coordinator only manages bounded rollout waves
+    # for the exact host set selected by the operator.
+    if campaign and not automatic and campaign['status'] != 'rollout':
         conn.commit()
         return
     # A paused campaign is an explicit operator safety boundary. Do not let a
@@ -130,6 +136,15 @@ def reconcile(conn, version, revision, now=None):
         reclaim_superseded_actions(conn, now)
     meta = json.loads(campaign['payload'])
     ident = campaign['id']
+    automatic = meta.get('automatic') is True
+    # Older manually created campaigns stored only hosts/attempts. Normalize
+    # them before the shared retry and wave scheduler reads the optional fields.
+    meta.setdefault('attempts', {})
+    meta.setdefault('retry_at', {})
+    meta.setdefault('nodes', {})
+    if not automatic:
+        selected_hosts = set(meta.get('hosts') or [])
+        eligible = {host: item for host, item in eligible.items() if host in selected_hosts}
     for host, h in eligible.items():
         # Never downgrade a client ahead of the running server.
         if not re.fullmatch(r'\d+\.\d+\.\d+', h['agent_version'] or '') or tuple(map(int, h['agent_version'].split('.'))) >= tuple(map(int, version.split('.'))):
@@ -227,23 +242,88 @@ def reconcile(conn, version, revision, now=None):
         elif not canary_fresh:
             save(conn, {**cfg, 'last_checked': now, 'target_version': version,
                         'campaign': ident, 'error': '灰度节点已离线；等待有新鲜上报的候选节点'})
-    canary = conn.execute('SELECT n.status,a.updated_at FROM ops_upgrade_nodes n LEFT JOIN security_actions a ON a.id=n.action_id WHERE n.campaign=? AND n.host_id=?', (ident, meta['canary'])).fetchone()
-    h = eligible.get(meta['canary'])
-    promote = bool(canary and canary['status'] == 'verified' and h and h['agent_version'] == version and 0<=now-h['ops_ts']<=900 and canary['updated_at'] and now>=canary['updated_at']+120 and h['ops_ts'] >= canary['updated_at']+120)
-    if promote:
-        promote, _ = upgrade_health.check(json.loads(h['ops_payload']))
+    canary_host = meta.get('canary') or next(iter(meta.get('hosts') or []), None)
+    canary = conn.execute('SELECT n.status,n.action_id,a.updated_at FROM ops_upgrade_nodes n LEFT JOIN security_actions a ON a.id=n.action_id WHERE n.campaign=? AND n.host_id=?', (ident, canary_host)).fetchone()
+    h = eligible.get(canary_host)
+    canary_action = conn.execute(
+        'SELECT status,updated_at,params_json FROM security_actions WHERE id=?',
+        (canary['action_id'] if canary else None,),
+    ).fetchone()
+    promote = bool(
+        automatic
+        and canary
+        and canary['status'] == 'verified'
+        and canary_action
+        and canary_action['status'] == 'succeeded'
+        and h
+        and upgrade_health.post_upgrade_observation(
+            conn, canary_host, meta.get('nodes', {}).get(canary_host, h['node_id']),
+            version, canary_action['updated_at'], now, ROLLOUT_SOAK_SECONDS,
+        )[0]
+    )
     if promote:
         conn.execute("UPDATE ops_upgrades SET status='rollout' WHERE id=?", (ident,))
-    permitted = campaign['status'] in {'rollout', 'verified'} or promote
+    campaign_status = 'rollout' if promote else campaign['status']
+    permitted = campaign_status in {'rollout', 'verified'} or promote
+
+    # A rollout wave is dispatched as a bounded batch. The next wave waits
+    # until every node in the current wave reports the target build, healthy
+    # checks, and a fresh post-upgrade sample after the soak interval.
+    wave_hosts = list(dict.fromkeys(
+        str(host) for host in meta.get('rollout_wave_hosts', []) if isinstance(host, str) and host
+    ))
+    allow_new_wave = not wave_hosts
+    if permitted and wave_hosts:
+        wave_nodes = {
+            row['host_id']: row
+            for row in conn.execute(
+                f"SELECT * FROM ops_upgrade_nodes WHERE campaign=? AND host_id IN ({','.join('?' for _ in wave_hosts)})",
+                (ident, *wave_hosts),
+            ).fetchall()
+        }
+        if len(wave_nodes) == len(wave_hosts) and all(row['status'] == 'verified' for row in wave_nodes.values()):
+            wave_healthy = True
+            for host in wave_hosts:
+                node = wave_nodes[host]
+                action = conn.execute(
+                    'SELECT status,updated_at,params_json FROM security_actions WHERE id=?',
+                    (node['action_id'],),
+                ).fetchone() if node['action_id'] else None
+                expected = json.loads(action['params_json'] or '{}').get('expected_node_id') if action else None
+                healthy, _ = upgrade_health.post_upgrade_observation(
+                    conn, host, expected, version, action['updated_at'] if action else 0,
+                    now, ROLLOUT_SOAK_SECONDS,
+                ) if action and action['status'] == 'succeeded' else (False, ['升级回执未成功确认'])
+                if not healthy:
+                    wave_healthy = False
+                    break
+            if wave_healthy:
+                meta['rollout_wave'] = int(meta.get('rollout_wave') or 1) + 1
+                meta['rollout_wave_hosts'] = []
+                meta.pop('rollout_waiting_for_health', None)
+                wave_hosts = []
+                allow_new_wave = True
+        else:
+            allow_new_wave = False
+    if not permitted:
+        allow_new_wave = False
+
     running = conn.execute("SELECT COUNT(*) FROM security_actions WHERE action_type IN ('managed_upgrade','managed_rollback') AND status IN ('queued','dispatched','running')").fetchone()[0]
     for n in conn.execute('SELECT * FROM ops_upgrade_nodes WHERE campaign=? ORDER BY host_id', (ident,)).fetchall():
         host = n['host_id']; h = eligible.get(host)
         if n['status']=='failed' and host not in meta['retry_at']:
             meta['retry_at'][host]=now+300
-        if running >= 3 or not h or now-h['last_seen'] > 900 or n['status'] not in {'pending', 'failed'}:
+        if (running >= 3 or not h or now-int(h['last_seen'] or 0) > 900
+                or not 0 <= now-int(h['ops_ts'] or 0) <= 900
+                or n['status'] not in {'pending', 'failed'}):
             continue
-        if not permitted and host != meta['canary']:
+        if not permitted and host != canary_host:
             continue
+        if campaign_status in {'rollout', 'verified'}:
+            if host in wave_hosts:
+                pass
+            elif not allow_new_wave or len(wave_hosts) >= ROLLOUT_BATCH_SIZE:
+                continue
         if meta['attempts'].get(host, 0) >= 3 or now < meta['retry_at'].get(host, 0):
             continue
         # Bind the current enrollment; replacing a host identity requires a new campaign.
@@ -252,12 +332,22 @@ def reconcile(conn, version, revision, now=None):
             continue
         if conn.execute("SELECT 1 FROM security_actions WHERE host_id=? AND action_type IN ('managed_upgrade','managed_rollback') AND status IN ('queued','dispatched','running')", (host,)).fetchone():
             continue
-        params = json.dumps({'revision': revision, 'version': version, 'expected_node_id': expected})
+        params = json.dumps({'revision': revision, 'version': version, 'expected_node_id': expected, 'campaign_id': ident})
         action = conn.execute("INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(0,?,'host','','__host__','managed_upgrade',?,'queued','automatic-fleet',?,?)", (host, params, now, now)).lastrowid
         conn.execute("UPDATE ops_upgrade_nodes SET status='dispatched',action_id=? WHERE campaign=? AND host_id=?", (action, ident, host))
         meta['attempts'][host] = meta['attempts'].get(host, 0)+1
         meta['retry_at'].pop(host,None)
         running += 1
+        if campaign_status in {'rollout', 'verified'} and host not in wave_hosts:
+            wave_hosts.append(host)
+            meta['rollout_wave_hosts'] = wave_hosts
+            meta.setdefault('rollout_wave', 1)
+    if campaign_status in {'rollout', 'verified'} and wave_hosts:
+        meta.setdefault('rollout_waiting_for_health', {
+            'wave': int(meta.get('rollout_wave') or 1),
+            'hosts': wave_hosts,
+            'since': now,
+        })
     remaining = conn.execute("SELECT COUNT(*) FROM ops_upgrade_nodes WHERE campaign=? AND status<>'verified'", (ident,)).fetchone()[0]
     conn.execute('UPDATE ops_upgrades SET payload=?,status=CASE WHEN ?=0 THEN \'verified\' ELSE status END WHERE id=?', (json.dumps(meta), remaining, ident))
     save(conn, {**cfg, 'last_checked': now, 'target_version': version, 'campaign': ident, 'error': ''})

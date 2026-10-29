@@ -9,7 +9,7 @@ from server import operations as ops
 class FleetTests(unittest.TestCase):
     def setUp(self):
         self.c=sqlite3.connect(':memory:'); self.c.row_factory=sqlite3.Row
-        self.c.executescript("CREATE TABLE hosts(host_id TEXT PRIMARY KEY,last_seen INTEGER,agent_version TEXT,node_id TEXT,payload TEXT); CREATE TABLE security_actions(id INTEGER PRIMARY KEY,alert_id INTEGER,host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,action_type TEXT,params_json TEXT,status TEXT,requested_by TEXT,created_at INTEGER,updated_at INTEGER,result_message TEXT);")
+        self.c.executescript("CREATE TABLE hosts(host_id TEXT PRIMARY KEY,last_seen INTEGER,agent_version TEXT,node_id TEXT,payload TEXT); CREATE TABLE reports(id INTEGER PRIMARY KEY AUTOINCREMENT,host_id TEXT,ts INTEGER,payload_json TEXT); CREATE TABLE security_actions(id INTEGER PRIMARY KEY,alert_id INTEGER,host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,action_type TEXT,params_json TEXT,status TEXT,requested_by TEXT,created_at INTEGER,updated_at INTEGER,result_message TEXT);")
         ops.initialize(self.c)
         for host,last,version in [('canary',1000,'1.7.46'),('old',1000,'1.7.41'),('offline',0,'1.7.41')]:
             self.c.execute('INSERT INTO hosts VALUES(?,?,?,?,?)',(host,last,version,host,'{}'))
@@ -21,16 +21,19 @@ class FleetTests(unittest.TestCase):
 
     def tick(self,at=1000):
         self.c.execute("UPDATE hosts SET last_seen=? WHERE host_id IN ('canary','old') AND last_seen<>1130",(at,)); self.c.commit()
+        self.c.execute("UPDATE ops_hosts SET ts=? WHERE host_id IN ('canary','old')",(at,)); self.c.commit()
         fleet.reconcile(self.c,'1.7.47','a'*40,at)
 
     def actions(self):
         return self.c.execute('SELECT * FROM security_actions ORDER BY id').fetchall()
 
     def verify(self):
-        self.c.execute("UPDATE ops_hosts SET ts=1130 WHERE host_id='canary'")
+        operations = {'managed_upgrade': True, 'health': [{'source':'network_counters','status':'healthy'},{'source':'security','status':'healthy'}], 'services': [], 'runtime_inventory': {'state':'empty','runtimes':[],'container_count':0}}
+        self.c.execute("UPDATE ops_hosts SET ts=1130,payload=? WHERE host_id='canary'",(json.dumps(operations),))
         self.c.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE host_id='canary'")
         self.c.execute("UPDATE hosts SET agent_version='1.7.47',last_seen=1130 WHERE host_id='canary'")
         self.c.execute("UPDATE security_actions SET status='succeeded',updated_at=1010")
+        self.c.execute("INSERT INTO reports(host_id,ts,payload_json) VALUES('canary',1130,?)",(json.dumps({'containers':[]}),))
         self.c.commit()
 
     def test_canary_soak_idempotence_and_offline_return(self):
@@ -40,8 +43,25 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(len(self.actions()),1)
         self.tick(1130)
         self.assertEqual([a['host_id'] for a in self.actions()],['canary','old'])
-        self.c.execute("UPDATE hosts SET last_seen=1200 WHERE host_id='offline'"); self.c.commit()
+        self.c.execute("UPDATE hosts SET last_seen=1200 WHERE host_id='offline'")
+        self.c.execute("UPDATE ops_hosts SET ts=1200 WHERE host_id='offline'"); self.c.commit()
         self.tick(1200)
+        self.assertEqual([a['host_id'] for a in self.actions()],['canary','old'])
+
+        old_ops = {'managed_upgrade': True, 'health': [{'source':'network_counters','status':'healthy'},{'source':'security','status':'healthy'}], 'services': [], 'runtime_inventory': {'state':'empty','runtimes':[],'container_count':0}}
+        self.c.execute("UPDATE hosts SET agent_version='1.7.47',last_seen=1300 WHERE host_id='old'")
+        self.c.execute("UPDATE ops_hosts SET ts=1300,payload=? WHERE host_id='old'",(json.dumps(old_ops),))
+        self.c.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE host_id='old'")
+        self.c.execute("UPDATE security_actions SET status='succeeded',updated_at=1300 WHERE host_id='old'")
+        self.c.execute("INSERT INTO reports(host_id,ts,payload_json) VALUES('old',1300,?)",(json.dumps({'containers':[]}),))
+        self.c.commit()
+        self.tick(1419)
+        self.assertEqual([a['host_id'] for a in self.actions()],['canary','old'])
+        self.c.execute("UPDATE ops_hosts SET ts=1420 WHERE host_id='old'")
+        self.c.execute("UPDATE reports SET ts=1420 WHERE host_id='old'")
+        self.c.execute("UPDATE hosts SET last_seen=1420 WHERE host_id='old'")
+        self.c.commit()
+        self.tick(1420)
         self.assertEqual([a['host_id'] for a in self.actions()],['canary','old','offline'])
 
     def test_failure_backoff_attempt_budget_and_no_full_rollout(self):
@@ -66,6 +86,35 @@ class FleetTests(unittest.TestCase):
         self.c.execute("UPDATE ops_hosts SET node='replacement' WHERE host_id='old'"); self.c.commit()
         self.tick(1500)
         self.assertEqual(len(self.actions()),1)
+
+    def test_failure_pauses_campaign_and_cancels_unpolled_batch_members(self):
+        self.tick()
+        campaign = self.c.execute("SELECT * FROM ops_upgrades").fetchone()
+        canary_action = self.actions()[0]
+        queued = self.c.execute(
+            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at,result_message) "
+            "VALUES(0,'old','host','','__host__','managed_upgrade',?,'queued','automatic-fleet',1000,1000,'')",
+            (json.dumps({'campaign_id':campaign['id'],'expected_node_id':'old'}),),
+        ).lastrowid
+        self.c.execute(
+            "UPDATE ops_upgrade_nodes SET status='dispatched',action_id=? WHERE campaign=? AND host_id='old'",
+            (queued,campaign['id']),
+        )
+        metadata=json.loads(campaign['payload'])
+        metadata.update(rollout_wave=1,rollout_wave_hosts=['canary','old'],attempts={'canary':1,'old':1})
+        self.c.execute("UPDATE ops_upgrades SET status='rollout',payload=? WHERE id=?",(json.dumps(metadata),campaign['id']))
+        self.c.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id='canary'",(campaign['id'],))
+        self.c.execute("UPDATE security_actions SET status='failed',result_message='health gate failed' WHERE id=?",(canary_action['id'],))
+        self.c.commit()
+
+        self.assertTrue(ops.pause_upgrade_campaign_for_failure(self.c,canary_action['id'],'canary',1100,'health gate failed','health_check'))
+        state=self.c.execute("SELECT status,payload FROM ops_upgrades WHERE id=?",(campaign['id'],)).fetchone()
+        self.assertEqual(state['status'],'paused')
+        self.assertEqual(json.loads(state['payload'])['paused_reason'],'health gate failed')
+        self.assertEqual(self.c.execute("SELECT status FROM security_actions WHERE id=?",(queued,)).fetchone()[0],'cancelled')
+        node=self.c.execute("SELECT status,action_id FROM ops_upgrade_nodes WHERE campaign=? AND host_id='old'",(campaign['id'],)).fetchone()
+        self.assertEqual((node['status'],node['action_id']),('pending',None))
+        self.assertEqual(json.loads(state['payload'])['attempts']['old'],0)
 
     def test_publication_requires_build_sha_main_and_version(self):
         with mock.patch.dict('os.environ',{'NARWHAL_REVISION':'a'*40}),mock.patch.object(fleet.urllib.request,'urlopen') as url:

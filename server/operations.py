@@ -88,6 +88,72 @@ def initialize(conn):
     """)
 
 
+def pause_upgrade_campaign_for_failure(conn, action_id, host_id, ts, reason, kind="install_failure"):
+    """Pause the owning rollout immediately and cancel work not yet dispatched."""
+    action = conn.execute(
+        "SELECT params_json FROM security_actions WHERE id=? AND host_id=?",
+        (action_id, host_id),
+    ).fetchone()
+    params = loads(action["params_json"] if action else "{}", {})
+    campaign_id = params.get("campaign_id")
+    if not campaign_id:
+        owner = conn.execute(
+            "SELECT campaign FROM ops_upgrade_nodes WHERE action_id=? AND host_id=?",
+            (action_id, host_id),
+        ).fetchone()
+        campaign_id = owner["campaign"] if owner else None
+    if not campaign_id:
+        return False
+    campaign = conn.execute(
+        "SELECT status,payload FROM ops_upgrades WHERE id=?", (campaign_id,)
+    ).fetchone()
+    if not campaign or campaign["status"] not in {"canary", "rollout", "paused"}:
+        return False
+
+    clean_reason = "".join(ch for ch in str(reason or "升级未通过健康门禁") if ch >= " " or ch == "\t")[:400]
+    metadata = loads(campaign["payload"], {})
+    if campaign["status"] != "paused":
+        metadata["paused_from_status"] = campaign["status"]
+    metadata.update(
+        paused_at=int(ts),
+        paused_host=host_id,
+        pause_kind=kind,
+        paused_reason=clean_reason,
+    )
+    conn.execute(
+        "UPDATE ops_upgrades SET status='paused',payload=? WHERE id=?",
+        (json.dumps(metadata, ensure_ascii=False), campaign_id),
+    )
+
+    # Unpolled actions cannot be executing yet. Cancel them and return their
+    # rollout nodes to pending so an administrator can safely resume later.
+    queued = conn.execute(
+        "SELECT a.id,a.host_id FROM security_actions a "
+        "JOIN ops_upgrade_nodes n ON n.action_id=a.id "
+        "WHERE n.campaign=? AND a.action_type='managed_upgrade' AND a.status='queued' AND a.id<>?",
+        (campaign_id, action_id),
+    ).fetchall()
+    for pending in queued:
+        conn.execute(
+            "UPDATE security_actions SET status='cancelled',result_message=?,updated_at=? WHERE id=? AND status='queued'",
+            (f"发布因节点 {host_id} 未通过门禁而暂停；该升级尚未派发", int(ts), pending["id"]),
+        )
+        conn.execute(
+            "UPDATE ops_upgrade_nodes SET status='pending',action_id=NULL WHERE campaign=? AND host_id=? AND action_id=?",
+            (campaign_id, pending["host_id"], pending["id"]),
+        )
+        attempts = metadata.setdefault("attempts", {})
+        host_attempts = int(attempts.get(pending["host_id"], 0) or 0)
+        if host_attempts > 0:
+            attempts[pending["host_id"]] = host_attempts - 1
+    if queued:
+        conn.execute(
+            "UPDATE ops_upgrades SET payload=? WHERE id=?",
+            (json.dumps(metadata, ensure_ascii=False), campaign_id),
+        )
+    return True
+
+
 def loads(value, fallback=None):
     try:
         return json.loads(value)
@@ -412,15 +478,9 @@ def ingest(conn, host_id, node_id, ts, data):
                 reason = "升级后健康检查未通过：" + "、".join(dict.fromkeys(failed_sources))
                 conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
                 conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?", (reason[:400], ts, upgrade["action_id"]))
-                campaign_row = conn.execute("SELECT status,payload FROM ops_upgrades WHERE id=?", (upgrade["campaign"],)).fetchone()
-                if campaign_row and campaign_row["status"] in {"canary", "rollout"}:
-                    metadata = loads(campaign_row["payload"])
-                    metadata.update(paused_at=ts, paused_host=host_id, pause_kind="health_check", paused_from_status=campaign_row["status"], paused_reason=reason[:400])
-                    conn.execute("UPDATE ops_upgrades SET status='paused',payload=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False), upgrade["campaign"]))
-                elif campaign_row and campaign_row["status"] == "paused":
-                    metadata = loads(campaign_row["payload"])
-                    metadata.update(paused_at=ts, paused_host=host_id, pause_kind="health_check", paused_reason=reason[:400])
-                    conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False), upgrade["campaign"]))
+                pause_upgrade_campaign_for_failure(
+                    conn, upgrade["action_id"], host_id, ts, reason, "health_check"
+                )
     result = operations.get("upgrade_result",{})
     # The previous Client may predate operations-v1, so its signed version report
     # (not a new operations payload) must be sufficient to confirm a rollback.
@@ -439,15 +499,9 @@ def ingest(conn, host_id, node_id, ts, data):
                 conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?",(failure,ts,result["action_id"]))
                 if action[0] == "managed_upgrade":
                     conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE action_id=?",(result["action_id"],))
-                    params = loads(action[1])
-                    campaign_id = params.get("campaign_id")
-                    campaign_row = conn.execute("SELECT status,payload FROM ops_upgrades WHERE id=?", (campaign_id,)).fetchone() if campaign_id else None
-                    if campaign_row and campaign_row["status"] in {"canary", "rollout", "paused"}:
-                        metadata = loads(campaign_row["payload"])
-                        if campaign_row["status"] != "paused":
-                            metadata["paused_from_status"] = campaign_row["status"]
-                        metadata.update(paused_at=ts, paused_host=host_id, pause_kind="install_failure", paused_reason=failure[:400])
-                        conn.execute("UPDATE ops_upgrades SET status='paused',payload=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False), campaign_id))
+                    pause_upgrade_campaign_for_failure(
+                        conn, result["action_id"], host_id, ts, failure, "install_failure"
+                    )
                 else:
                     params = loads(action[1])
                     if params.get("campaign_id"):

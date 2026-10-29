@@ -5925,13 +5925,17 @@ async def security_action_result(
             elif status == "succeeded":
                 status = "failed"
                 message = f"remediation could not be verified; no process, service or config change was confirmed; {message}"[:2000]
-        if row["status"] not in ("succeeded", "failed"):
+        if row["status"] not in ("succeeded", "failed", "cancelled"):
             if row['action_type'] in disk_cleanup.TYPES:
                 disk_cleanup.record(conn,host_id,node_id,payload.get('cleanup_run'))
             conn.execute(
                 "UPDATE security_actions SET status=?, result_message=?, updated_at=? WHERE id=?",
                 (status, message, now, action_id),
             )
+            if row["action_type"] == "managed_upgrade" and status == "failed":
+                operations.pause_upgrade_campaign_for_failure(
+                    conn, action_id, host_id, now, message, "install_failure"
+                )
             if receipt_items and status in {'succeeded','failed'}:
                 conn.execute("INSERT INTO security_action_receipts VALUES(?,?,?) ON CONFLICT(action_id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at", (action_id,json.dumps(receipt_items,ensure_ascii=False),now))
             if status in {'succeeded','failed'} and row['action_type'] == 'stop_container':

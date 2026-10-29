@@ -876,10 +876,10 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 if not found or not ops.loads(found[0]).get("managed_upgrade"):
                     raise HTTPException(409,f"{host} 未启用管理升级（需要新版主机 Agent）")
             now=int(time.time())
-            campaign=conn.execute("INSERT INTO ops_upgrades(version,revision,status,created_at,payload) VALUES(?,?,'canary',?,?)",(target_version,revision,now,json.dumps({"hosts":hosts,"attempts":{h:(1 if i==0 else 0) for i,h in enumerate(hosts)}}))).lastrowid
+            campaign=conn.execute("INSERT INTO ops_upgrades(version,revision,status,created_at,payload) VALUES(?,?,'canary',?,?)",(target_version,revision,now,json.dumps({"hosts":hosts,"canary":hosts[0],"attempts":{h:(1 if i==0 else 0) for i,h in enumerate(hosts)}}))).lastrowid
             for i,host in enumerate(hosts):
                 old=conn.execute("SELECT agent_version FROM hosts WHERE host_id=?",(host,)).fetchone()[0]
-                action=queue(conn,host,"managed_upgrade",{"revision":revision,"version":target_version},request.state.dashboard_user) if i==0 else None
+                action=queue(conn,host,"managed_upgrade",{"revision":revision,"version":target_version,"campaign_id":campaign},request.state.dashboard_user) if i==0 else None
                 conn.execute("INSERT INTO ops_upgrade_nodes VALUES(?,?,?,?,?)",(campaign,host,action,"dispatched" if i==0 else "pending",old))
             conn.commit()
             return {"id":campaign,"canary":hosts[0]}
@@ -897,11 +897,45 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             if ops.loads(row['payload']).get('automatic'):
                 raise HTTPException(409,'自动发布由协调器完成健康观察和分批推广，请勿手动跳过')
             metadata = ops.loads(row["payload"])
+            canary = conn.execute(
+                "SELECT n.host_id,n.status,n.action_id,a.status AS action_status,a.updated_at,a.params_json "
+                "FROM ops_upgrade_nodes n LEFT JOIN security_actions a ON a.id=n.action_id "
+                "WHERE n.campaign=? AND n.status='verified' ORDER BY n.host_id LIMIT 1",
+                (campaign,),
+            ).fetchone()
+            if not canary or not canary["action_id"] or canary["action_status"] != "succeeded":
+                raise HTTPException(409, "灰度升级回执尚未成功确认")
+            canary_params = ops.loads(canary["params_json"], {})
+            healthy, failed_sources = upgrade_health.post_upgrade_observation(
+                conn, canary["host_id"], canary_params.get("expected_node_id"), row["version"],
+                canary["updated_at"], int(time.time()), fleet_updates.ROLLOUT_SOAK_SECONDS,
+            )
+            if not healthy:
+                raise HTTPException(409, "灰度节点尚未通过升级后健康观察：" + "、".join(failed_sources))
             attempts = metadata.setdefault("attempts", {})
-            for n in conn.execute("SELECT host_id FROM ops_upgrade_nodes WHERE campaign=? AND status='pending'",(campaign,)).fetchall():
+            running = conn.execute(
+                "SELECT COUNT(*) FROM security_actions WHERE action_type IN ('managed_upgrade','managed_rollback') AND status IN ('queued','dispatched','running')"
+            ).fetchone()[0]
+            slots = max(0, min(fleet_updates.ROLLOUT_BATCH_SIZE, 3 - int(running)))
+            if slots <= 0:
+                raise HTTPException(409, "当前已有 3 个 Agent 升级任务运行；请稍后再推进该批次")
+            wave_hosts = []
+            for n in conn.execute("SELECT host_id FROM ops_upgrade_nodes WHERE campaign=? AND status='pending' ORDER BY host_id LIMIT ?",(campaign,slots)).fetchall():
+                host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (n[0],)).fetchone()
+                if not host or not host["node_id"] or int(time.time()) - int(host["last_seen"] or 0) > 900:
+                    continue
                 action=queue(conn,n[0],"managed_upgrade",{"revision":row["revision"],"version":row["version"],"campaign_id":campaign},request.state.dashboard_user)
                 conn.execute("UPDATE ops_upgrade_nodes SET status='dispatched',action_id=? WHERE campaign=? AND host_id=?",(action,campaign,n[0]))
                 attempts[n[0]] = int(attempts.get(n[0], 0)) + 1
+                wave_hosts.append(n[0])
+            metadata["rollout_wave"] = 1
+            metadata["rollout_wave_hosts"] = wave_hosts
+            if wave_hosts:
+                metadata["rollout_waiting_for_health"] = {
+                    "wave": 1,
+                    "hosts": wave_hosts,
+                    "since": int(time.time()),
+                }
             conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(metadata), campaign))
             conn.execute("UPDATE ops_upgrades SET status='rollout' WHERE id=?",(campaign,))
             conn.commit()
@@ -918,6 +952,14 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             node = conn.execute("SELECT * FROM ops_upgrade_nodes WHERE campaign=? AND host_id=?", (campaign, host_id)).fetchone()
             if not row or not node or node["status"] != "failed" or row["status"] not in {"canary", "rollout", "paused"}:
                 raise HTTPException(409, "只有灰度、分批发布或已暂停发布中的失败节点可重试")
+            active = conn.execute(
+                "SELECT a.host_id FROM security_actions a JOIN ops_upgrade_nodes n ON n.action_id=a.id "
+                "WHERE n.campaign=? AND a.id<>COALESCE(?,0) AND a.action_type IN ('managed_upgrade','managed_rollback') "
+                "AND a.status IN ('queued','dispatched','running') LIMIT 1",
+                (campaign, node["action_id"]),
+            ).fetchone()
+            if active:
+                raise HTTPException(409, f"节点 {active['host_id']} 仍在升级；等待当前任务结束后再重试")
             failed_action = conn.execute("SELECT action_type FROM security_actions WHERE id=?", (node["action_id"],)).fetchone() if node["action_id"] else None
             if failed_action and failed_action["action_type"] != "managed_upgrade":
                 raise HTTPException(409, "该节点最近失败的是回滚操作；请从回滚入口重新核对后操作")
@@ -964,6 +1006,14 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             row = conn.execute("SELECT * FROM ops_upgrades WHERE id=?", (campaign,)).fetchone()
             if not row or row["status"] != "paused":
                 raise HTTPException(409, "该发布当前未处于暂停状态")
+            active = conn.execute(
+                "SELECT a.host_id FROM security_actions a JOIN ops_upgrade_nodes n ON n.action_id=a.id "
+                "WHERE n.campaign=? AND a.action_type IN ('managed_upgrade','managed_rollback') "
+                "AND a.status IN ('queued','dispatched','running') LIMIT 1",
+                (campaign,),
+            ).fetchone()
+            if active:
+                raise HTTPException(409, f"节点 {active['host_id']} 仍有升级任务未完成；等待其回报后再恢复发布")
             metadata = ops.loads(row["payload"])
             canary_host = str(metadata.get("canary") or "")
             canary = conn.execute("SELECT n.status,n.action_id,a.action_type,a.status AS action_status,a.params_json FROM ops_upgrade_nodes n LEFT JOIN security_actions a ON a.id=n.action_id WHERE n.campaign=? AND n.host_id=?", (campaign, canary_host)).fetchone()
