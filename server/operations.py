@@ -677,13 +677,31 @@ def backup(database_path, retention=7):
     try:
         directory = Path(database_path).parent / "backups"
         directory.mkdir(mode=0o700, exist_ok=True)
+        source = sqlite3.connect(database_path, timeout=5)
+        try:
+            page_size = int(source.execute("PRAGMA page_size").fetchone()[0])
+            page_count = int(source.execute("PRAGMA page_count").fetchone()[0])
+            estimated_bytes = max(0, page_size * page_count)
+            reserve_bytes = max(512 * 1024 * 1024, estimated_bytes // 20)
+            available_bytes = shutil.disk_usage(directory).free
+            required_bytes = estimated_bytes + reserve_bytes
+            if available_bytes < required_bytes:
+                raise ValueError(
+                    "备份空间不足："
+                    f"预计快照 {estimated_bytes // (1024 * 1024)} MiB，"
+                    f"可用 {available_bytes // (1024 * 1024)} MiB，"
+                    f"至少需保留 {reserve_bytes // (1024 * 1024)} MiB 余量。"
+                )
+        finally:
+            source.close()
         name = f"monitor-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{secrets.token_hex(3)}.db"
         target = directory/name
         fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(fd)
         source = sqlite3.connect(database_path, timeout=5)
-        destination = sqlite3.connect(target)
+        destination = None
         try:
+            destination = sqlite3.connect(target)
             deadline = time.monotonic()+120
             def progress(status, remaining, total):
                 if time.monotonic() > deadline:
@@ -692,7 +710,8 @@ def backup(database_path, retention=7):
             if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise ValueError("backup integrity check failed")
         finally:
-            destination.close()
+            if destination is not None:
+                destination.close()
             source.close()
         digest = hashlib.sha256()
         with target.open("rb") as f:
@@ -720,11 +739,13 @@ def _restore_drill(backup_path, *, timeout_seconds=1800):
                 "duration_ms": int((time.monotonic()-started)*1000), "status": "failed",
                 "message": "backup file is empty or unavailable", "bytes": max(0, size), "sha256": "", "details": {}}
     scratch_root = Path(tempfile.gettempdir())
-    reserve = max(64 * 1024 * 1024, size // 20)
-    if shutil.disk_usage(scratch_root).free < size + reserve:
+    reserve = max(512 * 1024 * 1024, size // 20)
+    available_bytes = shutil.disk_usage(scratch_root).free
+    if available_bytes < size + reserve:
         return {"backup_name": source_path.name, "started_at": started_at, "finished_at": int(time.time()),
                 "duration_ms": int((time.monotonic()-started)*1000), "status": "failed",
-                "message": "临时目录剩余空间不足，未复制备份", "bytes": size, "sha256": "", "details": {}}
+                "message": f"临时目录空间不足，未复制备份；可用 {available_bytes // (1024 * 1024)} MiB，至少需要 {(size + reserve) // (1024 * 1024)} MiB（其中余量 {reserve // (1024 * 1024)} MiB）",
+                "bytes": size, "sha256": "", "details": {"available_free_bytes": available_bytes, "required_free_bytes": size + reserve}}
     digest = hashlib.sha256()
     try:
         with tempfile.TemporaryDirectory(prefix="narwhal-restore-drill-") as directory:
