@@ -3978,14 +3978,9 @@ async def save_container_user_note(request: Request) -> JSONResponse:
     finally:
         conn.close()
 
-    return JSONResponse({
-        "ok": True,
-        "user_email": user_email or mapped_email,
-        "user_email_source": "manual" if user_email else "upstream" if mapped_email else "unmatched" if mapping_issue else "",
-        "user_email_status": mapping_issue if not (user_email or mapped_email) else "",
-        "user_note": user_note,
-        "updated_at": now if user_email or user_note else mapped_at,
-    })
+    # Preserve the established POST response shape; clients can read source and
+    # mapping diagnostics from the GET endpoint without breaking older callers.
+    return JSONResponse({"ok": True, "user_email": user_email or mapped_email, "user_note": user_note})
 
 
 @app.get("/api/v1/history")

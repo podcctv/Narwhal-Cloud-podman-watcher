@@ -73,7 +73,19 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
         user_email: preserveUpstreamEmail ? '' : userEmail.trim(),
         user_note: userNote.trim(),
       });
-      setContainer((current) => current ? { ...current, ...saved } : current);
+      let refreshedUserNote = null;
+      try {
+        refreshedUserNote = await api.getContainerUserNote({ ...identity, container_id: container.container_id });
+      } catch {
+        // Saving succeeded; a failed metadata refresh must not turn it into an error.
+      }
+      const fallbackSource = preserveUpstreamEmail ? 'upstream' : userEmail.trim() ? 'manual' : '';
+      setContainer((current) => current ? {
+        ...current,
+        ...saved,
+        ...(refreshedUserNote || {}),
+        user_email_source: refreshedUserNote?.user_email_source ?? fallbackSource,
+      } : current);
       onToast('success', saved.user_email || saved.user_note ? '用户邮箱与备注已保存，可通过全局搜索定位容器' : '用户邮箱与备注已清除');
       onRefresh();
     } catch (err: any) {
