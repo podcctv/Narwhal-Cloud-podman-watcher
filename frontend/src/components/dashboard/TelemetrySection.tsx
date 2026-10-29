@@ -235,17 +235,21 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const auditLabel = labels[auditLevel];
         const gfw = t.gfw_reachability || {};
         const gfwStatus = gfw.status || 'unassessed';
+        const gfwSample = gfw.sample || {};
+        const hasDailyGfwSample = gfwSample.policy === 'daily_container_rotation';
         const gfwLevel: Level = gfwStatus === 'blocked' ? 'critical'
           : gfwStatus === 'investigating' ? 'warning'
           : gfwStatus === 'normal' || gfwStatus === 'recovered' ? 'normal' : 'unknown';
         const gfwLabels: Record<string, string> = {
-          blocked: 'GFW Blocked · 国内探测异常', investigating: gfw.last_known_state === 'blocked' ? '状态待复核' : '疑似受阻 · 连续确认中',
-          normal: '国内外可达', recovered: '已恢复', stale: '数据过期', unassessed: '待评估',
+          blocked: hasDailyGfwSample ? 'GFW Blocked · 抽测端点国内异常' : 'GFW Blocked · 国内探测异常',
+          investigating: gfw.last_known_state === 'blocked' ? '状态待复核' : '疑似受阻 · 连续确认中',
+          normal: hasDailyGfwSample ? '抽测端点国内外可达' : '国内外可达',
+          recovered: hasDailyGfwSample ? '抽测端点已恢复' : '已恢复', stale: '数据过期', unassessed: '待评估',
         };
         const gfwLastState = gfw.last_known_state === 'blocked' ? 'GFW Blocked' : gfw.last_known_state === 'recovered' ? '已恢复' : gfw.last_known_state === 'normal' ? '国内外可达' : '未评估';
         const gfwDuration = gfwStatus === 'blocked' ? `持续 ${durationDays(gfw.duration_seconds)}`
           : gfwStatus === 'recovered' ? `恢复 ${durationDays(gfw.duration_seconds)}`
-          : gfwStatus === 'normal' ? `正常 ${durationDays(gfw.duration_seconds)}`
+          : gfwStatus === 'normal' ? `${hasDailyGfwSample ? '抽样正常' : '正常'} ${durationDays(gfw.duration_seconds)}`
           : gfwStatus === 'investigating' && gfw.last_known_state === 'blocked' ? `最近确认阻断：${auditTime(gfw.last_sample_at)} · 当前证据待复核`
           : gfwStatus === 'investigating' && gfw.pending_block_rounds ? `失败迹象 ${gfw.pending_block_rounds}/3 轮`
           : gfwStatus === 'investigating' ? '连通性证据待复核'
@@ -290,9 +294,17 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             <Signal title="国内连通性 / GFW 状态" level={gfwLevel}>
               <p className="text-sm font-semibold">{gfwLabels[gfwStatus] || '待评估'}</p>
               <p className="text-sm font-bold">{gfwDuration}</p>
+              {hasDailyGfwSample && <p>UTC {gfwSample.date_utc || '—'}：今日抽测 {fmtNumber(gfwSample.sampled_containers, 0)}/{fmtNumber(gfwSample.eligible_containers, 0)} 个容器、{fmtNumber(gfwSample.sampled_endpoints, 0)} 个现有 TCP 端点；{gfwSample.follow_up_blocked_endpoint ? '包含已确认受阻端口的恢复复测；' : ''}未抽中的对象未验证。</p>}
               {gfw.blocked_count ? <p>累计确认阻断 {fmtNumber(gfw.blocked_count, 0)} 次</p> : null}
               {gfw.last_sample_at ? <p>最近采样 {auditTime(gfw.last_sample_at)}</p> : null}
+              {gfwSample.containers && gfwSample.containers.length > 0 && <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
+                <p className="mb-1 font-semibold text-slate-200">今日抽测容器</p>
+                {gfwSample.containers.map((container, index) => <p key={`${container.runtime}-${container.project}-${container.name}-${index}`} className="break-all">
+                  {container.runtime || '容器'}{container.project ? `/${container.project}` : ''}/{container.name || '未知'}{container.endpoints?.length ? ` · ${container.endpoints.map(endpoint => `${endpoint.ip}:${endpoint.port}`).join(', ')}` : ''}
+                </p>)}
+              </div>}
               {comparedEndpoint ? <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
+                {comparedEndpoint.container_name && <span className="break-all text-slate-200">{comparedEndpoint.runtime || '容器'}{comparedEndpoint.project ? `/${comparedEndpoint.project}` : ''}/{comparedEndpoint.container_name}</span>}
                 <span className="font-mono text-slate-200">{comparedEndpoint.ip}:{comparedEndpoint.port}</span>
                 <span>国内成功 {comparedEndpoint.mainland?.success || 0}/{comparedEndpoint.mainland?.total || 0}</span>
                 <span>海外成功 {comparedEndpoint.overseas?.success || 0}/{comparedEndpoint.overseas?.total || 0}</span>

@@ -12,6 +12,11 @@ interface ManageData {
     online_hosts: number;
     hosts_with_targets: number;
     target_endpoints: number;
+    eligible_endpoints?: number;
+    eligible_containers?: number;
+    sampled_containers?: number;
+    sample_limit_per_host?: number;
+    sample_date_utc?: string;
     missing_reasons: Array<{ reason: string; hosts: number }>;
   };
   candidates: Candidate[];
@@ -52,9 +57,10 @@ export const GfwProbeManage: React.FC = () => {
     <div className="mt-2 rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-xs text-slate-200">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <strong>被测主机端口覆盖</strong>
-        <span className="tabular-nums">{data?.target_coverage?.hosts_with_targets || 0}/{data?.target_coverage?.online_hosts || 0} 台在线主机 · {data?.target_coverage?.target_endpoints || 0} 个公网 TCP 端点</span>
+        <span className="tabular-nums">{data?.target_coverage?.hosts_with_targets || 0}/{data?.target_coverage?.online_hosts || 0} 台在线主机 · 今日抽测 {data?.target_coverage?.sampled_containers || 0}/{data?.target_coverage?.eligible_containers || 0} 个容器</span>
       </div>
-      <p className="mt-1 leading-5 text-slate-300">自动采集 Incus 代理 / 网络转发、Podman 已发布 TCP 端口，以及容器直接持有的公网 IPv4 + 实际监听端口。需要公网端点与容器/端口有明确对应关系；宿主机在 NAT 后时，系统不会把出口 IP 猜成入站公网 IP。</p>
+      <p className="mt-1 leading-5 text-slate-300">自动采集 Incus 代理 / 网络转发、Podman 已发布 TCP 端口，以及容器直接持有的公网 IPv4 + 实际监听端口。每天按稳定轮换抽取每台母鸡最多 2 个不同容器，通常每个容器抽测一个已存在的公网 TCP 端口；已确认受阻的端口优先复测以确认恢复。当天继续按约 5 分钟周期复测样本，累积证据。不会创建端口映射；未抽中的容器或端口仍是未验证状态。宿主机在 NAT 后时，系统不会把出口 IP 猜成入站公网 IP。</p>
+      <p className="mt-1 text-slate-400">今日 UTC {data?.target_coverage?.sample_date_utc || '—'} · 抽测端点 {data?.target_coverage?.target_endpoints || 0} 个 · 有明确映射的端点共 {data?.target_coverage?.eligible_endpoints || 0} 个</p>
       {!!data?.target_coverage?.missing_reasons?.length && <div className="mt-2 space-y-1 text-amber-200">
         {data.target_coverage.missing_reasons.map(item => <p key={item.reason} className="break-words">{item.hosts} 台：{item.reason}</p>)}
       </div>}

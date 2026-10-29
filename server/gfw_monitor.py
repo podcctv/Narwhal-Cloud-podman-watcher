@@ -6,10 +6,12 @@ import re
 import secrets
 import time
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request
 
 MAX_TARGETS = 8
+DAILY_CONTAINER_SAMPLE_LIMIT = 2
 MIN_MAINLAND = 2
 MIN_OVERSEAS = 1
 CYCLE_SECONDS = 300
@@ -47,6 +49,38 @@ def _json(value):
 
 def _digest(value):
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _utc_sample_date(now):
+    return datetime.fromtimestamp(int(now), timezone.utc).date()
+
+
+def _same_day_sample(conn, host_id, now):
+    day_start = int(datetime.fromtimestamp(int(now), timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    rows = conn.execute(
+        "SELECT result_json FROM gfw_cycles WHERE host_id=? AND created_at>=? ORDER BY created_at,id LIMIT 400",
+        (host_id, day_start),
+    ).fetchall()
+    for row in rows:
+        try:
+            result = json.loads(row["result_json"] or "{}")
+            sample = result.get("sample", {}) if isinstance(result, dict) else {}
+            if isinstance(sample, dict) and sample.get("policy") == "daily_container_rotation":
+                return sample
+        except (TypeError, ValueError):
+            continue
+    return {}
+
+
+def _blocked_endpoint_keys(evidence_json):
+    try:
+        evidence = json.loads(evidence_json or "{}")
+        return {
+            (str(item[0]), int(item[1])) for item in evidence.get("blocked_endpoint_keys", [])
+            if isinstance(item, (list, tuple)) and len(item) == 2 and 1 <= int(item[1]) <= 65535
+        }
+    except (TypeError, ValueError, AttributeError):
+        return set()
 
 
 def _public_v4(value):
@@ -92,7 +126,9 @@ def _listen_endpoint(item):
     return address, port
 
 
-def _targets_for_host(conn, host_id, node_id, now):
+def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, daily_selection=None):
+    pinned_endpoint_keys = set(pinned_endpoint_keys or ())
+    daily_selection = daily_selection if isinstance(daily_selection, dict) else {}
     host_sample = conn.execute(
         "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1", (host_id,)
     ).fetchone()
@@ -123,7 +159,16 @@ def _targets_for_host(conn, host_id, node_id, now):
         (host_id, now - STALE_SECONDS),
     ).fetchall()
     newest, discovered = set(), {}
+    socket_owners = {}
     has_public_container_ip = False
+
+    def add_endpoint(address, port, interface, container):
+        target = {"ip": address, "port": port, "interface": interface}
+        target_id = _digest({"host_id": host_id, **target})[:24]
+        endpoint = discovered.setdefault(target_id, {"id": target_id, **target, "owners": {}})
+        endpoint["owners"][container["key"]] = container
+        socket_owners.setdefault((address, port), set()).add(container["key"])
+
     for row in latest:
         key = (row["runtime"], row["project"], row["container_name"])
         if key in newest:
@@ -136,6 +181,14 @@ def _targets_for_host(conn, host_id, node_id, now):
             continue
         if not isinstance(report, dict):
             continue
+        container_id = str(report.get("id") or report.get("container_id") or "")[:255]
+        container = {
+            "key": f"{row['runtime']}|{row['project']}|{container_id or row['container_name']}",
+            "runtime": str(row["runtime"] or "")[:32],
+            "project": str(row["project"] or "")[:255],
+            "name": str(row["container_name"] or "")[:255],
+            "container_id": container_id,
+        }
         # A container with a directly assigned public address and a live TCP
         # listener is independently probeable, including routed/macvlan setups
         # that do not use a host-side proxy or published port.
@@ -158,9 +211,7 @@ def _targets_for_host(conn, host_id, node_id, now):
                 valid_ports.add(port)
         for ip in public_container_ips:
             for port in valid_ports:
-                target = {"ip": ip, "port": port, "interface": "container"}
-                target["id"] = _digest({"host_id": host_id, **target})[:24]
-                discovered[target["id"]] = target
+                add_endpoint(ip, port, "container", container)
         exposures = security.get("network_exposure", []) if isinstance(security, dict) else []
         for exposure in exposures[:128] if isinstance(exposures, list) else []:
             bind, port = _listen_endpoint(exposure)
@@ -169,15 +220,126 @@ def _targets_for_host(conn, host_id, node_id, now):
             explicit = _public_v4(bind)
             target_ips = [explicit] if explicit and explicit in addresses else addresses if bind in ("", "*", "0.0.0.0", "::") else []
             for ip in target_ips:
-                target = {"ip": ip, "port": port, "interface": interface_by_ip.get(ip, "")}
-                target["id"] = _digest({"host_id": host_id, **target})[:24]
-                discovered[target["id"]] = target
-    targets = sorted(discovered.values(), key=lambda item: (item["ip"], item["port"]))[:MAX_TARGETS]
+                add_endpoint(ip, port, interface_by_ip.get(ip, ""), container)
+
+    # Public endpoints must map to one unambiguous Incus/Podman container before
+    # they can participate in a per-container sample.
+    containers = {}
+    eligible_endpoint_count = 0
+    seen_sockets = set()
+    for endpoint in discovered.values():
+        socket = (endpoint["ip"], endpoint["port"])
+        if socket in seen_sockets or len(socket_owners.get(socket, set())) != 1:
+            continue
+        owners = endpoint.pop("owners", {})
+        if len(owners) != 1:
+            continue
+        seen_sockets.add(socket)
+        container = next(iter(owners.values()))
+        container_key = container["key"]
+        containers.setdefault(container_key, {"container": container, "targets": []})["targets"].append(endpoint)
+        eligible_endpoint_count += 1
+
+    sample_date = _utc_sample_date(now).isoformat()
+    sample = {
+        "policy": "daily_container_rotation",
+        "date_utc": sample_date,
+        "eligible_containers": len(containers),
+        "sampled_containers": 0,
+        "eligible_endpoints": eligible_endpoint_count,
+        "sampled_endpoints": 0,
+        "containers": [],
+    }
+    targets = []
+    endpoint_containers = {}
+    if containers:
+        day_index = _utc_sample_date(now).toordinal()
+        ordered_keys = sorted(
+            containers,
+            key=lambda key: (hashlib.sha256(f"{host_id}\0{key}".encode("utf-8")).hexdigest(), key),
+        )
+        offset = day_index % len(ordered_keys)
+        rotated_keys = ordered_keys[offset:] + ordered_keys[:offset]
+        pinned_by_container = {}
+        for container_key, group in containers.items():
+            matches = [target for target in group["targets"] if (target["ip"], target["port"]) in pinned_endpoint_keys]
+            if matches:
+                pinned_by_container[container_key] = sorted(matches, key=lambda target: target["id"])
+        previous_endpoints = {}
+        previous_keys = []
+        for item in daily_selection.get("containers", []) if isinstance(daily_selection.get("containers"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            container_key = str(item.get("key") or "")
+            if not container_key or container_key not in containers:
+                continue
+            previous_keys.append(container_key)
+            points = set()
+            for endpoint in item.get("endpoints", []) if isinstance(item.get("endpoints"), list) else []:
+                if not isinstance(endpoint, dict):
+                    continue
+                try:
+                    port = int(endpoint.get("port") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= port <= 65535 and isinstance(endpoint.get("ip"), str):
+                    points.add((endpoint["ip"], port))
+            previous_endpoints[container_key] = points
+        selected_limit = min(DAILY_CONTAINER_SAMPLE_LIMIT, len(rotated_keys), MAX_TARGETS)
+        priority_keys = ([key for key in rotated_keys if key in pinned_by_container]
+                         + [key for key in previous_keys if key not in pinned_by_container]
+                         + rotated_keys)
+        selected_keys = []
+        for key in priority_keys:
+            if key not in selected_keys:
+                selected_keys.append(key)
+            if len(selected_keys) >= selected_limit:
+                break
+        sample["sampled_containers"] = len(selected_keys)
+        for container_key in selected_keys:
+            group = containers[container_key]
+            ordered_endpoints = sorted(
+                group["targets"],
+                key=lambda target: (
+                    hashlib.sha256(f"{container_key}\0{target['id']}".encode("utf-8")).hexdigest(),
+                    target["id"],
+                ),
+            )
+            selected_endpoints = pinned_by_container.get(container_key)
+            if not selected_endpoints:
+                preferred = previous_endpoints.get(container_key, set())
+                selected_endpoints = [target for target in ordered_endpoints if (target["ip"], target["port"]) in preferred][:1]
+            if not selected_endpoints:
+                selected_endpoints = [ordered_endpoints[day_index % len(ordered_endpoints)]]
+            # A container with many previously blocked listeners must not make
+            # one daily sample exceed the existing per-cycle probe target cap.
+            remaining_target_slots = MAX_TARGETS - len(targets)
+            if remaining_target_slots <= 0:
+                break
+            selected_endpoints = selected_endpoints[:remaining_target_slots]
+            container = group["container"]
+            sample_container = {"key": container_key, "runtime": container["runtime"], "project": container["project"], "name": container["name"], "endpoints": []}
+            for target in selected_endpoints:
+                # Probe payloads intentionally remain limited to id/ip/port/interface;
+                # the separately stored metadata is for admin evidence and display.
+                targets.append({key: target[key] for key in ("id", "ip", "port", "interface")})
+                endpoint_containers[target["id"]] = {
+                    "runtime": container["runtime"], "project": container["project"],
+                    "name": container["name"],
+                }
+                sample_container["endpoints"].append({"ip": target["ip"], "port": target["port"]})
+            sample["containers"].append({
+                **sample_container,
+            })
+        sample["sampled_containers"] = len(sample["containers"])
+        sample["sampled_endpoints"] = len(targets)
+        sample["follow_up_blocked_endpoint"] = any(key in pinned_by_container for key in selected_keys)
+    sample_metadata = {"sample": sample, "endpoint_containers": endpoint_containers}
     if targets:
-        return targets, ""
+        return targets, "", sample_metadata
     if not addresses and not has_public_container_ip:
-        return [], inventory_reason or "未发现公网 IPv4 地址；NAT 公网地址无法安全推断"
-    return [], "未发现可确认的公网容器 TCP 端口：检查 Incus 代理/网络转发、Podman 端口发布或容器公网地址与监听端口"
+        return [], inventory_reason or "未发现公网 IPv4 地址；NAT 公网地址无法安全推断", sample_metadata
+    return [], "未发现可确认的公网容器 TCP 端口：检查 Incus 代理/网络转发、Podman 端口发布或容器公网地址与监听端口", sample_metadata
 
 
 def initialize(conn):
@@ -246,8 +408,8 @@ def _schedule(conn, now):
         active_cycles = int(conn.execute("SELECT COUNT(*) FROM gfw_cycles WHERE status IN ('queued','running')").fetchone()[0])
         if active_cycles >= MAX_ACTIVE_CYCLES:
             break
-        state = conn.execute("SELECT last_cycle_at FROM gfw_states WHERE host_id=? AND node_id=?", (host["host_id"], host["node_id"])).fetchone()
-        last_cycle = int(state[0] or 0) if state else 0
+        state = conn.execute("SELECT last_cycle_at,state,evidence_json FROM gfw_states WHERE host_id=? AND node_id=?", (host["host_id"], host["node_id"])).fetchone()
+        last_cycle = int(state["last_cycle_at"] or 0) if state else 0
         if now - last_cycle < CYCLE_SECONDS:
             continue
         if conn.execute("SELECT 1 FROM gfw_cycles WHERE host_id=? AND status IN ('queued','running') LIMIT 1", (host["host_id"],)).fetchone():
@@ -265,15 +427,23 @@ def _schedule(conn, now):
             conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
                          (host["host_id"], host["node_id"], now, _json({"reason": reason, "targets": []})))
             continue  # Never use a node to probe its own public endpoint.
-        targets, _reason = _targets_for_host(conn, host["host_id"], host["node_id"], now)
+        pinned_endpoint_keys = set()
+        if state and state["state"] == "blocked":
+            pinned_endpoint_keys = _blocked_endpoint_keys(state["evidence_json"])
+        daily_selection = _same_day_sample(conn, host["host_id"], now)
+        targets, _reason, sample_metadata = _targets_for_host(
+            conn, host["host_id"], host["node_id"], now,
+            pinned_endpoint_keys=pinned_endpoint_keys, daily_selection=daily_selection,
+        )
         if not targets:
+            preserved_blocked_endpoints = sorted([list(key) for key in pinned_endpoint_keys])
             conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
-                         (host["host_id"], host["node_id"], now, _json({"reason": _reason, "targets": []})))
+                         (host["host_id"], host["node_id"], now, _json({"reason": _reason, "targets": [], "sample": sample_metadata["sample"], "blocked_endpoint_keys": preserved_blocked_endpoints})))
             continue
         cycle_id = str(uuid.uuid4())
         targets_json = _json(targets)
-        conn.execute("INSERT INTO gfw_cycles(id,host_id,node_id,targets_json,status,created_at,deadline_at) VALUES(?,?,?,?,'queued',?,?)",
-                     (cycle_id, host["host_id"], host["node_id"], targets_json, now, now + JOB_SECONDS))
+        conn.execute("INSERT INTO gfw_cycles(id,host_id,node_id,targets_json,status,created_at,deadline_at,result_json) VALUES(?,?,?,?,'queued',?,?,?)",
+                     (cycle_id, host["host_id"], host["node_id"], targets_json, now, now + JOB_SECONDS, _json(sample_metadata)))
         conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at) VALUES(?,?,?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at",
                      (host["host_id"], host["node_id"], now))
         for role in ("mainland", "overseas"):
@@ -288,6 +458,16 @@ def _apply_cycle(conn, cycle, now):
     if not jobs or any(job["status"] not in ("complete", "expired", "failed", "cancelled") for job in jobs):
         return False
     targets = json.loads(cycle["targets_json"])
+    try:
+        cycle_metadata = json.loads(cycle["result_json"] or "{}")
+    except (TypeError, ValueError):
+        cycle_metadata = {}
+    sample_metadata = cycle_metadata.get("sample", {}) if isinstance(cycle_metadata, dict) else {}
+    endpoint_containers = cycle_metadata.get("endpoint_containers", {}) if isinstance(cycle_metadata, dict) else {}
+    if not isinstance(sample_metadata, dict):
+        sample_metadata = {}
+    if not isinstance(endpoint_containers, dict):
+        endpoint_containers = {}
     evidence = []
     successful_cycle = False
     blocked_cycle = False
@@ -311,8 +491,14 @@ def _apply_cycle(conn, cycle, now):
             status = "normal"
         else:
             status = "unknown"
-        evidence.append({"ip": target["ip"], "port": target["port"], "interface": target.get("interface", ""),
-                         "status": status, "mainland": main, "overseas": over})
+        endpoint = {"ip": target["ip"], "port": target["port"], "interface": target.get("interface", ""),
+                    "status": status, "mainland": main, "overseas": over}
+        owner = endpoint_containers.get(target["id"])
+        if isinstance(owner, dict):
+            endpoint.update({"runtime": str(owner.get("runtime") or ""),
+                             "project": str(owner.get("project") or ""),
+                             "container_name": str(owner.get("name") or "")})
+        evidence.append(endpoint)
     classification = "blocked" if blocked_cycle else "normal" if successful_cycle else "unknown"
     prior = conn.execute("SELECT * FROM gfw_states WHERE host_id=?", (cycle["host_id"],)).fetchone()
     state = dict(prior) if prior else {"host_id": cycle["host_id"], "node_id": cycle["node_id"], "state": "unassessed",
@@ -407,7 +593,8 @@ def _apply_cycle(conn, cycle, now):
     else:
         anchored_blocked_keys = set()
     evidence_payload = {"targets": evidence, "classification": classification,
-                        "blocked_endpoint_keys": sorted([list(key) for key in anchored_blocked_keys])}
+                        "blocked_endpoint_keys": sorted([list(key) for key in anchored_blocked_keys]),
+                        "sample": sample_metadata}
     if reason:
         evidence_payload["reason"] = reason
     evidence_payload["probe_failures"] = [
@@ -430,7 +617,8 @@ def _apply_cycle(conn, cycle, now):
         conn.execute("INSERT INTO gfw_events(host_id,node_id,event_type,at,duration_seconds,normal_duration_seconds,evidence_json) VALUES(?,?,?,?,?,?,?)",
                      (cycle["host_id"], cycle["node_id"], event[0], event[1], event[2], event[3], _json({"targets": evidence})))
     conn.execute("UPDATE gfw_cycles SET status=?,finished_at=?,result_json=? WHERE id=?",
-                 ("complete" if classification != "unknown" else "partial", now, _json({"classification": classification, "targets": evidence}), cycle["id"]))
+                 ("complete" if classification != "unknown" else "partial", now,
+                  _json({"classification": classification, "targets": evidence, "sample": sample_metadata}), cycle["id"]))
     # Longitudinal history is compact: keep the most recent 100 transitions per host.
     conn.execute("DELETE FROM gfw_events WHERE host_id=? AND id NOT IN (SELECT id FROM gfw_events WHERE host_id=? ORDER BY at DESC,id DESC LIMIT 100)",
                  (cycle["host_id"], cycle["host_id"]))
@@ -550,6 +738,9 @@ def status_map(conn, now):
             except ValueError:
                 evidence = {}
             reason = str(evidence.get("reason") or "") if isinstance(evidence, dict) else ""
+            sample = evidence.get("sample", {}) if isinstance(evidence, dict) else {}
+            if not isinstance(sample, dict):
+                sample = {}
             if stale:
                 status = "stale"
             elif coverage_insufficient or not last_sample_at:
@@ -574,12 +765,13 @@ def status_map(conn, now):
                 "blocked_count": int(state_row["blocked_count"] or 0), "last_sample_at": int(state_row["last_sample_at"] or 0),
                 "last_classification": state_row["last_classification"], "pending_block_rounds": int(state_row["pending_block_count"] or 0),
                 "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"],
-                "evidence": evidence.get("targets", []) if isinstance(evidence, dict) else [], "reason": "探测数据已过期" if stale else reason, "history": history}
+                "evidence": evidence.get("targets", []) if isinstance(evidence, dict) else [], "sample": sample,
+                "reason": "探测数据已过期" if stale else reason, "history": history}
         else:
             result[host["host_id"]] = {"status": "unassessed", "last_known_state": "unassessed", "stale": False,
                 "since": 0, "duration_seconds": 0, "last_normal_duration_seconds": 0, "blocked_count": 0,
                 "last_sample_at": 0, "last_classification": "unknown", "pending_block_rounds": 0,
-                "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"], "evidence": [],
+                "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"], "evidence": [], "sample": {},
                 "reason": "需配置至少 2 个国内和 1 个海外探测节点" if counts["mainland"] < MIN_MAINLAND or counts["overseas"] < MIN_OVERSEAS else "等待 Agent 自动上报可验证的公网容器 TCP 端点", "history": history}
     return result
 
@@ -599,9 +791,24 @@ def attach(app, db, verify_signature, signed_response):
             online_hosts = [item for item in candidates if now - int(item.get("last_seen") or 0) <= STALE_SECONDS]
             target_hosts = 0
             target_endpoints = 0
+            eligible_endpoints = 0
+            eligible_containers = 0
+            sampled_containers = 0
             missing_reasons = {}
             for item in online_hosts:
-                targets, reason = _targets_for_host(conn, item["host_id"], item["node_id"], now)
+                state = conn.execute("SELECT state,evidence_json FROM gfw_states WHERE host_id=? AND node_id=?",
+                                     (item["host_id"], item["node_id"])).fetchone()
+                pinned_endpoint_keys = _blocked_endpoint_keys(state["evidence_json"]) if state and state["state"] == "blocked" else set()
+                daily_selection = _same_day_sample(conn, item["host_id"], now)
+                targets, reason, sample_metadata = _targets_for_host(
+                    conn, item["host_id"], item["node_id"], now,
+                    pinned_endpoint_keys=pinned_endpoint_keys, daily_selection=daily_selection,
+                )
+                sample = sample_metadata.get("sample", {})
+                if isinstance(sample, dict):
+                    eligible_endpoints += int(sample.get("eligible_endpoints") or 0)
+                    eligible_containers += int(sample.get("eligible_containers") or 0)
+                    sampled_containers += int(sample.get("sampled_containers") or 0)
                 if targets:
                     target_hosts += 1
                     target_endpoints += len(targets)
@@ -614,6 +821,11 @@ def attach(app, db, verify_signature, signed_response):
                         "online_hosts": len(online_hosts),
                         "hosts_with_targets": target_hosts,
                         "target_endpoints": target_endpoints,
+                        "eligible_endpoints": eligible_endpoints,
+                        "eligible_containers": eligible_containers,
+                        "sampled_containers": sampled_containers,
+                        "sample_limit_per_host": DAILY_CONTAINER_SAMPLE_LIMIT,
+                        "sample_date_utc": _utc_sample_date(now).isoformat(),
                         "missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
                     },
                     "candidates": [{**item, "role": roles.get(item["node_id"], "disabled")} for item in candidates]}

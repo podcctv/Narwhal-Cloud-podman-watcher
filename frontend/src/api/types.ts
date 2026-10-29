@@ -300,7 +300,17 @@ export interface SecurityStatusItem {
     mainland_sources?: number;
     overseas_sources?: number;
     reason?: string;
-    evidence?: Array<{ ip?: string; port?: number; interface?: string; status?: string; mainland?: { success?: number; failed?: number; total?: number }; overseas?: { success?: number; failed?: number; total?: number } }>;
+    sample?: {
+      policy?: string;
+      date_utc?: string;
+      eligible_containers?: number;
+      sampled_containers?: number;
+      eligible_endpoints?: number;
+      sampled_endpoints?: number;
+      follow_up_blocked_endpoint?: boolean;
+      containers?: Array<{ runtime?: string; project?: string; name?: string; endpoints?: Array<{ ip?: string; port?: number }> }>;
+    };
+    evidence?: Array<{ ip?: string; port?: number; interface?: string; runtime?: string; project?: string; container_name?: string; status?: string; mainland?: { success?: number; failed?: number; total?: number }; overseas?: { success?: number; failed?: number; total?: number } }>;
     history?: Array<{ event_type?: 'blocked' | 'recovered' | string; at?: number; duration_seconds?: number; normal_duration_seconds?: number }>;
   };
   enabled?: boolean;
