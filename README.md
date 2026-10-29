@@ -1,6 +1,13 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.144**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.145**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.145：修复 GFW 公网端点自动发现
+
+- 服务端现在识别 Agent 已上报的 Incus `network forward` TCP 映射；此前这类端点被解析器忽略，导致探针虽在线但主机一直“待评估”。
+- 支持容器直接持有公网 IPv4 时，将该地址与容器实际 TCP 监听端口配对作为探测目标，覆盖 routed/macvlan 等不经宿主机代理的网络。
+- GFW 管理页分别显示在线探针覆盖与被测主机端口覆盖，并列出没有可探测端点的原因；明确提示 NAT 公网地址不会按出口 IP 猜测。
+- 探测端口继续由 Agent 自动采集；不会为了获得数据而扫描任意端口或探测未确认的公网地址。
 
 ### v1.7.144：隔离 VMess/Trojan 端口证据字段
 

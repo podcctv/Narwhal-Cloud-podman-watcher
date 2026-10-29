@@ -67,8 +67,13 @@ def _listen_endpoint(item):
         target = str(item.get("target") or "").lower()
         if not target.endswith("/tcp"):
             return "", 0
-    elif source == "incus-proxy":
-        if listen.lower().startswith("udp:"):
+    elif source in {"incus-proxy", "incus-forward"}:
+        target = str(item.get("target") or "").lower()
+        if listen.lower().startswith("udp:") or target.startswith("udp:"):
+            return "", 0
+        # Incus network-forward records carry the protocol on both endpoints.
+        # Do not silently accept an untyped or non-TCP forward as a TCP probe.
+        if source == "incus-forward" and (not listen.lower().startswith("tcp:") or not target.startswith("tcp:")):
             return "", 0
         if listen.lower().startswith("tcp:"):
             listen = listen[4:]
@@ -91,15 +96,17 @@ def _targets_for_host(conn, host_id, node_id, now):
     host_sample = conn.execute(
         "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1", (host_id,)
     ).fetchone()
+    inventory_reason = ""
     if not host_sample or now - int(host_sample["ts"] or 0) > STALE_SECONDS:
-        return [], "宿主机网卡采样已过期"
+        inventory_reason = "宿主机网卡采样已过期"
     try:
-        payload = json.loads(host_sample["payload_json"] or "{}")
+        payload = json.loads(host_sample["payload_json"] or "{}") if host_sample else {}
         inventory = payload.get("host_firewall", {}).get("interface_inventory", {})
     except (TypeError, ValueError, AttributeError):
         inventory = {}
     if not isinstance(inventory, dict) or inventory.get("status") != "ready":
-        return [], "尚未收到可用的网卡地址清单"
+        inventory_reason = inventory_reason or "尚未收到可用的网卡地址清单"
+        inventory = {}
     addresses, interface_by_ip = [], {}
     for interface in inventory.get("interfaces", [])[:64] if isinstance(inventory.get("interfaces"), list) else []:
         if not isinstance(interface, dict):
@@ -111,23 +118,49 @@ def _targets_for_host(conn, host_id, node_id, now):
                 interface_by_ip[address] = name
                 if address not in addresses:
                     addresses.append(address)
-    if not addresses:
-        return [], "未发现直接配置在网卡上的公网 IPv4；NAT 公网地址无法安全推断"
-
     latest = conn.execute(
         "SELECT runtime,project,container_name,payload_json,ts FROM reports WHERE host_id=? AND runtime IN ('incus','podman') AND ts>=? ORDER BY ts DESC,id DESC LIMIT 1200",
         (host_id, now - STALE_SECONDS),
     ).fetchall()
     newest, discovered = set(), {}
+    has_public_container_ip = False
     for row in latest:
         key = (row["runtime"], row["project"], row["container_name"])
         if key in newest:
             continue
         newest.add(key)
         try:
-            security = json.loads(row["payload_json"] or "{}").get("security", {})
+            report = json.loads(row["payload_json"] or "{}")
+            security = report.get("security", {})
         except (TypeError, ValueError, AttributeError):
             continue
+        if not isinstance(report, dict):
+            continue
+        # A container with a directly assigned public address and a live TCP
+        # listener is independently probeable, including routed/macvlan setups
+        # that do not use a host-side proxy or published port.
+        container_addresses = report.get("network_addresses", [])
+        listening_ports = security.get("listening_ports", []) if isinstance(security, dict) else []
+        public_container_ips = set()
+        for value in container_addresses[:32] if isinstance(container_addresses, list) else []:
+            ip = _public_v4(value) if isinstance(value, str) else ""
+            if ip:
+                public_container_ips.add(ip)
+        public_container_ips = sorted(public_container_ips)
+        has_public_container_ip = has_public_container_ip or bool(public_container_ips)
+        valid_ports = set()
+        for value in listening_ports[:128] if isinstance(listening_ports, list) else []:
+            try:
+                port = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535:
+                valid_ports.add(port)
+        for ip in public_container_ips:
+            for port in valid_ports:
+                target = {"ip": ip, "port": port, "interface": "container"}
+                target["id"] = _digest({"host_id": host_id, **target})[:24]
+                discovered[target["id"]] = target
         exposures = security.get("network_exposure", []) if isinstance(security, dict) else []
         for exposure in exposures[:128] if isinstance(exposures, list) else []:
             bind, port = _listen_endpoint(exposure)
@@ -140,7 +173,11 @@ def _targets_for_host(conn, host_id, node_id, now):
                 target["id"] = _digest({"host_id": host_id, **target})[:24]
                 discovered[target["id"]] = target
     targets = sorted(discovered.values(), key=lambda item: (item["ip"], item["port"]))[:MAX_TARGETS]
-    return targets, "" if targets else "没有发现已确认的公网 Incus / Podman TCP 端口映射"
+    if targets:
+        return targets, ""
+    if not addresses and not has_public_container_ip:
+        return [], inventory_reason or "未发现公网 IPv4 地址；NAT 公网地址无法安全推断"
+    return [], "未发现可确认的公网容器 TCP 端口：检查 Incus 代理/网络转发、Podman 端口发布或容器公网地址与监听端口"
 
 
 def initialize(conn):
@@ -543,7 +580,7 @@ def status_map(conn, now):
                 "since": 0, "duration_seconds": 0, "last_normal_duration_seconds": 0, "blocked_count": 0,
                 "last_sample_at": 0, "last_classification": "unknown", "pending_block_rounds": 0,
                 "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"], "evidence": [],
-                "reason": "需配置至少 2 个国内和 1 个海外探测节点" if counts["mainland"] < MIN_MAINLAND or counts["overseas"] < MIN_OVERSEAS else "等待有效的公网 TCP 映射采样", "history": history}
+                "reason": "需配置至少 2 个国内和 1 个海外探测节点" if counts["mainland"] < MIN_MAINLAND or counts["overseas"] < MIN_OVERSEAS else "等待 Agent 自动上报可验证的公网容器 TCP 端点", "history": history}
     return result
 
 
@@ -559,8 +596,27 @@ def attach(app, db, verify_signature, signed_response):
         try:
             candidates = [dict(row) for row in conn.execute("SELECT host_id,node_id,agent_version,last_seen FROM hosts WHERE node_id<>'' ORDER BY host_id LIMIT 300")]
             roles = {row["node_id"]: row["role"] for row in conn.execute("SELECT node_id,role FROM gfw_probe_roles")}
+            online_hosts = [item for item in candidates if now - int(item.get("last_seen") or 0) <= STALE_SECONDS]
+            target_hosts = 0
+            target_endpoints = 0
+            missing_reasons = {}
+            for item in online_hosts:
+                targets, reason = _targets_for_host(conn, item["host_id"], item["node_id"], now)
+                if targets:
+                    target_hosts += 1
+                    target_endpoints += len(targets)
+                else:
+                    label = reason or "未发现可验证的公网 TCP 端点"
+                    missing_reasons[label] = missing_reasons.get(label, 0) + 1
             return {"minimum_mainland": MIN_MAINLAND, "minimum_overseas": MIN_OVERSEAS,
-                    "coverage": _role_counts(conn, now), "candidates": [{**item, "role": roles.get(item["node_id"], "disabled")} for item in candidates]}
+                    "coverage": _role_counts(conn, now),
+                    "target_coverage": {
+                        "online_hosts": len(online_hosts),
+                        "hosts_with_targets": target_hosts,
+                        "target_endpoints": target_endpoints,
+                        "missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
+                    },
+                    "candidates": [{**item, "role": roles.get(item["node_id"], "disabled")} for item in candidates]}
         finally:
             conn.close()
 

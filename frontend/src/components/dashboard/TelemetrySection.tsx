@@ -249,7 +249,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           : gfwStatus === 'investigating' && gfw.last_known_state === 'blocked' ? `最近确认阻断：${auditTime(gfw.last_sample_at)} · 当前证据待复核`
           : gfwStatus === 'investigating' && gfw.pending_block_rounds ? `失败迹象 ${gfw.pending_block_rounds}/3 轮`
           : gfwStatus === 'investigating' ? '连通性证据待复核'
-          : gfwStatus === 'stale' ? `上次状态：${gfwLastState}` : '需要配置探测点与公网端口';
+          : gfwStatus === 'stale' ? `上次状态：${gfwLastState}`
+          : gfw.reason || '探针会自动采集可验证的公网容器 TCP 端口';
         const gfwEvidence = gfw.evidence || [];
         const comparedEndpoint = gfwEvidence.find(item => item.status === 'blocked') || gfwEvidence.find(item => item.status === 'normal') || gfwEvidence[0];
 
