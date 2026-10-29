@@ -1939,7 +1939,6 @@ class SecurityTelemetryTests(unittest.TestCase):
             {
                 "ddos_bandwidth",
                 "ddos_packets",
-                "ddos_syn",
                 "inbound_ip_fanout",
                 "port_scan",
                 "outbound_fanout",
@@ -1954,6 +1953,9 @@ class SecurityTelemetryTests(unittest.TestCase):
                 "unauthorized_panel_pairing",
             }.issubset(types)
         )
+        # SYN_RECV alone is only an observation. The fixture intentionally has
+        # no validated connection_metrics or sustained corroborating samples.
+        self.assertNotIn("ddos_syn", types)
 
     def test_connection_count_alert_uses_warning_and_critical_thresholds(self):
         container = {"name": "node1", "runtime": "podman", "conn_count": 501, "security": {}}
