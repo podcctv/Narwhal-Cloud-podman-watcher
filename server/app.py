@@ -130,7 +130,7 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, ip_reputation, inbound_assessment, database_telemetry
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, ip_reputation, inbound_assessment, database_telemetry, control_reconciliation
 except ImportError:
     import operations
     import connection_policy
@@ -145,6 +145,7 @@ except ImportError:
     import ip_reputation
     import inbound_assessment
     import database_telemetry
+    import control_reconciliation
 
 try:
     from server import abuse_api, admission_api
@@ -596,7 +597,7 @@ def operations_maintenance():
                 logging.exception("Scheduled backup failed")
             conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)", (json.dumps(settings),))
             conn.commit()
-        drill_due = settings.get("enabled") and settings.get("drill_enabled") and now-settings.get("last_drill_attempt", 0) >= 7*86400
+        drill_due = settings.get("enabled") and operations.restore_drill_enabled(settings) and now-settings.get("last_drill_attempt", 0) >= 7*86400
         if drill_due:
             folder = Path(DB_PATH).parent / "backups"
             candidates = sorted(folder.glob("monitor-*.db"), key=lambda item: item.stat().st_mtime, reverse=True)
@@ -6404,6 +6405,48 @@ def security_status() -> JSONResponse:
             (health_bucket_cutoff,),
         ).fetchall()
         gfw_by_host = gfw_monitor.status_map(conn, health_now)
+        latest_container_rows = conn.execute(
+            """SELECT host_id,runtime,project,container_name,ts,payload_json FROM (
+                   SELECT host_id,runtime,project,container_name,ts,payload_json,
+                          ROW_NUMBER() OVER (PARTITION BY host_id,runtime,project,container_name ORDER BY ts DESC,id DESC) AS row_number
+                   FROM reports WHERE ts>=?
+               ) WHERE row_number=1""",
+            (health_now - STALE_SECONDS,),
+        ).fetchall()
+        container_controls_by_host: Dict[str, List[Dict[str, Any]]] = {}
+        for report_row in latest_container_rows:
+            try:
+                container_payload = json.loads(report_row["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                container_payload = {}
+            container_controls_by_host.setdefault(str(report_row["host_id"]), []).append({
+                "runtime": str(report_row["runtime"] or ""), "project": str(report_row["project"] or ""),
+                "container_name": str(report_row["container_name"] or ""), "ts": int(report_row["ts"] or 0),
+                "security": container_payload.get("security") if isinstance(container_payload.get("security"), dict) else {},
+            })
+        firewall_policy_by_host = {}
+        for policy_row in conn.execute("SELECT host_id,revision,policy_json FROM host_firewall_policies"):
+            try:
+                policy_value = json.loads(policy_row["policy_json"] or "{}")
+            except (TypeError, ValueError):
+                policy_value = {}
+            if isinstance(policy_value, dict):
+                policy_value.setdefault("revision", int(policy_row["revision"] or 0))
+                firewall_policy_by_host[str(policy_row["host_id"])] = policy_value
+        reconciliation_by_host = {}
+        for host_row in rows:
+            host_key = str(host_row["host_id"])
+            try:
+                host_payload = json.loads(host_row["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                host_payload = {}
+            reconciliation_by_host[host_key] = control_reconciliation.build_control_reconciliation(
+                {**(host_payload if isinstance(host_payload, dict) else {}), "observed_at": int(host_row["security_ts"] or 0)},
+                container_controls_by_host.get(host_key, []),
+                firewall_policy_by_host.get(host_key),
+                _host_firewall_live_readback(conn, host_key, health_now),
+                health_now,
+            )
     finally:
         conn.close()
 
@@ -6483,6 +6526,7 @@ def security_status() -> JSONResponse:
                 "last_seen_utc8": format_utc8(host_last_seen),
                 "agent_version": host_agent_version,
                 "collection_health": collection_health,
+                "control_reconciliation": reconciliation_by_host.get(host_id, {"status": "unconfigured", "issue_count": 0, "controls": []}),
                 "enabled": bool(payload.get("enabled")),
                 "stale": stale,
                 "interval_seconds": payload.get("interval_seconds"),

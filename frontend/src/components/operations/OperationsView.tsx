@@ -38,7 +38,7 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState<RecordData>({ profile: 'general', bandwidth_mbps: '', bandwidth_minutes: 10, interval_hours: 24, retention: 7, drill_enabled: false, role: 'viewer', kind: 'http' });
+  const [form, setForm] = useState<RecordData>({ profile: 'general', bandwidth_mbps: '', bandwidth_minutes: 10, interval_hours: 24, retention: 7, drill_enabled: true, role: 'viewer', kind: 'http' });
   const [preview, setPreview] = useState<RecordData | null>(null);
   const [timeline, setTimeline] = useState<RecordData | null>(null);
   const [historyEntity, setHistoryEntity] = useState('');
@@ -88,7 +88,7 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
   }, [load, isPaused]);
   useEffect(() => {
     if (section === 'backups' && data.settings && !backupSettingsDirty.current) {
-      setForm(current => ({ ...current, interval_hours: data.settings.interval_hours ?? 24, retention: data.settings.retention ?? 7, drill_enabled: data.settings.drill_enabled === true }));
+      setForm(current => ({ ...current, interval_hours: data.settings.interval_hours ?? 24, retention: data.settings.retention ?? 7, drill_enabled: data.settings.drill_enabled !== false }));
     }
   }, [section, data.settings]);
   const act = async (fn: () => Promise<unknown>, message = '操作已完成') => {
@@ -132,6 +132,9 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
           </div>
           <div className="my-4 flex flex-wrap gap-3"><button className={button} disabled={busy} onClick={() => void act(() => post('backups'), '备份已创建并通过完整性检查')}>立即备份</button><button className={button} disabled={busy} onClick={() => void act(() => saveBackupSettings(false), '定时备份已关闭')}>关闭定时备份</button></div>
           <p className="text-sm text-slate-400">定时备份 {data.settings?.enabled ? '已启用' : '未启用'} · 自动演练 {data.settings?.drill_enabled ? '每周' : '未启用'} · 最近备份 {date(data.settings?.last_success)} · {data.settings?.error || '无备份错误'}</p>
+          {data.drill_health && <p role={['failed', 'overdue', 'never_tested'].includes(data.drill_health.state) && data.settings?.enabled && data.settings?.drill_enabled ? 'alert' : undefined} className={`mt-2 rounded-md border px-3 py-2 text-xs ${data.drill_health.state === 'healthy' ? 'border-emerald-900 bg-emerald-950/20 text-emerald-200' : data.drill_health.state === 'disabled' ? 'border-slate-700 bg-slate-950/30 text-slate-400' : 'border-amber-800 bg-amber-950/20 text-amber-200'}`}>
+            隔离恢复演练：{data.drill_health.message}{data.drill_health.last_success_at ? ` · 最近成功 ${date(data.drill_health.last_success_at)}` : ''}{data.drill_health.due_at ? ` · 下次到期 ${date(data.drill_health.due_at)}` : ''}
+          </p>}
           {data.settings?.last_drill && <p className="mt-2 text-xs text-slate-400">最近演练：<Status value={data.settings.last_drill.status} /> · {data.settings.last_drill.backup_name} · {date(data.settings.last_drill.finished_at)} · {(data.settings.last_drill.duration_ms / 1000).toFixed(1)} 秒 · {data.settings.last_drill.message}</p>}
         </Card>
         <Card title="备份清单 / 隔离恢复演练">

@@ -31,6 +31,13 @@ _backup_lock = threading.Lock()
 _restore_drill_lock = threading.Lock()
 
 
+def restore_drill_enabled(settings):
+    """Treat legacy settings without an explicit opt-out as enabled."""
+    if not isinstance(settings, dict):
+        return True
+    return settings.get("drill_enabled", True) is not False
+
+
 def initialize(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS ops_hosts(node TEXT PRIMARY KEY,host_id TEXT,ts INTEGER,payload TEXT);

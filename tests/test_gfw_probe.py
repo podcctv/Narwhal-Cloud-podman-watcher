@@ -120,6 +120,22 @@ class GfwProbeFailurePersistenceTests(unittest.TestCase):
             gfw_monitor.report_failure(self.conn, payload, self.now + 1)
         self.assertEqual(raised.exception.status_code, 403)
 
+    def test_latest_role_result_includes_endpoint_and_source_evidence(self):
+        self.conn.execute(
+            "UPDATE gfw_probe_jobs SET status='complete',finished_at=? WHERE id=?",
+            (self.now + 2, self.job_id),
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_probe_results(job_id,target_id,success,latency_ms,error,attempts) VALUES(?,?,?,?,?,?)",
+            (self.job_id, "target-1", 1, 41.5, "", 1),
+        )
+        result = gfw_monitor._latest_role_result(self.conn, "mainland")
+        self.assertEqual(result["target_host_id"], self.host_id)
+        self.assertEqual(result["source_region"], "")
+        self.assertEqual(result["endpoints"][0]["ip"], "8.8.8.8")
+        self.assertEqual(result["endpoints"][0]["port"], 443)
+        self.assertTrue(result["endpoints"][0]["success"])
+
 
 class GfwCoverageDiagnosticTests(unittest.TestCase):
     def setUp(self):

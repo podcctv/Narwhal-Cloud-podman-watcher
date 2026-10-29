@@ -4,6 +4,8 @@ import { request } from '../../api/client';
 
 type ProbeRole = 'disabled' | 'mainland' | 'overseas';
 interface Candidate { host_id: string; node_id: string; agent_version: string; last_seen: number; role: ProbeRole; region?: string; carrier?: string; probe_online?: boolean; last_seen_age_seconds?: number | null }
+interface ProbeEndpointResult { ip: string; port: number; success: boolean | null; latency_ms: number | null; error: string; attempts: number }
+interface LatestRoleResult { status: string; created_at: number; finished_at: number; source_host_id: string; source_region: string; source_carrier: string; target_host_id: string; target_node_id: string; error: string; endpoints: ProbeEndpointResult[] }
 interface ManageData {
   minimum_mainland: number;
   minimum_overseas: number;
@@ -31,6 +33,7 @@ interface ManageData {
       configured: number; online: number; offline: number; missing_region: number; missing_carrier: number;
       online_missing_region?: number; online_missing_carrier?: number; distinct_regions: number; distinct_carriers: number;
     }>;
+    latest_role_results?: Partial<Record<'mainland' | 'overseas', LatestRoleResult | null>>;
     recommendations?: string[];
   };
   candidates: Candidate[];
@@ -99,6 +102,16 @@ export const GfwProbeManage: React.FC = () => {
           return <div key={role} className="rounded-md border border-slate-700/70 bg-slate-950/30 p-2">
             <p className="font-semibold text-slate-200">{role === 'mainland' ? '国内探针' : '海外探针'}：在线 {stats.online}/{role === 'mainland' ? data.minimum_mainland : data.minimum_overseas} · 已配置 {stats.configured} · 离线 {stats.offline}</p>
             <p className="mt-1 text-slate-300">地区覆盖 {stats.distinct_regions} 个 · 运营商覆盖 {stats.distinct_carriers} 个{role === 'mainland' ? ` · 在线未标运营商 ${stats.online_missing_carrier || 0}` : ''} · 在线未标地区 {stats.online_missing_region || 0}</p>
+            {(() => {
+              const latest = data.probe_health?.latest_role_results?.[role];
+              return latest ? <div className="mt-2 rounded border border-slate-700/70 bg-slate-950/40 p-2">
+                <p className="font-medium text-slate-200">最近实际端口结果 · {latest.finished_at ? new Date(latest.finished_at * 1000).toLocaleString('zh-CN', { hour12: false }) : latest.status}</p>
+                <p className="mt-1 break-all text-slate-400">目标：{latest.target_host_id || '未知'} · 来源：{latest.source_region || latest.source_host_id || '未知'}{latest.source_carrier ? ` / ${latest.source_carrier}` : ''}</p>
+                {latest.endpoints.length ? <div className="mt-1 space-y-1">{latest.endpoints.map((endpoint, index) => <p key={`${endpoint.ip}:${endpoint.port}:${index}`} className={endpoint.success === true ? 'text-emerald-300' : endpoint.success === false ? 'text-amber-200' : 'text-slate-400'}>
+                  <span className="font-mono">{endpoint.ip}:{endpoint.port}</span> · {endpoint.success === true ? `可连接${endpoint.latency_ms != null ? ` · ${endpoint.latency_ms.toFixed(1)} ms` : ''}` : endpoint.success === false ? `连接失败${endpoint.error ? ` · ${endpoint.error}` : ''}` : `无端口结果${endpoint.error ? ` · ${endpoint.error}` : ''}`}
+                </p>)}</div> : <p className="mt-1 text-amber-200">任务 {latest.status}，没有端口结果{latest.error ? ` · ${latest.error}` : ''}</p>}
+              </div> : <p className="mt-2 text-slate-400">该角色尚无已完成探测结果。</p>;
+            })()}
           </div>;
         })}
       </div>}

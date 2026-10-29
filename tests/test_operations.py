@@ -45,6 +45,11 @@ class OperationsTests(unittest.TestCase):
     def usage(self,period="day"):
         return self.conn.execute("SELECT SUM(rx),SUM(tx),SUM(covered),SUM(gaps) FROM ops_rollups WHERE period=?",(period,)).fetchone()
 
+    def test_legacy_backup_settings_keep_weekly_restore_drill_enabled(self):
+        self.assertTrue(ops.restore_drill_enabled({"enabled": True}))
+        self.assertTrue(ops.restore_drill_enabled({"enabled": True, "drill_enabled": True}))
+        self.assertFalse(ops.restore_drill_enabled({"enabled": True, "drill_enabled": False}))
+
     def test_counter_deltas_and_duplicates(self):
         # Always cross a non-even hour split rather than failing only when CI
         # happens to run near xx:59. SQLite REAL prorating has binary rounding.

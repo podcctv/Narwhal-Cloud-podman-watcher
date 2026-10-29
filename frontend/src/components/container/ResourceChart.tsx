@@ -1,6 +1,11 @@
 import React, { useEffect, useRef } from 'react';
-import * as echarts from 'echarts';
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 import { HistoryPoint } from '../../api/types';
+
+echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
 interface ResourceChartProps {
   history: HistoryPoint[];
@@ -21,7 +26,7 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
     const cpuSeries = history.map((h) => Number((h.cpu_percent || 0).toFixed(2)));
     const memSeries = history.map((h) => Number((h.mem_percent || 0).toFixed(2)));
 
-    const option: echarts.EChartsOption = {
+    const option: echarts.EChartsCoreOption = {
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',

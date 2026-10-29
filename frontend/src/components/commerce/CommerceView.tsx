@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import * as echarts from 'echarts';
+import * as echarts from 'echarts/core';
+import { BarChart, LineChart } from 'echarts/charts';
+import { AriaComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 import { KeyRound, RefreshCw, Server, ShoppingBag, Receipt, AlertTriangle, Trash2, Pencil } from 'lucide-react';
 import { request } from '../../api/client';
+
+echarts.use([BarChart, LineChart, AriaComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
 type Money = string | null;
 type Settings = { configured: boolean; updated_at: number; synced_at: number; last_error: string; api_url: string; syncing: boolean };

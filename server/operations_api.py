@@ -1117,8 +1117,21 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 if path.is_symlink() or not path.is_file():
                     continue
                 items.append({"name":path.name,"bytes":path.stat().st_size,"ts":int(path.stat().st_mtime),"last_drill":latest.get(path.name)})
-            settings=ops.loads(row[0]) if row else {"enabled":False,"interval_hours":24,"retention":7,"drill_enabled":False}
-            return {"settings":settings,"items":items,"drills":drills}
+            settings=ops.loads(row[0]) if row else {"enabled":False,"interval_hours":24,"retention":7,"drill_enabled":True}
+            settings.setdefault("drill_enabled", True)
+            now=int(time.time())
+            last_success=max((int(item.get("finished_at") or 0) for item in drills if item.get("status")=="succeeded"),default=0)
+            last_attempt=drills[0] if drills else None
+            if not settings.get("enabled") or not ops.restore_drill_enabled(settings):
+                drill_health={"state":"disabled","last_success_at":last_success,"due_at":0,"message":"定时备份或每周恢复演练未启用。"}
+            elif last_attempt and last_attempt.get("status")=="failed" and int(last_attempt.get("finished_at") or 0)>last_success:
+                drill_health={"state":"failed","last_success_at":last_success,"last_attempt_at":int(last_attempt.get("finished_at") or 0),"due_at":last_success+7*86400 if last_success else 0,"message":"最近一次隔离恢复演练失败；查看演练记录与可用空间后重试。"}
+            elif not last_success:
+                drill_health={"state":"never_tested","last_success_at":0,"due_at":0,"message":"尚无成功的隔离恢复演练记录。"}
+            else:
+                due_at=last_success+7*86400
+                drill_health={"state":"overdue" if now>=due_at else "healthy","last_success_at":last_success,"due_at":due_at,"message":"恢复演练已逾期，等待下一轮自动校验。" if now>=due_at else "最近备份已通过隔离恢复演练。"}
+            return {"settings":settings,"items":items,"drills":drills,"drill_health":drill_health}
         finally:
             conn.close()
 
@@ -1135,7 +1148,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         conn=db()
         try:
             old=conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
-            settings={**ops.loads(old[0] if old else None),"enabled":p["enabled"],"interval_hours":interval,"retention":retention,"drill_enabled":p.get("drill_enabled",ops.loads(old[0] if old else None).get("drill_enabled",False))}
+            settings={**ops.loads(old[0] if old else None),"enabled":p["enabled"],"interval_hours":interval,"retention":retention,"drill_enabled":p.get("drill_enabled",ops.loads(old[0] if old else None).get("drill_enabled",True))}
             conn.execute("INSERT OR REPLACE INTO ops_settings VALUES('backup',?)",(json.dumps(settings),))
             conn.commit()
             return {"ok":True}
@@ -1179,7 +1192,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         try:
             ops.record_backup_drill(conn,result)
             settings_row=conn.execute("SELECT payload FROM ops_settings WHERE key='backup'").fetchone()
-            settings=ops.loads(settings_row[0]) if settings_row else {"enabled":False,"interval_hours":24,"retention":7,"drill_enabled":False}
+            settings=ops.loads(settings_row[0]) if settings_row else {"enabled":False,"interval_hours":24,"retention":7,"drill_enabled":True}
             settings["last_drill_attempt"]=result["started_at"]
             settings["last_drill"]={key:result[key] for key in ("backup_name","started_at","finished_at","duration_ms","status","message","bytes","sha256")}
             settings["last_drill_at"]=result["finished_at"]

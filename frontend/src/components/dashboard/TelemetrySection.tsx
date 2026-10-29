@@ -234,6 +234,12 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const auditLevel = hostAuditLevel(t);
         const auditLabel = labels[auditLevel];
         const gfw = t.gfw_reachability || {};
+        const reconciliation = t.control_reconciliation || {};
+        const reconciliationControls = reconciliation.controls || [];
+        const reconciliationLevel: Level = reconciliation.status === 'verified' ? 'normal'
+          : reconciliation.status === 'attention' ? 'warning' : 'unknown';
+        const controlLabels: Record<string, string> = { tc: 'tc 网卡限速', cgroup_cpu: 'cgroup CPU', cgroup_io: 'cgroup 磁盘 I/O', nftables_admission: 'nftables 容器准入', rfw: 'RFW 防火墙' };
+        const controlStatusLabels: Record<string, string> = { verified: '读回一致', attention: '需核查', failed: '失败', stale: '样本过期', unverified: '未核实', drift: '规则有差异', unconfigured: '未配置' };
         const collectionHealth = t.collection_health || {};
         const collectionStatus = String(collectionHealth.status || 'unavailable');
         const collectionLevel: Level = collectionStatus === 'healthy' ? 'normal'
@@ -377,6 +383,18 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                   </div>)}
                 </div>
               </details>}
+            </Signal>
+            <Signal title="规则执行与内核读回" level={reconciliationLevel}>
+              <p>{reconciliation.status === 'verified' ? '已有活动规则均有读回证据' : reconciliation.status === 'attention' ? `发现 ${fmtNumber(reconciliation.issue_count || 0, 0)} 项状态需核查` : '尚无已配置的托管规则'}</p>
+              {reconciliationControls.map((control, index) => <div key={`${control.control}-${index}`} className="rounded border border-slate-700/70 bg-slate-950/30 p-2">
+                <p className="font-semibold text-slate-200">{controlLabels[control.control || ''] || control.control || '规则'} · {controlStatusLabels[control.status || ''] || control.status || '未知'}</p>
+                {control.control === 'tc' && <p>期望版本 {control.expected?.revision ?? '—'} · 当前已读回 {control.actual?.active_limits ?? 0} 条限额</p>}
+                {control.control === 'rfw' && <p>期望版本 {control.expected?.revision ?? '—'} · 运行规则 {control.actual?.rule_count ?? '—'} · 差异 {control.actual?.drift_count ?? 0} / 缺失 {control.actual?.missing_count ?? 0}</p>}
+                {['cgroup_cpu', 'cgroup_io', 'nftables_admission'].includes(control.control || '') && <p>已核实活动 {control.actual?.verified_active ?? 0} 个 · 未核实 {control.actual?.unverified ?? 0} 个 · 人工改动 {control.actual?.manual_override ?? 0} 个</p>}
+                {control.samples?.map((sample, sampleIndex) => <p key={`${sample.container}-${sampleIndex}`} className="mt-1 break-all text-slate-400">{sample.container} · {sample.state}{sample.expected ? ` · 目标 ${typeof sample.expected === 'string' ? sample.expected : JSON.stringify(sample.expected)}` : ''}{sample.actual ? ` · 当前 ${typeof sample.actual === 'string' ? sample.actual : JSON.stringify(sample.actual)}` : ''}{sample.reason ? ` · ${sample.reason}` : ''}</p>)}
+                {control.reason && <p className="mt-1 text-slate-400">{control.reason}</p>}
+                {control.last_confirmed_at ? <p className="mt-1 text-[10px] text-slate-500">最近成功读回 {auditTime(control.last_confirmed_at)}</p> : null}
+              </div>)}
             </Signal>
             <Signal title="实时速率 / 今日峰值" level={signalLevel(t, /^ddos_(host_)?bandwidth$/)}>
               <p>↓ {fmtNetSpeed(t.rx_bps).mbps} · ↑ {fmtNetSpeed(t.tx_bps).mbps}</p>

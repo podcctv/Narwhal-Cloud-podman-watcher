@@ -665,6 +665,11 @@ def observe(
                             record["last_high"] = 0
                             record["escalation_samples"] = 0
                         tier = int(record.get("tier") or 1)
+                        actual_limit = _parse_io_max(io_file_path, device)
+                        expected_limit = record.get("pending") if record.get("stage") == "escalating" else record.get("applied")
+                        readback_confirmed = _normalize_io_max(actual_limit) == _normalize_io_max(expected_limit)
+                        if readback_confirmed:
+                            record["readback_confirmed_at"] = timestamp
                         security["io_guard"] = {
                             "state": record.get("stage"), "device": device,
                             "device_busy_percent": record.get("device_busy_percent"),
@@ -675,6 +680,10 @@ def observe(
                             "observed_rates": record.get("observed_rates"),
                             "tier": tier, "tier_percent_of_baseline": {1: 50, 2: 25, 3: 10}.get(tier),
                             "original_limit": original, "active_limit": record.get("applied"),
+                            "expected_limit": expected_limit,
+                            "actual_limit": actual_limit,
+                            "readback_confirmed": readback_confirmed,
+                            "readback_confirmed_at": int(record.get("readback_confirmed_at") or timestamp) if readback_confirmed else 0,
                             "recovery_samples": int(record.get("low_samples") or 0),
                             "recovery_samples_required": recovery_samples,
                             "recovery_duration_seconds": recovery_duration,

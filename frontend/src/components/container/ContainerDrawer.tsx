@@ -499,7 +499,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     {['limited', 'limit_unverified', 'limited_unverified', 'limit_failed', 'restore_failed', 'escalating', 'restoring'].includes(cpuGuard?.state || '') && (
                       <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
                         <p>原限额：<span className="font-mono text-slate-100">{cpuGuard?.original_limit || '未记录'}</span></p>
-                        <p>当前限额：<span className="font-mono text-slate-100">{cpuGuard?.active_limit || '等待读回'}</span>{cpuGuard?.tier ? ` · 第 ${cpuGuard.tier} 阶（约原容量 ${cpuGuard.tier_percent_of_original ?? '-'}%）` : ''}</p>
+                        <p>策略目标：<span className="font-mono text-slate-100">{cpuGuard?.expected_limit || cpuGuard?.active_limit || '等待读回'}</span>{cpuGuard?.tier ? ` · 第 ${cpuGuard.tier} 阶（约原容量 ${cpuGuard.tier_percent_of_original ?? '-'}%）` : ''}</p>
+                        <p>内核当前读回：<span className="font-mono text-slate-100">{cpuGuard?.actual_limit || '暂不可读'}</span> · {cpuGuard?.readback_confirmed ? `已核实${cpuGuard.readback_confirmed_at ? ` · ${new Date(cpuGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}` : '尚未确认目标值'}</p>
                         <p>恢复条件：低占用连续 {cpuGuard?.recovery_samples ?? 0}/{cpuGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(cpuGuard?.recovery_duration_seconds)}。</p>
                       </div>
                     )}
@@ -557,7 +558,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'retry_wait'].includes(ioGuard?.state || '') && (
                       <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
                         <p>原 I/O 限额：<span className="font-mono text-slate-100">{formatIoLimit(ioGuard?.original_limit)}</span></p>
-                        <p>{['active', 'restore_failed'].includes(ioGuard?.state || '') ? '已读回生效限额' : '待确认限额'}：<span className="font-mono text-slate-100">{['active', 'restore_failed'].includes(ioGuard?.state || '') ? formatIoLimit(ioGuard?.active_limit) : '尚未确认；保留最后一次读回值'}</span>{ioGuard?.tier ? ` · 第 ${ioGuard.tier} 阶（约基线 ${ioGuard.tier_percent_of_baseline ?? '-'}%）` : ''}</p>
+                        <p>策略目标：<span className="font-mono text-slate-100">{formatIoLimit(ioGuard?.expected_limit || ioGuard?.active_limit)}</span>{ioGuard?.tier ? ` · 第 ${ioGuard.tier} 阶（约基线 ${ioGuard.tier_percent_of_baseline ?? '-'}%）` : ''}</p>
+                        <p>内核当前读回：<span className="font-mono text-slate-100">{ioGuard?.actual_limit ? formatIoLimit(ioGuard.actual_limit) : '暂不可读'}</span> · {ioGuard?.readback_confirmed ? `已核实${ioGuard.readback_confirmed_at ? ` · ${new Date(ioGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}` : '尚未确认目标值'}</p>
                         <p>恢复条件：低压力连续 {ioGuard?.recovery_samples ?? 0}/{ioGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(ioGuard?.recovery_duration_seconds)}。</p>
                         {ioGuard?.retry_after_seconds ? <p className="text-amber-200">约 {formatMinutes(ioGuard.retry_after_seconds)} 后自动重试。</p> : null}
                       </div>

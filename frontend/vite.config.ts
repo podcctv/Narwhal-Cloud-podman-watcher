@@ -21,12 +21,5 @@ export default defineConfig({
   build: {
     outDir: '../server/static',
     emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.replaceAll(path.sep, '/').includes('/node_modules/echarts/')) return 'echarts';
-        },
-      },
-    },
   },
 });

@@ -144,6 +144,61 @@ def _probe_health_snapshot(conn, now):
     return {"roles": counts, "sources": sources}
 
 
+def _latest_role_result(conn, role):
+    """Return the latest completed per-endpoint probe result for an admin view."""
+    row = conn.execute(
+        """SELECT j.id,j.status,j.created_at,j.finished_at,j.error,j.source_host_id,
+                  j.source_region,j.source_carrier,c.host_id AS target_host_id,
+                  c.node_id AS target_node_id,j.targets_json
+           FROM gfw_probe_jobs j JOIN gfw_cycles c ON c.id=j.cycle_id
+           WHERE j.role=? AND j.status IN ('complete','failed','expired')
+           ORDER BY COALESCE(NULLIF(j.finished_at,0),j.created_at) DESC,j.id DESC LIMIT 1""",
+        (role,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        targets = json.loads(row["targets_json"] or "[]")
+    except (TypeError, ValueError):
+        targets = []
+    results = {
+        str(result["target_id"]): dict(result)
+        for result in conn.execute(
+            "SELECT target_id,success,latency_ms,error,attempts FROM gfw_probe_results WHERE job_id=?",
+            (row["id"],),
+        ).fetchall()
+    }
+    endpoints = []
+    for target in targets[:MAX_TARGETS] if isinstance(targets, list) else []:
+        if not isinstance(target, dict):
+            continue
+        try:
+            port = int(target.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        result = results.get(str(target.get("id") or ""))
+        endpoints.append({
+            "ip": str(target.get("ip") or "")[:64],
+            "port": port,
+            "success": bool(result["success"]) if result else None,
+            "latency_ms": result.get("latency_ms") if result else None,
+            "error": str((result.get("error") if result else row["error"]) or "")[:160],
+            "attempts": int(result.get("attempts") or 0) if result else 0,
+        })
+    return {
+        "status": str(row["status"] or "unknown"),
+        "created_at": int(row["created_at"] or 0),
+        "finished_at": int(row["finished_at"] or 0),
+        "source_host_id": str(row["source_host_id"] or "")[:200],
+        "source_region": str(row["source_region"] or "")[:80],
+        "source_carrier": str(row["source_carrier"] or "")[:100],
+        "target_host_id": str(row["target_host_id"] or "")[:200],
+        "target_node_id": str(row["target_node_id"] or "")[:128],
+        "error": str(row["error"] or "")[:240],
+        "endpoints": endpoints,
+    }
+
+
 def _listen_endpoint(item):
     """Return (bind address, TCP port) only for an explicit TCP mapping."""
     if not isinstance(item, dict):
@@ -1018,6 +1073,10 @@ def attach(app, db, verify_signature, signed_response):
                     label = reason or "未发现可验证的公网 TCP 端点"
                     missing_reasons[label] = missing_reasons.get(label, 0) + 1
             role_health = probe_health["roles"]
+            latest_role_results = {
+                role: _latest_role_result(conn, role)
+                for role in ("mainland", "overseas")
+            }
             recommendations = []
             if role_health["mainland"]["online"] < MIN_MAINLAND:
                 recommendations.append(f"国内探针在线 {role_health['mainland']['online']}/{MIN_MAINLAND}：恢复离线节点或配置更多不同网络来源的国内探针。")
@@ -1065,6 +1124,7 @@ def attach(app, db, verify_signature, signed_response):
                                      "last_finished_at": int(last_probe_job[0] or 0) if last_probe_job else 0,
                                      "last_attempt": latest_probe,
                                      "roles": role_health,
+                                     "latest_role_results": latest_role_results,
                                      "recommendations": recommendations},
                     "candidates": [{**item,
                                     "role": role_rows.get(item["node_id"], {}).get("role", "disabled"),

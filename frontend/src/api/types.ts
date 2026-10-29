@@ -390,6 +390,16 @@ export interface SecurityAlert {
 }
 
 export interface SecurityStatusItem {
+  control_reconciliation?: {
+    status?: 'verified' | 'attention' | 'unconfigured' | string;
+    issue_count?: number;
+    observed_at?: number;
+    controls?: Array<{
+      control?: string; status?: string; reason?: string; last_confirmed_at?: number;
+      expected?: Record<string, any> | null; actual?: Record<string, any> | null;
+      samples?: Array<{ container?: string; state?: string; expected?: any; actual?: any; reason?: string; readback_confirmed?: boolean }>;
+    }>;
+  };
   agent_version?: string;
   last_seen?: number;
   last_seen_utc8?: string;

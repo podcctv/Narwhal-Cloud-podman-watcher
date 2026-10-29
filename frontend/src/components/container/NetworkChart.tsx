@@ -1,7 +1,12 @@
 import React, { useEffect, useRef } from 'react';
-import * as echarts from 'echarts';
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 import { HistoryPoint } from '../../api/types';
 import { fmtMbps } from '../../api/client';
+
+echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
 interface NetworkChartProps {
   history: HistoryPoint[];
@@ -22,7 +27,7 @@ export const NetworkChart: React.FC<NetworkChartProps> = ({ history }) => {
     const rxSeries = history.map((h) => Number(fmtMbps(h.net_rx_bps)));
     const txSeries = history.map((h) => Number(fmtMbps(h.net_tx_bps)));
 
-    const option: echarts.EChartsOption = {
+    const option: echarts.EChartsCoreOption = {
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',

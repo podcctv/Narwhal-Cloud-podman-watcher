@@ -797,10 +797,18 @@ def observe(
                         security["cpu_guard"] = {"state": "manual_override", "message": record.get("last_error") or "检测到人工更改 CPU 配置；系统保留该配置。"}
                         continue
                     process = record.get("top_process") if isinstance(record.get("top_process"), dict) else {}
+                    expected_applied = record.get("pending_applied") if record.get("stage") == "escalating" else applied
+                    readback_confirmed = not read_error and current is not None and _matches(runtime, current, expected_applied)
+                    if readback_confirmed:
+                        record["readback_confirmed_at"] = timestamp
                     status = {
                         "state": "limited" if record.get("stage") == "active" else "limit_unverified" if record.get("stage") == "escalating" else "restore_failed",
                         "original_limit": _format_limit(runtime, original),
                         "active_limit": _format_limit(runtime, applied),
+                        "expected_limit": _format_limit(runtime, expected_applied),
+                        "actual_limit": _format_limit(runtime, current),
+                        "readback_confirmed": readback_confirmed,
+                        "readback_confirmed_at": int(record.get("readback_confirmed_at") or record.get("last_step_at") or record.get("applied_at") or timestamp) if readback_confirmed else 0,
                         "tier": tier,
                         "tier_percent_of_original": {1: 50, 2: 25, 3: 10}.get(tier),
                         "applied_at": int(record.get("applied_at") or timestamp),

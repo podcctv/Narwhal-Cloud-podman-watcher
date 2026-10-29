@@ -1,9 +1,8 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as echarts from 'echarts/core';
 import { MapChart } from 'echarts/charts';
 import { TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
-import china from '../../china-map.json';
 import { carriers, latencyColor, median, Target } from './types';
 import { connectionSummary, provinceSummary, summaryState } from './model';
 
@@ -11,10 +10,20 @@ echarts.use([MapChart, TooltipComponent, CanvasRenderer]);
 const fullName = (name: string) => ({ 内蒙古: '内蒙古自治区', 广西: '广西壮族自治区', 西藏: '西藏自治区', 宁夏: '宁夏回族自治区', 新疆: '新疆维吾尔自治区', 北京: '北京市', 天津: '天津市', 上海: '上海市', 重庆: '重庆市' }[name] || name + '省');
 type MapFeature = { properties?: { name?: string }; [key: string]: unknown };
 type MapData = { features: MapFeature[]; [key: string]: unknown };
-const mapData = china as unknown as MapData;
-const registeredMaps = new Set(['narwhal-china']);
-echarts.registerMap('narwhal-china', china as Parameters<typeof echarts.registerMap>[1]);
-function mapForProvince(province: string) {
+const registeredMaps = new Set<string>();
+let mapDataPromise: Promise<MapData> | null = null;
+function loadMapData() {
+  if (!mapDataPromise) {
+    mapDataPromise = import('../../china-map.json').then(({ default: china }) => {
+      const mapData = china as unknown as MapData;
+      echarts.registerMap('narwhal-china', china as Parameters<typeof echarts.registerMap>[1]);
+      registeredMaps.add('narwhal-china');
+      return mapData;
+    });
+  }
+  return mapDataPromise;
+}
+function mapForProvince(province: string, mapData: MapData) {
   if (!province) return 'narwhal-china';
   const name = fullName(province), feature = mapData.features.find(item => item.properties?.name === name);
   if (!feature) return 'narwhal-china';
@@ -30,8 +39,9 @@ const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '
 export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: string; status: string; onSelect: (value: string) => void }> = ({ nodes, province, carrier, status, onSelect }) => {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<echarts.ECharts>();
+  const [mapData, setMapData] = useState<MapData | null>(null);
   const callback = useRef(onSelect); callback.current = onSelect;
-  const mapName = mapForProvince(province);
+  const mapName = mapData ? mapForProvince(province, mapData) : '';
   const data = useMemo(() => [...[...new Set(nodes.map(n => n.province))].map(p => {
     const { rows, completed, good, value, filteredOut } = provinceSummary(nodes, p, { province, carrier, status });
     const summary = connectionSummary(rows);
@@ -51,6 +61,11 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
     label: { show: false },
   }))], [nodes, province, carrier, status]);
   useEffect(() => {
+    let active = true;
+    loadMapData().then(value => { if (active) setMapData(value); }).catch(() => { if (active) setMapData(null); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
     if (!el.current) return;
     const c = echarts.init(el.current, undefined, { renderer: 'canvas' }); chart.current = c;
     c.on('click', (event: unknown) => {
@@ -65,6 +80,7 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
     return () => { resize.disconnect(); c.dispose(); chart.current = undefined; };
   }, []);
   useEffect(() => {
+    if (!mapData || !mapName) return;
     chart.current?.setOption({ animation: false, tooltip: { trigger: 'item', confine: true, backgroundColor: '#0f172a', borderColor: '#475569', textStyle: { color: '#f8fafc', fontSize: 12 },
       formatter: (event: unknown) => {
         const d = (event as { name: string; data?: typeof data[number] });
@@ -76,6 +92,6 @@ export const ChinaMap: React.FC<{ nodes: Target[]; province: string; carrier: st
         layoutCenter: ['50%', '50%'], layoutSize: '96%',
         label: { show: false }, itemStyle: { areaColor: '#172033', borderColor: '#08101f', borderWidth: 1 },
         emphasis: { label: { show: false }, itemStyle: { borderColor: '#e2e8f0', borderWidth: 2 } }, data }] }, { notMerge: true });
-  }, [data, mapName]);
+  }, [data, mapData, mapName]);
   return <div className="tcp-map" ref={el} role="img" aria-label={`${province ? province + '省级区域聚焦图' : '全国省级'} TCP 地图，当前显示${carriers[carrier] || '全部运营商'}。可通过省份表格或筛选器选择区域；台湾指定目标独立统计。`} />;
 };
