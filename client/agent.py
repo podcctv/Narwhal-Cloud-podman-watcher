@@ -274,6 +274,18 @@ def _runtime_exec_cmd(runtime: str, name: str, shell_command: str, project: str 
     return cmd + ["sh", "-lc", shell_command]
 
 
+def _runtime_config_exec_cmd(runtime: str, name: str, shell_command: str, project: str = "") -> List[str]:
+    """Read protocol config files with container-root permissions, never host privileges.
+
+    Podman exec otherwise inherits the image's configured USER, which can make
+    root-owned proxy configuration look absent. Incus exec already enters as
+    container root by default, so it keeps the ordinary command path.
+    """
+    if _runtime_kind(runtime) in {"podman", "podman-remote"}:
+        return _runtime_base(runtime, project) + ["exec", "--user", "0", name, "sh", "-lc", shell_command]
+    return _runtime_exec_cmd(runtime, name, shell_command, project)
+
+
 def parse_size(s: str) -> int:
     m = re.match(r"([0-9.]+)([kKmMgGtTpP]?[bB]?)?", s.strip())
     if not m:
@@ -5933,7 +5945,7 @@ def _collect_socks_config_evidence(
                 "\\( -name '*.json' -o -name '*.yaml' -o -name '*.yml' -o -name '*.conf' -o -name '*.cfg' \\) "
                 "-print 2>/dev/null; rc=$?; [ $rc -eq 0 ] && echo @@CONFIG_DIR_SCAN_OK@@"
             )
-            listing = run(_runtime_exec_cmd(runtime, name, find_command, project), timeout=2)
+            listing = run(_runtime_config_exec_cmd(runtime, name, find_command, project), timeout=2)
             lines = [line.strip() for line in listing.splitlines() if line.strip()]
             complete_marker = '@@CONFIG_DIR_SCAN_OK@@' in lines
             found_paths = [line for line in lines if line != '@@CONFIG_DIR_SCAN_OK@@']
@@ -5998,9 +6010,9 @@ def _collect_socks_config_evidence(
                 break
             protocol_metadata_before = ''
             if is_protocol_process:
-                protocol_metadata_before = run(_runtime_exec_cmd(
+                protocol_metadata_before = run(_runtime_config_exec_cmd(
                     runtime, name,
-                    f"stat -Lc '%d:%i:%s:%y:%z|%Y|%Z' {shlex.quote(path)} 2>/dev/null",
+                    f"stat -Lc '%d:%i:%s|%Y|%Z' {shlex.quote(path)} 2>/dev/null",
                     project,
                 ), timeout=2).strip()
                 if not protocol_metadata_before:
@@ -6009,11 +6021,11 @@ def _collect_socks_config_evidence(
                     process_scan_reason = process_scan_reason or 'config_file_metadata_unavailable'
                     inventory_reason = inventory_reason or process_scan_reason
             # Raw JSON is local-only and bounded; it never enters a report/log.
-            raw = run(_runtime_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
+            raw = run(_runtime_config_exec_cmd(runtime, name, f'head -c 262145 {shlex.quote(path)} 2>/dev/null', project), timeout=2)
             if is_protocol_process:
-                protocol_metadata_after = run(_runtime_exec_cmd(
+                protocol_metadata_after = run(_runtime_config_exec_cmd(
                     runtime, name,
-                    f"stat -Lc '%d:%i:%s:%y:%z|%Y|%Z' {shlex.quote(path)} 2>/dev/null",
+                    f"stat -Lc '%d:%i:%s|%Y|%Z' {shlex.quote(path)} 2>/dev/null",
                     project,
                 ), timeout=2).strip()
                 if not protocol_metadata_after:
@@ -6037,7 +6049,7 @@ def _collect_socks_config_evidence(
                     # stable across two reads; timestamp ordering is not needed
                     # to match a configured port to its current listener.
                     raw_snapshot_after = run(
-                        _runtime_exec_cmd(
+                        _runtime_config_exec_cmd(
                             runtime, name,
                             f'head -c 262145 {shlex.quote(path)} 2>/dev/null',
                             project,
