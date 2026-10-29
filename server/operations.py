@@ -738,7 +738,10 @@ def _restore_drill(backup_path, *, timeout_seconds=1800):
         return {"backup_name": source_path.name, "started_at": started_at, "finished_at": int(time.time()),
                 "duration_ms": int((time.monotonic()-started)*1000), "status": "failed",
                 "message": "backup file is empty or unavailable", "bytes": max(0, size), "sha256": "", "details": {}}
-    scratch_root = Path(tempfile.gettempdir())
+    # Use the backup volume rather than the container overlay /tmp. The
+    # production container may have a small writable layer while /data has
+    # enough reserved space for a full isolated restore copy.
+    scratch_root = source_path.parent
     reserve = max(512 * 1024 * 1024, size // 20)
     available_bytes = shutil.disk_usage(scratch_root).free
     if available_bytes < size + reserve:
@@ -748,7 +751,7 @@ def _restore_drill(backup_path, *, timeout_seconds=1800):
                 "bytes": size, "sha256": "", "details": {"available_free_bytes": available_bytes, "required_free_bytes": size + reserve}}
     digest = hashlib.sha256()
     try:
-        with tempfile.TemporaryDirectory(prefix="narwhal-restore-drill-") as directory:
+        with tempfile.TemporaryDirectory(prefix=".narwhal-restore-drill-", dir=scratch_root) as directory:
             restored = Path(directory) / "monitor.db"
             deadline = started + max(30, min(int(timeout_seconds), 1800))
             with source_path.open("rb") as source, restored.open("xb") as destination:
