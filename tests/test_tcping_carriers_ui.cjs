@@ -27,6 +27,7 @@ const path=require('node:path');
   await page.route('**/tcping?*',route=>route.fulfill({contentType:'text/html',body:fs.readFileSync(path.resolve('server/static/index.html'),'utf8')}));
   await page.goto('http://127.0.0.1:8795/tcping?job='+id);
   await page.getByRole('heading',{name:'三网连接分布'}).waitFor();
+  await page.locator('.tcp-carrier-maps canvas').nth(2).waitFor({state:'attached'});
   assert.equal(await page.locator('.tcp-carrier-maps canvas').count(),3);
   const hebei=page.locator('.tcp-compare-scroll tbody tr').filter({has:page.getByRole('button',{name:'河北',exact:true})});
   await assert.doesNotReject(()=>hebei.getByText('1170.1',{exact:false}).waitFor());
@@ -39,7 +40,7 @@ const path=require('node:path');
   await page.locator('.tcp-comparison').screenshot({path:output+'/desktop.png'});
   await page.getByRole('button',{name:'单网明细',exact:true}).click();assert.equal(await page.getByLabel('筛选运营商').inputValue(),'telecom');
   await page.getByLabel('筛选运营商').selectOption('unicom');assert.equal(await page.locator('.tcp-workspace .tcp-map').isVisible(),true);
-  await page.getByRole('button',{name:'三网对比',exact:true}).click();assert.equal(await page.locator('.tcp-carrier-maps canvas').count(),3);
+  await page.getByRole('button',{name:'三网对比',exact:true}).click();await page.locator('.tcp-carrier-maps canvas').nth(2).waitFor({state:'attached'});assert.equal(await page.locator('.tcp-carrier-maps canvas').count(),3);
   for(const width of [375,768,1024,1440]){
    await page.setViewportSize({width,height:1000});await page.waitForTimeout(150);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`overflow at ${width}`);
