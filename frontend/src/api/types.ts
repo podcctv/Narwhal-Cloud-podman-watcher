@@ -411,6 +411,17 @@ export interface SecurityStatusItem {
     available_mainland_sources?: number;
     available_overseas_sources?: number;
     reason?: string;
+    host_last_seen?: number;
+    target_readiness?: {
+      status?: 'ready' | 'host_offline' | 'interface_inventory_unavailable' | 'public_address_missing' | 'public_tcp_endpoint_missing' | 'ambiguous_container_mapping' | string;
+      reason?: string;
+      next_step?: string;
+      eligible_containers?: number;
+      sampled_containers?: number;
+      eligible_endpoints?: number;
+      sampled_endpoints?: number;
+      ambiguous_endpoints?: number;
+    };
     sample?: {
       policy?: string;
       date_utc?: string;

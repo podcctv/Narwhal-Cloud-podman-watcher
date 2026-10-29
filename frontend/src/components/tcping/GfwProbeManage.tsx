@@ -3,7 +3,7 @@ import { Loader2, Radio, RefreshCw } from 'lucide-react';
 import { request } from '../../api/client';
 
 type ProbeRole = 'disabled' | 'mainland' | 'overseas';
-interface Candidate { host_id: string; node_id: string; agent_version: string; last_seen: number; role: ProbeRole; region?: string; carrier?: string }
+interface Candidate { host_id: string; node_id: string; agent_version: string; last_seen: number; role: ProbeRole; region?: string; carrier?: string; probe_online?: boolean; last_seen_age_seconds?: number | null }
 interface ManageData {
   minimum_mainland: number;
   minimum_overseas: number;
@@ -22,7 +22,17 @@ interface ManageData {
     missing_reasons: Array<{ reason: string; hosts: number }>;
     probe_missing_reasons?: Array<{ reason: string; hosts: number }>;
   };
-  probe_health?: { window_seconds: number; jobs: Record<string, number>; last_finished_at: number };
+  probe_health?: {
+    window_seconds: number;
+    jobs: Record<string, number>;
+    last_finished_at: number;
+    last_attempt?: { status?: string; created_at?: number; finished_at?: number; error?: string };
+    roles?: Record<'mainland' | 'overseas', {
+      configured: number; online: number; offline: number; missing_region: number; missing_carrier: number;
+      online_missing_region?: number; online_missing_carrier?: number; distinct_regions: number; distinct_carriers: number;
+    }>;
+    recommendations?: string[];
+  };
   candidates: Candidate[];
 }
 
@@ -80,8 +90,24 @@ export const GfwProbeManage: React.FC = () => {
         {data.target_coverage.probe_missing_reasons.map(item => <p key={item.reason} className="break-words">{item.hosts} 台：{item.reason}</p>)}
       </div>}
       {data?.probe_health && <p className="mt-2 border-t border-slate-800 pt-2 text-slate-300">
-        最近 24 小时探针任务：回传完成 {data.probe_health.jobs.complete || 0} · 失败 {data.probe_health.jobs.failed || 0} · 超时 {data.probe_health.jobs.expired || 0} · 排队/运行 {data.probe_health.jobs.queued || 0}/{data.probe_health.jobs.running || 0}；最近完成 {data.probe_health.last_finished_at ? new Date(data.probe_health.last_finished_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无'}。任务完成代表探针已回传，不代表端口可达。
+        最近 24 小时探针任务：回传完成 {data.probe_health.jobs.complete || 0} · 失败 {data.probe_health.jobs.failed || 0} · 超时 {data.probe_health.jobs.expired || 0} · 排队/运行 {data.probe_health.jobs.queued || 0}/{data.probe_health.jobs.running || 0}；最近完成 {data.probe_health.last_finished_at ? new Date(data.probe_health.last_finished_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '最近 24 小时暂无完成任务'}。任务完成代表探针已回传，不代表端口可达。
       </p>}
+      {data?.probe_health?.roles && <div className="mt-2 grid gap-2 border-t border-slate-800 pt-2 text-xs sm:grid-cols-2">
+        {(['mainland', 'overseas'] as const).map(role => {
+          const stats = data.probe_health?.roles?.[role];
+          if (!stats) return null;
+          return <div key={role} className="rounded-md border border-slate-700/70 bg-slate-950/30 p-2">
+            <p className="font-semibold text-slate-200">{role === 'mainland' ? '国内探针' : '海外探针'}：在线 {stats.online}/{role === 'mainland' ? data.minimum_mainland : data.minimum_overseas} · 已配置 {stats.configured} · 离线 {stats.offline}</p>
+            <p className="mt-1 text-slate-300">地区覆盖 {stats.distinct_regions} 个 · 运营商覆盖 {stats.distinct_carriers} 个{role === 'mainland' ? ` · 在线未标运营商 ${stats.online_missing_carrier || 0}` : ''} · 在线未标地区 {stats.online_missing_region || 0}</p>
+          </div>;
+        })}
+      </div>}
+      {!!data?.probe_health?.recommendations?.length && <div className="mt-2 space-y-1 rounded-md border border-amber-900/70 bg-amber-950/20 p-2 text-xs text-amber-200">
+        {data.probe_health.recommendations.map((item, index) => <p key={`${index}-${item}`}>{item}</p>)}
+      </div>}
+      {data?.probe_health?.last_attempt?.created_at ? <p className="mt-2 text-[11px] text-slate-400">
+        最近探测任务：{new Date(data.probe_health.last_attempt.created_at * 1000).toLocaleString('zh-CN', { hour12: false })} · {data.probe_health.last_attempt.status || '未知'}{data.probe_health.last_attempt.error ? ` · ${data.probe_health.last_attempt.error}` : ''}
+      </p> : <p className="mt-2 text-[11px] text-amber-200">尚无历史探测任务记录；满足覆盖与端点条件后由服务端自动创建任务。</p>}
       <details className="mt-2 border-t border-slate-800 pt-2 text-slate-300">
         <summary className="cursor-pointer font-semibold text-sky-300">没有可探测端口时怎么处理？</summary>
         <p className="mt-2 leading-5">Agent 会自动读取 Incus / Podman 端口发布、容器公网地址和宿主机现有 TCP DNAT 规则，并与容器实际监听端口核对。若公网映射由宿主机之外的上游 NAT 提供，且宿主机没有对应转发规则或可读映射，当前没有可靠数据可自动确定公网地址与端口；系统会继续显示待评估，不猜测并探测端口。</p>
@@ -92,7 +118,8 @@ export const GfwProbeManage: React.FC = () => {
       {data?.candidates.map(candidate => <div key={candidate.node_id} className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-slate-100" title={candidate.host_id}>{candidate.host_id}</p>
-          <p className="mt-1 text-[11px] text-slate-400">Agent {candidate.agent_version || '未知'} · 最近上报 {candidate.last_seen ? new Date(candidate.last_seen * 1000).toLocaleString('zh-CN', { hour12: false }) : '未知'}</p>
+          <p className="mt-1 text-[11px] text-slate-400">Agent {candidate.agent_version || '未知'} · 最近上报 {candidate.last_seen ? new Date(candidate.last_seen * 1000).toLocaleString('zh-CN', { hour12: false }) : '未知'} · {candidate.role === 'disabled' ? (candidate.probe_online ? 'Agent 在线' : 'Agent 离线') : candidate.probe_online ? '探针在线' : '探针离线'}</p>
+          {candidate.role !== 'disabled' && (!candidate.region || (candidate.role === 'mainland' && !candidate.carrier)) && <p className="mt-1 text-[11px] text-amber-200">覆盖信息未完整标注{!candidate.region ? ' · 地区' : ''}{candidate.role === 'mainland' && !candidate.carrier ? ' · 运营商' : ''}</p>}
           {candidate.role !== 'disabled' && <div className="mt-2 grid max-w-xl grid-cols-2 gap-2">
             <input aria-label={`${candidate.host_id} 探针地区`} maxLength={80} value={candidate.region || ''} placeholder="地区（如：枣庄，山东）" disabled={!!busyNode} onChange={event => updateCandidate(candidate.node_id, 'region', event.target.value)} onBlur={() => save(candidate, candidate.role)} className="min-h-8 min-w-0 rounded border border-slate-700 bg-slate-950 px-2 text-[11px] text-slate-200 placeholder:text-slate-500" />
             <input aria-label={`${candidate.host_id} 探针运营商`} maxLength={100} value={candidate.carrier || ''} placeholder="运营商（如：联通 BGP）" disabled={!!busyNode} onChange={event => updateCandidate(candidate.node_id, 'carrier', event.target.value)} onBlur={() => save(candidate, candidate.role)} className="min-h-8 min-w-0 rounded border border-slate-700 bg-slate-950 px-2 text-[11px] text-slate-200 placeholder:text-slate-500" />

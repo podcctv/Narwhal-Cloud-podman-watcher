@@ -91,6 +91,59 @@ def _public_v4(value):
         return ""
 
 
+def _probe_online(last_seen, payload, now):
+    try:
+        interval = int(json.loads(payload or "{}").get("report_interval", 300))
+    except (ValueError, TypeError, AttributeError):
+        interval = 300
+    return now - int(last_seen or 0) <= max(600, min(1800, interval * 3))
+
+
+def _probe_health_snapshot(conn, now):
+    rows = conn.execute(
+        "SELECT r.host_id,r.node_id,r.role,r.region,r.carrier,h.last_seen,o.payload "
+        "FROM gfw_probe_roles r LEFT JOIN hosts h ON h.node_id=r.node_id "
+        "LEFT JOIN ops_hosts o ON o.node=h.node_id ORDER BY r.role,r.host_id"
+    ).fetchall()
+    sources = []
+    counts = {
+        role: {"configured": 0, "online": 0, "offline": 0, "missing_region": 0,
+               "missing_carrier": 0, "online_missing_region": 0, "online_missing_carrier": 0,
+               "distinct_regions": 0, "distinct_carriers": 0}
+        for role in ("mainland", "overseas")
+    }
+    for row in rows:
+        role = str(row["role"] or "")
+        if role not in counts:
+            continue
+        last_seen = int(row["last_seen"] or 0)
+        online = _probe_online(last_seen, row["payload"], now)
+        region = str(row["region"] or "").strip()
+        carrier = str(row["carrier"] or "").strip()
+        stats = counts[role]
+        stats["configured"] += 1
+        stats["online" if online else "offline"] += 1
+        if not region:
+            stats["missing_region"] += 1
+            if online:
+                stats["online_missing_region"] += 1
+        if role == "mainland" and not carrier:
+            stats["missing_carrier"] += 1
+            if online:
+                stats["online_missing_carrier"] += 1
+        sources.append({
+            "host_id": str(row["host_id"] or ""), "node_id": str(row["node_id"] or ""),
+            "role": role, "region": region, "carrier": carrier, "last_seen": last_seen,
+            "last_seen_age_seconds": max(0, now - last_seen) if last_seen else None,
+            "online": online,
+        })
+    for role in counts:
+        role_sources = [item for item in sources if item["role"] == role and item["online"]]
+        counts[role]["distinct_regions"] = len({item["region"].casefold() for item in role_sources if item["region"]})
+        counts[role]["distinct_carriers"] = len({item["carrier"].casefold() for item in role_sources if item["carrier"]})
+    return {"roles": counts, "sources": sources}
+
+
 def _listen_endpoint(item):
     """Return (bind address, TCP port) only for an explicit TCP mapping."""
     if not isinstance(item, dict):
@@ -248,6 +301,8 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
         "sampled_containers": 0,
         "eligible_endpoints": eligible_endpoint_count,
         "sampled_endpoints": 0,
+        "discovered_endpoints": len(discovered),
+        "ambiguous_endpoints": sum(1 for owners in socket_owners.values() if len(owners) > 1),
         "containers": [],
     }
     targets = []
@@ -336,10 +391,27 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
         sample["follow_up_blocked_endpoint"] = any(key in pinned_by_container for key in selected_keys)
     sample_metadata = {"sample": sample, "endpoint_containers": endpoint_containers}
     if targets:
+        sample_metadata.update({"readiness": "ready", "reason": "", "next_step": "探测任务会按约 5 分钟周期运行"})
         return targets, "", sample_metadata
     if not addresses and not has_public_container_ip:
-        return [], inventory_reason or "未发现公网 IPv4 地址；NAT 公网地址无法安全推断", sample_metadata
-    return [], "未发现可确认的公网容器 TCP 端口：检查 Incus 代理/网络转发、Podman 端口发布或容器公网地址与监听端口", sample_metadata
+        if inventory_reason:
+            reason = inventory_reason
+            readiness = "interface_inventory_unavailable"
+            next_step = "检查 Agent 主机网卡清单采集与上报；如使用上游 NAT，需在宿主机配置中提供可读的公网转发映射"
+        else:
+            reason = "未发现公网 IPv4 地址；NAT 公网地址无法安全推断"
+            readiness = "public_address_missing"
+            next_step = "确认宿主机网卡或容器具有公网 IPv4；上游 NAT 未在主机配置中登记时，系统不会猜测公网地址"
+    elif sample["ambiguous_endpoints"]:
+        reason = f"发现 {sample['ambiguous_endpoints']} 个 TCP 端点同时关联多个容器，无法安全确认归属"
+        readiness = "ambiguous_container_mapping"
+        next_step = "检查重复的端口发布/代理映射，确保公网 IP:端口唯一指向一个 Incus 或 Podman 容器"
+    else:
+        reason = "未发现可确认的公网容器 TCP 端口：缺少实际监听端口或明确的 Incus/Podman TCP 映射"
+        readiness = "public_tcp_endpoint_missing"
+        next_step = "检查容器监听端口、Incus 代理/网络转发、Podman TCP 端口发布，以及容器公网地址与监听端口"
+    sample_metadata.update({"readiness": readiness, "reason": reason, "next_step": next_step})
+    return [], reason, sample_metadata
 
 
 def initialize(conn):
@@ -387,11 +459,7 @@ def initialize(conn):
 def _role_counts(conn, now):
     result = {"mainland": 0, "overseas": 0}
     for row in conn.execute("SELECT r.role,h.last_seen,o.payload FROM gfw_probe_roles r JOIN hosts h ON h.node_id=r.node_id LEFT JOIN ops_hosts o ON o.node=h.node_id"):
-        try:
-            interval = int(json.loads(row["payload"] or "{}").get("report_interval", 300))
-        except (ValueError, TypeError):
-            interval = 300
-        if now - int(row["last_seen"] or 0) <= max(600, min(1800, interval * 3)):
+        if _probe_online(row["last_seen"], row["payload"], now):
             result[row["role"]] += 1
     return result
 
@@ -400,11 +468,7 @@ def _active_roles(conn, now):
     rows = conn.execute("SELECT r.host_id,r.node_id,r.role,r.region,r.carrier,h.last_seen,o.payload FROM gfw_probe_roles r JOIN hosts h ON h.node_id=r.node_id LEFT JOIN ops_hosts o ON o.node=h.node_id ORDER BY r.role,r.host_id").fetchall()
     result = {"mainland": [], "overseas": []}
     for row in rows:
-        try:
-            interval = int(json.loads(row["payload"] or "{}").get("report_interval", 300))
-        except (ValueError, TypeError):
-            interval = 300
-        if now - int(row["last_seen"] or 0) <= max(600, min(1800, interval * 3)):
+        if _probe_online(row["last_seen"], row["payload"], now):
             result[row["role"]].append({"host_id": row["host_id"], "node_id": row["node_id"],
                                          "region": str(row["region"] or "")[:80],
                                          "carrier": str(row["carrier"] or "")[:100]})
@@ -455,8 +519,10 @@ def _schedule(conn, now):
         )}
         if coverage_reason:
             reason = coverage_reason + "；需增加不同主机上的在线探针"
+            target_readiness = {"status": "probe_coverage_missing", "reason": reason,
+                                "next_step": "恢复离线探针或补足不同主机上的国内/海外探针；探针不会自测"}
             conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
-                         (host["host_id"], host["node_id"], now, _json({"reason": reason, "targets": []})))
+                         (host["host_id"], host["node_id"], now, _json({"reason": reason, "targets": [], "target_readiness": target_readiness})))
             continue  # Never use a node to probe its own public endpoint.
         pinned_endpoint_keys = set()
         if state and state["state"] == "blocked":
@@ -468,15 +534,32 @@ def _schedule(conn, now):
         )
         if not targets:
             preserved_blocked_endpoints = sorted([list(key) for key in pinned_endpoint_keys])
+            target_readiness = {
+                "status": sample_metadata.get("readiness", "public_tcp_endpoint_missing"),
+                "reason": sample_metadata.get("reason") or _reason,
+                "next_step": sample_metadata.get("next_step", ""),
+            }
             conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
-                         (host["host_id"], host["node_id"], now, _json({"reason": _reason, "targets": [], "sample": sample_metadata["sample"], "blocked_endpoint_keys": preserved_blocked_endpoints})))
+                         (host["host_id"], host["node_id"], now, _json({"reason": _reason, "targets": [], "sample": sample_metadata["sample"], "target_readiness": target_readiness, "blocked_endpoint_keys": preserved_blocked_endpoints})))
             continue
         cycle_id = str(uuid.uuid4())
         targets_json = _json(targets)
         conn.execute("INSERT INTO gfw_cycles(id,host_id,node_id,targets_json,status,created_at,deadline_at,result_json) VALUES(?,?,?,?,'queued',?,?,?)",
                      (cycle_id, host["host_id"], host["node_id"], targets_json, now, now + JOB_SECONDS, _json(sample_metadata)))
-        conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at) VALUES(?,?,?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at",
-                     (host["host_id"], host["node_id"], now))
+        try:
+            pending_evidence = json.loads(state["evidence_json"] or "{}") if state else {}
+        except (TypeError, ValueError):
+            pending_evidence = {}
+        if not isinstance(pending_evidence, dict):
+            pending_evidence = {}
+        if not state or state["state"] in {"unassessed", "unknown"}:
+            pending_evidence["reason"] = ""
+        pending_evidence.update({
+            "sample": sample_metadata.get("sample", {}),
+            "target_readiness": {"status": "ready", "reason": "", "next_step": "探针任务已排队；等待探测结果回传"},
+        })
+        conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,evidence_json) VALUES(?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,evidence_json=excluded.evidence_json",
+                     (host["host_id"], host["node_id"], now, _json(pending_evidence)))
         for role in ("mainland", "overseas"):
             for source in host_roles[role]:
                 job_id = str(uuid.uuid4())
@@ -773,15 +856,53 @@ def status_map(conn, now):
         history = [dict(event) for event in conn.execute("SELECT event_type,at,duration_seconds,normal_duration_seconds FROM gfw_events WHERE host_id=? ORDER BY at DESC,id DESC LIMIT 6", (host["host_id"],))]
         host_sources, source_reason = _source_coverage_for_host(active_roles, host["node_id"])
         source_counts = {role: len(sources) for role, sources in host_sources.items()}
+        host_last_seen = int(host["last_seen"] or 0)
+        host_online = host_last_seen > 0 and now - host_last_seen <= STALE_SECONDS
+        last_sample_at = int(state_row["last_sample_at"] or 0) if state_row else 0
+        try:
+            cached_evidence = json.loads(state_row["evidence_json"] or "{}") if state_row else {}
+        except (TypeError, ValueError):
+            cached_evidence = {}
+        target_readiness = cached_evidence.get("target_readiness", {}) if isinstance(cached_evidence, dict) else {}
+        target_readiness = dict(target_readiness) if isinstance(target_readiness, dict) else {}
+        cached_sample = cached_evidence.get("sample", {}) if isinstance(cached_evidence, dict) else {}
+        if isinstance(cached_sample, dict):
+            for key in ("eligible_containers", "sampled_containers", "eligible_endpoints", "sampled_endpoints", "ambiguous_endpoints"):
+                target_readiness.setdefault(key, int(cached_sample.get(key) or 0))
+        if not host_online:
+            target_readiness.update({"status": "host_offline", "reason": "母鸡 Agent 心跳已过期，当前不会为该主机调度探测", "next_step": "先恢复 Agent 上报；恢复后系统会自动发现端点并安排探测"})
+        elif source_reason:
+            target_readiness.update({"status": "probe_coverage_missing", "reason": source_reason + "；本机不会作为自己的探测来源", "next_step": "恢复离线探针或补足不同主机上的国内/海外探针"})
+        elif not target_readiness:
+            if not state_row:
+                target_readiness = {"status": "awaiting_scheduler", "reason": "服务端尚未执行该主机的首轮发现", "next_step": "等待一个 Agent 轮询周期；若持续无任务，检查服务端 GFW 调度日志"}
+            else:
+                cached_reason = str(cached_evidence.get("reason") or "") if isinstance(cached_evidence, dict) else ""
+                sample = cached_evidence.get("sample", {}) if isinstance(cached_evidence, dict) else {}
+                if "公网 IPv4" in cached_reason:
+                    readiness = "public_address_missing"
+                    next_step = "确认宿主机或容器公网地址；上游 NAT 地址不会被自动猜测"
+                elif "网卡" in cached_reason or "网卡地址清单" in cached_reason:
+                    readiness = "interface_inventory_unavailable"
+                    next_step = "检查 Agent 主机网卡清单采集与上报"
+                elif "多个容器" in cached_reason:
+                    readiness = "ambiguous_container_mapping"
+                    next_step = "确保公网 IP:端口映射唯一指向一个 Incus 或 Podman 容器"
+                elif "公网容器 TCP 端口" in cached_reason:
+                    readiness = "public_tcp_endpoint_missing"
+                    next_step = "检查容器监听端口和明确的 Incus/Podman TCP 映射"
+                else:
+                    readiness = "awaiting_scheduler"
+                    next_step = "等待服务端下一轮发现；持续无任务时检查服务端 GFW 调度日志"
+                target_readiness = {"status": readiness, "reason": cached_reason, "next_step": next_step}
+                if isinstance(sample, dict):
+                    for key in ("eligible_containers", "sampled_containers", "eligible_endpoints", "sampled_endpoints", "ambiguous_endpoints"):
+                        target_readiness[key] = int(sample.get(key) or 0)
         if state_row:
             state = state_row["state"]
-            last_sample_at = int(state_row["last_sample_at"] or 0)
             stale = last_sample_at > 0 and now - last_sample_at > STALE_SECONDS
             coverage_insufficient = bool(source_reason)
-            try:
-                evidence = json.loads(state_row["evidence_json"] or "{}")
-            except ValueError:
-                evidence = {}
+            evidence = cached_evidence
             reason = str(evidence.get("reason") or "") if isinstance(evidence, dict) else ""
             sample = evidence.get("sample", {}) if isinstance(evidence, dict) else {}
             if not isinstance(sample, dict):
@@ -805,23 +926,35 @@ def status_map(conn, now):
                 reason = source_reason + "；本机不会作为自己的探测来源"
                 if stale:
                     reason = "探测数据已过期；" + reason
+            elif not host_online:
+                reason = "母鸡 Agent 心跳已过期；探测数据不会自动视为恢复"
             elif status == "investigating" and not reason:
                 reason = "本轮证据不足或端点变化；当前不确认恢复，也不把未知样本计入持续时长"
             result[host["host_id"]] = {"status": status, "last_known_state": state, "stale": stale,
                 "since": since, "duration_seconds": duration, "last_normal_duration_seconds": int(state_row["last_normal_duration"] or 0),
                 "blocked_count": int(state_row["blocked_count"] or 0), "last_sample_at": int(state_row["last_sample_at"] or 0),
+                "host_last_seen": host_last_seen,
                 "last_classification": state_row["last_classification"], "pending_block_rounds": int(state_row["pending_block_count"] or 0),
                 "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"],
                 "available_mainland_sources": source_counts["mainland"], "available_overseas_sources": source_counts["overseas"],
                 "evidence": evidence.get("targets", []) if isinstance(evidence, dict) else [], "sample": sample,
-                "reason": reason or ("探测数据已过期" if stale else ""), "history": history}
+                "reason": reason or ("探测数据已过期" if stale else ""), "target_readiness": target_readiness, "history": history}
         else:
+            if source_reason:
+                reason = source_reason + "；本机不会作为自己的探测来源"
+            elif not host_online:
+                reason = "母鸡 Agent 心跳已过期，探测任务暂不调度"
+            elif target_readiness and target_readiness.get("reason"):
+                reason = target_readiness["reason"]
+            else:
+                reason = "探针与端点覆盖已就绪，等待首轮自动 TCP 抽测"
             result[host["host_id"]] = {"status": "unassessed", "last_known_state": "unassessed", "stale": False,
                 "since": 0, "duration_seconds": 0, "last_normal_duration_seconds": 0, "blocked_count": 0,
                 "last_sample_at": 0, "last_classification": "unknown", "pending_block_rounds": 0,
                 "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"], "evidence": [], "sample": {},
+                "host_last_seen": host_last_seen,
                 "available_mainland_sources": source_counts["mainland"], "available_overseas_sources": source_counts["overseas"],
-                "reason": source_reason + "；本机不会作为自己的探测来源" if source_reason else "探针覆盖已就绪，等待首轮自动发现端点并完成 TCP 抽测", "history": history}
+                "reason": reason, "target_readiness": target_readiness, "history": history}
     return result
 
 
@@ -838,6 +971,8 @@ def attach(app, db, verify_signature, signed_response):
             candidates = [dict(row) for row in conn.execute("SELECT host_id,node_id,agent_version,last_seen FROM hosts WHERE node_id<>'' ORDER BY host_id LIMIT 300")]
             role_rows = {row["node_id"]: dict(row) for row in conn.execute("SELECT node_id,role,region,carrier FROM gfw_probe_roles")}
             active_roles = _active_roles(conn, now)
+            probe_health = _probe_health_snapshot(conn, now)
+            probe_by_node = {source["node_id"]: source for source in probe_health["sources"]}
             online_hosts = [item for item in candidates if now - int(item.get("last_seen") or 0) <= STALE_SECONDS]
             target_hosts = 0
             ready_hosts = 0
@@ -854,6 +989,7 @@ def attach(app, db, verify_signature, signed_response):
                 if job["status"] in probe_job_counts:
                     probe_job_counts[job["status"]] = int(job["count"] or 0)
             last_probe_job = conn.execute("SELECT MAX(finished_at) FROM gfw_probe_jobs WHERE created_at>=? AND status IN ('complete','failed','expired')", (probe_jobs_since,)).fetchone()
+            latest_probe_job = conn.execute("SELECT status,created_at,finished_at,error FROM gfw_probe_jobs ORDER BY created_at DESC,id DESC LIMIT 1").fetchone()
             for item in online_hosts:
                 _source_candidates, source_reason = _source_coverage_for_host(active_roles, item["node_id"])
                 if not source_reason:
@@ -881,6 +1017,33 @@ def attach(app, db, verify_signature, signed_response):
                 else:
                     label = reason or "未发现可验证的公网 TCP 端点"
                     missing_reasons[label] = missing_reasons.get(label, 0) + 1
+            role_health = probe_health["roles"]
+            recommendations = []
+            if role_health["mainland"]["online"] < MIN_MAINLAND:
+                recommendations.append(f"国内探针在线 {role_health['mainland']['online']}/{MIN_MAINLAND}：恢复离线节点或配置更多不同网络来源的国内探针。")
+            if role_health["overseas"]["online"] < MIN_OVERSEAS:
+                recommendations.append(f"海外探针在线 {role_health['overseas']['online']}/{MIN_OVERSEAS}：恢复或配置至少 {MIN_OVERSEAS} 个海外探针。")
+            if role_health["mainland"]["online_missing_carrier"] or role_health["mainland"]["online_missing_region"]:
+                recommendations.append(
+                    f"有在线国内探针缺少运营商标注 {role_health['mainland']['online_missing_carrier']} 个、地区标注 {role_health['mainland']['online_missing_region']} 个；"
+                    "请在节点卡片填写，以便核对探测网络是否独立。缺少标注不会被伪装成已覆盖。"
+                )
+            if online_hosts and target_hosts < len(online_hosts):
+                top_target_reason = sorted(missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[0][0] if missing_reasons else "未发现公网 TCP 端点"
+                recommendations.append(f"{len(online_hosts) - target_hosts} 台在线母鸡没有可探测端点；最常见原因：{top_target_reason}。")
+            if ready_hosts and not probe_job_counts["complete"] and not probe_job_counts["queued"] and not probe_job_counts["running"]:
+                if probe_job_counts["failed"] or probe_job_counts["expired"]:
+                    recommendations.append("存在可探测主机但近 24 小时没有成功回传；检查探针 Agent 的 GFW TCP 探测能力与出站连接。")
+                else:
+                    recommendations.append("存在可探测主机但近 24 小时没有探测任务；检查服务端调度日志与 Agent 轮询状态。")
+            if not recommendations:
+                recommendations.append("探针角色、在线状态与端点覆盖均满足当前要求；系统会自动按轮换策略抽测。")
+            latest_probe = {
+                "status": str(latest_probe_job["status"] or "") if latest_probe_job else "",
+                "created_at": int(latest_probe_job["created_at"] or 0) if latest_probe_job else 0,
+                "finished_at": int(latest_probe_job["finished_at"] or 0) if latest_probe_job else 0,
+                "error": str(latest_probe_job["error"] or "")[:240] if latest_probe_job else "",
+            }
             return {"minimum_mainland": MIN_MAINLAND, "minimum_overseas": MIN_OVERSEAS,
                     "coverage": _role_counts(conn, now),
                     "target_coverage": {
@@ -894,15 +1057,21 @@ def attach(app, db, verify_signature, signed_response):
                         "sampled_containers": sampled_containers,
                         "sample_limit_per_host": DAILY_CONTAINER_SAMPLE_LIMIT,
                         "sample_date_utc": _utc_sample_date(now).isoformat(),
+                        "inventory_stale_seconds": STALE_SECONDS,
                         "missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
                         "probe_missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(probe_missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
                     },
                     "probe_health": {"window_seconds": 86400, "jobs": probe_job_counts,
-                                     "last_finished_at": int(last_probe_job[0] or 0) if last_probe_job else 0},
+                                     "last_finished_at": int(last_probe_job[0] or 0) if last_probe_job else 0,
+                                     "last_attempt": latest_probe,
+                                     "roles": role_health,
+                                     "recommendations": recommendations},
                     "candidates": [{**item,
                                     "role": role_rows.get(item["node_id"], {}).get("role", "disabled"),
                                     "region": role_rows.get(item["node_id"], {}).get("region", ""),
-                                    "carrier": role_rows.get(item["node_id"], {}).get("carrier", "")}
+                                    "carrier": role_rows.get(item["node_id"], {}).get("carrier", ""),
+                                    "probe_online": probe_by_node.get(item["node_id"], {}).get("online", False) if item["node_id"] in probe_by_node else now - int(item.get("last_seen") or 0) <= STALE_SECONDS,
+                                    "last_seen_age_seconds": max(0, now - int(item.get("last_seen") or 0)) if item.get("last_seen") else None}
                                    for item in candidates]}
         finally:
             conn.close()

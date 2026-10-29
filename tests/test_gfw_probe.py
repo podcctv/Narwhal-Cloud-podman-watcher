@@ -121,5 +121,74 @@ class GfwProbeFailurePersistenceTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 403)
 
 
+class GfwCoverageDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.now = int(time.time())
+        self.conn.executescript("""
+          CREATE TABLE hosts(host_id TEXT PRIMARY KEY,last_seen INTEGER NOT NULL,agent_version TEXT NOT NULL DEFAULT 'unknown',node_id TEXT NOT NULL DEFAULT '',config_json TEXT NOT NULL DEFAULT '{}');
+          CREATE TABLE ops_hosts(node TEXT PRIMARY KEY,payload TEXT NOT NULL DEFAULT '{}');
+          CREATE TABLE host_security(id INTEGER PRIMARY KEY AUTOINCREMENT,host_id TEXT NOT NULL,ts INTEGER NOT NULL,payload_json TEXT NOT NULL);
+          CREATE TABLE reports(id INTEGER PRIMARY KEY AUTOINCREMENT,host_id TEXT NOT NULL,container_name TEXT NOT NULL,runtime TEXT NOT NULL,project TEXT NOT NULL DEFAULT '',ts INTEGER NOT NULL,payload_json TEXT NOT NULL);
+        """)
+        gfw_monitor.initialize(self.conn)
+        self.target_host = "target-vps"
+        self.target_node = "target-node"
+        self.conn.execute("INSERT INTO hosts(host_id,last_seen,node_id) VALUES(?,?,?)", (self.target_host, self.now, self.target_node))
+        probes = [
+            ("mainland-a", "probe-cn-a", "mainland", "Zaozhuang", "Telecom", self.now - 10),
+            ("mainland-b", "probe-cn-b", "mainland", "Shanghai", "Unicom", self.now - 20),
+            ("overseas-a", "probe-us-a", "overseas", "US", "", self.now - 30),
+        ]
+        for host_id, node_id, role, region, carrier, last_seen in probes:
+            self.conn.execute("INSERT INTO hosts(host_id,last_seen,node_id) VALUES(?,?,?)", (host_id, last_seen, node_id))
+            self.conn.execute("INSERT INTO ops_hosts(node,payload) VALUES(?,?)", (node_id, json.dumps({"report_interval": 300})))
+            self.conn.execute("INSERT INTO gfw_probe_roles(node_id,host_id,role,region,carrier,updated_at) VALUES(?,?,?,?,?,?)",
+                              (node_id, host_id, role, region, carrier, self.now))
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_probe_health_reports_online_offline_and_network_labels(self):
+        self.conn.execute("UPDATE hosts SET last_seen=? WHERE node_id='probe-cn-b'", (self.now - 4000,))
+        self.conn.commit()
+        health = gfw_monitor._probe_health_snapshot(self.conn, self.now)
+        self.assertEqual(health["roles"]["mainland"]["configured"], 2)
+        self.assertEqual(health["roles"]["mainland"]["online"], 1)
+        self.assertEqual(health["roles"]["mainland"]["offline"], 1)
+        self.assertEqual(health["roles"]["mainland"]["distinct_carriers"], 1)
+        self.assertEqual(health["roles"]["overseas"]["online_missing_region"], 0)
+
+    def test_status_map_explains_missing_public_tcp_listener(self):
+        self.conn.execute(
+            "INSERT INTO host_security(host_id,ts,payload_json) VALUES(?,?,?)",
+            (self.target_host, self.now, json.dumps({"host_firewall": {"interface_inventory": {
+                "status": "ready", "interfaces": [{"name": "ens3", "addresses": ["8.8.8.8/24"]}],
+            }}})),
+        )
+        self.conn.execute(
+            "INSERT INTO reports(host_id,container_name,runtime,project,ts,payload_json) VALUES(?,?,?,?,?,?)",
+            (self.target_host, "container-a", "incus", "default", self.now,
+             json.dumps({"id": "container-id", "network_addresses": ["10.0.0.2"],
+                         "security": {"listening_ports": [], "network_exposure": []}})),
+        )
+        self.conn.commit()
+        gfw_monitor._schedule(self.conn, self.now)
+        self.conn.commit()
+        status = gfw_monitor.status_map(self.conn, self.now)[self.target_host]
+        self.assertEqual(status["target_readiness"]["status"], "public_tcp_endpoint_missing")
+        self.assertIn("实际监听端口", status["target_readiness"]["reason"])
+        self.assertIn("检查容器监听端口", status["target_readiness"]["next_step"])
+
+    def test_status_map_reports_expired_host_heartbeat_before_waiting_for_a_probe(self):
+        self.conn.execute("UPDATE hosts SET last_seen=? WHERE host_id=?", (self.now - gfw_monitor.STALE_SECONDS - 1, self.target_host))
+        self.conn.commit()
+        status = gfw_monitor.status_map(self.conn, self.now)[self.target_host]
+        self.assertEqual(status["target_readiness"]["status"], "host_offline")
+        self.assertIn("心跳已过期", status["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

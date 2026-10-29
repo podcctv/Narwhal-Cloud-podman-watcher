@@ -245,6 +245,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           : `${fmtNumber(collectionHealth.missing_count || 0, 0)} 项待补齐`;
         const gfwStatus = gfw.status || 'unassessed';
         const gfwSample = gfw.sample || {};
+        const targetReadiness = gfw.target_readiness || {};
         const hasDailyGfwSample = gfwSample.policy === 'daily_container_rotation';
         const gfwLevel: Level = gfwStatus === 'blocked' ? 'critical'
           : gfwStatus === 'investigating' ? 'warning'
@@ -253,7 +254,15 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           blocked: hasDailyGfwSample ? 'GFW Blocked · 抽测端点国内异常' : 'GFW Blocked · 国内探测异常',
           investigating: gfw.last_known_state === 'blocked' ? '状态待复核' : '疑似受阻 · 连续确认中',
           normal: hasDailyGfwSample ? '抽测端点国内外可达' : '国内外可达',
-          recovered: hasDailyGfwSample ? '抽测端点已恢复' : '已恢复', stale: '数据过期', unassessed: '待评估',
+          recovered: hasDailyGfwSample ? '抽测端点已恢复' : '已恢复', stale: '数据过期',
+          unassessed: targetReadiness.status === 'host_offline' ? '母鸡离线'
+            : targetReadiness.status === 'probe_coverage_missing' ? '探针覆盖不足'
+            : targetReadiness.status === 'interface_inventory_unavailable' ? '网卡清单不可用'
+            : targetReadiness.status === 'public_address_missing' ? '未发现公网地址'
+            : targetReadiness.status === 'ambiguous_container_mapping' ? '端口归属不唯一'
+            : targetReadiness.status === 'public_tcp_endpoint_missing' ? '缺少可测端口'
+            : targetReadiness.status === 'awaiting_scheduler' ? '等待自动调度'
+            : targetReadiness.status === 'ready' ? '等待首轮探测' : '探测条件不足',
         };
         const gfwLastState = gfw.last_known_state === 'blocked' ? 'GFW Blocked' : gfw.last_known_state === 'recovered' ? '已恢复' : gfw.last_known_state === 'normal' ? '国内外可达' : '未评估';
         const gfwDuration = gfwStatus === 'blocked' ? `持续 ${durationDays(gfw.duration_seconds)}`
@@ -263,7 +272,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           : gfwStatus === 'investigating' && gfw.pending_block_rounds ? `失败迹象 ${gfw.pending_block_rounds}/3 轮`
           : gfwStatus === 'investigating' ? '连通性证据待复核'
           : gfwStatus === 'stale' ? `上次状态：${gfwLastState}`
-          : gfw.reason || '探针会自动采集可验证的公网容器 TCP 端口';
+          : gfw.reason || targetReadiness.reason || '探针会自动采集可验证的公网容器 TCP 端口';
         const gfwEvidence = gfw.evidence || [];
         const comparedEndpoint = gfwEvidence.find(item => item.status === 'blocked') || gfwEvidence.find(item => item.status === 'normal') || gfwEvidence[0];
 
@@ -323,6 +332,13 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                 {gfwSample.containers.map((container, index) => <p key={`${container.runtime}-${container.project}-${container.name}-${index}`} className="break-all">
                   {container.runtime || '容器'}{container.project ? `/${container.project}` : ''}/{container.name || '未知'}{container.endpoints?.length ? ` · ${container.endpoints.map(endpoint => `${endpoint.ip}:${endpoint.port}`).join(', ')}` : ''}
                 </p>)}
+              </div>}
+              {targetReadiness.status && <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
+                <p className="font-semibold text-slate-200">自动探测条件：{gfwLabels[gfwStatus] || '待核实'}</p>
+                <p>{targetReadiness.reason || '已发现可探测端点，等待调度器与独立探针完成首轮采样。'}</p>
+                {Number(targetReadiness.eligible_endpoints || 0) > 0 && <p>可确认端点 {fmtNumber(targetReadiness.eligible_endpoints, 0)} 个 · 今日抽测 {fmtNumber(targetReadiness.sampled_containers, 0)}/{fmtNumber(targetReadiness.eligible_containers, 0)} 个容器</p>}
+                {Number(targetReadiness.ambiguous_endpoints || 0) > 0 && <p>映射不唯一 {fmtNumber(targetReadiness.ambiguous_endpoints, 0)} 个；这些端点不会用于判定。</p>}
+                {targetReadiness.next_step && <p className="text-slate-300">处理：{targetReadiness.next_step}</p>}
               </div>}
               {comparedEndpoint ? <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
                 {comparedEndpoint.container_name && <span className="break-all text-slate-200">{comparedEndpoint.runtime || '容器'}{comparedEndpoint.project ? `/${comparedEndpoint.project}` : ''}/{comparedEndpoint.container_name}</span>}
