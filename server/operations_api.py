@@ -816,6 +816,11 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 item["latest_update"] = dict(action) if action else None
             progress = rows(conn,"SELECT n.*,u.version,u.revision,u.status AS campaign_status,u.payload AS campaign_payload FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign ORDER BY n.campaign DESC LIMIT 500")
             for item in progress:
+                current = conn.execute("SELECT agent_version,last_seen FROM hosts WHERE host_id=?", (item["host_id"],)).fetchone()
+                item["target_version"] = str(item.get("version") or "unknown")
+                item["actual_version"] = str(current["agent_version"] or "unknown") if current else "unknown"
+                item["node_last_seen"] = int(current["last_seen"] or 0) if current else 0
+                item["version_matches_target"] = item["actual_version"] == item["target_version"]
                 action = conn.execute("SELECT action_type,status,result_message,updated_at,attempts FROM security_actions WHERE id=?", (item.get("action_id"),)).fetchone() if item.get("action_id") else None
                 item["action"] = dict(action) if action else None
                 metadata = ops.loads(item.pop("campaign_payload", "{}"))

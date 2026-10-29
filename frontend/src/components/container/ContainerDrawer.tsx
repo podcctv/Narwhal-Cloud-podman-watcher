@@ -79,6 +79,11 @@ const guardTone = (state?: string) => {
 };
 
 const guardStateLabel = (state?: string) => RESOURCE_GUARD_STATES[state || ''] || '状态待核实';
+const psiPercent = (source: any, resource: 'cpu' | 'memory' | 'io') => {
+  const item = source?.[resource];
+  const value = item?.some?.avg10;
+  return item?.status === 'ready' && Number.isFinite(Number(value)) ? `${fmtNumber(Number(value), 2)}%` : '不可用';
+};
 
 const formatIoRate = (value?: string | number) => {
   if (value === 'max' || value === undefined || value === null || value === '') return '不限';
@@ -258,6 +263,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const pairing = sec.panel_pairing;
   const cpuGuard = sec.cpu_guard;
   const ioGuard = sec.io_guard;
+  const resourcePressure = sec.resource_pressure;
   const activeActionableAlert = activeAlerts.find((alert) => {
     if (
       alert.host_id !== identity.host_id ||
@@ -516,6 +522,13 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     <p className="text-[11px] leading-relaxed text-slate-400">{ioGuard?.message || (ioGuard?.state === 'normal' ? '当前未达到持续宿主机磁盘压力及容器归属条件。' : '等待 Agent 采样与读回状态。')}</p>
                     {ioGuard?.recheck_interval_seconds ? <p className="text-[10px] text-slate-500">每约 {formatMinutes(ioGuard.recheck_interval_seconds)} 复查一次。</p> : null}
                   </div>
+                </div>
+                <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[11px] text-slate-300">
+                  <p className="font-semibold text-slate-200">PSI 等待压力（近 10 秒）</p>
+                  <p className="mt-1">母鸡 CPU / 内存 / 磁盘 I/O：{psiPercent(resourcePressure?.host, 'cpu')} · {psiPercent(resourcePressure?.host, 'memory')} · {psiPercent(resourcePressure?.host, 'io')}</p>
+                  <p>容器 CPU / 内存 / 磁盘 I/O：{psiPercent(resourcePressure?.container, 'cpu')} · {psiPercent(resourcePressure?.container, 'memory')} · {psiPercent(resourcePressure?.container, 'io')}</p>
+                  <p className="mt-1 text-sky-200">{resourcePressure?.explanation || resourcePressure?.container?.reason || '等待新版 Agent 上报 PSI；部分旧内核或 cgroup 配置不提供该指标。'}</p>
+                  <p className="mt-1 text-slate-500">PSI 表示任务因资源压力而等待的时间比例；它辅助区分持续计算与资源争用，不用于认定用户行为。</p>
                 </div>
               </section>
             )}

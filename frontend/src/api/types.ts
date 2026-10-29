@@ -88,6 +88,13 @@ export interface ProtocolGuardSummary {
 }
 
 export interface ContainerSecurity {
+  resource_pressure?: {
+    status?: 'ready' | 'partial' | 'unsupported' | 'unavailable' | string;
+    classification?: string;
+    explanation?: string;
+    host?: Record<string, any>;
+    container?: Record<string, any>;
+  };
   vmess_guard?: ProtocolGuardSummary;
   trojan_guard?: ProtocolGuardSummary;
   cpu_guard?: {
@@ -350,6 +357,18 @@ export interface SecurityAlert {
 }
 
 export interface SecurityStatusItem {
+  agent_version?: string;
+  last_seen?: number;
+  last_seen_utc8?: string;
+  collection_health?: {
+    status?: 'healthy' | 'partial' | 'unavailable' | 'stale' | string;
+    last_report_at?: number;
+    last_seen?: number;
+    report_age_seconds?: number | null;
+    agent_version?: string;
+    missing_count?: number;
+    issues?: Array<{ component?: string; state?: string; reason?: string; guidance?: string }>;
+  };
   gfw_reachability?: {
     status?: 'unassessed' | 'normal' | 'blocked' | 'recovered' | 'investigating' | 'stale' | string;
     last_known_state?: string;
@@ -376,7 +395,7 @@ export interface SecurityStatusItem {
       follow_up_blocked_endpoint?: boolean;
       containers?: Array<{ runtime?: string; project?: string; name?: string; endpoints?: Array<{ ip?: string; port?: number }> }>;
     };
-    evidence?: Array<{ ip?: string; port?: number; interface?: string; runtime?: string; project?: string; container_name?: string; status?: string; mainland?: { success?: number; failed?: number; total?: number }; overseas?: { success?: number; failed?: number; total?: number }; probes?: Array<{ source_host_id?: string; role?: 'mainland' | 'overseas' | string; job_status?: string; success?: boolean | null; latency_ms?: number | null; error?: string }> }>;
+    evidence?: Array<{ ip?: string; port?: number; interface?: string; runtime?: string; project?: string; container_name?: string; status?: string; mainland?: { success?: number; failed?: number; total?: number }; overseas?: { success?: number; failed?: number; total?: number }; probes?: Array<{ source_host_id?: string; source_region?: string; source_carrier?: string; role?: 'mainland' | 'overseas' | string; job_status?: string; success?: boolean | null; latency_ms?: number | null; error?: string }> }>;
     history?: Array<{ event_type?: 'blocked' | 'recovered' | string; at?: number; duration_seconds?: number; normal_duration_seconds?: number }>;
   };
   enabled?: boolean;

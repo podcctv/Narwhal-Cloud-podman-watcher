@@ -323,6 +323,7 @@ def _strictly_tighter(target: dict[str, str], current: dict[str, str]) -> bool:
 def _trigger_alert(container: dict[str, Any], record: dict[str, Any], action: dict[str, Any], message: str) -> dict[str, Any]:
     succeeded = action.get("succeeded") is True
     restored = record.get("stage") == "restored"
+    security = container.get("security") if isinstance(container.get("security"), dict) else {}
     io_detail = {
         "state": record.get("stage"),
         "device": record.get("device"),
@@ -340,6 +341,7 @@ def _trigger_alert(container: dict[str, Any], record: dict[str, Any], action: di
         "reason_is_user_abuse": False,
         "limit_applied": succeeded,
         "restore_failed": record.get("stage") == "restore_failed",
+        "resource_pressure": security.get("resource_pressure"),
     }
     return {
         "type": "io_pressure_protection",

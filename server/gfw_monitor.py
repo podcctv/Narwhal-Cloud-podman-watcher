@@ -345,7 +345,8 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
 def initialize(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS gfw_probe_roles(
-      node_id TEXT PRIMARY KEY,host_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('mainland','overseas')),updated_at INTEGER NOT NULL);
+      node_id TEXT PRIMARY KEY,host_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('mainland','overseas')),
+      updated_at INTEGER NOT NULL,region TEXT NOT NULL DEFAULT '',carrier TEXT NOT NULL DEFAULT '');
     CREATE TABLE IF NOT EXISTS gfw_cycles(
       id TEXT PRIMARY KEY,host_id TEXT NOT NULL,node_id TEXT NOT NULL,targets_json TEXT NOT NULL,status TEXT NOT NULL,
       created_at INTEGER NOT NULL,deadline_at INTEGER NOT NULL,finished_at INTEGER NOT NULL DEFAULT 0,result_json TEXT NOT NULL DEFAULT '{}');
@@ -354,7 +355,8 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS gfw_probe_jobs(
       id TEXT PRIMARY KEY,cycle_id TEXT NOT NULL,source_host_id TEXT NOT NULL,source_node_id TEXT NOT NULL,role TEXT NOT NULL,
       targets_json TEXT NOT NULL,targets_hash TEXT NOT NULL,lease TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,
-      deadline_at INTEGER NOT NULL,finished_at INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '');
+      deadline_at INTEGER NOT NULL,finished_at INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',
+      source_region TEXT NOT NULL DEFAULT '',source_carrier TEXT NOT NULL DEFAULT '');
     CREATE INDEX IF NOT EXISTS gfw_jobs_source_queue ON gfw_probe_jobs(source_node_id,status,created_at);
     CREATE TABLE IF NOT EXISTS gfw_probe_results(
       job_id TEXT NOT NULL,target_id TEXT NOT NULL,success INTEGER NOT NULL,latency_ms REAL,error TEXT NOT NULL,attempts INTEGER NOT NULL,
@@ -370,6 +372,16 @@ def initialize(conn):
       duration_seconds INTEGER NOT NULL DEFAULT 0,normal_duration_seconds INTEGER NOT NULL DEFAULT 0,evidence_json TEXT NOT NULL DEFAULT '{}');
     CREATE INDEX IF NOT EXISTS gfw_events_host_time ON gfw_events(host_id,at DESC);
     """)
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(gfw_probe_roles)")}
+    if "region" not in columns:
+        conn.execute("ALTER TABLE gfw_probe_roles ADD COLUMN region TEXT NOT NULL DEFAULT ''")
+    if "carrier" not in columns:
+        conn.execute("ALTER TABLE gfw_probe_roles ADD COLUMN carrier TEXT NOT NULL DEFAULT ''")
+    job_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(gfw_probe_jobs)")}
+    if "source_region" not in job_columns:
+        conn.execute("ALTER TABLE gfw_probe_jobs ADD COLUMN source_region TEXT NOT NULL DEFAULT ''")
+    if "source_carrier" not in job_columns:
+        conn.execute("ALTER TABLE gfw_probe_jobs ADD COLUMN source_carrier TEXT NOT NULL DEFAULT ''")
 
 
 def _role_counts(conn, now):
@@ -385,7 +397,7 @@ def _role_counts(conn, now):
 
 
 def _active_roles(conn, now):
-    rows = conn.execute("SELECT r.host_id,r.node_id,r.role,h.last_seen,o.payload FROM gfw_probe_roles r JOIN hosts h ON h.node_id=r.node_id LEFT JOIN ops_hosts o ON o.node=h.node_id ORDER BY r.role,r.host_id").fetchall()
+    rows = conn.execute("SELECT r.host_id,r.node_id,r.role,r.region,r.carrier,h.last_seen,o.payload FROM gfw_probe_roles r JOIN hosts h ON h.node_id=r.node_id LEFT JOIN ops_hosts o ON o.node=h.node_id ORDER BY r.role,r.host_id").fetchall()
     result = {"mainland": [], "overseas": []}
     for row in rows:
         try:
@@ -393,7 +405,9 @@ def _active_roles(conn, now):
         except (ValueError, TypeError):
             interval = 300
         if now - int(row["last_seen"] or 0) <= max(600, min(1800, interval * 3)):
-            result[row["role"]].append({"host_id": row["host_id"], "node_id": row["node_id"]})
+            result[row["role"]].append({"host_id": row["host_id"], "node_id": row["node_id"],
+                                         "region": str(row["region"] or "")[:80],
+                                         "carrier": str(row["carrier"] or "")[:100]})
     result["mainland"] = result["mainland"][:5]
     result["overseas"] = result["overseas"][:3]
     return result
@@ -466,8 +480,8 @@ def _schedule(conn, now):
         for role in ("mainland", "overseas"):
             for source in host_roles[role]:
                 job_id = str(uuid.uuid4())
-                conn.execute("INSERT INTO gfw_probe_jobs(id,cycle_id,source_host_id,source_node_id,role,targets_json,targets_hash,lease,status,created_at,deadline_at) VALUES(?,?,?,?,?,?,?,?, 'queued',?,?)",
-                             (job_id, cycle_id, source["host_id"], source["node_id"], role, targets_json, _digest(targets), secrets.token_urlsafe(32), now, now + JOB_SECONDS))
+                conn.execute("INSERT INTO gfw_probe_jobs(id,cycle_id,source_host_id,source_node_id,role,targets_json,targets_hash,lease,status,created_at,deadline_at,source_region,source_carrier) VALUES(?,?,?,?,?,?,?,?, 'queued',?,?,?,?)",
+                             (job_id, cycle_id, source["host_id"], source["node_id"], role, targets_json, _digest(targets), secrets.token_urlsafe(32), now, now + JOB_SECONDS, source.get("region", ""), source.get("carrier", "")))
 
 
 def _apply_cycle(conn, cycle, now):
@@ -496,6 +510,8 @@ def _apply_cycle(conn, cycle, now):
             probe_sources.append({
                 "source_host_id": str(job["source_host_id"] or "")[:200],
                 "role": job["role"],
+                "source_region": str(job["source_region"] or "")[:80],
+                "source_carrier": str(job["source_carrier"] or "")[:100],
                 "job_status": job["status"],
                 "success": bool(result["success"]) if result else None,
                 "latency_ms": result["latency_ms"] if result else None,
@@ -820,7 +836,7 @@ def attach(app, db, verify_signature, signed_response):
         conn, now = db(), int(time.time())
         try:
             candidates = [dict(row) for row in conn.execute("SELECT host_id,node_id,agent_version,last_seen FROM hosts WHERE node_id<>'' ORDER BY host_id LIMIT 300")]
-            roles = {row["node_id"]: row["role"] for row in conn.execute("SELECT node_id,role FROM gfw_probe_roles")}
+            role_rows = {row["node_id"]: dict(row) for row in conn.execute("SELECT node_id,role,region,carrier FROM gfw_probe_roles")}
             active_roles = _active_roles(conn, now)
             online_hosts = [item for item in candidates if now - int(item.get("last_seen") or 0) <= STALE_SECONDS]
             target_hosts = 0
@@ -883,7 +899,11 @@ def attach(app, db, verify_signature, signed_response):
                     },
                     "probe_health": {"window_seconds": 86400, "jobs": probe_job_counts,
                                      "last_finished_at": int(last_probe_job[0] or 0) if last_probe_job else 0},
-                    "candidates": [{**item, "role": roles.get(item["node_id"], "disabled")} for item in candidates]}
+                    "candidates": [{**item,
+                                    "role": role_rows.get(item["node_id"], {}).get("role", "disabled"),
+                                    "region": role_rows.get(item["node_id"], {}).get("region", ""),
+                                    "carrier": role_rows.get(item["node_id"], {}).get("carrier", "")}
+                                   for item in candidates]}
         finally:
             conn.close()
 
@@ -897,9 +917,14 @@ def attach(app, db, verify_signature, signed_response):
             payload = json.loads(raw)
         except Exception:
             raise HTTPException(400, "invalid JSON") from None
-        if not isinstance(payload, dict) or set(payload) != {"host_id", "node_id", "role"} or not all(isinstance(payload.get(k), str) for k in payload):
+        if not isinstance(payload, dict) or not {"host_id", "node_id", "role"}.issubset(payload) or set(payload) - {"host_id", "node_id", "role", "region", "carrier"} or not all(isinstance(payload.get(k, ""), str) for k in payload):
             raise HTTPException(400, "invalid probe role")
-        if payload["role"] not in {"disabled", "mainland", "overseas"} or not 1 <= len(payload["host_id"]) <= 200 or not 1 <= len(payload["node_id"]) <= 128:
+        payload["region"] = str(payload.get("region") or "").strip()
+        payload["carrier"] = str(payload.get("carrier") or "").strip()
+        if (payload["role"] not in {"disabled", "mainland", "overseas"}
+                or not 1 <= len(payload["host_id"]) <= 200 or not 1 <= len(payload["node_id"]) <= 128
+                or len(payload["region"]) > 80 or len(payload["carrier"]) > 100
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in payload["region"] + payload["carrier"])):
             raise HTTPException(400, "invalid probe role")
         conn, now = db(), int(time.time())
         try:
@@ -917,8 +942,8 @@ def attach(app, db, verify_signature, signed_response):
             if payload["role"] == "disabled":
                 conn.execute("DELETE FROM gfw_probe_roles WHERE node_id=?", (payload["node_id"],))
             else:
-                conn.execute("INSERT INTO gfw_probe_roles(node_id,host_id,role,updated_at) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET host_id=excluded.host_id,role=excluded.role,updated_at=excluded.updated_at",
-                             (payload["node_id"], payload["host_id"], payload["role"], now))
+                conn.execute("INSERT INTO gfw_probe_roles(node_id,host_id,role,updated_at,region,carrier) VALUES(?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET host_id=excluded.host_id,role=excluded.role,updated_at=excluded.updated_at,region=excluded.region,carrier=excluded.carrier",
+                             (payload["node_id"], payload["host_id"], payload["role"], now, payload["region"], payload["carrier"]))
             conn.commit()
             return {"ok": True}
         finally:

@@ -535,13 +535,18 @@ def database_storage_status() -> Dict[str, Any]:
         page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
         pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
         free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+        now = int(time.time())
+        table_sample = database_telemetry.sample_table_sizes(conn, now)
+        growth = database_telemetry.sample_and_summarize(conn, DB_PATH, now)
+        growth["table_growth"] = database_telemetry.table_growth(conn, now)
+        growth["table_sample"] = table_sample
         return {
             "database_bytes": pages * page_size,
             "reusable_bytes": free * page_size,
             "live_bytes": (pages - free) * page_size,
             "wal_bytes": os.path.getsize(DB_PATH + "-wal") if os.path.exists(DB_PATH + "-wal") else 0,
             "auto_vacuum": int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]),
-            "growth": database_telemetry.sample_and_summarize(conn, DB_PATH, int(time.time())),
+            "growth": growth,
             "cleanup": dict(_cleanup_status),
             "raw_retention_seconds": min(PURGE_SECONDS, RAW_RETENTION_SECONDS),
             "report_max_rows": REPORT_MAX_ROWS,
@@ -6109,6 +6114,108 @@ def security_alert_history(
     )
 
 
+def _security_collection_health(
+    payload: Dict[str, Any],
+    gfw: Dict[str, Any],
+    last_seen: int,
+    report_ts: int,
+    agent_version: str,
+    now: int,
+    stale: bool,
+) -> Dict[str, Any]:
+    """Summarize missing host telemetry with the reason and next action."""
+    issues: List[Dict[str, str]] = []
+
+    def issue(component: str, state: str, reason: str, guidance: str) -> None:
+        issues.append({"component": component, "state": state, "reason": reason[:240], "guidance": guidance[:240]})
+
+    if stale:
+        issue("Agent 上报", "stale", "节点心跳已超过数据有效期", "检查 narwhal-agent 服务、出站网络和主控地址；恢复后等待下一次上报。")
+    if not report_ts:
+        issue("主机安全遥测", "missing", "没有收到主机安全采样", "确认 Agent 已升级并启用安全采集，再检查 Agent 日志。")
+    if report_ts and payload.get("enabled") is not True:
+        issue("主机安全遥测", "disabled", "节点未启用安全采集", "在系统设置中启用主机安全采集，并等待 Agent 下一次上报。")
+
+    audit = payload.get("host_audit") if isinstance(payload.get("host_audit"), dict) else {}
+    if payload.get("enabled") is True:
+        if not audit.get("enabled"):
+            issue("主机审计", "missing", "Agent 未返回主机审计数据", "升级 Agent，并确认其有权限读取主机基线与安全日志。")
+        else:
+            snapshot = str(audit.get("snapshot_status") or "unavailable")
+            if snapshot in {"partial", "unavailable"}:
+                issue("主机基线", snapshot, str(audit.get("snapshot_error") or "主机文件/账户基线未能完整读取"), "检查 Agent root 权限、审计目录权限及该项扫描错误，然后请求只读复扫。")
+            ssh_status = str(audit.get("ssh_log_status") or "unavailable")
+            if ssh_status in {"partial", "unavailable"}:
+                issue("SSH 登录日志", ssh_status, str(audit.get("ssh_log_error") or "journald 或认证日志不可完整读取"), "检查 journald/auth.log 是否启用及 Agent 读取权限，然后等待新样本。")
+            for key, label in (("vulnerability_scan", "漏洞扫描"), ("security_indicator_scan", "威胁指标扫描")):
+                scan = audit.get(key) if isinstance(audit.get(key), dict) else {}
+                coverage = str(scan.get("coverage") or "unavailable")
+                if coverage in {"partial", "unavailable"}:
+                    detail = str(scan.get("error") or f"覆盖状态为 {coverage}")
+                    guidance = "检查软件包数据库、依赖清单和扫描器可用性；修复后请求只读复扫。"
+                    issue(label, coverage, detail, guidance)
+
+        access_sources = payload.get("access_sources") if isinstance(payload.get("access_sources"), list) else []
+        for source in access_sources[:12]:
+            if not isinstance(source, dict):
+                continue
+            label = str(source.get("label") or "访问日志")[:80]
+            try:
+                readable = int(source.get("readable_files") or 0) + int(source.get("container_readable_files") or 0)
+                missing = int(source.get("missing_files") or 0)
+                unreadable = int(source.get("unreadable_files") or 0)
+                parse_errors = int(source.get("parse_errors") or 0)
+            except (TypeError, ValueError, OverflowError):
+                readable = missing = unreadable = parse_errors = 0
+            if unreadable:
+                issue(label, "permission_denied", f"{unreadable} 个日志文件不可读", "检查日志文件权限、挂载路径和 Agent 读取权限。")
+            elif readable == 0 and source.get("enabled") is not False:
+                reason = f"配置的日志文件不存在 ({missing} 个)" if missing else "没有可读的访问日志文件"
+                issue(label, "missing", reason, "在主机配置中填写真实 access log 路径；无 HTTP 服务时可忽略此项。")
+            elif parse_errors:
+                issue(label, "partial", f"{parse_errors} 行日志解析失败", "核对 access log 格式与解析器设置；请求统计可能不完整。")
+
+        for key, label in (("cpu_guard", "CPU 压力保护"), ("io_guard", "磁盘 I/O 保护")):
+            guard = payload.get(key) if isinstance(payload.get(key), dict) else None
+            if guard is None:
+                issue(label, "missing", "Agent 未上报保护采样", "升级 Agent 到支持该采集项的版本，并检查服务运行状态。")
+            elif str(guard.get("state") or "") in {"unavailable", "sampling_unavailable", "state_unavailable"}:
+                issue(label, "unavailable", str(guard.get("message") or "采样数据不可用"), "检查 cgroup v2、容器宿主机 PID 和 Agent 对 /sys/fs/cgroup 的读取权限。")
+
+        host_cpu = payload.get("host_cpu") if isinstance(payload.get("host_cpu"), dict) else {}
+        psi = host_cpu.get("psi") if isinstance(host_cpu.get("psi"), dict) else {}
+        unavailable_psi = [name for name in ("cpu", "memory", "io")
+                           if not isinstance(psi.get(name), dict) or psi[name].get("status") != "ready"]
+        if unavailable_psi:
+            labels = {"cpu": "CPU", "memory": "内存", "io": "磁盘 I/O"}
+            missing = "、".join(labels[name] for name in unavailable_psi)
+            issue("PSI 资源压力", "partial" if psi else "missing",
+                  f"宿主机 PSI 指标不可用：{missing}",
+                  "确认 Linux 内核启用了 PSI 并可读取 /proc/pressure；cgroup PSI 缺失时不能按容器维度判断等待压力。")
+
+    gfw_status = str(gfw.get("status") or "unassessed")
+    if gfw_status in {"unassessed", "stale", "investigating"}:
+        issue("国内 TCP 连通性", gfw_status, str(gfw.get("reason") or "探测样本不足"), "检查是否存在公网 TCP 映射，并保证至少有独立国内与海外探针在线。")
+
+    if stale:
+        status = "stale"
+    elif any(item["state"] not in {"normal", "healthy"} for item in issues):
+        status = "partial" if report_ts else "unavailable"
+    elif not issues:
+        status = "healthy"
+    else:
+        status = "partial"
+    return {
+        "status": status,
+        "last_report_at": report_ts,
+        "last_seen": last_seen,
+        "report_age_seconds": max(0, now - last_seen) if last_seen else None,
+        "agent_version": agent_version,
+        "missing_count": len(issues),
+        "issues": issues[:20],
+    }
+
+
 @app.get("/api/v1/security/status")
 def security_status() -> JSONResponse:
     global _security_status_cache, _security_status_cache_time
@@ -6124,7 +6231,9 @@ def security_status() -> JSONResponse:
         try:
             rows = conn.execute(
                 """
-                SELECT hosts.host_id, COALESCE(h.ts, hosts.last_seen) AS ts, hosts.node_id, hosts.config_json, h.payload_json
+                SELECT hosts.host_id, COALESCE(h.ts, hosts.last_seen) AS ts, h.ts AS security_ts,
+                       hosts.last_seen, hosts.agent_version,
+                       hosts.node_id, hosts.config_json, h.payload_json
                 FROM hosts
                 LEFT JOIN host_security h ON h.id = (
                     SELECT hs.id FROM host_security hs WHERE hs.host_id=hosts.host_id ORDER BY hs.id DESC LIMIT 1
@@ -6137,7 +6246,9 @@ def security_status() -> JSONResponse:
             # before the application startup migration has run.
             rows = conn.execute(
                 """
-                SELECT hosts.host_id, COALESCE(h.ts, hosts.last_seen) AS ts, '' AS node_id, '{}' AS config_json, h.payload_json
+                SELECT hosts.host_id, COALESCE(h.ts, hosts.last_seen) AS ts, h.ts AS security_ts,
+                       hosts.last_seen, hosts.agent_version,
+                       '' AS node_id, '{}' AS config_json, h.payload_json
                 FROM hosts
                 LEFT JOIN host_security h ON h.id = (
                     SELECT hs.id FROM host_security hs WHERE hs.host_id=hosts.host_id ORDER BY hs.id DESC LIMIT 1
@@ -6229,16 +6340,29 @@ def security_status() -> JSONResponse:
         cur_rx = float(payload.get("total_rx_bps") or 0)
         cur_tx = float(payload.get("total_tx_bps") or 0)
         p = peaks_by_host.get(host_id, {})
+        gfw_status = gfw_by_host.get(host_id, {"status": "unassessed"})
+        host_last_seen = int(row["last_seen"] or 0)
+        sample_timestamp = int(row["security_ts"] or 0)
+        report_timestamp = int(row["ts"] or 0)
+        host_agent_version = str(row["agent_version"] or "unknown")[:80]
+        stale = time.time() - host_last_seen > STALE_SECONDS
+        collection_health = _security_collection_health(
+            payload, gfw_status, host_last_seen, sample_timestamp, host_agent_version, int(time.time()), stale
+        )
         items.append(
             {
                 "host_id": host_id,
-                "gfw_reachability": gfw_by_host.get(host_id, {"status": "unassessed"}),
+                "gfw_reachability": gfw_status,
                 "node_id": str(row["node_id"] or ""),
                 "host_config": json.loads(row["config_json"] or "{}"),
-                "timestamp": int(row["ts"]),
-                "timestamp_utc8": format_utc8(int(row["ts"])),
+                "timestamp": report_timestamp,
+                "timestamp_utc8": format_utc8(report_timestamp),
+                "last_seen": host_last_seen,
+                "last_seen_utc8": format_utc8(host_last_seen),
+                "agent_version": host_agent_version,
+                "collection_health": collection_health,
                 "enabled": bool(payload.get("enabled")),
-                "stale": time.time() - int(row["ts"]) > STALE_SECONDS,
+                "stale": stale,
                 "interval_seconds": payload.get("interval_seconds"),
                 "thresholds": payload.get("thresholds") or {},
                 "sample_alerts": payload.get("alerts") or [],

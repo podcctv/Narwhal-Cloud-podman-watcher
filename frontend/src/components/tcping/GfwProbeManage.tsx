@@ -3,7 +3,7 @@ import { Loader2, Radio, RefreshCw } from 'lucide-react';
 import { request } from '../../api/client';
 
 type ProbeRole = 'disabled' | 'mainland' | 'overseas';
-interface Candidate { host_id: string; node_id: string; agent_version: string; last_seen: number; role: ProbeRole }
+interface Candidate { host_id: string; node_id: string; agent_version: string; last_seen: number; role: ProbeRole; region?: string; carrier?: string }
 interface ManageData {
   minimum_mainland: number;
   minimum_overseas: number;
@@ -38,10 +38,17 @@ export const GfwProbeManage: React.FC = () => {
   const save = async (candidate: Candidate, role: ProbeRole) => {
     setBusyNode(candidate.node_id); setError('');
     try {
-      await request('/api/v1/gfw-probes/role', { method: 'POST', body: JSON.stringify({ host_id: candidate.host_id, node_id: candidate.node_id, role }) });
+      await request('/api/v1/gfw-probes/role', { method: 'POST', body: JSON.stringify({ host_id: candidate.host_id, node_id: candidate.node_id, role, region: candidate.region || '', carrier: candidate.carrier || '' }) });
       await load();
     } catch (e) { setError((e as Error).message); }
     finally { setBusyNode(''); }
+  };
+
+  const updateCandidate = (nodeId: string, field: 'region' | 'carrier', value: string) => {
+    setData(current => current ? {
+      ...current,
+      candidates: current.candidates.map(candidate => candidate.node_id === nodeId ? { ...candidate, [field]: value } : candidate),
+    } : current);
   };
 
   const coverageReady = !!data && data.coverage.mainland >= data.minimum_mainland && data.coverage.overseas >= data.minimum_overseas;
@@ -86,6 +93,10 @@ export const GfwProbeManage: React.FC = () => {
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-slate-100" title={candidate.host_id}>{candidate.host_id}</p>
           <p className="mt-1 text-[11px] text-slate-400">Agent {candidate.agent_version || '未知'} · 最近上报 {candidate.last_seen ? new Date(candidate.last_seen * 1000).toLocaleString('zh-CN', { hour12: false }) : '未知'}</p>
+          {candidate.role !== 'disabled' && <div className="mt-2 grid max-w-xl grid-cols-2 gap-2">
+            <input aria-label={`${candidate.host_id} 探针地区`} maxLength={80} value={candidate.region || ''} placeholder="地区（如：枣庄，山东）" disabled={!!busyNode} onChange={event => updateCandidate(candidate.node_id, 'region', event.target.value)} onBlur={() => save(candidate, candidate.role)} className="min-h-8 min-w-0 rounded border border-slate-700 bg-slate-950 px-2 text-[11px] text-slate-200 placeholder:text-slate-500" />
+            <input aria-label={`${candidate.host_id} 探针运营商`} maxLength={100} value={candidate.carrier || ''} placeholder="运营商（如：联通 BGP）" disabled={!!busyNode} onChange={event => updateCandidate(candidate.node_id, 'carrier', event.target.value)} onBlur={() => save(candidate, candidate.role)} className="min-h-8 min-w-0 rounded border border-slate-700 bg-slate-950 px-2 text-[11px] text-slate-200 placeholder:text-slate-500" />
+          </div>}
         </div>
         <label className="flex shrink-0 items-center gap-2 text-xs text-slate-300">
           <span className="sr-only">{candidate.host_id} 的探测区域</span>

@@ -234,6 +234,15 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const auditLevel = hostAuditLevel(t);
         const auditLabel = labels[auditLevel];
         const gfw = t.gfw_reachability || {};
+        const collectionHealth = t.collection_health || {};
+        const collectionStatus = String(collectionHealth.status || 'unavailable');
+        const collectionLevel: Level = collectionStatus === 'healthy' ? 'normal'
+          : collectionStatus === 'partial' ? 'warning'
+          : collectionStatus === 'unavailable' && !t.stale ? 'warning' : 'unknown';
+        const collectionStatusLabel = collectionStatus === 'healthy' ? '完整'
+          : collectionStatus === 'stale' || t.stale ? '上报过期'
+          : collectionStatus === 'unavailable' ? '无数据'
+          : `${fmtNumber(collectionHealth.missing_count || 0, 0)} 项待补齐`;
         const gfwStatus = gfw.status || 'unassessed';
         const gfwSample = gfw.sample || {};
         const hasDailyGfwSample = gfwSample.policy === 'daily_container_rotation';
@@ -262,7 +271,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1 basis-56">
               <h3 className="break-all text-sm font-semibold text-slate-100">{t.host_id}</h3>
-              <p className="mt-1 wrap-break-word text-xs text-slate-300">采样：{t.timestamp_iso_utc8 || '—'} · 窗口 {t.interval_seconds || '—'} 秒
+              <p className="mt-1 wrap-break-word text-xs text-slate-300">采样：{t.timestamp_iso_utc8 || '—'} · Agent {t.agent_version || '未知'} · 最近上报 {t.last_seen_utc8 || '—'} · 窗口 {t.interval_seconds || '—'} 秒
                 {t.stale ? ' · 数据已过期' : !t.enabled ? ' · 安全采集未启用' : ''}</p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -270,7 +279,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-red-400">删除</button>
             </div>
           </div>
-          <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-5" aria-label="主机状态摘要">
+          <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-6" aria-label="主机状态摘要">
             <SummaryTile title="网络峰值" level={peakLevel} status={labels[peakLevel]}>
               最高连接 {fmtNumber(connPeak, 0)} · 入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}
             </SummaryTile>
@@ -286,11 +295,23 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             <SummaryTile title="国内连通性" level={gfwLevel} status={gfwLabels[gfwStatus] || '待评估'}>
               {gfwDuration}{gfw.blocked_count ? ` · 累计阻断 ${gfw.blocked_count} 次` : ''}
             </SummaryTile>
+            <SummaryTile title="采集完整性" level={collectionLevel} status={collectionStatusLabel}>
+              {collectionHealth.issues?.length ? `${collectionHealth.issues[0].component || '数据项'}：${collectionHealth.issues[0].reason || '采样不完整'}` : 'Agent 与安全采样正常'}
+            </SummaryTile>
           </div>
           <details className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
             <summary className="cursor-pointer text-xs font-semibold text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-400">展开网络信号、主机安全证据与修复建议</summary>
             <div className="mt-3 space-y-3">
           <div className="grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
+            <Signal title="采集完整性与修复提示" level={collectionLevel}>
+              <p>Agent {collectionHealth.agent_version || t.agent_version || '未知'} · 最后心跳 {t.last_seen_utc8 || '—'}</p>
+              <p>最后安全采样 {collectionHealth.last_report_at ? auditTime(collectionHealth.last_report_at) : '暂无安全采样'}</p>
+              {collectionHealth.issues?.length ? collectionHealth.issues.map((item, index) => <div key={`${item.component || 'component'}-${index}`} className="rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
+                <p className="font-semibold">{item.component || '数据项'} · {item.state || '待核实'}</p>
+                <p>{item.reason || '采样不完整'}</p>
+                <p className="text-slate-300">处理：{item.guidance || '检查 Agent 采集状态后等待新样本。'}</p>
+              </div>) : <p>当前没有已知采集缺口。</p>}
+            </Signal>
             <Signal title="国内连通性 / GFW 状态" level={gfwLevel}>
               <p className="text-sm font-semibold">{gfwLabels[gfwStatus] || '待评估'}</p>
               <p className="text-sm font-bold">{gfwDuration}</p>
@@ -318,7 +339,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                     const stateClass = succeeded ? 'text-emerald-300' : failed ? 'text-amber-300' : 'text-slate-400';
                     const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}` : failed ? `TCP 连接失败${probe.error ? ` · ${probe.error}` : ''}` : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
                     return <div key={`${probe.role}-${probe.source_host_id}-${index}`} className="min-w-0 rounded-md border border-slate-800 px-2 py-1">
-                      <p className="break-all text-xs text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}</p>
+                      <p className="break-all text-xs text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}{probe.source_region ? ` · ${probe.source_region}` : ''}{probe.source_carrier ? ` · ${probe.source_carrier}` : ''}{!probe.source_region && !probe.source_carrier ? ' · 地区/运营商待标注' : ''}</p>
                       <p className={`break-words text-xs ${stateClass}`}>{stateText}</p>
                     </div>;
                   })}

@@ -31,6 +31,94 @@ def _finite_number(value: Any, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def _read_psi(path: str) -> dict[str, Any]:
+    """Read Linux PSI averages without treating absent kernel support as zero pressure."""
+    result: dict[str, Any] = {}
+    try:
+        with open(path, "r", encoding="ascii", errors="ignore") as stream:
+            lines = stream.readlines()
+    except OSError as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__}
+    for line in lines[:2]:
+        fields = line.split()
+        if not fields or fields[0] not in {"some", "full"}:
+            continue
+        values: dict[str, float | int] = {}
+        for field in fields[1:]:
+            key, sep, raw = field.partition("=")
+            if not sep or key not in {"avg10", "avg60", "avg300", "total"}:
+                continue
+            try:
+                parsed = int(raw) if key == "total" else float(raw)
+                if math.isfinite(float(parsed)) and parsed >= 0:
+                    values[key] = parsed
+            except (ValueError, OverflowError):
+                continue
+        if "avg10" in values:
+            result[fields[0]] = values
+    if not result:
+        return {"status": "unsupported", "reason": "PSI 数据不可用或格式不受支持"}
+    return {"status": "ready", **result}
+
+
+def _host_psi() -> dict[str, Any]:
+    return {resource: _read_psi(f"/proc/pressure/{resource}")
+            for resource in ("cpu", "memory", "io")}
+
+
+def _container_psi(pid_value: Any) -> dict[str, Any]:
+    try:
+        pid = int(pid_value or 0)
+    except (TypeError, ValueError, OverflowError):
+        pid = 0
+    if pid <= 1:
+        return {"status": "unavailable", "reason": "容器宿主机 PID 不可用"}
+    root = os.path.realpath(os.getenv("NARWHAL_CGROUP_ROOT", "/sys/fs/cgroup"))
+    try:
+        with open(f"/proc/{pid}/cgroup", "r", encoding="ascii", errors="ignore") as stream:
+            relative = next((line[3:].strip() for line in stream if line.startswith("0::")), "")
+        if not relative or relative == "/" or "(deleted)" in relative:
+            return {"status": "unavailable", "reason": "未能确认容器 cgroup v2 路径"}
+        target = os.path.realpath(os.path.join(root, relative.lstrip("/")))
+        if os.path.commonpath((root, target)) != root or target == root:
+            return {"status": "unavailable", "reason": "容器 cgroup 路径越出受控目录"}
+    except (OSError, ValueError, StopIteration) as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__}
+    resources = {resource: _read_psi(os.path.join(target, f"{resource}.pressure"))
+                 for resource in ("cpu", "memory", "io")}
+    available = [value for value in resources.values() if value.get("status") == "ready"]
+    if not available:
+        return {"status": "unsupported", "reason": "当前内核或 cgroup 未提供 PSI 文件", **resources}
+    missing = [name for name, value in resources.items() if value.get("status") != "ready"]
+    reason = "" if not missing else "部分 cgroup PSI 文件不可用：" + "、".join(missing)
+    return {"status": "ready" if not missing else "partial", "reason": reason, **resources}
+
+
+def _resource_pressure(container: dict[str, Any], host_pressure: dict[str, Any]) -> dict[str, Any]:
+    cgroup = _container_psi(container.get("pid"))
+    cpu_percent = _finite_number(container.get("cpu_pressure_percent"), -1.0)
+    cgroup_cpu = cgroup.get("cpu") if isinstance(cgroup.get("cpu"), dict) else {}
+    host_cpu = host_pressure.get("cpu") if isinstance(host_pressure.get("cpu"), dict) else {}
+    cgroup_some = cgroup_cpu.get("some") if isinstance(cgroup_cpu.get("some"), dict) else {}
+    host_some = host_cpu.get("some") if isinstance(host_cpu.get("some"), dict) else {}
+    cgroup_wait = _finite_number(cgroup_some.get("avg10"), -1.0)
+    host_wait = _finite_number(host_some.get("avg10"), -1.0)
+    if cpu_percent >= 80 and cgroup_wait >= 0 and cgroup_wait < 1:
+        classification = "active_compute_low_wait"
+        explanation = "容器 CPU 正忙，但近 10 秒 CPU 等待压力低；更像持续计算负载，而非明显排队争用。"
+    elif cgroup_wait >= 10 and host_wait >= 10:
+        classification = "host_and_container_cpu_contention"
+        explanation = "宿主机与该容器都出现明显 CPU 等待；存在主机级 CPU 争用或配额排队。"
+    elif cgroup_wait >= 10:
+        classification = "container_cpu_contention"
+        explanation = "该容器出现明显 CPU 等待；可能受配额限制或同机任务争用。"
+    else:
+        classification = "insufficient_pressure_evidence"
+        explanation = "当前 PSI 样本不足以判断资源争用；PSI 是等待压力证据，不表示进程身份或用户归属。"
+    return {"status": cgroup.get("status", "unavailable"), "classification": classification,
+            "explanation": explanation, "host": host_pressure, "container": cgroup}
+
+
 def sample_host_cpu() -> dict[str, Any]:
     """Return host-wide CPU busy percent over the interval between agent reports."""
     global _host_cpu_previous
@@ -43,6 +131,7 @@ def sample_host_cpu() -> dict[str, Any]:
         "logical_cpus": max(1, int(os.cpu_count() or 1)),
         "load_1m": None,
         "sample_seconds": 0.0,
+        "psi": _host_psi(),
     }
     try:
         with open("/proc/stat", "r", encoding="ascii", errors="ignore") as stream:
@@ -357,6 +446,8 @@ def _alert(
             "host_iowait_percent": host_cpu.get("iowait_percent"),
             "host_logical_cpus": host_cpu.get("logical_cpus"),
             "host_load_1m": host_cpu.get("load_1m"),
+            "host_psi": host_cpu.get("psi"),
+            "resource_pressure": (container.get("security") or {}).get("resource_pressure") if isinstance(container.get("security"), dict) else None,
             "sample_count": high_samples,
             "required_samples": required_samples,
             "confirmed_duration_seconds": max(0, int(duration)),
@@ -428,6 +519,7 @@ def observe(
         effective_cpus = _finite_number(container.get("cpu_effective_cpus"), 0.0)
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         container["security"] = security
+        security["resource_pressure"] = _resource_pressure(container, host_cpu.get("psi") or {})
         record = instances.get(key)
 
         if isinstance(record, dict) and record.get("stage") in {"applying", "escalating", "active", "restoring", "restore_failed", "apply_unverified", "manual_override"}:
