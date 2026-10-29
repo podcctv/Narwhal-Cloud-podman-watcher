@@ -1,6 +1,13 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.131**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.132**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.132：增加精确测速目标与容器服务保护
+
+- 增加可单独选择的 Ookla `speedtest.net`、Cloudflare `speed.cloudflare.com`、FAST `fast.com` / `www.fast.com` 和 TcpQuality / Lisaweb 策略；只作用于明确选择的 Incus / Podman 容器，不默认启用，也不封共享 CDN IP。
+- TcpQuality 目标来自官方脚本与 `getNodes`：每 6 小时读取并校验 LeaseWeb `speedtest.*.leaseweb.net` 目标及北京、上海、广州国内测速 IP。测速脚本会用 `curl --resolve` 直连 IP，因此国内和 LeaseWeb 目标同时在对应容器独立网络命名空间安装出站 nftables 规则；上游不完整时保留旧规则并标记过期，不宣称更新成功。
+- iPerf3 服务端、LibreSpeed、OpenSpeedTest、OoklaServer 只在确认服务特征、容器内进程和该进程实际监听端口后，阻断目标容器的入站端口；不按 5201、8080 或 5060 全局封锁，不停止进程或容器。host、pasta、macvlan / ipvlan 或共享网络命名空间无法安全隔离时跳过。
+- SSH Banner 和用户提醒只在对应域名、目标 IP 或服务入口通过本地规则读回确认后生成，说明服务、方向与处理结果，不把测速使用定性为滥用。
 
 ### v1.7.131：修复安全告警构造与 VMess 客户通知
 

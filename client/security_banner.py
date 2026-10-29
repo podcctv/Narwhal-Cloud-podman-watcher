@@ -107,7 +107,8 @@ def customer_copy(entry, english=False):
                  'vmess_port_blocked':'VMess 入站端口已自动阻断','vmess_block_unverified':'VMess 入站保护待核实',
                  'vmess_block_release_unverified':'VMess 端口恢复待核实',
                  'trojan_port_blocked':'Trojan 入站端口已自动阻断','trojan_block_unverified':'Trojan 入站保护待核实',
-                 'trojan_block_release_unverified':'Trojan 端口恢复待核实'}.get(entry.get('type'), title or '运行异常')
+                 'trojan_block_release_unverified':'Trojan 端口恢复待核实',
+                 'speedtest_service_blocked':'测速目标连接已按策略限制'}.get(entry.get('type'), title or '运行异常')
     details = entry.get('customer') if isinstance(entry.get('customer'), dict) else {}
     extra = []
     advice = 'Please check the related settings and background tasks.' if english else '请检查相关设置和后台任务；需要协助时请联系管理员。'
@@ -143,6 +144,9 @@ def customer_copy(entry, english=False):
         advice = 'The service was not stopped because its live listener or firewall rule could not be verified. Please ask the administrator to review the listed process and port.' if english else '由于实时监听或防火墙规则无法核实，系统没有确认封锁。请管理员根据提示的进程和端口复核。'
     elif entry.get('type') == 'trojan_block_release_unverified':
         advice = 'The previous network rule remains until the listener is confirmed absent and rule removal is verified.' if english else '旧端口规则会保留，直到确认监听已消失且规则删除结果可读回验证。'
+    elif entry.get('type') == 'speedtest_service_blocked':
+        advice = ('This is an administrator-configured resource policy, not an abuse finding. Only the listed DNS targets, destination IPs, or verified service listeners were restricted after local readback; no process or container was stopped.'
+                  if english else '这是管理员设置的资源保护策略，不代表认定用户滥用。仅对消息列出的出站域名、测速目标 IP 或已确认入站服务入口应用了限制，并经本地读回确认；没有停止进程或容器。如业务需要访问这些目标，请联系管理员。')
     elif entry.get('type') in {'malicious_process', 'confirmed_abuse'}:
         advice = 'Please review the program source and startup tasks; contact the administrator before restoring access.' if english else '请检查程序来源及启动任务；如已隔离，请联系管理员复核后恢复。'
     elif entry.get('type') in {'cpu', 'memory', 'process_fanout_abuse'}:

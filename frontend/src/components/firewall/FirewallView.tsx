@@ -41,7 +41,21 @@ const cnRiskProtocolOptions: Array<{ protocol: CnRiskProtocol; label: string; no
   { protocol: 'openvpn', label: 'OpenVPN（仅入站）', note: 'VPN 协议命中不等于滥用' },
 ];
 
-const emptyAbuse: HostFirewallAbusePolicy = { speedtest: false, mining: false, bt: false, interfaces: [], runtimes: [] };
+const emptyAbuse: HostFirewallAbusePolicy = { speedtest: false, mining: false, bt: false, services: [], interfaces: [], runtimes: [], service_runtimes: [] };
+const speedtestServiceOptions: Array<{
+  id: NonNullable<HostFirewallAbusePolicy['services']>[number];
+  title: string;
+  detail: string;
+}> = [
+  { id: 'ookla', title: 'Ookla Speedtest', detail: '只将 speedtest.net 写入容器解析屏蔽项；不按 Ookla 共享节点 IP 或端口封锁。' },
+  { id: 'cloudflare', title: 'Cloudflare Speed Test', detail: '只处理 speed.cloudflare.com，不封锁其他 Cloudflare/CDN 域名或共享 IP。' },
+  { id: 'fast', title: 'FAST.com', detail: '只处理 fast.com、www.fast.com；不封锁 Netflix 共享内容节点。' },
+  { id: 'tcpquality', title: 'TcpQuality / Lisaweb', detail: '读取官方测速脚本中 speedtest.*.leaseweb.net 目标，并每 6 小时更新国内三地 TOS 与节点 IP；在所选容器网络命名空间限制出站目标。' },
+  { id: 'iperf3_server', title: '容器内 iPerf3 服务端', detail: '按容器进程模式和实际监听识别；随机端口也可匹配，不按固定 5201 推断。' },
+  { id: 'librespeed', title: 'LibreSpeed 自建测速', detail: '镜像、页面标记和 Web 服务监听同时吻合后，才阻断该容器对应端口。' },
+  { id: 'openspeedtest', title: 'OpenSpeedTest 自建测速', detail: '镜像、页面标记和 Web 服务监听同时吻合后，才阻断该容器对应端口。' },
+  { id: 'ookla_server', title: 'Ookla 自建测速服务器', detail: '确认 OoklaServer 守护进程的实际 PID 与监听端口后，只阻断该容器对应入口；不按 8080 / 5060 端口猜测。' },
+];
 const defaultDraft = (): RuleDraft => ({
   priority: 100, direction: 'in', protocol: 'tcp', action: 'block', enabled: true,
   port_start: 0, port_end: '', ip_type: 'any', ip: '', countries: '',
@@ -412,8 +426,26 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     onToast('info', '已复制到网页策略草稿。保存并在 RFW 读回确认新规则生效后，再删除原手工规则；迁移期间原规则会保留。');
   };
 
-  const setAbuseOption = (key: 'speedtest' | 'mining' | 'bt', value: boolean) => {
+  const setAbuseOption = (key: 'mining' | 'bt', value: boolean) => {
     setAbuse((current) => ({ ...current, [key]: value }));
+    setDirty(true);
+  };
+
+  const toggleSpeedtestService = (service: NonNullable<HostFirewallAbusePolicy['services']>[number], checked: boolean) => {
+    setAbuse((current) => {
+      const selected = current.services || [];
+      const services = checked ? [...new Set([...selected, service])] : selected.filter((item) => item !== service);
+      return { ...current, services };
+    });
+    setDirty(true);
+  };
+
+  const toggleServiceRuntime = (runtime: 'incus' | 'podman', checked: boolean) => {
+    setAbuse((current) => {
+      const selected = current.service_runtimes || [];
+      const service_runtimes = checked ? [...new Set([...selected, runtime])] : selected.filter((item) => item !== runtime);
+      return { ...current, service_runtimes };
+    });
     setDirty(true);
   };
 
@@ -552,16 +584,23 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const confirmApply = useCallback(async () => {
     if (!hostId || scope !== 'host' || !canEdit || !snapshotMatchesHost || mutationInFlightRef.current) return;
     const requestedHostId = hostId;
-    const anyAbuseEnabled = abuse.speedtest || abuse.mining || abuse.bt;
-    const interfaces = anyAbuseEnabled ? [...new Set((abuse.interfaces || []).map((item) => item.trim()).filter(Boolean))] : [];
+    const services = [...new Set(abuse.services || [])];
+    const serviceRuntimes = [...new Set(abuse.service_runtimes || [])];
+    const fixedPortEnabled = abuse.mining || abuse.bt;
+    const interfaces = fixedPortEnabled ? [...new Set((abuse.interfaces || []).map((item) => item.trim()).filter(Boolean))] : [];
     const knownInterfaces = new Set(eligibleInterfaces.map((item) => item.name));
     const unknownInterfaces = interfaces.filter((name) => !knownInterfaces.has(name));
-    if (interfaces.length > 16 || (anyAbuseEnabled && (!interfaces.length || interfaceInventory?.status !== 'ready' || interfaceInventory.stale || unknownInterfaces.length > 0))) {
+    if (services.length && !serviceRuntimes.length) {
+      setConfirmOpen(false);
+      onToast('error', '请至少选择一个测速服务保护范围：Incus 或 Podman。');
+      return;
+    }
+    if (interfaces.length > 16 || (fixedPortEnabled && (!interfaces.length || interfaceInventory?.status !== 'ready' || interfaceInventory.stale || unknownInterfaces.length > 0))) {
       setConfirmOpen(false);
       onToast('error', interfaceInventory?.stale ? '网卡清单已过期，请刷新并等待母机重新上报后再应用。' : unknownInterfaces.length ? `以下网卡已不在当前采集清单中，请先从草稿移除：${unknownInterfaces.join(', ')}` : '启用防滥用规则前，请从最新采集到的 Incus / Podman 网桥中至少选择一个。');
       return;
     }
-    const policyAbuse = { ...abuse, interfaces, runtimes: [] };
+    const policyAbuse = { ...abuse, speedtest: false, services, service_runtimes: services.length ? serviceRuntimes : [], interfaces, runtimes: [] };
     mutationInFlightRef.current = true;
     setSaving(true);
     try {
@@ -609,10 +648,17 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
   const confirmFleetApply = useCallback(async () => {
     if (scope !== 'fleet' || !canEdit || mutationInFlightRef.current) return;
-    const anyAbuseEnabled = abuse.speedtest || abuse.mining || abuse.bt;
-    const runtimes = anyAbuseEnabled ? [...new Set(abuse.runtimes || [])] : [];
+    const services = [...new Set(abuse.services || [])];
+    const serviceRuntimes = [...new Set(abuse.service_runtimes || [])];
+    const fixedPortEnabled = abuse.mining || abuse.bt;
+    const runtimes = fixedPortEnabled ? [...new Set(abuse.runtimes || [])] : [];
     const uncoveredRuntimes = runtimes.filter((runtime) => fleetNetworkCoverage[runtime] === 0);
-    if (anyAbuseEnabled && (!runtimes.length || uncoveredRuntimes.length)) {
+    if (services.length && !serviceRuntimes.length) {
+      setFleetConfirmOpen(false);
+      onToast('error', '请至少选择一个测速服务保护范围：Incus 或 Podman。');
+      return;
+    }
+    if (fixedPortEnabled && (!runtimes.length || uncoveredRuntimes.length)) {
       setFleetConfirmOpen(false);
       onToast('error', !runtimes.length
         ? '启用全局防滥用规则前，请至少选择 Incus 或 Podman。'
@@ -622,7 +668,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     mutationInFlightRef.current = true;
     setFleetSaving(true);
     try {
-      const policyAbuse = { ...abuse, interfaces: [], runtimes };
+      const policyAbuse = { ...abuse, speedtest: false, services, service_runtimes: services.length ? serviceRuntimes : [], interfaces: [], runtimes };
       const result = await api.updateFleetFirewallPolicy({ rules, abuse: policyAbuse });
       if (selectionRef.current.scope !== 'fleet') return;
       setFleetConfirmOpen(false);
@@ -740,8 +786,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const outboundProtocols: HostFirewallRule['protocol'][] = ['all', 'tcp', 'udp', 'socks', 'fet', 'wireguard', 'mtproto'];
   const protocols: HostFirewallRule['protocol'][] = ['all', 'tcp', 'udp', 'http', 'tls', 'socks', 'ssh', 'fet', 'wireguard', 'openvpn', 'quic', 'mtproto'];
   const blockingRules = rules.filter((rule) => rule.enabled && rule.action === 'block').length;
-  const enabledAbuse = Number(abuse.speedtest) + Number(abuse.mining) + Number(abuse.bt);
-  const anyAbuseEnabled = enabledAbuse > 0;
+  const enabledAbuse = (abuse.services || []).length + Number(abuse.mining) + Number(abuse.bt);
 
   return <div className="mx-auto mt-6 max-w-6xl space-y-5 pb-8">
     <header className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
@@ -1020,17 +1065,49 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     <section className="rounded-2xl border border-slate-800 bg-slate-900/70">
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-bold text-slate-100">容器转发端口保护</h3>
+          <h3 className="text-sm font-bold text-slate-100">测速目标与容器服务保护</h3>
           <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[10px] text-slate-400">默认关闭 · Incus / Podman</span>
         </div>
-        <p className="mt-1 text-xs leading-5 text-slate-400">先选网桥范围，再启用端口规则。它只匹配进入容器的 FORWARD 流量，不检查宿主机 INPUT/OUTPUT，也不识别进程名称或加密协议。</p>
+        <p className="mt-1 text-xs leading-5 text-slate-400">服务项按所选 Incus / Podman 容器分别执行，不需要网卡名；固定端口模板另行选择网桥。默认关闭，不会因打开页面就下发规则。</p>
       </div>
 
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h4 className="text-xs font-semibold text-slate-200">1. 选择生效的容器网络</h4>
-            <p className="mt-1 max-w-3xl text-[10px] leading-4 text-slate-400">选择后下方端口模板只作用于这些桥接网卡。不会自动全选；清单过期或未采集时不能勾选。</p>
+            <h4 className="text-xs font-semibold text-slate-200">1. 选择测速服务与容器运行时</h4>
+            <p className="mt-1 max-w-4xl text-[10px] leading-4 text-slate-400">精确域名策略通过容器内 hosts 解析项生效；TcpQuality 另外按官方脚本域名与动态目标 IP 安装容器命名空间出站规则。自建服务必须由镜像/配置、进程和实际监听共同确认后，才会阻断该服务入口。</p>
+          </div>
+          <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-[10px] text-slate-300">已选 {(abuse.services || []).length} 项服务</span>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {speedtestServiceOptions.map((item) => {
+            const checked = (abuse.services || []).includes(item.id);
+            return <label key={item.id} className={checked ? 'flex min-h-24 cursor-pointer items-start gap-3 rounded-xl border border-sky-700 bg-sky-950/30 p-3' : 'flex min-h-24 cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/50 p-3 hover:border-slate-600'}>
+              <input type="checkbox" checked={checked} onChange={(event) => toggleSpeedtestService(item.id, event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500" aria-label={item.title} />
+              <span className="min-w-0"><span className="block text-xs font-semibold text-slate-100">{item.title}</span><span className="mt-1 block text-[10px] leading-4 text-slate-400">{item.detail}</span></span>
+            </label>;
+          })}
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {(['incus', 'podman'] as const).map((runtime) => {
+            const checked = (abuse.service_runtimes || []).includes(runtime);
+            const label = runtime === 'incus' ? 'Incus' : 'Podman';
+            return <label key={runtime} className={checked ? 'flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-sky-700 bg-sky-950/30 p-3' : 'flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-slate-700 bg-slate-950/50 p-3 hover:border-slate-600'}>
+              <input type="checkbox" checked={checked} onChange={(event) => toggleServiceRuntime(runtime, event.target.checked)} className="h-4 w-4 shrink-0 accent-sky-500" aria-label={'测速服务范围 ' + label} />
+              <span className="text-xs font-semibold text-slate-100">{label} 容器</span>
+              <span className="ml-auto text-[10px] text-slate-500">{checked ? '纳入策略' : '不处理'}</span>
+            </label>;
+          })}
+        </div>
+        {(abuse.services || []).length > 0 && !(abuse.service_runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">已选测速服务，但尚未选 Incus / Podman 范围；保存前至少选择一个。</p>}
+        <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-500">Ookla、Cloudflare 和 FAST 仅限制指定入口域名，不封共享 CDN IP；浏览器 DoH、直连 IP 或已有 DNS 缓存可能绕过 hosts 解析限制。TcpQuality IP 列表上游不可读时会保留已安装规则并标记过期，不会宣称刷新成功。</p>
+      </div>
+
+      <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h4 className="text-xs font-semibold text-slate-200">2. 选择固定端口模板需要保护的容器网桥</h4>
+            <p className="mt-1 max-w-3xl text-[10px] leading-4 text-slate-400">仅下方矿池 / BT 固定端口模板使用网卡。测速服务策略使用上一步的运行时范围，不依赖网卡名。</p>
           </div>
           {scope === 'host' && <div className="flex flex-wrap items-center gap-2">
             <span className={interfaceInventory?.status === 'ready' && !interfaceInventory.stale ? 'rounded-full border border-emerald-800 bg-emerald-950/40 px-2.5 py-1 text-[10px] text-emerald-200' : 'rounded-full border border-amber-800 bg-amber-950/40 px-2.5 py-1 text-[10px] text-amber-200'}>
@@ -1104,14 +1181,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h4 className="text-xs font-semibold text-slate-200">2. 启用要拦截的固定端口规则</h4>
+            <h4 className="text-xs font-semibold text-slate-200">3. 可选固定端口模板（矿池 / BT）</h4>
             <p className="mt-1 text-[10px] leading-4 text-slate-400">这些不是应用识别开关；只按目的端口阻断，改用随机端口后无法识别。规则仅针对上一步勾选的容器桥接网络。</p>
           </div>
-          <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-[10px] text-slate-300">已启用 {enabledAbuse} / 3 项</span>
+          <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-[10px] text-slate-300">全部策略已启用 {enabledAbuse} / {speedtestServiceOptions.length + 2} 项</span>
         </div>
-        <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
           {([
-            ['speedtest', 'iperf3 测速端口', 'TCP / UDP 目的端口 5201。只拦此端口，不会按进程名识别测速软件。'],
             ['mining', '常见矿池端口', 'TCP 目的端口 3333、4444、5555、6666、7777、8888、9999、14433、14444。随机端口不在覆盖范围。'],
             ['bt', '常见 BT / P2P 端口', 'TCP / UDP 目的端口 6881–6889、6969、51413、4662、4672。其它端口不在覆盖范围。'],
           ] as const).map(([key, title, description]) => <label key={key} className={abuse[key] ? 'flex min-h-28 cursor-pointer items-start gap-3 rounded-xl border border-rose-800/70 bg-rose-950/20 p-4 transition-colors' : 'flex min-h-28 cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/60 p-4 transition-colors hover:border-slate-600'}>
@@ -1119,11 +1195,11 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <span className="min-w-0"><span className="flex items-center gap-2"><span className="text-sm font-semibold text-slate-100">{title}</span><span className={abuse[key] ? 'rounded-full border border-rose-800 bg-rose-950/50 px-2 py-0.5 text-[9px] text-rose-200' : 'rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[9px] text-slate-500'}>{abuse[key] ? '启用' : '关闭'}</span></span><span className="mt-1 block text-xs leading-5 text-slate-400">{description}</span></span>
           </label>)}
         </div>
-        {anyAbuseEnabled && scope === 'host' && abuse.interfaces.length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">已有端口模板启用，但没有选择目标网卡。请先在上方勾选一个 Incus / Podman 网桥，系统不会自动全选。</p>}
-        {anyAbuseEnabled && scope === 'fleet' && (abuse.runtimes || []).length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">已有端口模板启用，但没有选择 Incus / Podman 运行时；请选择目标范围后再同步。</p>}
-        {!anyAbuseEnabled && <p className="mt-3 text-[10px] leading-4 text-slate-500">当前没有启用端口规则，因此不会产生容器流量拦截。选择网卡只保存在本次草稿；启用模板后才会随策略应用。</p>}
+        {(abuse.mining || abuse.bt) && scope === 'host' && abuse.interfaces.length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">固定端口模板已启用，但没有选择目标网卡。请先在上方勾选 Incus / Podman 网桥；测速服务策略不需要网卡。</p>}
+        {(abuse.mining || abuse.bt) && scope === 'fleet' && (abuse.runtimes || []).length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">固定端口模板已启用，但没有选择 Incus / Podman 运行时；测速服务范围在上方单独配置。</p>}
+        {!abuse.mining && !abuse.bt && <p className="mt-3 text-[10px] leading-4 text-slate-500">固定端口模板保持关闭。上方已选的测速服务策略仍可独立生效，不需要勾选网卡。</p>}
       </div>
-      <p className="mx-4 mb-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[10px] leading-4 text-slate-400 sm:mx-5 sm:mb-5">容器端口模板只覆盖 bridge 转发流量；host、pasta、macvlan / ipvlan 等网络模式不在此路径。母机级协议规则作用于 RFW 实例自身的接口范围，两种配置互不改变。应用后检查节点回执和 RFW 读回。</p>
+      <p className="mx-4 mb-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[10px] leading-4 text-slate-400 sm:mx-5 sm:mb-5">固定端口模板只覆盖 bridge 转发流量；自建服务的端口保护和 TcpQuality 出站 IP 保护只在独立网络命名空间可用。host、pasta、macvlan / ipvlan 等模式会跳过命名空间防火墙，不会猜测宿主机接口或全局封端口。规则只有读回确认后才报告成功。</p>
     </section>
     </fieldset>
 
@@ -1166,10 +1242,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     <ConfirmDialog open={recoveryIntent !== null} title={recoveryIntent === 'retry' ? '重试当前母机防火墙策略？' : '回滚到上一条历史策略？'} description={recoveryIntent === 'retry' ? `这会把 ${hostId} 当前保存的策略作为新修订重新排队。执行前系统会检查主机在线状态、RFW 实时读回、接口映射和协议能力。` : `这会把 ${hostId} 最近一条历史策略作为新修订排队应用；如果历史规则引用了当前无法确认的接口，系统会拒绝下发。`} confirmLabel={recoveryIntent === 'retry' ? '确认重试并排队' : '确认回滚并排队'} tone="danger" isSubmitting={recoveringPolicy} onConfirm={confirmPolicyRecovery} onCancel={() => { if (!recoveringPolicy) setRecoveryIntent(null); }}>
       <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/80">只有管理员可执行。它会发送一个主机范围的 RFW 操作，但不会触碰其他母机；若正在运行全局模板、Agent 离线或读回过期，后端会拒绝请求。</p>
     </ConfirmDialog>
-    <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。RFW 协议规则可能影响该母机的全部容器和服务；已启用 ${blockingRules} 条阻断规则与 ${enabledAbuse} 项固定端口防滥用策略。平台只自动删除自身登记的规则；手工规则需在实时读回后逐条确认删除。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
-      <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">执行依赖 Watcher Agent、支持 firewall.sock 的 Runman Agent 与运行中的 RFW。Watcher 离线时排队等待；成功回执是 Runman 应用结果，不等同于平台实时读取内核规则。</div>
+    <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。已启用 ${blockingRules} 条 RFW 主机规则与 ${enabledAbuse} 项容器级保护。服务域名项写入指定容器解析配置，容器监听与动态 IP 规则由 Agent 在独立网络命名空间应用。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
+      <div className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/90">RFW 规则依赖 Runman；容器服务规则依赖 Watcher Agent。每类规则都会单独报告执行和读回状态。管理员配置的测速资源保护不构成对用户滥用的认定。</div>
     </ConfirmDialog>
-    <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用阻断规则、${enabledAbuse} 项固定端口策略；容器网络选择：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}。每个节点会按本机网卡清单独立映射；无法安全映射的节点将等待，不会应用错误接口名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>
+    <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用 RFW 阻断规则与 ${enabledAbuse} 项容器级保护；测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}；固定端口范围：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}。节点会按各自策略执行；无法确认的范围会等待或跳过，不会套用猜测的网卡名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>
       <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">CN GeoIP 规则可按入站来源或出站目标阻断匹配流量，可能影响母机上全部容器与服务。FET 是启发式特征、存在误报；MTProto 仅能识别特定初始化标记，且不做 TCP 重组。节点只有在运行中的 RFW 明确报告支持后才会应用 MTProto 规则；若读回不支持，必须先部署含该检测能力的 RFW 构建。IPv6 暂不支持。策略应用回执不等于内核规则实时读回，节点事件采集可能因缓冲区覆盖而不完整。</div>
     </ConfirmDialog>
   </div>;

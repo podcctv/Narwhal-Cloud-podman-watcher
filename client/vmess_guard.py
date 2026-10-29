@@ -6,6 +6,7 @@ The guard drops that transport/port in the container's own network namespace;
 it never signals or restarts a process or container.
 """
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -21,7 +22,9 @@ except ImportError:
 SUPPORTED_RUNTIMES = {"incus", "podman"}
 SUPPORTED_ENGINES = {"xray", "v2ray", "sing-box"}
 SUPPORTED_PROTOCOLS = {"vmess", "trojan"}
+SUPPORTED_GUARD_TYPES = SUPPORTED_PROTOCOLS | {"speedtest"}
 MAX_ENDPOINTS = 32
+MAX_DESTINATION_IPS = 256
 _SAFE_SCAN_REASON = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -250,6 +253,20 @@ def _owned_endpoints(readback, marker):
     return endpoints
 
 
+def _owned_destinations(readback, marker):
+    """Extract only exact public destination IPs from this table's output rules."""
+    result = set()
+    pattern = re.compile(r'comment "' + re.escape(marker) + r'-dst-([0-9a-fA-F:.]+)"')
+    for raw in pattern.findall(str(readback or "")):
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if address.is_global:
+            result.add(str(address))
+    return result
+
+
 def _confirmed_protocol_live_endpoints(live_listeners, application_protocol):
     """Return exclusive live endpoints proven to belong to one protected config.
 
@@ -270,16 +287,28 @@ def _confirmed_protocol_live_endpoints(live_listeners, application_protocol):
     for endpoint, listeners in grouped.items():
         if not listeners:
             continue
-        if all(
-            isinstance(item.get("application_protocols"), list)
-            and {str(value).lower() for value in item["application_protocols"]} == {application_protocol}
-            and item.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
-            and (item.get("protocol_process_scan_complete") is True
-                 or (application_protocol == "vmess" and item.get("vmess_process_scan_complete") is True))
-            and _integer(item.get("pid"), 2, 4194304) > 0
-            and str(item.get("process") or "").lower() in SUPPORTED_ENGINES
-            for item in listeners
-        ):
+        if application_protocol == "speedtest":
+            confirmed_owner = all(
+                isinstance(item.get("application_protocols"), list)
+                and {str(value).lower() for value in item["application_protocols"]} == {"speedtest"}
+                and item.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
+                and item.get("speedtest_process_scan_complete") is True
+                and _integer(item.get("pid"), 2, 4194304) > 0
+                and str(item.get("process") or "").lower() not in {"", "unknown"}
+                for item in listeners
+            )
+        else:
+            confirmed_owner = all(
+                isinstance(item.get("application_protocols"), list)
+                and {str(value).lower() for value in item["application_protocols"]} == {application_protocol}
+                and item.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
+                and (item.get("protocol_process_scan_complete") is True
+                     or (application_protocol == "vmess" and item.get("vmess_process_scan_complete") is True))
+                and _integer(item.get("pid"), 2, 4194304) > 0
+                and str(item.get("process") or "").lower() in SUPPORTED_ENGINES
+                for item in listeners
+            )
+        if confirmed_owner:
             confirmed.add(endpoint)
     return confirmed
 
@@ -307,9 +336,9 @@ def _firewall_failure_reason(completed, fallback):
     return fallback
 
 
-def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint_map, pid, expected_epoch, runner, namespace_fd,
+def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint_map, destination_ips, pid, expected_epoch, runner, namespace_fd,
                            *, release_if_absent=False, live_listeners=None, preserve_existing=False):
-    result = {"state": "unverified", "blocked_endpoints": [], "reason": "firewall_apply_failed"}
+    result = {"state": "unverified", "blocked_endpoints": [], "blocked_destination_ips": [], "reason": "firewall_apply_failed"}
 
     def call(args, data=None):
         try:
@@ -339,7 +368,19 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
             return result
 
     existing_endpoints = _owned_endpoints(current.stdout, marker) if exists else set()
+    existing_destinations = _owned_destinations(current.stdout, marker) if exists else set()
+    if endpoint_map is None:
+        endpoint_map = {
+            key: {"proto": key[0], "port": key[1]} for key in existing_endpoints
+        }
     requested_endpoints = set(endpoint_map)
+    if destination_ips is None:
+        final_destinations = set(existing_destinations)
+    else:
+        final_destinations = set(destination_ips)
+    if len(final_destinations) > MAX_DESTINATION_IPS:
+        result["reason"] = "destination_ip_limit_exceeded"
+        return result
     # Only preserve/release-check a guard against an exclusive, positively
     # attributed listener for this exact protocol.
     live = _confirmed_protocol_live_endpoints(live_listeners, application_protocol)
@@ -348,7 +389,7 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
             if (transport, port) in live:
                 endpoint_map[(transport, port)] = {"proto": transport, "port": port}
 
-    if not endpoint_map:
+    if not endpoint_map and not final_destinations:
         if exists and release_if_absent:
             if not isinstance(live_listeners, list):
                 result["reason"] = "release_evidence_unavailable"
@@ -361,7 +402,7 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
                     pending_removal_endpoints=[{"proto": proto, "port": port} for proto, port in remaining],
                 )
                 return result
-        if exists:
+        if exists and not final_destinations:
             removed = call(prefix + ["delete", "table", "inet", table])
             tables = call(prefix + ["-j", "list", "tables"])
             if tables is None or tables.returncode != 0:
@@ -383,7 +424,7 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
         if _pid_epoch(pid) != expected_epoch:
             result["reason"] = "container_namespace_changed"
             return result
-        return {"state": "cleared", "blocked_endpoints": [], "reason": ""}
+        return {"state": "cleared", "blocked_endpoints": [], "blocked_destination_ips": [], "reason": ""}
 
     if len(endpoint_map) > MAX_ENDPOINTS:
         result["reason"] = "endpoint_limit_exceeded"
@@ -393,11 +434,19 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
     if exists:
         lines.append(f"delete table inet {table}")
     lines.append(f"add table inet {table}")
-    lines.append(f"add chain inet {table} input {{ type filter hook input priority -20; policy accept; }}")
+    if endpoint_map:
+        lines.append(f"add chain inet {table} input {{ type filter hook input priority -20; policy accept; }}")
     for transport, port in sorted(endpoint_map):
         lines.append(
             f'add rule inet {table} input meta l4proto {transport} {transport} dport {port} drop comment "{marker}-{transport}-{port}"'
         )
+    if final_destinations:
+        lines.append(f"add chain inet {table} output {{ type filter hook output priority -20; policy accept; }}")
+        for destination in sorted(final_destinations, key=lambda item: (ipaddress.ip_address(item).version, int(ipaddress.ip_address(item)))):
+            family = "ip6" if ipaddress.ip_address(destination).version == 6 else "ip"
+            lines.append(
+                f'add rule inet {table} output {family} daddr {destination} drop comment "{marker}-dst-{destination}"'
+            )
     script = "\n".join(lines) + "\n"
     checked = call(prefix + ["--check", "-f", "-"], script)
     if checked is None or checked.returncode != 0:
@@ -415,20 +464,29 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
         if f"{marker}-{transport}-{port}" not in (readback.stdout or ""):
             result["reason"] = "firewall_rule_readback_incomplete"
             return result
+    for destination in final_destinations:
+        if f'{marker}-dst-{destination}' not in (readback.stdout or ""):
+            result["reason"] = "firewall_destination_readback_incomplete"
+            return result
     if _pid_epoch(pid) != expected_epoch:
         # The descriptor pins the namespace, so cleanup cannot touch a newly
         # reused PID's network. A fresh collection can re-apply if still valid.
         removed = call(prefix + ["delete", "table", "inet", table])
         result["reason"] = "container_namespace_changed" if removed is not None and removed.returncode == 0 else "container_namespace_changed_cleanup_failed"
         return result
-    return {"state": "blocked", "blocked_endpoints": [endpoint_map[key] for key in sorted(endpoint_map)], "reason": ""}
+    return {
+        "state": "blocked",
+        "blocked_endpoints": [endpoint_map[key] for key in sorted(endpoint_map)],
+        "blocked_destination_ips": sorted(final_destinations, key=lambda item: (ipaddress.ip_address(item).version, int(ipaddress.ip_address(item)))),
+        "reason": "",
+    }
 
 
-def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, runner=None, nsenter_path=None,
+def reconcile(pid, identity, expected_epoch, endpoints, *, destination_ips=None, host_network=False, runner=None, nsenter_path=None,
               nft_path=None, release_if_absent=False, live_listeners=None, preserve_existing=False,
               application_protocol="vmess"):
     """Atomically reconcile an owned nft table in one isolated network namespace."""
-    result = {"state": "unverified", "blocked_endpoints": [], "reason": "firewall_apply_failed"}
+    result = {"state": "unverified", "blocked_endpoints": [], "blocked_destination_ips": [], "reason": "firewall_apply_failed"}
     if type(pid) is not int or pid <= 1 or not isinstance(identity, str) or not identity:
         result["reason"] = "container_identity_unavailable"
         return result
@@ -436,7 +494,7 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
         result["reason"] = "shared_network_namespace"
         return result
     application_protocol = str(application_protocol or "").strip().lower()
-    if application_protocol not in SUPPORTED_PROTOCOLS:
+    if application_protocol not in SUPPORTED_GUARD_TYPES:
         result["reason"] = "protocol_not_supported"
         return result
     if not expected_epoch or _pid_epoch(pid) != expected_epoch:
@@ -447,7 +505,7 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
     if not nsenter_path or not nft_path:
         result["reason"] = "firewall_dependency_unavailable"
         return result
-    endpoint_map = {}
+    endpoint_map = None if endpoints is None else {}
     for item in endpoints if isinstance(endpoints, list) else []:
         if not isinstance(item, dict):
             continue
@@ -455,9 +513,22 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
         port = _integer(item.get("port"))
         if transport in {"tcp", "udp"} and port:
             endpoint_map[(transport, port)] = {"proto": transport, "port": port}
-    if len(endpoint_map) > MAX_ENDPOINTS:
+    if endpoint_map is not None and len(endpoint_map) > MAX_ENDPOINTS:
         result["reason"] = "endpoint_limit_exceeded"
         return result
+    normalized_destinations = None
+    if destination_ips is not None:
+        normalized_destinations = set()
+        for value in destination_ips if isinstance(destination_ips, (list, tuple, set)) else []:
+            try:
+                address = ipaddress.ip_address(str(value).strip())
+            except ValueError:
+                continue
+            if address.is_global:
+                normalized_destinations.add(str(address))
+            if len(normalized_destinations) > MAX_DESTINATION_IPS:
+                result["reason"] = "destination_ip_limit_exceeded"
+                return result
 
     digest = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:12]
     table = f"narwhal_{application_protocol}_{digest}"
@@ -469,7 +540,7 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
     try:
         prefix = [nsenter_path, f"--net=/proc/self/fd/{namespace_fd}", "--", nft_path]
         return _reconcile_owned_table(
-            prefix, table, marker, application_protocol, endpoint_map, pid, expected_epoch,
+            prefix, table, marker, application_protocol, endpoint_map, normalized_destinations, pid, expected_epoch,
             runner or subprocess.run, namespace_fd, release_if_absent=release_if_absent,
             live_listeners=live_listeners, preserve_existing=preserve_existing,
         )

@@ -23,7 +23,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, gfw_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, manual_bandwidth, cpu_guard, io_guard
+    from client import operations as node_operations, security_banner, tcp_probe, gfw_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, speedtest_guard, manual_bandwidth, cpu_guard, io_guard
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 except ImportError:
     import operations as node_operations
@@ -34,6 +34,7 @@ except ImportError:
     import socks_detector
     import host_security_audit
     import vmess_guard
+    import speedtest_guard
     import manual_bandwidth
     import cpu_guard
     import io_guard
@@ -1209,7 +1210,12 @@ def _collect_socket_process_details(
         remote_ip, remote_port = _parse_socket_endpoint(remote_endpoint)
         _, local_port = _parse_socket_endpoint(local_endpoint)
         if (state == 'LISTEN' or (proto.startswith('udp') and remote_port == 0)) and 0 < local_port <= 65535:
-            for process_name, process_pid in re.findall(r'\("([^"\\]{1,120})",pid=(\d+)', process_text):
+            listener_owners = re.findall(r'\("([^"\\]{1,120})",pid=(\d+)', process_text)
+            if not listener_owners and len(service_listeners) < 100:
+                service_listeners.append({'process':'unknown', 'pid':0,
+                                          'proto':'tcp' if proto.startswith('tcp') else 'udp',
+                                          'local':local_endpoint, 'port':local_port, 'source':'ss_process_owner_missing'})
+            for process_name, process_pid in listener_owners:
                 if len(service_listeners) < 100:
                     service_listeners.append({'process':process_name.lower(), 'pid':int(process_pid),
                                               'proto':'tcp' if proto.startswith('tcp') else 'udp',
@@ -1279,6 +1285,9 @@ def _collect_socket_process_details(
         "process_attribution_available": _communication_socket_owner_count({"communication_sockets": sockets}) > 0,
         "communication_source": "container_ss",
         "service_listeners": service_listeners,
+        "service_listener_inventory_complete": bool(
+            available and len(lines) < snapshot_limit and len(service_listeners) < 100
+        ),
     }
 
 
@@ -3271,6 +3280,7 @@ _MOTD_THREAT_TYPES = {
     "trojan_port_blocked",
     "trojan_block_unverified",
     "trojan_block_release_unverified",
+    "speedtest_service_blocked",
 }
 
 _container_motd_incidents = security_banner.incidents
@@ -3945,6 +3955,111 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 vmess_alert.update(alert_key="vmess:unverified:" + ",".join(labels), vmess_guard=vmess,
                                    instance_id=str(container.get("id") or "")[:200])
             alerts.append(vmess_alert)
+        speedtest = security.get("speedtest_guard") if isinstance(security.get("speedtest_guard"), dict) else {}
+        if container.get("runtime") in {"incus", "podman"}:
+            blocked_domains = [str(item)[:180] for item in speedtest.get("blocked_domains", [])
+                               if isinstance(item, str) and item][:10]
+            blocked_endpoints = [item for item in speedtest.get("blocked_endpoints", [])
+                                 if isinstance(item, dict) and item.get("proto") in {"tcp", "udp"}
+                                 and type(item.get("port")) is int and 0 < item["port"] <= 65535][:20]
+            blocked_destination_ips = [str(item)[:64] for item in speedtest.get("blocked_destination_ips", [])
+                                       if isinstance(item, str)][:128]
+            selected_names = [item for item in speedtest.get("services", [])
+                              if isinstance(item, str)] if isinstance(speedtest.get("services"), list) else []
+            if blocked_domains or blocked_endpoints or blocked_destination_ips:
+                names = {
+                    "ookla": "Ookla Speedtest", "cloudflare": "Cloudflare Speed Test", "fast": "FAST.com",
+                    "tcpquality": "TcpQuality / Lisaweb", "iperf3_server": "iPerf3 服务端",
+                    "librespeed": "LibreSpeed", "openspeedtest": "OpenSpeedTest",
+                    "ookla_server": "Ookla 自建测速服务",
+                }
+                detected_names = {
+                    str(item) for item in speedtest.get("detected_services", [])
+                    if isinstance(item, str)
+                } if isinstance(speedtest.get("detected_services"), list) else set()
+                effective_services = set()
+                selected_domains_set = set(blocked_domains)
+                for service_name in selected_names:
+                    required_domains = speedtest_guard.SERVICE_DOMAINS.get(service_name, ())
+                    if required_domains and set(required_domains).issubset(selected_domains_set):
+                        effective_services.add(service_name)
+                if (
+                    "tcpquality" in selected_names
+                    and speedtest.get("destination_state") == "blocked"
+                    and speedtest.get("target_inventory_state") == "fresh"
+                    and speedtest.get("target_ip_count") == len(blocked_destination_ips)
+                ):
+                    effective_services.add("tcpquality")
+                if (
+                    speedtest.get("state") == "blocked"
+                    and blocked_endpoints
+                ):
+                    effective_services.update(
+                        detected_names & {"iperf3_server", "librespeed", "openspeedtest", "ookla_server"}
+                    )
+                service_labels = [names[item] for item in selected_names if item in effective_services and item in names]
+                detail_parts = []
+                if service_labels:
+                    detail_parts.append("策略范围：" + "、".join(service_labels[:7]))
+                if blocked_domains:
+                    detail_parts.append("已读回确认容器出站域名限制：" + "、".join(blocked_domains))
+                if blocked_destination_ips:
+                    detail_parts.append(f"已在该容器网络命名空间阻断出站测速目标 IP {len(blocked_destination_ips)} 个")
+                if blocked_endpoints:
+                    detail_parts.append("已确认并阻断入站测速监听：" + "、".join(
+                        f"{item['proto'].upper()}/{item['port']}" for item in blocked_endpoints
+                    ))
+                inventory_fresh = speedtest.get("target_inventory_state") == "fresh"
+                tcpquality_ok = "tcpquality" not in selected_names or (
+                    speedtest.get("destination_state") == "blocked" and inventory_fresh
+                    and speedtest.get("target_ip_count", 0) == len(blocked_destination_ips)
+                )
+                inbound_selected = bool(set(selected_names) & {"iperf3_server", "librespeed", "openspeedtest", "ookla_server"})
+                inbound_detected = bool(set(speedtest.get("detected_services", [])) & {"iperf3_server", "librespeed", "openspeedtest", "ookla_server"}) if isinstance(speedtest.get("detected_services"), list) else False
+                inbound_ok = not inbound_selected or not inbound_detected or (
+                    speedtest.get("state") == "blocked" and bool(blocked_endpoints)
+                )
+                requires_domain_rules = any(
+                    bool(speedtest_guard.SERVICE_DOMAINS.get(service_name, ()))
+                    for service_name in selected_names
+                )
+                hosts_state_ok = (
+                    speedtest.get("hosts_state") == "blocked"
+                    if requires_domain_rules
+                    else speedtest.get("hosts_state") in {"cleared", "not_required"}
+                )
+                component_state_ok = (
+                    hosts_state_ok
+                    and tcpquality_ok and inbound_ok
+                    and speedtest.get("state") == "blocked"
+                    and not speedtest.get("reason")
+                )
+                # Keep incomplete/stale results in the container telemetry only.
+                # Buyer alerts and SSH banner updates are created only when every
+                # selected component has a successful local readback.
+                if component_state_ok:
+                    if blocked_domains:
+                        detail_parts.append("本地解析规则已生效；应用使用 DoH、直连 IP 或缓存域名时仍可能绕过")
+                    if "tcpquality" in selected_names:
+                        refreshed_at = speedtest.get("target_inventory_refreshed_at")
+                        if type(refreshed_at) is int and refreshed_at > 0:
+                            detail_parts.append(f"TcpQuality 目标清单更新于 {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(refreshed_at))}")
+                    detail_parts.append("这是管理员设置的资源保护策略，不代表对用户作滥用认定；未停止进程或容器")
+                    endpoint_key = ",".join(f"{item['proto']}:{item['port']}" for item in blocked_endpoints)
+                    ip_key = ",".join(blocked_destination_ips[:12])
+                    speedtest_alert = _security_alert(
+                        "speedtest_service_blocked", "info", "测速目标网络策略已确认生效",
+                        "。".join(detail_parts) + "。",
+                        len(blocked_domains) + len(blocked_endpoints) + len(blocked_destination_ips), 0, container,
+                    )
+                    speedtest_alert.update(
+                        alert_key="speedtest:" + ",".join(blocked_domains) + ":" + endpoint_key + ":" + ip_key,
+                        speedtest_guard=speedtest,
+                        instance_id=str(container.get("id") or "")[:200],
+                        automatic_remediation={"attempted": True, "succeeded": True,
+                                               "message": "所选服务规则已应用并通过本地读回确认"},
+                    )
+                    alerts.append(speedtest_alert)
         trojan = security.get("trojan_guard") if isinstance(security.get("trojan_guard"), dict) else {}
         if container.get("runtime") in {"incus", "podman"} and trojan.get("state") == "release_pending":
             pending = trojan.get("pending_endpoints") if isinstance(trojan.get("pending_endpoints"), list) else []
@@ -7323,6 +7438,13 @@ def collect_container(
     panel_pairing = collect_panel_pairing_indicators(name, runtime, project, image, init_pid=pid)
     socks_proxy = panel_pairing.pop("socks_proxy", {})
     socket_security = _collect_socket_security(pid)
+    speedtest_policy = speedtest_guard.load_policy()
+    speedtest_policy_active = bool(
+        isinstance(speedtest_policy, dict)
+        and speedtest_policy.get("invalid") is not True
+        and runtime_name in speedtest_policy.get("runtimes", [])
+        and speedtest_policy.get("services")
+    )
     connection_metrics = socket_security.get('connection_metrics') or {}
     if connection_metrics.get('valid') is True:
         conn_count = int(connection_metrics['total'])
@@ -7369,7 +7491,7 @@ def collect_container(
             if isinstance(socket_security.get("listening_ports"), list)
             else [],
         )
-        if has_remote_connections or has_listening_ports or socks_proxy.get('detected') or panel_pairing.get('detected') or panel_pairing.get('standalone_panels')
+        if has_remote_connections or has_listening_ports or socks_proxy.get('detected') or panel_pairing.get('detected') or panel_pairing.get('standalone_panels') or (speedtest_policy_active and runtime_name in speedtest_guard.SUPPORTED_RUNTIMES)
         else {
             "communication_detail_available": True,
             "communication_snapshot_count": 0,
@@ -7377,6 +7499,7 @@ def collect_container(
             "communication_processes": [],
             "communication_sockets": [],
             "service_listeners": [],
+            "service_listener_inventory_complete": False,
         }
     )
     expected_connection_count = max(
@@ -7682,6 +7805,36 @@ def collect_container(
         if endpoint in blocked_trojan and "trojan" in [str(value).lower() for value in listener.get("application_protocols", [])]:
             listener["trojan_block_state"] = "blocked"
             listener["trojan_block_message"] = "该容器网络命名空间内仅阻断了此容器已确认的 Trojan 入站协议和端口"
+    speedtest_status = None
+    if speedtest_policy is not None and runtime_name in speedtest_guard.SUPPORTED_RUNTIMES:
+        speedtest_runner = lambda command: _run_action_command(_runtime_exec_cmd(runtime, name, command, project))
+        speedtest_status = speedtest_guard.reconcile_container(
+            runtime=runtime_name,
+            name=name,
+            project=project,
+            identity=f"{runtime_name}\0{project}\0{name}\0{container_id or name}",
+            pid=pid,
+            namespace_epoch=namespace_epoch,
+            network_shared=host_or_shared_network,
+            image=image,
+            listeners=communication.get("service_listeners", []),
+            listener_inventory_complete=(
+                communication.get("service_listener_inventory_complete") is True
+                and communication.get("communication_detail_available") is True
+                and communication.get("communication_snapshot_truncated") is not True
+            ),
+            policy=speedtest_policy,
+            runner=speedtest_runner,
+        )
+        blocked_speedtest = {
+            (str(item.get("proto") or "").lower(), int(item.get("port") or 0))
+            for item in speedtest_status.get("blocked_endpoints", []) if isinstance(item, dict)
+        }
+        for listener in service_inventory:
+            endpoint = (str(listener.get("proto") or "").lower(), int(listener.get("port") or 0))
+            if endpoint in blocked_speedtest:
+                listener["speedtest_block_state"] = "blocked"
+                listener["speedtest_block_message"] = "按测速服务策略，仅阻断已确认的测速服务监听端口"
     socket_security.update(
         {
             "net_rx_pps": net_rx_pps,
@@ -7704,6 +7857,7 @@ def collect_container(
             "service_inventory_state": service_inventory_state,
             "vmess_guard": vmess_status,
             "trojan_guard": trojan_status,
+            **({"speedtest_guard": speedtest_status} if speedtest_status is not None else {}),
             "vmess_listener_inventory_source": vmess_listener_source,
             "vmess_listener_inventory_reason": vmess_listener_inventory_reason,
             "vmess_listener_inventory_complete": vmess_listener_inventory_complete,
@@ -9265,7 +9419,34 @@ def _execute_host_firewall_policy(action: Dict, node_id: str) -> Tuple[bool, str
         return False, 'host firewall policy revision is missing or invalid'
     if not isinstance(policy.get('rules'), list) or not isinstance(policy.get('abuse'), dict):
         return False, 'host firewall policy data is invalid'
-    return _runman_host_firewall_request(policy)
+    abuse = policy.get('abuse') or {}
+    requires_rfw = params.get("requires_rfw") is not False
+    if requires_rfw:
+        rfw_policy = {
+            "revision": policy["revision"],
+            "rules": policy.get("rules", []),
+            "abuse": {
+                # Ignore the retired port-only speedtest flag; Runman should
+                # receive only the fixed non-speedtest templates and RFW NICs.
+                "speedtest": False,
+                "mining": abuse.get("mining") is True,
+                "bt": abuse.get("bt") is True,
+                "interfaces": abuse.get("interfaces") if isinstance(abuse.get("interfaces"), list) else [],
+            },
+        }
+        ok, message = _runman_host_firewall_request(rfw_policy)
+        if not ok:
+            return False, message
+    policy_ok, policy_message = speedtest_guard.save_policy({
+        "revision": policy["revision"],
+        "services": abuse.get("services", []),
+        "runtimes": abuse.get("service_runtimes", []),
+    })
+    if not policy_ok:
+        return False, policy_message
+    if requires_rfw:
+        return True, (message + "; " if message else "") + policy_message
+    return True, "service policy saved for the selected Incus/Podman runtimes"
 
 
 def _execute_host_firewall_rule_delete(action: Dict, node_id: str) -> Tuple[bool, str]:

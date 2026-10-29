@@ -2245,14 +2245,28 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
 
     raw_abuse = payload.get("abuse", {})
     categories = {"speedtest", "mining", "bt"}
-    if not isinstance(raw_abuse, dict) or set(raw_abuse) - (categories | {"interfaces", "runtimes"}):
-        raise HTTPException(status_code=400, detail="防滥用策略只支持固定端口规则、容器桥接网卡或 Incus/Podman 运行时")
+    allowed_services = {"ookla", "cloudflare", "fast", "tcpquality", "iperf3_server", "librespeed", "openspeedtest", "ookla_server"}
+    if not isinstance(raw_abuse, dict) or set(raw_abuse) - (categories | {"services", "service_runtimes", "interfaces", "runtimes"}):
+        raise HTTPException(status_code=400, detail="测速服务策略只支持已知测速服务，以及 Incus/Podman 容器目标")
     abuse = {}
     for category in sorted(categories):
         value = raw_abuse.get(category, False)
         if type(value) is not bool:
             raise HTTPException(status_code=400, detail=f"防滥用策略 {category} 必须是布尔值")
-        abuse[category] = value
+        # The old `speedtest` flag only blocked destination port 5201. Keep
+        # accepting it while reading old clients, but never reapply that
+        # port-only rule; new matching is service/domain/process based.
+        abuse[category] = False if category == "speedtest" else value
+    raw_services = raw_abuse.get("services", [])
+    if not isinstance(raw_services, list) or len(raw_services) > len(allowed_services):
+        raise HTTPException(status_code=400, detail="测速服务列表无效")
+    services = []
+    for service in raw_services:
+        name = str(service).strip().lower()
+        if name not in allowed_services:
+            raise HTTPException(status_code=400, detail="测速服务选择包含不支持的类型")
+        if name not in services:
+            services.append(name)
     raw_interfaces = raw_abuse.get("interfaces", [])
     if not isinstance(raw_interfaces, list) or len(raw_interfaces) > 16:
         raise HTTPException(status_code=400, detail="容器桥接网卡必须是最多 16 项的列表")
@@ -2273,17 +2287,56 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="容器运行时只支持 Incus 或 Podman")
         if name not in runtimes:
             runtimes.append(name)
+    raw_service_runtimes = raw_abuse.get("service_runtimes", [])
+    if not isinstance(raw_service_runtimes, list) or len(raw_service_runtimes) > 2:
+        raise HTTPException(status_code=400, detail="测速服务运行时必须从 Incus / Podman 中选择，最多两项")
+    service_runtimes = []
+    for runtime in raw_service_runtimes:
+        name = str(runtime).strip().lower()
+        if name not in {"incus", "podman"}:
+            raise HTTPException(status_code=400, detail="测速服务范围只支持 Incus 或 Podman")
+        if name not in service_runtimes:
+            service_runtimes.append(name)
     if interfaces and runtimes:
-        raise HTTPException(status_code=400, detail="请使用具体网卡或运行时作为目标，不要混合填写")
-    if any(abuse.values()) and not interfaces and not runtimes:
-        raise HTTPException(status_code=400, detail="启用容器防滥用前必须选择已采集的容器网卡或运行时")
+        # Fixed-port RFW templates need bridge names; service guards need
+        # logical runtime scope. They may coexist in one policy.
+        if not services or not any(abuse.get(key) for key in ("mining", "bt")):
+            raise HTTPException(status_code=400, detail="测速服务范围和固定端口规则的目标不能混用")
+    fixed_rules = any(abuse.get(key) is True for key in ("mining", "bt"))
+    if fixed_rules and not interfaces and not runtimes:
+        raise HTTPException(status_code=400, detail="启用固定端口规则前必须选择已采集的容器网卡或运行时")
+    if services and not service_runtimes:
+        raise HTTPException(status_code=400, detail="启用测速服务识别前必须选择 Incus、Podman 或两者")
     abuse["interfaces"] = interfaces
     abuse["runtimes"] = runtimes
+    abuse["services"] = sorted(services)
+    abuse["service_runtimes"] = service_runtimes
     return {"rules": rules, "abuse": abuse}
 
 
 def _empty_host_firewall_policy() -> Dict[str, Any]:
-    return {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "interfaces": [], "runtimes": []}}
+    return {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "services": [], "service_runtimes": [], "interfaces": [], "runtimes": []}}
+
+
+def _policy_has_rfw_effect(policy: Dict[str, Any] | None) -> bool:
+    if not isinstance(policy, dict):
+        return False
+    rules = policy.get("rules")
+    abuse = policy.get("abuse") if isinstance(policy.get("abuse"), dict) else {}
+    return bool(
+        isinstance(rules, list) and rules
+        or any(abuse.get(key) is True for key in ("speedtest", "mining", "bt"))
+    )
+
+
+def _stored_policy_has_rfw_effect(raw: str) -> bool:
+    try:
+        policy = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return False
+    # Inspect the persisted shape before validation so legacy port-5201
+    # policies can still be sent to Runman once to remove their owned rule.
+    return _policy_has_rfw_effect(policy)
 
 
 HOST_FIREWALL_READBACK_REASONS = {
@@ -2691,7 +2744,7 @@ def _host_firewall_policy_targets(
 ) -> Tuple[List[str] | None, str]:
     """Resolve a logical runtime selection to fresh, agent-discovered bridge names."""
     abuse = policy.get("abuse") if isinstance(policy, dict) else None
-    if not isinstance(abuse, dict) or not any(abuse.get(key) is True for key in ("speedtest", "mining", "bt")):
+    if not isinstance(abuse, dict) or not any(abuse.get(key) is True for key in ("mining", "bt")):
         return [], "not_required"
 
     inventory = _host_firewall_interface_inventory(conn, host_id, now)
@@ -2725,8 +2778,7 @@ def _materialize_host_firewall_policy(
         return None, status
     materialized = dict(policy)
     abuse = dict(policy.get("abuse") or {})
-    abuse.pop("runtimes", None)
-    if any(abuse.get(key) is True for key in ("speedtest", "mining", "bt")):
+    if any(abuse.get(key) is True for key in ("mining", "bt")):
         abuse["interfaces"] = targets
     materialized["abuse"] = abuse
     validated = _validate_host_firewall_policy(materialized)
@@ -2757,6 +2809,9 @@ def _enqueue_host_firewall_policy(
     revision = (int(existing["revision"]) if existing else 0) + 1
     policy_with_revision = {"revision": revision, **policy}
     policy_json = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
+    requires_rfw = _policy_has_rfw_effect(policy)
+    if existing and _stored_policy_has_rfw_effect(str(existing["policy_json"] or "{}")):
+        requires_rfw = True
     if existing and str(existing["policy_json"] or "") != policy_json:
         conn.execute(
             "INSERT INTO host_firewall_policy_history(host_id,revision,policy_json,updated_by,updated_at,source_fleet_revision) VALUES(?,?,?,?,?,?)",
@@ -2778,7 +2833,7 @@ def _enqueue_host_firewall_policy(
         "WHERE host_id=? AND action_type='apply_host_firewall_policy' AND status IN ('queued','dispatched')",
         (now, host_id),
     )
-    action_params = {"expected_node_id": node_id, "policy": policy_with_revision}
+    action_params = {"expected_node_id": node_id, "policy": policy_with_revision, "requires_rfw": requires_rfw}
     if fleet_revision > 0:
         action_params["fleet_revision"] = int(fleet_revision)
     cur = conn.execute(
@@ -2803,10 +2858,22 @@ def _maybe_queue_fleet_firewall_policy(
     security: Dict[str, Any],
 ) -> bool:
     runtime = security.get("host_firewall") if isinstance(security, dict) else None
-    if not node_id or not isinstance(runtime, dict) or runtime.get("control_api") != "ready":
+    if not node_id:
         return False
     fleet = conn.execute("SELECT revision,policy_json FROM fleet_firewall_policy WHERE id=1").fetchone()
     if fleet is None or int(fleet["revision"] or 0) < 1:
+        return False
+    try:
+        policy = _validate_host_firewall_policy(json.loads(fleet["policy_json"] or "{}"))
+    except (HTTPException, TypeError, ValueError):
+        return False
+    local_policy = conn.execute(
+        "SELECT policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)
+    ).fetchone()
+    requires_rfw = _policy_has_rfw_effect(policy) or (
+        local_policy is not None and _stored_policy_has_rfw_effect(str(local_policy["policy_json"] or "{}"))
+    )
+    if requires_rfw and (not isinstance(runtime, dict) or runtime.get("control_api") != "ready"):
         return False
     fleet_revision = int(fleet["revision"])
     state = conn.execute(
@@ -2815,7 +2882,7 @@ def _maybe_queue_fleet_firewall_policy(
     already_on_fleet_revision = (
         state is not None and int(state["source_fleet_revision"] or 0) >= fleet_revision
     )
-    live_readback = _host_firewall_live_readback(conn, host_id, ts)
+    live_readback = _host_firewall_live_readback(conn, host_id, ts) if requires_rfw else {"status": "unavailable", "stale": True}
     drift_repair_needed = (
         already_on_fleet_revision
         and live_readback.get("status") == "ready"
@@ -2845,10 +2912,6 @@ def _maybe_queue_fleet_firewall_policy(
             and int(live_readback.get("observed_at") or 0) <= int(latest["updated_at"] or 0)
         ):
             return False
-    try:
-        policy = _validate_host_firewall_policy(json.loads(fleet["policy_json"] or "{}"))
-    except (HTTPException, TypeError, ValueError):
-        return False
     if _policy_required_protocols(policy):
         compatibility = _policy_protocol_compatibility(policy, live_readback)
         if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
@@ -3082,17 +3145,31 @@ def _fleet_firewall_node_state(
         {"rules": [{"protocol": protocol} for protocol in (required_protocols or [])]}, live_readback
     )
     policy_abuse = (required_policy or {}).get("abuse") or {}
-    container_policy_enabled = any(policy_abuse.get(key) is True for key in ("speedtest", "mining", "bt"))
+    container_policy_enabled = any(policy_abuse.get(key) is True for key in ("mining", "bt"))
     policy_row = conn.execute(
-        "SELECT revision,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
+        "SELECT revision,source_fleet_revision,policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)
     ).fetchone()
     local_revision = int(policy_row["revision"] or 0) if policy_row is not None else 0
     applied_fleet_revision = int(policy_row["source_fleet_revision"] or 0) if policy_row is not None else 0
+    rfw_required = _policy_has_rfw_effect(required_policy) or (
+        policy_row is not None and _stored_policy_has_rfw_effect(str(policy_row["policy_json"] or "{}"))
+    )
     action = _latest_host_firewall_action(conn, host_id)
     status = "unregistered"
     if node_id:
         status = "offline" if not online else "awaiting_capability"
-        if online and not runtime["stale"] and runtime["control_api"] == "unsupported":
+        if online and not rfw_required:
+            if action is not None and action["status"] in {"queued", "dispatched", "running"}:
+                status = "queued"
+            elif action is not None and action["status"] == "failed":
+                status = "apply_failed"
+            elif fleet_revision > 0 and applied_fleet_revision == fleet_revision and action is not None and action["status"] == "succeeded":
+                status = "last_apply_succeeded"
+            elif fleet_revision > 0:
+                status = "not_synced"
+            else:
+                status = "ready"
+        elif online and not runtime["stale"] and runtime["control_api"] == "unsupported":
             status = "runman_update_required"
         elif online and not runtime["stale"] and runtime["control_api"] == "unavailable":
             status = "runman_unavailable"
@@ -4949,6 +5026,10 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
                 policy = json.loads(row["policy_json"] or "{}")
             except (TypeError, ValueError):
                 policy = _empty_host_firewall_policy()
+            try:
+                policy = _validate_host_firewall_policy(policy)
+            except HTTPException:
+                policy = _empty_host_firewall_policy()
             revision, updated_by, updated_at, source_fleet_revision = int(row["revision"]), str(row["updated_by"] or ""), int(row["updated_at"] or 0), int(row["source_fleet_revision"] or 0)
         action = _latest_host_firewall_action(conn, host_id)
         latest = None if action is None else {
@@ -5331,19 +5412,30 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
             "updated_by=excluded.updated_by,updated_at=excluded.updated_at",
             (revision, json.dumps(policy, ensure_ascii=False, separators=(",", ":")), requested_by, now),
         )
-        hosts = conn.execute("SELECT host_id,node_id FROM hosts ORDER BY host_id").fetchall()
+        hosts = conn.execute("SELECT host_id,node_id,last_seen FROM hosts ORDER BY host_id").fetchall()
         queued = 0
         deferred = 0
         network_deferred = 0
         policy_abuse = policy.get("abuse") if isinstance(policy, dict) else None
         container_policy_enabled = isinstance(policy_abuse, dict) and any(
-            policy_abuse.get(key) is True for key in ("speedtest", "mining", "bt")
+            policy_abuse.get(key) is True for key in ("mining", "bt")
         )
         for host in hosts:
             host_id = str(host["host_id"])
             node_id = str(host["node_id"] or "")
+            host_online = bool(node_id) and now - int(host["last_seen"] or 0) <= STALE_SECONDS
+            existing_policy_row = conn.execute(
+                "SELECT policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)
+            ).fetchone()
+            requires_rfw = _policy_has_rfw_effect(policy) or (
+                existing_policy_row is not None
+                and _stored_policy_has_rfw_effect(str(existing_policy_row["policy_json"] or "{}"))
+            )
             runtime = _host_firewall_runtime_status(conn, host_id, now)
-            if node_id and runtime["control_api"] == "ready" and not runtime["stale"]:
+            if host_online and (
+                not requires_rfw
+                or (runtime["control_api"] == "ready" and not runtime["stale"])
+            ):
                 if _policy_required_protocols(policy):
                     live_readback = _host_firewall_live_readback(conn, host_id, now)
                     compatibility = _policy_protocol_compatibility(policy, live_readback)
@@ -5359,7 +5451,7 @@ async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
                 queued += 1
             else:
                 deferred += 1
-                if container_policy_enabled:
+                if container_policy_enabled or requires_rfw:
                     _targets, target_status = _host_firewall_policy_targets(conn, host_id, policy, now)
                     if target_status in {"inventory_unavailable", "runtime_not_found", "interface_not_found"}:
                         network_deferred += 1

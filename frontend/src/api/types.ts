@@ -416,12 +416,16 @@ export interface HostFirewallRule {
 }
 
 export interface HostFirewallAbusePolicy {
+  /** Deprecated: legacy TCP/UDP 5201 block is ignored by current agents. */
   speedtest: boolean;
   mining: boolean;
   bt: boolean;
+  services?: Array<'ookla' | 'cloudflare' | 'fast' | 'tcpquality' | 'iperf3_server' | 'librespeed' | 'openspeedtest' | 'ookla_server'>;
   interfaces: string[];
   /** Fleet templates use logical runtimes and resolve real interfaces per host. */
   runtimes?: Array<'incus' | 'podman'>;
+  /** Service-target policies select container runtimes independently of bridge interfaces. */
+  service_runtimes?: Array<'incus' | 'podman'>;
 }
 
 export interface HostFirewallRuntimeStatus {
