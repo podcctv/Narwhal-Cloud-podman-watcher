@@ -2315,7 +2315,24 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
 
 
 def _empty_host_firewall_policy() -> Dict[str, Any]:
-    return {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "services": [], "service_runtimes": [], "interfaces": [], "runtimes": []}}
+    # New drafts preselect supported speed-test protections, but deliberately
+    # leave the runtime scope empty. Nothing is sent to a node until an admin
+    # selects Incus and/or Podman and explicitly applies the policy.
+    return {
+        "rules": [],
+        "abuse": {
+            "speedtest": False,
+            "mining": False,
+            "bt": False,
+            "services": [
+                "cloudflare", "fast", "iperf3_server", "librespeed",
+                "ookla", "ookla_server", "openspeedtest", "tcpquality",
+            ],
+            "service_runtimes": [],
+            "interfaces": [],
+            "runtimes": [],
+        },
+    }
 
 
 def _policy_has_rfw_effect(policy: Dict[str, Any] | None) -> bool:

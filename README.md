@@ -1,6 +1,12 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.136**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.137**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.137：启用默认保护策略但要求明确作用范围
+
+- 新建防火墙策略时默认勾选 Ookla、Cloudflare、FAST、TcpQuality / Lisaweb、iPerf3 服务端、LibreSpeed、OpenSpeedTest 和 Ookla Server 保护；Incus / Podman 目标范围保持未选。必须明确选择运行时并手动应用后才会下发，不会因升级或打开页面自动改动节点；已有明确关闭的策略保持不变。
+- Agent 安装器为 VMess 与 Trojan 自动保护显式写入默认启用值，同时保留用户在本机配置中的明确覆盖。拦截仍要求完整配置、进程、监听及端口独占证据，只处理已确认的目标端口。
+- 不启用按 5201 等固定端口的全局测速阻断。
 
 ### v1.7.136：修复测速保护模块的 Agent 发布打包
 

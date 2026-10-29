@@ -41,7 +41,7 @@ const cnRiskProtocolOptions: Array<{ protocol: CnRiskProtocol; label: string; no
   { protocol: 'openvpn', label: 'OpenVPN（仅入站）', note: 'VPN 协议命中不等于滥用' },
 ];
 
-const emptyAbuse: HostFirewallAbusePolicy = { speedtest: false, mining: false, bt: false, services: [], interfaces: [], runtimes: [], service_runtimes: [] };
+const emptyAbuse: HostFirewallAbusePolicy = { speedtest: false, mining: false, bt: false, services: ['ookla', 'cloudflare', 'fast', 'tcpquality', 'iperf3_server', 'librespeed', 'openspeedtest', 'ookla_server'], interfaces: [], runtimes: [], service_runtimes: [] };
 const speedtestServiceOptions: Array<{
   id: NonNullable<HostFirewallAbusePolicy['services']>[number];
   title: string;
@@ -786,7 +786,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const outboundProtocols: HostFirewallRule['protocol'][] = ['all', 'tcp', 'udp', 'socks', 'fet', 'wireguard', 'mtproto'];
   const protocols: HostFirewallRule['protocol'][] = ['all', 'tcp', 'udp', 'http', 'tls', 'socks', 'ssh', 'fet', 'wireguard', 'openvpn', 'quic', 'mtproto'];
   const blockingRules = rules.filter((rule) => rule.enabled && rule.action === 'block').length;
-  const enabledAbuse = (abuse.services || []).length + Number(abuse.mining) + Number(abuse.bt);
+  const enabledAbuse = ((abuse.service_runtimes || []).length > 0 ? (abuse.services || []).length : 0) + Number(abuse.mining) + Number(abuse.bt);
 
   return <div className="mx-auto mt-6 max-w-6xl space-y-5 pb-8">
     <header className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
@@ -1066,9 +1066,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-bold text-slate-100">测速目标与容器服务保护</h3>
-          <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[10px] text-slate-400">默认关闭 · Incus / Podman</span>
+          <span className="rounded-full border border-sky-800 bg-sky-950/30 px-2 py-0.5 text-[10px] text-sky-200">测速保护默认勾选 · 需手动选范围并应用</span>
         </div>
-        <p className="mt-1 text-xs leading-5 text-slate-400">服务项按所选 Incus / Podman 容器分别执行，不需要网卡名；固定端口模板另行选择网桥。默认关闭，不会因打开页面就下发规则。</p>
+        <p className="mt-1 text-xs leading-5 text-slate-400">新建策略时默认勾选测速服务；必须选择 Incus / Podman 范围并手动应用后才会下发。服务项不需要网卡名；固定端口模板另行选择网桥。打开页面不会自动修改节点。</p>
       </div>
 
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
@@ -1099,7 +1099,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             </label>;
           })}
         </div>
-        {(abuse.services || []).length > 0 && !(abuse.service_runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">已选测速服务，但尚未选 Incus / Podman 范围；保存前至少选择一个。</p>}
+        {(abuse.services || []).length > 0 && !(abuse.service_runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">测速规则默认已勾选，但尚未应用到任何节点。请选择 Incus 和/或 Podman，再手动保存应用；未选择运行时前不会下发封锁。</p>}
         <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-500">Ookla、Cloudflare 和 FAST 仅限制指定入口域名，不封共享 CDN IP；浏览器 DoH、直连 IP 或已有 DNS 缓存可能绕过 hosts 解析限制。TcpQuality IP 列表上游不可读时会保留已安装规则并标记过期，不会宣称刷新成功。</p>
       </div>
 
@@ -1184,7 +1184,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <h4 className="text-xs font-semibold text-slate-200">3. 可选固定端口模板（矿池 / BT）</h4>
             <p className="mt-1 text-[10px] leading-4 text-slate-400">这些不是应用识别开关；只按目的端口阻断，改用随机端口后无法识别。规则仅针对上一步勾选的容器桥接网络。</p>
           </div>
-          <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-[10px] text-slate-300">全部策略已启用 {enabledAbuse} / {speedtestServiceOptions.length + 2} 项</span>
+          <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-[10px] text-slate-300">当前生效保护 {enabledAbuse} / {speedtestServiceOptions.length + 2} 项</span>
         </div>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           {([
