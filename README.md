@@ -1,6 +1,11 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.130**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.131**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.131：修复安全告警构造与 VMess 客户通知
+
+- 恢复安全告警对象的完整构造，避免告警生成函数返回空值影响多类安全遥测和 SSH banner 更新。
+- 保留 VMess 入站策略提醒中的 VLESS + Reality + Vision 迁移建议。
 
 ### v1.7.130：增加 Trojan 入站配置核验与端口保护
 
