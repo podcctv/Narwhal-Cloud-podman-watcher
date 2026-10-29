@@ -3610,12 +3610,33 @@ def _upstream_container_email(conn, identity, container_id, now=None):
     return (str(row["user_email"] or ""), int(row["verified_at"] or 0)) if row else ("", 0)
 
 
-def _buyer_mapping_issue(conn, identity):
+def _buyer_mapping_issue(conn, identity, container_id="", now=None):
     row = conn.execute(
         "SELECT reason FROM buyer_mapping_issues WHERE host_id=? AND runtime=? AND project=? AND container_name=?",
         tuple(identity),
     ).fetchone()
-    return str(row["reason"] or "") if row else ""
+    if row:
+        return str(row["reason"] or "")
+    container_id = str(container_id or "")[:200]
+    if not container_id:
+        return ""
+    now = int(time.time()) if now is None else int(now)
+    mapping = conn.execute(
+        """
+        SELECT user_email, verified_at FROM buyer_targets
+        WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND vm_id=?
+          AND source='upstream' AND enabled=1 AND scope='user'
+        LIMIT 1
+        """,
+        (*identity, container_id),
+    ).fetchone()
+    if not mapping:
+        return ""
+    if int(mapping["verified_at"] or 0) < now - buyer_notifications.buyer_mapping.TTL:
+        return "上游邮箱映射已过期，暂不显示旧邮箱；容器重新上报并成功匹配后会自动刷新。"
+    if not buyer_notifications.buyer_mapping.normalize_email(mapping["user_email"]):
+        return "上游已匹配此实例，但 API 未提供有效邮箱；可手工补充邮箱。"
+    return ""
 
 
 @app.get("/api/v1/latest")
@@ -3633,8 +3654,9 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         }
         buyer_emails = {}
         buyer_email_issues = {}
+        buyer_email_mapping_states = {}
+        mapped_after = int(time.time()) - buyer_notifications.buyer_mapping.TTL
         if can_view_user_notes:
-            mapped_after = int(time.time()) - buyer_notifications.buyer_mapping.TTL
             buyer_emails = {
                 (r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"]): str(r["user_email"] or "")
                 for r in conn.execute(
@@ -3644,6 +3666,16 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
                       AND user_email<>'' AND verified_at>=?
                     """,
                     (mapped_after,),
+                )
+            }
+            buyer_email_mapping_states = {
+                (r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"]):
+                    (str(r["user_email"] or ""), int(r["verified_at"] or 0))
+                for r in conn.execute(
+                    """
+                    SELECT host_id,runtime,project,container_name,vm_id,user_email,verified_at
+                    FROM buyer_targets WHERE source='upstream' AND enabled=1 AND scope='user'
+                    """
                 )
             }
             buyer_email_issues = {
@@ -3699,6 +3731,14 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         manual_email = str(note.get("user_email") or "") if can_view_user_notes else ""
         upstream_email = buyer_emails.get((r["host_id"], r["runtime"], r["project"], r["container_name"], current_container_id), "") if can_view_user_notes else ""
         mapping_issue = buyer_email_issues.get((r["host_id"], r["runtime"], r["project"], r["container_name"]), "") if can_view_user_notes else ""
+        mapping_key = (r["host_id"], r["runtime"], r["project"], r["container_name"], current_container_id)
+        mapping_state = buyer_email_mapping_states.get(mapping_key) if can_view_user_notes else None
+        if not mapping_issue and not (manual_email or upstream_email) and mapping_state:
+            mapped_email, mapped_at = mapping_state
+            if mapped_at < mapped_after:
+                mapping_issue = "上游邮箱映射已过期，暂不显示旧邮箱；容器重新上报并成功匹配后会自动刷新。"
+            elif not buyer_notifications.buyer_mapping.normalize_email(mapped_email):
+                mapping_issue = "上游已匹配此实例，但 API 未提供有效邮箱；可手工补充邮箱。"
         admission=admission_rows.get((r['host_id'],r['runtime'],r['project'],r['container_name']))
         reported_identity=(payload.get('security') or {}).get('admission',{}).get('instance_id') or payload.get('stable_id') or payload.get('id') or ''
         if admission and (not admission['instance_id'] or (len(reported_identity)>=12 and admission['instance_id'].startswith(reported_identity))):
@@ -3880,7 +3920,7 @@ def get_container_user_note(
         mapped_email, mapped_at = _upstream_container_email(
             conn, (host_id, runtime, project, container_name), container_id
         )
-        mapping_issue = _buyer_mapping_issue(conn, (host_id, runtime, project, container_name))
+        mapping_issue = _buyer_mapping_issue(conn, (host_id, runtime, project, container_name), container_id)
     finally:
         conn.close()
 
@@ -3971,10 +4011,9 @@ async def save_container_user_note(request: Request) -> JSONResponse:
                  str(getattr(request.state, "dashboard_user", "dashboard"))[:100]),
             )
         conn.commit()
-        mapped_email, mapped_at = _upstream_container_email(
+        mapped_email, _mapped_at = _upstream_container_email(
             conn, note_key[:4], container_id, now
         )
-        mapping_issue = _buyer_mapping_issue(conn, note_key[:4])
     finally:
         conn.close()
 
