@@ -7,7 +7,7 @@ const path = require('node:path');
 const frontend = path.resolve('frontend');
 const esbuild = require(require.resolve('esbuild', { paths: [frontend] }));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
-const abuse = { speedtest: false, mining: false, bt: false, interfaces: [], runtimes: [] };
+const abuse = { speedtest: false, mining: false, bt: false, services: [], service_runtimes: [], interfaces: [], runtimes: [] };
 const rule = port => ({ key: `rule-${port}`, priority: 100, direction: 'in', protocol: 'tcp', action: 'block', enabled: true, port_start: port, ip_type: 'any' });
 const policy = host => ({
   host_id: host, agent_ready: true, revision: 1, source_fleet_revision: 0,
