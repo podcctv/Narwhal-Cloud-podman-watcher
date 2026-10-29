@@ -1,6 +1,13 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.129**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.130**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.130：增加 Trojan 入站配置核验与端口保护
+
+- Agent 扫描 Xray、V2Ray、sing-box 的入站配置，识别 Trojan 端口，并将配置、进程代次、实时监听归属及传输协议逐项核对。
+- 仅在证据完整、端口独占且容器使用独立网络命名空间时，才在对应 Incus/Podman 容器网络命名空间阻断已确认的 Trojan 端口；不停止进程/容器，也不影响 VMess、VLESS 或其他协议端口。
+- Trojan 与 VMess 使用独立的 Agent nftables 规则表；采集不完整或端口共享时保持待核实。服务消失后，只有确认监听已消失且规则删除读回成功才报告恢复。
+- 安全告警、容器卡片、SSH banner 和买家通知展示 Trojan 处置结果；买家通知仅在节点回报封锁证据并匹配精确用户映射时发送，且说明这是网络保护策略，不是滥用定性。
 
 ### v1.7.129：修正 VMess 进程 time namespace 时钟核验
 

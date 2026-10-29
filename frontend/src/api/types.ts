@@ -64,7 +64,18 @@ export interface ContainerItem {
   security?: ContainerSecurity;
 }
 
+export interface ProtocolGuardSummary {
+  detected?: boolean;
+  protocol?: 'vmess' | 'trojan' | string;
+  state?: 'blocked' | 'partial' | 'unverified' | 'release_pending' | 'not_detected' | string;
+  reason?: string;
+  blocked_endpoints?: { proto?: 'tcp' | 'udp' | string; port?: number; pid?: number; process?: string }[];
+  pending_endpoints?: { proto?: 'tcp' | 'udp' | string; port?: number; pid?: number; process?: string; reason?: string }[];
+}
+
 export interface ContainerSecurity {
+  vmess_guard?: ProtocolGuardSummary;
+  trojan_guard?: ProtocolGuardSummary;
   admission?: {
     state: 'enforced' | 'unverified' | 'unavailable';
     observed_at?: number;
@@ -140,6 +151,8 @@ export interface ContainerSecurity {
     application_protocol_evidence?: 'config_matches_live_pid_and_port' | string;
     vmess_block_state?: 'blocked' | 'unverified' | string;
     vmess_block_message?: string;
+    trojan_block_state?: 'blocked' | 'unverified' | string;
+    trojan_block_message?: string;
   }[];
   communication_processes?: {
     process?: string;

@@ -438,6 +438,11 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
                               VMess 已阻断
                             </span>
                           )}
+                          {listener.trojan_block_state === 'blocked' && application.labels.some((label) => label.toLowerCase() === 'trojan') && (
+                            <span className="rounded border border-rose-800/70 bg-rose-950/50 px-1 py-0.5 text-[9px] font-semibold text-rose-300" title={listener.trojan_block_message || '只阻断此容器内已确认的 Trojan 入站端口，未停止其他服务'}>
+                              Trojan 已阻断
+                            </span>
+                          )}
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[9px] font-mono text-slate-500">
                           <span>{listener.local || '监听地址未采集'}</span>

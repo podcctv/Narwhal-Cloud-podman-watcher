@@ -1,6 +1,6 @@
-"""Conservative, namespace-local VMess inbound port guard for Incus/Podman.
+"""Conservative, namespace-local VMess/Trojan inbound port guard.
 
-Only a VMess endpoint that is present in a completely parsed live process
+Only a protected-protocol endpoint that is present in a completely parsed live process
 configuration and matched to the same PID/transport/port listener is eligible.
 The guard drops that transport/port in the container's own network namespace;
 it never signals or restarts a process or container.
@@ -20,6 +20,7 @@ except ImportError:
 
 SUPPORTED_RUNTIMES = {"incus", "podman"}
 SUPPORTED_ENGINES = {"xray", "v2ray", "sing-box"}
+SUPPORTED_PROTOCOLS = {"vmess", "trojan"}
 MAX_ENDPOINTS = 32
 _SAFE_SCAN_REASON = re.compile(r"[a-z0-9_]{1,64}")
 
@@ -45,24 +46,30 @@ def _publicly_reachable_listener(listener, network_exposure):
 
 
 def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_state="unavailable",
-         process_scan_states=None, listener_inventory_complete=None):
-    """Build only unambiguous VMess targets from config+live listener evidence."""
+         process_scan_states=None, listener_inventory_complete=None, application_protocol="vmess"):
+    """Build only unambiguous protected-protocol targets from config+live evidence."""
+    application_protocol = str(application_protocol or "").strip().lower()
+    if application_protocol not in SUPPORTED_PROTOCOLS:
+        return {"detected": False, "protocol": application_protocol, "state": "unverified",
+                "blocked_endpoints": [], "pending_endpoints": [], "release_eligible": False,
+                "reason": "protocol_not_supported"}
     runtime = str(runtime or "").strip().lower()
     configured_protocols = configured_protocols if isinstance(configured_protocols, list) else []
     listeners = listeners if isinstance(listeners, list) else []
     network_exposure = network_exposure if isinstance(network_exposure, list) else []
-    vmess = []
+    protected = []
     for item in configured_protocols[:100]:
-        if not isinstance(item, dict) or str(item.get("protocol") or "").lower() != "vmess":
+        if not isinstance(item, dict) or str(item.get("protocol") or "").lower() != application_protocol:
             continue
         pid = _integer(item.get("pid"), 2, 4194304)
         port = _integer(item.get("port"))
         process = str(item.get("process") or "").lower()
         if pid and port and process in SUPPORTED_ENGINES:
-            vmess.append({"pid": pid, "process": process, "port": port, "listen": str(item.get("listen") or "*")})
-    detected = bool(vmess)
+            protected.append({"pid": pid, "process": process, "port": port, "listen": str(item.get("listen") or "*")})
+    detected = bool(protected)
     result = {
         "detected": detected,
+        "protocol": application_protocol,
         "state": "not_detected",
         "blocked_endpoints": [],
         "pending_endpoints": [],
@@ -85,7 +92,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         return result
     if not listener_snapshot_complete:
         result.update(state="unverified", reason="listener_inventory_incomplete")
-        result["pending_endpoints"] = [{"pid": item["pid"], "port": item["port"], "process": item["process"], "reason": "listener_inventory_incomplete"} for item in vmess[:20]]
+        result["pending_endpoints"] = [{"pid": item["pid"], "port": item["port"], "process": item["process"], "reason": "listener_inventory_incomplete"} for item in protected[:20]]
         return result
 
     process_states = None
@@ -98,13 +105,13 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         # Compatibility for callers that only provide the historical aggregate
         # scan state. The Agent now supplies process-scoped evidence below.
         result.update(state="unverified", reason="configuration_scan_incomplete")
-        result["pending_endpoints"] = [{"pid": item["pid"], "port": item["port"], "process": item["process"], "reason": "configuration_scan_incomplete"} for item in vmess[:20]]
+        result["pending_endpoints"] = [{"pid": item["pid"], "port": item["port"], "process": item["process"], "reason": "configuration_scan_incomplete"} for item in protected[:20]]
         return result
 
     desired = {}
     pending = []
     saw_loopback_only = False
-    for configured in vmess:
+    for configured in protected:
         pid, process, port = configured["pid"], configured["process"], configured["port"]
         if process_states is not None:
             process_state = process_states.get((pid, process))
@@ -127,7 +134,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                 _integer(item.get("pid"), 2, 4194304) == pid
                 and str(item.get("process") or "").lower() == process
                 and _integer(item.get("port")) == port
-                and str(item.get("protocol") or "").lower() == "vmess"
+                and str(item.get("protocol") or "").lower() == application_protocol
             ):
                 transports = item.get("transports")
                 configured_transports = set(transports) if isinstance(transports, list) and all(x in {"tcp", "udp"} for x in transports) else None
@@ -147,7 +154,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
             transport = str(listener.get("proto") or "").lower()
             protocols = listener.get("application_protocols")
             protocols = {str(value).lower() for value in protocols} if isinstance(protocols, list) else set()
-            if listener.get("application_protocol_evidence") != "config_matches_live_pid_and_port" or protocols != {"vmess"}:
+            if listener.get("application_protocol_evidence") != "config_matches_live_pid_and_port" or protocols != {application_protocol}:
                 pending.append({"pid": pid, "port": port, "process": process, "reason": "listener_protocol_or_owner_ambiguous"})
                 continue
 
@@ -158,7 +165,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                 if (_integer(item.get("pid"), 2, 4194304) != pid
                         or str(item.get("process") or "").lower() != process
                         or _integer(item.get("port")) != port
-                        or str(item.get("protocol") or "").lower() == "vmess"):
+                        or str(item.get("protocol") or "").lower() == application_protocol):
                     continue
                 transports = item.get("transports")
                 if not isinstance(transports, list) or transport in transports:
@@ -176,7 +183,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                 or str(item.get("process") or "").lower() != process
                 or item.get("application_protocol_evidence") != "config_matches_live_pid_and_port"
                 or not isinstance(item.get("application_protocols"), list)
-                or {str(value).lower() for value in item["application_protocols"]} != {"vmess"}
+                or {str(value).lower() for value in item["application_protocols"]} != {application_protocol}
                 for item in co_listeners
             ):
                 pending.append({"pid": pid, "port": port, "proto": transport, "process": process, "reason": "shared_live_listener"})
@@ -243,11 +250,11 @@ def _owned_endpoints(readback, marker):
     return endpoints
 
 
-def _confirmed_vmess_live_endpoints(live_listeners):
-    """Return only exclusive live endpoints proven to belong to a VMess config.
+def _confirmed_protocol_live_endpoints(live_listeners, application_protocol):
+    """Return exclusive live endpoints proven to belong to one protected config.
 
-    A listener on a previously guarded port is not enough to keep a VMess rule:
-    VLESS, unknown owners, and mixed protocol evidence must remain reachable.
+    A listener on a previously guarded port is not enough to retain a block:
+    another protocol, unknown owners, and mixed evidence must remain reachable.
     """
     grouped = {}
     for item in live_listeners if isinstance(live_listeners, list) else []:
@@ -265,15 +272,21 @@ def _confirmed_vmess_live_endpoints(live_listeners):
             continue
         if all(
             isinstance(item.get("application_protocols"), list)
-            and {str(value).lower() for value in item["application_protocols"]} == {"vmess"}
+            and {str(value).lower() for value in item["application_protocols"]} == {application_protocol}
             and item.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
-            and item.get("vmess_process_scan_complete") is True
+            and (item.get("protocol_process_scan_complete") is True
+                 or (application_protocol == "vmess" and item.get("vmess_process_scan_complete") is True))
             and _integer(item.get("pid"), 2, 4194304) > 0
             and str(item.get("process") or "").lower() in SUPPORTED_ENGINES
             for item in listeners
         ):
             confirmed.add(endpoint)
     return confirmed
+
+
+def _confirmed_vmess_live_endpoints(live_listeners):
+    """Backward-compatible VMess evidence helper."""
+    return _confirmed_protocol_live_endpoints(live_listeners, "vmess")
 
 
 def _firewall_failure_reason(completed, fallback):
@@ -294,7 +307,7 @@ def _firewall_failure_reason(completed, fallback):
     return fallback
 
 
-def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_epoch, runner, namespace_fd,
+def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint_map, pid, expected_epoch, runner, namespace_fd,
                            *, release_if_absent=False, live_listeners=None, preserve_existing=False):
     result = {"state": "unverified", "blocked_endpoints": [], "reason": "firewall_apply_failed"}
 
@@ -328,9 +341,8 @@ def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_ep
     existing_endpoints = _owned_endpoints(current.stdout, marker) if exists else set()
     requested_endpoints = set(endpoint_map)
     # Only preserve/release-check a guard against an exclusive, positively
-    # attributed VMess listener. A VLESS or ambiguous listener on the same
-    # port must never inherit a VMess block.
-    live = _confirmed_vmess_live_endpoints(live_listeners)
+    # attributed listener for this exact protocol.
+    live = _confirmed_protocol_live_endpoints(live_listeners, application_protocol)
     if preserve_existing and exists:
         for transport, port in existing_endpoints - requested_endpoints:
             if (transport, port) in live:
@@ -413,7 +425,8 @@ def _reconcile_owned_table(prefix, table, marker, endpoint_map, pid, expected_ep
 
 
 def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, runner=None, nsenter_path=None,
-              nft_path=None, release_if_absent=False, live_listeners=None, preserve_existing=False):
+              nft_path=None, release_if_absent=False, live_listeners=None, preserve_existing=False,
+              application_protocol="vmess"):
     """Atomically reconcile an owned nft table in one isolated network namespace."""
     result = {"state": "unverified", "blocked_endpoints": [], "reason": "firewall_apply_failed"}
     if type(pid) is not int or pid <= 1 or not isinstance(identity, str) or not identity:
@@ -421,6 +434,10 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
         return result
     if host_network:
         result["reason"] = "shared_network_namespace"
+        return result
+    application_protocol = str(application_protocol or "").strip().lower()
+    if application_protocol not in SUPPORTED_PROTOCOLS:
+        result["reason"] = "protocol_not_supported"
         return result
     if not expected_epoch or _pid_epoch(pid) != expected_epoch:
         result["reason"] = "container_namespace_changed_or_shared"
@@ -443,8 +460,8 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
         return result
 
     digest = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:12]
-    table = f"narwhal_vmess_{digest}"
-    marker = f"narwhal-vmess-guard-v1-{digest}"
+    table = f"narwhal_{application_protocol}_{digest}"
+    marker = f"narwhal-{application_protocol}-guard-v1-{digest}"
     namespace_fd = _open_namespace_fd(pid, expected_epoch)
     if namespace_fd is None:
         result["reason"] = "container_namespace_changed_or_unavailable"
@@ -452,7 +469,7 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, host_network=False, r
     try:
         prefix = [nsenter_path, f"--net=/proc/self/fd/{namespace_fd}", "--", nft_path]
         return _reconcile_owned_table(
-            prefix, table, marker, endpoint_map, pid, expected_epoch,
+            prefix, table, marker, application_protocol, endpoint_map, pid, expected_epoch,
             runner or subprocess.run, namespace_fd, release_if_absent=release_if_absent,
             live_listeners=live_listeners, preserve_existing=preserve_existing,
         )

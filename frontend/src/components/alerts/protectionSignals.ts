@@ -10,6 +10,7 @@ const PROTECTION_ONLY_ALERT_TYPES = new Set([
   'container_connection_count', 'inbound_ip_fanout', 'socks_inbound_fanout',
   'inbound_source_blocked', 'tcp_concurrency_limited', 'admission_unverified',
   'vmess_port_blocked', 'vmess_block_unverified',
+  'trojan_port_blocked', 'trojan_block_unverified', 'trojan_block_release_unverified',
   'ddos_bandwidth', 'ddos_packets', 'ddos_syn', 'cc_total_rps', 'cc_single_ip',
   'cc_4xx_ratio', 'http_5xx_ratio', 'http_abuse', 'web_scan', 'port_scan',
   'outbound_fanout', 'outbound_sensitive_ports', 'outbound_bandwidth_abuse',

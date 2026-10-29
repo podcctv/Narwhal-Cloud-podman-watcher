@@ -1933,6 +1933,8 @@ def _build_service_inventory(
         if matches:
             row["application_protocols"] = sorted(matches)
             row["application_protocol_evidence"] = "config_matches_live_pid_and_port"
+            if (pid, process.lower()) in complete_protocol_processes:
+                row["protocol_process_scan_complete"] = True
             if matches == {"vmess"} and (pid, process.lower()) in complete_protocol_processes:
                 row["vmess_process_scan_complete"] = True
         inventory.append(row)
@@ -2964,6 +2966,92 @@ def _security_alert(
         'connections':container.get('conn_count',0), 'http_requests':access.get('requests',0),
         'configuration_risks':security.get('configuration_risks',[])[:10],
     }
+
+
+def _apply_protocol_guard_plan(
+    plan: Dict[str, object], protocol: str, *, runtime_name: str, identity: str,
+    pid: int, namespace_epoch: str, host_or_shared_network: bool,
+    auto_enabled: bool, scan_state: str, listener_inventory_complete: bool,
+    listeners: List[Dict[str, object]],
+) -> Dict[str, object]:
+    """Apply a protocol-specific guard without sharing another protocol's nft table."""
+    status = dict(plan)
+    should_reconcile = (
+        runtime_name in {"incus", "podman"}
+        and not host_or_shared_network
+        and bool(namespace_epoch)
+        and (
+            not auto_enabled
+            or scan_state == "complete"
+            or (listener_inventory_complete and plan.get("detected") is True)
+        )
+    )
+    if should_reconcile:
+        desired = plan.get("blocked_endpoints", []) if auto_enabled else []
+        enforcement = vmess_guard.reconcile(
+            pid, identity, namespace_epoch, desired,
+            release_if_absent=auto_enabled and plan.get("release_eligible") is True,
+            live_listeners=listeners,
+            preserve_existing=auto_enabled and plan.get("detected") is True
+                and bool(plan.get("pending_endpoints")),
+            application_protocol=protocol,
+        )
+        if auto_enabled and plan.get("release_eligible") is True:
+            if enforcement.get("state") == "cleared":
+                status.update(state="not_detected", reason="", blocked_endpoints=[], pending_endpoints=[])
+            else:
+                status.update(state="release_pending", reason=enforcement.get("reason") or "firewall_remove_unverified",
+                              blocked_endpoints=[], pending_endpoints=enforcement.get("pending_removal_endpoints", []))
+        elif auto_enabled and plan.get("detected"):
+            if plan.get("state") == "internal_only":
+                if enforcement.get("state") == "cleared":
+                    status.update(state="internal_only", reason="loopback_only_listener", blocked_endpoints=[])
+                else:
+                    status.update(state="release_pending", reason=enforcement.get("reason") or "firewall_remove_unverified",
+                                  blocked_endpoints=[], pending_endpoints=enforcement.get("pending_removal_endpoints", []))
+            elif enforcement.get("state") == "blocked":
+                status["state"] = "partial" if plan.get("pending_endpoints") else "blocked"
+                status["blocked_endpoints"] = [
+                    endpoint for endpoint in plan.get("blocked_endpoints", [])
+                    if any(endpoint.get("proto") == live.get("proto") and endpoint.get("port") == live.get("port")
+                           for live in enforcement.get("blocked_endpoints", []))
+                ]
+                if status["state"] == "partial":
+                    status["reason"] = "some_endpoints_are_ambiguous"
+                if plan.get("state") == "unverified":
+                    status.update(state="unverified",
+                                  reason="previous_guard_rule_preserved" if enforcement.get("blocked_endpoints")
+                                  else (plan.get("reason") or "firewall_apply_failed"),
+                                  blocked_endpoints=[])
+                    preserved = [
+                        {"proto": item.get("proto"), "port": item.get("port"), "reason": "previous_guard_rule_preserved"}
+                        for item in enforcement.get("blocked_endpoints", []) if isinstance(item, dict)
+                    ]
+                    status["pending_endpoints"] = list(plan.get("pending_endpoints") or [])[:20]
+                    for item in preserved:
+                        if not any(existing.get("proto") == item["proto"] and existing.get("port") == item["port"]
+                                   for existing in status["pending_endpoints"] if isinstance(existing, dict)):
+                            status["pending_endpoints"].append(item)
+            else:
+                status.update(state="unverified", reason=enforcement.get("reason") or "firewall_apply_failed",
+                              blocked_endpoints=[])
+        elif not auto_enabled:
+            if enforcement.get("state") == "cleared":
+                status.update(state="disabled", reason="automatic_block_disabled", blocked_endpoints=[])
+            else:
+                status.update(state="release_pending", reason=enforcement.get("reason") or "firewall_remove_unverified",
+                              blocked_endpoints=[], pending_endpoints=enforcement.get("pending_removal_endpoints", []))
+        elif scan_state == "complete" and not plan.get("detected"):
+            status.update(state="not_detected", reason="", blocked_endpoints=[])
+    elif plan.get("detected") and auto_enabled:
+        if host_or_shared_network:
+            status.update(state="unverified", reason="shared_network_namespace", blocked_endpoints=[])
+        elif not namespace_epoch:
+            status.update(state="unverified", reason="container_namespace_unavailable", blocked_endpoints=[])
+    elif auto_enabled and runtime_name in {"incus", "podman"} and plan.get("release_eligible") is True:
+        reason = "shared_network_namespace" if host_or_shared_network else "container_namespace_unavailable"
+        status.update(state="release_pending", reason=reason, blocked_endpoints=[], pending_endpoints=[])
+    return status
     if alert_type in {'cc_single_ip','http_abuse','web_scan'}:
         observation['source_ip'] = access.get({'cc_single_ip':'top_ip','http_abuse':'top_ip_4xx','web_scan':'top_scanner_ip'}[alert_type], '')
     return {
@@ -3182,6 +3270,9 @@ _MOTD_THREAT_TYPES = {
     "container_connection_count",
     "vmess_port_blocked",
     "vmess_block_unverified",
+    "trojan_port_blocked",
+    "trojan_block_unverified",
+    "trojan_block_release_unverified",
 }
 
 _container_motd_incidents = security_banner.incidents
@@ -3856,6 +3947,86 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 vmess_alert.update(alert_key="vmess:unverified:" + ",".join(labels), vmess_guard=vmess,
                                    instance_id=str(container.get("id") or "")[:200])
             alerts.append(vmess_alert)
+        trojan = security.get("trojan_guard") if isinstance(security.get("trojan_guard"), dict) else {}
+        if container.get("runtime") in {"incus", "podman"} and trojan.get("state") == "release_pending":
+            pending = trojan.get("pending_endpoints") if isinstance(trojan.get("pending_endpoints"), list) else []
+            labels = [label for label in (_vmess_endpoint_label(item, pending=True) for item in pending) if label]
+            detail = (
+                "当前完整扫描未发现 Trojan 入站，但系统尚未确认旧端口阻断规则已安全删除。"
+                if not trojan.get("detected") else "当前仅发现本地回环 Trojan 监听，尚未确认旧端口规则可安全删除。"
+            )
+            if labels:
+                detail += f"待核实端口：{'、'.join(labels)}。"
+            detail += "规则只有在监听消失且 nftables 读回确认后才会移除；未停止进程或容器。"
+            alert = _security_alert("trojan_block_release_unverified", "warning", "Trojan 端口恢复待核实", detail, len(labels), 0, container)
+            alert.update(alert_key="trojan:release:" + ",".join(labels), trojan_guard=trojan,
+                         instance_id=str(container.get("id") or "")[:200],
+                         automatic_remediation={"attempted": True, "succeeded": False, "message": "未确认 Trojan 规则已移除，旧规则保留"})
+            alerts.append(alert)
+        elif container.get("runtime") in {"incus", "podman"} and trojan.get("detected") and trojan.get("state") in {"blocked", "partial", "unverified"}:
+            blocked = trojan.get("blocked_endpoints") if isinstance(trojan.get("blocked_endpoints"), list) else []
+            pending = trojan.get("pending_endpoints") if isinstance(trojan.get("pending_endpoints"), list) else []
+            blocked_labels = [label for label in (_vmess_endpoint_label(item) for item in blocked) if label]
+            pending_labels = [label for label in (_vmess_endpoint_label(item, pending=True) for item in pending) if label]
+            if trojan.get("state") in {"blocked", "partial"} and blocked_labels:
+                title = "Trojan 入站端口已自动阻断" if trojan.get("state") == "blocked" else "Trojan 入站已部分阻断，仍有端口待核实"
+                message = (
+                    f"已核实此容器内以下进程提供 Trojan 入站，并在该容器独立网络命名空间阻断对应协议/端口：{'、'.join(blocked_labels)}。"
+                    "未停止进程、容器或其他端口；这是网络保护策略，不代表认定用户滥用。"
+                )
+                if pending_labels:
+                    message += f" 另有入口待核实，未阻断：{'、'.join(pending_labels)}。"
+                alert = _security_alert("trojan_port_blocked", "warning", title, message, len(blocked_labels), 0, container)
+                alert.update(
+                    alert_key="trojan:" + ",".join(blocked_labels + pending_labels),
+                    trojan_guard=trojan,
+                    instance_id=str(container.get("id") or "")[:200],
+                    service_listeners=[item for item in security.get("service_listeners", [])
+                                       if isinstance(item, dict) and item.get("trojan_block_state") == "blocked"][:20],
+                    automatic_remediation={"attempted": True, "succeeded": trojan.get("state") == "blocked",
+                                           "message": "仅阻断配置、进程及实时监听均已确认的 Trojan 端口，未停止其他服务"},
+                )
+            else:
+                reason_labels = {
+                    "configuration_scan_incomplete": "配置扫描不完整",
+                    "config_not_known_before_process_start": "配置文件在进程启动后更新，无法确认当前进程已加载该版本",
+                    "config_file_changed_during_scan": "配置文件在扫描期间发生变化",
+                    "config_file_metadata_unavailable": "无法读取配置文件时间信息",
+                    "config_parse_failed_or_too_large": "配置文件无法完整解析或超过大小上限",
+                    "listener_inventory_incomplete": "实时监听清单不完整",
+                    "live_listener_not_confirmed": "尚未找到配置对应的实时监听",
+                    "listener_protocol_or_owner_ambiguous": "监听进程或协议归属不明确",
+                    "shared_configured_port": "该端口还配置了其他协议",
+                    "shared_live_listener": "该端口由其他监听服务共用",
+                    "firewall_permission_denied": "Agent 缺少目标网络命名空间的防火墙权限",
+                    "firewall_kernel_unsupported": "当前内核或 nftables 不支持该规则",
+                    "firewall_rule_validation_failed": "nftables 规则校验失败",
+                    "firewall_apply_failed": "防火墙规则应用失败",
+                    "firewall_readback_failed": "无法读回确认规则生效",
+                    "shared_network_namespace": "容器与其他服务共用网络命名空间",
+                    "container_namespace_unavailable": "容器网络命名空间不可用",
+                    "previous_guard_rule_preserved": "当前证据不足，旧的 Trojan 端口保护规则仍保留",
+                }
+                labels = pending_labels or [str(item.get("port")) for item in pending if isinstance(item, dict) and item.get("port")]
+                reason = reason_labels.get(str(trojan.get("reason") or ""), "端口归属或规则生效状态未能确认")
+                detail = f"已在进程配置中发现 Trojan 入站，但尚未安全确认对应端口保护：{reason}。未停止进程或容器。"
+                if labels:
+                    detail += f"待核实端口：{'、'.join(labels)}。"
+                socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
+                scan_states = socks_proxy.get("protocol_process_scan_states") if isinstance(socks_proxy.get("protocol_process_scan_states"), list) else []
+                for item in [item for item in scan_states if isinstance(item, dict) and item.get("state") != "complete"][:3]:
+                    process = str(item.get("process") or "未知进程")[:40]
+                    pid = int(item.get("pid") or 0) if str(item.get("pid") or "").isdigit() else 0
+                    scan_reason = reason_labels.get(str(item.get("reason") or ""), "扫描证据不完整")
+                    detail += f"进程 {process}{f' PID {pid}' if pid else ''}：{scan_reason}。"
+                    config_files = item.get("config_files") if isinstance(item.get("config_files"), list) else []
+                    safe_files = [str(path)[:180] for path in config_files[:3] if isinstance(path, str)]
+                    if safe_files:
+                        detail += f"已检查路径：{'、'.join(safe_files)}。"
+                alert = _security_alert("trojan_block_unverified", "warning", "Trojan 入站保护待核实", detail, len(labels), 0, container)
+                alert.update(alert_key="trojan:unverified:" + ",".join(labels), trojan_guard=trojan,
+                             instance_id=str(container.get("id") or "")[:200])
+            alerts.append(alert)
         rx_bps = float(container.get("net_rx_bps") or 0)
         tx_bps = float(container.get("net_tx_bps") or 0)
         rx_pps = float(security.get("net_rx_pps") or 0)
@@ -7264,30 +7435,31 @@ def collect_container(
         and len(communication.get("service_listeners") or []) < 100
         and len(service_inventory) < 100
     )
-    vmess_candidates = [
+    guarded_protocol_candidates = [
         item for item in configured_protocols[:100]
-        if isinstance(item, dict) and str(item.get("protocol") or "").lower() == "vmess"
+        if isinstance(item, dict) and str(item.get("protocol") or "").lower() in vmess_guard.SUPPORTED_PROTOCOLS
     ]
     vmess_listener_source = str(communication.get("communication_source") or "container_ss")
     vmess_target_inventory_complete = regular_listener_inventory_complete
-    vmess_candidate_ports = {
-        int(item.get("port") or 0) for item in vmess_candidates
+    guarded_candidate_ports = {
+        int(item.get("port") or 0) for item in guarded_protocol_candidates
         if str(item.get("port") or "").isdigit() and 0 < int(item.get("port") or 0) <= 65535
     }
-    vmess_candidate_listener_missing = False
-    for candidate in vmess_candidates:
+    guarded_candidate_listener_missing = False
+    for candidate in guarded_protocol_candidates:
         try:
             candidate_pid = int(candidate.get("pid") or 0)
             candidate_port = int(candidate.get("port") or 0)
         except (TypeError, ValueError, OverflowError):
-            vmess_candidate_listener_missing = True
+            guarded_candidate_listener_missing = True
             break
         candidate_process = str(candidate.get("process") or "").lower()
+        candidate_protocol = str(candidate.get("protocol") or "").lower()
         candidate_transports = candidate.get("transports")
         for listener in service_inventory:
             protocols = listener.get("application_protocols")
             if (
-                isinstance(protocols, list) and {str(value).lower() for value in protocols} == {"vmess"}
+                isinstance(protocols, list) and {str(value).lower() for value in protocols} == {candidate_protocol}
                 and listener.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
                 and int(listener.get("pid") or 0) == candidate_pid
                 and str(listener.get("process") or "").lower() == candidate_process
@@ -7296,17 +7468,17 @@ def collect_container(
             ):
                 break
         else:
-            vmess_candidate_listener_missing = True
+            guarded_candidate_listener_missing = True
             break
 
     vmess_listener_inventory_reason = ""
-    if vmess_candidates and (not regular_listener_inventory_complete or vmess_candidate_listener_missing):
+    if guarded_protocol_candidates and (not regular_listener_inventory_complete or guarded_candidate_listener_missing):
         proc_listener_snapshot = _collect_vmess_host_proc_listener_inventory(
             pid,
             configured_protocols,
             process_scan_states,
             sorted({
-                int(port) for port in list(socket_security.get("listening_ports") or [])
+            int(port) for port in list(socket_security.get("listening_ports") or [])
                 + list(socket_security.get("udp_listening_ports") or [])
                 if str(port).isdigit() and 0 < int(port) <= 65535
             }),
@@ -7316,7 +7488,7 @@ def collect_container(
             fallback_listeners = fallback_listeners if isinstance(fallback_listeners, list) else []
             communication["service_listeners"] = [
                 item for item in (communication.get("service_listeners") or [])
-                if isinstance(item, dict) and int(item.get("port") or 0) not in vmess_candidate_ports
+                if isinstance(item, dict) and int(item.get("port") or 0) not in guarded_candidate_ports
             ] + fallback_listeners
             communication["vmess_listener_inventory_source"] = "host_proc_fd_inode"
             service_inventory, service_inventory_state = _build_service_inventory(
@@ -7324,7 +7496,7 @@ def collect_container(
                 communication,
                 configured_protocols,
                 process_scan_states,
-                authoritative_listener_ports=vmess_candidate_ports,
+                authoritative_listener_ports=guarded_candidate_ports,
             )
             scoped_socket_security = dict(socket_security)
             scoped_socket_security["listening_ports"] = []
@@ -7338,7 +7510,7 @@ def collect_container(
                 scoped_communication,
                 configured_protocols,
                 process_scan_states,
-                authoritative_listener_ports=vmess_candidate_ports,
+                authoritative_listener_ports=guarded_candidate_ports,
             )
             vmess_listener_source = "host_proc_fd_inode"
             vmess_target_inventory_complete = len(vmess_plan_inventory) < 100
@@ -7466,6 +7638,34 @@ def collect_container(
         reason = "shared_network_namespace" if host_or_shared_network else "container_namespace_unavailable"
         vmess_status.update(state="release_pending", reason=reason, blocked_endpoints=[], pending_endpoints=[])
 
+    auto_block_trojan = os.getenv("SECURITY_AUTO_BLOCK_TROJAN", "true").strip().lower() not in ("0", "false", "no", "off")
+    trojan_plan = vmess_guard.plan(
+        runtime_name,
+        configured_protocols,
+        vmess_plan_inventory,
+        network_exposure,
+        vmess_scan_state,
+        process_scan_states=socks_proxy.get("protocol_process_scan_states"),
+        listener_inventory_complete=vmess_listener_inventory_complete,
+        application_protocol="trojan",
+    )
+    trojan_plan["listener_inventory_source"] = vmess_listener_source
+    trojan_plan["listener_inventory_reason"] = vmess_listener_inventory_reason
+    trojan_plan["protocol_inventory_reason"] = socks_proxy.get("protocol_inventory_reason", "")
+    trojan_status = _apply_protocol_guard_plan(
+        trojan_plan,
+        "trojan",
+        runtime_name=runtime_name,
+        identity=f"{runtime_name}\0{project}\0{name}\0{container_id or name}",
+        pid=pid,
+        namespace_epoch=namespace_epoch,
+        host_or_shared_network=host_or_shared_network,
+        auto_enabled=auto_block_trojan,
+        scan_state=vmess_scan_state,
+        listener_inventory_complete=vmess_listener_inventory_complete,
+        listeners=vmess_plan_inventory,
+    )
+
     blocked_vmess = {
         (str(item.get("proto") or "").lower(), int(item.get("port") or 0))
         for item in vmess_status.get("blocked_endpoints", []) if isinstance(item, dict)
@@ -7475,6 +7675,15 @@ def collect_container(
             if (str(listener.get("proto") or "").lower(), int(listener.get("port") or 0)) in blocked_vmess:
                 listener["vmess_block_state"] = "blocked"
                 listener["vmess_block_message"] = "该容器网络命名空间内仅阻断了此 VMess 传输协议和端口"
+    blocked_trojan = {
+        (str(item.get("proto") or "").lower(), int(item.get("port") or 0))
+        for item in trojan_status.get("blocked_endpoints", []) if isinstance(item, dict)
+    }
+    for listener in service_inventory:
+        endpoint = (str(listener.get("proto") or "").lower(), int(listener.get("port") or 0))
+        if endpoint in blocked_trojan and "trojan" in [str(value).lower() for value in listener.get("application_protocols", [])]:
+            listener["trojan_block_state"] = "blocked"
+            listener["trojan_block_message"] = "该容器网络命名空间内仅阻断了此容器已确认的 Trojan 入站协议和端口"
     socket_security.update(
         {
             "net_rx_pps": net_rx_pps,
@@ -7496,6 +7705,7 @@ def collect_container(
             "service_listeners": service_inventory,
             "service_inventory_state": service_inventory_state,
             "vmess_guard": vmess_status,
+            "trojan_guard": trojan_status,
             "vmess_listener_inventory_source": vmess_listener_source,
             "vmess_listener_inventory_reason": vmess_listener_inventory_reason,
             "vmess_listener_inventory_complete": vmess_listener_inventory_complete,
@@ -7920,9 +8130,9 @@ def _collect_vmess_host_proc_listener_inventory(
     """Use host /proc inode ownership to complete candidate VMess listener evidence."""
     candidates = [
         item for item in configured_protocols[:100]
-        if isinstance(item, dict) and str(item.get("protocol") or "").lower() == "vmess"
+        if isinstance(item, dict) and str(item.get("protocol") or "").lower() in vmess_guard.SUPPORTED_PROTOCOLS
     ]
-    if not candidates or len(candidates) > vmess_guard.MAX_ENDPOINTS:
+    if not candidates or len(candidates) > vmess_guard.MAX_ENDPOINTS * len(vmess_guard.SUPPORTED_PROTOCOLS):
         return {"complete": False, "reason": "candidate_limit_or_absence", "listeners": []}
 
     states: Dict[Tuple[int, str], Dict[str, object]] = {}

@@ -44,9 +44,12 @@ def names(items):
     return "、".join(clean(v, 80) for v in items[:4] if isinstance(v, str) and v) if isinstance(items, list) else ""
 
 
-def vmess_block_evidence(details):
-    """Return only process/port tuples backed by a confirmed node-side block."""
-    guard = details.get("vmess_guard") if isinstance(details, dict) else None
+def protocol_block_evidence(details, protocol):
+    """Return endpoint facts only when the node confirms this protocol's block."""
+    protocol = str(protocol or "").strip().lower()
+    if protocol not in {"vmess", "trojan"}:
+        return None
+    guard = details.get(f"{protocol}_guard") if isinstance(details, dict) else None
     if not isinstance(guard, dict) or guard.get("state") not in {"blocked", "partial"}:
         return None
     remediation = details.get("automatic_remediation")
@@ -76,10 +79,20 @@ def vmess_block_evidence(details):
     if not endpoints:
         return None
     return {
+        "protocol": protocol,
         "state": guard["state"],
         "blocked_endpoints": [dict(process=p, pid=pid, proto=proto, port=port) for p, pid, proto, port in endpoints],
         "pending_count": len(guard.get("pending_endpoints", [])) if isinstance(guard.get("pending_endpoints"), list) else 0,
     }
+
+
+def vmess_block_evidence(details):
+    """Backward-compatible VMess evidence validator."""
+    return protocol_block_evidence(details, "vmess")
+
+
+def trojan_block_evidence(details):
+    return protocol_block_evidence(details, "trojan")
 
 
 METRICS = {
@@ -112,8 +125,9 @@ METRICS = {
 def issue(alert, details):
     kind = alert.get("alert_type", alert.get("type", ""))
     obs = details.get("observation") or details
-    if kind == "vmess_port_blocked":
-        evidence = vmess_block_evidence(details)
+    if kind in {"vmess_port_blocked", "trojan_port_blocked"}:
+        protocol = "vmess" if kind == "vmess_port_blocked" else "trojan"
+        evidence = protocol_block_evidence(details, protocol)
         if evidence:
             runtime = clean(alert.get("runtime") or "容器", 40)
             project = clean(alert.get("project") or "default", 100)
@@ -127,10 +141,11 @@ def issue(alert, details):
             identity = f"容器 {runtime}/{project}/{container}"
             if instance_id:
                 identity += f"（实例 ID {instance_id[:12]}）"
-            facts = f"已确认 {identity} 内 VMess 进程及监听：{targets}；系统只在该容器网络命名空间阻断列出的协议/端口，没有停止进程、容器或其他端口。"
+            facts = f"已确认 {identity} 内 {protocol.upper()} 进程及监听：{targets}；系统只在该容器网络命名空间阻断列出的协议/端口，没有停止进程、容器或其他端口。"
             if evidence["state"] == "partial" or evidence["pending_count"]:
-                facts += "另有 VMess 入口仍待核实，不能据此认为全部入口都已阻断。"
-            return "已按平台网络策略限制 VMess 入站", facts, "这不是对您进行滥用定性。建议将服务迁移到 VLESS + Reality + Vision；迁移前请确认新端口不会与其他服务冲突。如需协助，请发工单。"
+                facts += f"另有 {protocol.upper()} 入口仍待核实，不能据此认为全部入口都已阻断。"
+            advice = "这不是对您进行滥用定性。请联系管理员核对端口策略；如需继续使用相关服务，请先确认替代端口不会与其他业务冲突。"
+            return f"已按平台网络策略限制 {protocol.upper()} 入站", facts, advice
     if kind in {'inbound_source_blocked','tcp_concurrency_limited','admission_unverified'}:
         data=details.get('admission') or {}
         if kind=='inbound_source_blocked':
@@ -387,11 +402,13 @@ def render(alert, state, node="", action=None):
     instance = clean(alert.get("container_name"), 200)
     identity = f"您的 {name} 服务器（实例 {instance}）"
     outcome = execution_text(details, action)
-    if alert.get("alert_type") == "vmess_port_blocked" and vmess_block_evidence(details):
+    if alert.get("alert_type") in {"vmess_port_blocked", "trojan_port_blocked"} and protocol_block_evidence(
+        details, "vmess" if alert.get("alert_type") == "vmess_port_blocked" else "trojan"
+    ):
         outcome = ""
     if alert.get("alert_type") in {"cpu_pressure_protection", "io_pressure_protection"}:
         outcome = ""
-    subject = "服务器服务策略提醒" if alert.get("alert_type") == "vmess_port_blocked" else "服务器资源保护提醒" if alert.get("alert_type") in {"cpu_pressure_protection", "io_pressure_protection"} else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
+    subject = "服务器服务策略提醒" if alert.get("alert_type") in {"vmess_port_blocked", "trojan_port_blocked"} else "服务器资源保护提醒" if alert.get("alert_type") in {"cpu_pressure_protection", "io_pressure_protection"} else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
     if state == "verified":
         subject = "服务器安全复查通知"
         text = f"{identity}此前{description}。\n本次复查未再发现该问题。请保持安全设置，并留意后续使用情况。"
