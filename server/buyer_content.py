@@ -144,7 +144,10 @@ def issue(alert, details):
             facts = f"已确认 {identity} 内 {protocol.upper()} 进程及监听：{targets}；系统只在该容器网络命名空间阻断列出的协议/端口，没有停止进程、容器或其他端口。"
             if evidence["state"] == "partial" or evidence["pending_count"]:
                 facts += f"另有 {protocol.upper()} 入口仍待核实，不能据此认为全部入口都已阻断。"
-            advice = "这不是对您进行滥用定性。请联系管理员核对端口策略；如需继续使用相关服务，请先确认替代端口不会与其他业务冲突。"
+            if protocol == "vmess":
+                advice = "这不是对您进行滥用定性。该端口已按平台策略限制；如需继续提供服务，建议迁移到 VLESS + Reality + Vision，并先确认新端口不会与其他业务冲突。"
+            else:
+                advice = "这不是对您进行滥用定性。请联系管理员核对端口策略；如需继续使用相关服务，请先确认替代端口不会与其他业务冲突。"
             return f"已按平台网络策略限制 {protocol.upper()} 入站", facts, advice
     if kind in {'inbound_source_blocked','tcp_concurrency_limited','admission_unverified'}:
         data=details.get('admission') or {}

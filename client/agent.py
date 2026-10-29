@@ -2966,6 +2966,20 @@ def _security_alert(
         'connections':container.get('conn_count',0), 'http_requests':access.get('requests',0),
         'configuration_risks':security.get('configuration_risks',[])[:10],
     }
+    if alert_type in {'cc_single_ip','http_abuse','web_scan'}:
+        observation['source_ip'] = access.get({'cc_single_ip':'top_ip','http_abuse':'top_ip_4xx','web_scan':'top_scanner_ip'}[alert_type], '')
+    return {
+        "type": alert_type,
+        "severity": severity,
+        "title": title,
+        "message": message,
+        "value": value,
+        "threshold": threshold,
+        "runtime": str(container.get("runtime") or ""),
+        "project": str(container.get("project") or ""),
+        "container_name": str(container.get("name") or ""),
+        "observation": observation,
+    }
 
 
 def _apply_protocol_guard_plan(
@@ -3052,22 +3066,6 @@ def _apply_protocol_guard_plan(
         reason = "shared_network_namespace" if host_or_shared_network else "container_namespace_unavailable"
         status.update(state="release_pending", reason=reason, blocked_endpoints=[], pending_endpoints=[])
     return status
-    if alert_type in {'cc_single_ip','http_abuse','web_scan'}:
-        observation['source_ip'] = access.get({'cc_single_ip':'top_ip','http_abuse':'top_ip_4xx','web_scan':'top_scanner_ip'}[alert_type], '')
-    return {
-        "type": alert_type,
-        "severity": severity,
-        "title": title,
-        "message": message,
-        "value": value,
-        "threshold": threshold,
-        "runtime": str(container.get("runtime") or ""),
-        "project": str(container.get("project") or ""),
-        "container_name": str(container.get("name") or ""),
-        "observation": observation,
-    }
-
-
 def _vmess_endpoint_label(item: Dict[str, object], pending: bool = False) -> str:
     """Describe the exact container process and transport port proven by the guard."""
     if not isinstance(item, dict):
