@@ -7,7 +7,8 @@ import { ToastMessage } from '../common/Toast';
 type Target = { host_id: string; runtime: string; project: string; container_name: string; machine_id: string; user_id: string; node_name: string; scope: 'user' | 'machine'; enabled: boolean | number; source?: string; verified_at?: number };
 type RecordItem = Target & { id: number; state: string; status: string; subject: string; message: string; last_error: string; attempts: number; due_at: number; machine_next_at: number; created_at: number; http_status: number };
 type SyncState = { status: string; message: string; verified_at?: number; matched?: number; unmatched?: number; manual?: number };
-type Data = { items: RecordItem[]; counts: Record<string, number>; targets: Target[]; hosts: Target[]; mapping_sync?: SyncState; mapping_issues?: (Target & {reason: string})[] };
+type NoticeEvent = { id: number; notice_id: string; channel: 'telegram' | 'banner'; status: string; attempt: number; ts: number; detail: string; host_id: string; runtime: string; project: string; container_name: string; subject: string };
+type Data = { items: RecordItem[]; counts: Record<string, number>; notice_channel_counts?: { telegram?: Record<string, number>; banner?: Record<string, number> }; notice_events?: NoticeEvent[]; targets: Target[]; hosts: Target[]; mapping_sync?: SyncState; mapping_issues?: (Target & {reason: string})[] };
 const EMPTY: Target = { host_id: '', runtime: '', project: '', container_name: '', machine_id: '', user_id: '', node_name: '', scope: 'user', enabled: true };
 const LABELS: Record<string, string> = { blocked: '暂缓发送', queued: '待发送', retrying: '等待重试', sending: '发送中', succeeded: '成功', failed: '失败', uncertain: '结果不确定', cancelled: '状态变化已取消', expired: '已过期' };
 const stamp = (t: number) => t ? new Date(t * 1000).toLocaleString('zh-CN') : '—';
@@ -63,6 +64,25 @@ export function BuyerNotificationsView({ onToast }: { onToast: (type: ToastMessa
       <button type="button" disabled={busy} onClick={() => setConfirmation('sync')} className="min-h-11 rounded-lg border border-sky-700 px-3 text-sky-300 disabled:opacity-50">同步上游收件关联</button>
     </div>
     <div className="flex flex-wrap gap-2">{Object.entries(data.counts).map(([status, count]) => <span key={status} className="rounded-lg bg-slate-950 px-3 py-2 text-xs text-slate-300 tabular-nums">{LABELS[status] || status} {count}</span>)}</div>
+    {data.notice_channel_counts && <div className="grid gap-3 md:grid-cols-2">
+      {(['telegram', 'banner'] as const).map(channel => {
+        const counts = data.notice_channel_counts?.[channel] || {};
+        const pending = Object.entries(counts).filter(([state]) => ['queued', 'blocked', 'sending', 'retrying', 'failed', 'uncertain'].includes(state)).reduce((sum, [, count]) => sum + count, 0);
+        return <div key={channel} className="rounded-xl border border-slate-700 bg-slate-950/70 p-3">
+          <div className="flex flex-wrap justify-between gap-2"><strong>{channel === 'telegram' ? 'Telegram 通知' : 'SSH Banner 提醒'}</strong><span className="text-amber-300">待处理 {pending}</span></div>
+          <div className="mt-2 flex flex-wrap gap-2">{Object.entries(counts).map(([state, count]) => <span key={state} className="rounded-md bg-slate-900 px-2 py-1 text-xs text-slate-300">{LABELS[state] || state} {count}</span>)}</div>
+        </div>;
+      })}
+    </div>}
+    {!!data.notice_events?.length && <details className="rounded-xl border border-slate-700 bg-slate-950/50 p-3">
+      <summary className="cursor-pointer text-sm font-semibold text-slate-200">最近用户通知投递事件（{data.notice_events.length}）</summary>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">{data.notice_events.map(event => <article key={event.id} className="min-w-0 rounded-lg border border-slate-800 p-2 text-xs text-slate-300">
+        <p className="flex flex-wrap justify-between gap-2"><strong>{event.channel === 'telegram' ? 'Telegram' : 'SSH Banner'} · {LABELS[event.status] || event.status}</strong><span>第 {event.attempt} 次</span></p>
+        <p className="mt-1 break-all">{event.host_id} / {event.runtime} / {event.project} / {event.container_name}</p>
+        <p className="mt-1">{event.subject} · {stamp(event.ts)}</p>
+        {event.detail && <p className="mt-1 break-words text-slate-400">{event.detail}</p>}
+      </article>)}</div>
+    </details>}
     <form onSubmit={e => { e.preventDefault(); form.scope === 'machine' ? setConfirmation('target') : void save(); }} className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
       <label className="text-xs text-slate-300">精确容器身份<select required value={identity(form)} onChange={e => { const t = data.hosts.find(t => identity(t) === e.target.value); if (t) choose(t); }} className={field}><option value={identity(EMPTY)}>选择主机 / 运行时 / 项目 / 容器</option>{data.hosts.map(t => <option key={identity(t)} value={identity(t)}>{t.host_id} / {t.runtime} / {t.project} / {t.container_name}</option>)}</select></label>
       <label className="text-xs text-slate-300">托管机器 UUID<input required value={form.machine_id} onChange={e => change({ machine_id: e.target.value })} className={field} /></label>

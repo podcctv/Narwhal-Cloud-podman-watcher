@@ -793,6 +793,44 @@ class HostFirewallPolicyTests(unittest.TestCase):
         self.assertTrue(server._maybe_queue_fleet_firewall_policy(conn, "host-a", "watcher-node-a", self.now + 4, security))
         conn.close()
 
+    def test_fleet_policy_retries_unverified_failure_after_cooldown_with_a_bound(self):
+        policy = {"rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False, "services": [], "service_runtimes": []}}
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO fleet_firewall_policy(id,revision,policy_json,updated_by,updated_at) VALUES(1,1,?,?,?)",
+            (json.dumps(policy), "test", self.now - 1200),
+        )
+        conn.execute(
+            "INSERT INTO host_firewall_policies(host_id,revision,policy_json,updated_by,updated_at,source_fleet_revision) VALUES('host-a',1,?,'test',?,1)",
+            (json.dumps(policy), self.now - 1100),
+        )
+        conn.execute(
+            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
+            "VALUES(0,'host-a','host','','__host__','apply_host_firewall_policy',?,'failed','fleet-policy-reconcile',?,?)",
+            (json.dumps({"fleet_revision": 1, "expected_node_id": "watcher-node-a", "policy": {"revision": 1, **policy}}), self.now - 1000, self.now - 500),
+        )
+        conn.commit()
+        security = {"host_firewall": {"control_api": "ready", "observed_at": self.now}}
+
+        self.assertFalse(server._maybe_queue_fleet_firewall_policy(conn, "host-a", "watcher-node-a", self.now, security))
+        self.assertTrue(server._maybe_queue_fleet_firewall_policy(conn, "host-a", "watcher-node-a", self.now + 901, security))
+        retry_count = conn.execute(
+            "SELECT COUNT(*) FROM security_actions WHERE host_id='host-a' AND action_type='apply_host_firewall_policy'"
+        ).fetchone()[0]
+        self.assertEqual(retry_count, 2)
+
+        conn.execute("UPDATE security_actions SET status='failed',updated_at=? WHERE id=(SELECT MAX(id) FROM security_actions)", (self.now + 901,))
+        conn.commit()
+        self.assertTrue(server._maybe_queue_fleet_firewall_policy(conn, "host-a", "watcher-node-a", self.now + 1801, security))
+        conn.execute("UPDATE security_actions SET status='failed',updated_at=? WHERE id=(SELECT MAX(id) FROM security_actions)", (self.now + 1801,))
+        conn.commit()
+        self.assertFalse(server._maybe_queue_fleet_firewall_policy(conn, "host-a", "watcher-node-a", self.now + 2702, security))
+        retry_count = conn.execute(
+            "SELECT COUNT(*) FROM security_actions WHERE host_id='host-a' AND action_type='apply_host_firewall_policy'"
+        ).fetchone()[0]
+        self.assertEqual(retry_count, 3)
+        conn.close()
+
     def test_enabled_fleet_template_rejects_conflicting_single_host_policy(self):
         asyncio.run(server.update_fleet_firewall_policy(Request(self.policy())))
 
@@ -1144,12 +1182,21 @@ class HostFirewallPolicyTests(unittest.TestCase):
                 "policy": {"revision": 4, "rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False}},
             },
         }
+        verified_snapshot = {
+            "status": "in_sync", "policy_revision": 4, "drift_count": 0, "missing_count": 0,
+            "expected_rules": [{"key": "managed_rule", "sync_state": "in_sync"}],
+            "rules": [{"id": 1, "origin": "platform", "sync_state": "in_sync"}],
+        }
         with mock.patch.object(agent.speedtest_guard, "save_policy", return_value=(True, "policy saved")) as save:
             with mock.patch.object(agent, "_runman_host_firewall_request", return_value=(True, "applied")) as send:
-                self.assertEqual(
-                    agent._execute_host_firewall_policy(action, "watcher-node-a"),
-                    (True, "applied; policy saved"),
-                )
+                with mock.patch.object(agent, "_runman_firewall_readback", return_value={
+                    "status": "ready", "snapshot": verified_snapshot,
+                }) as readback:
+                    self.assertEqual(
+                        agent._execute_host_firewall_policy(action, "watcher-node-a"),
+                        (True, "applied; RFW live readback confirms the requested revision and all managed rules are in sync; policy saved"),
+                    )
+                    readback.assert_called_once_with()
                 send.assert_called_once_with({
                     "revision": 4,
                     "rules": [],
@@ -1159,6 +1206,27 @@ class HostFirewallPolicyTests(unittest.TestCase):
                     },
                 })
             save.assert_called_once_with({"revision": 4, "services": [], "runtimes": []})
+
+        with mock.patch.object(agent.speedtest_guard, "save_policy") as save:
+            with mock.patch.object(agent, "_runman_host_firewall_request", return_value=(True, "applied")):
+                with mock.patch.object(agent, "_runman_firewall_readback", return_value={
+                    "status": "unavailable", "reason": "socket_timeout",
+                }):
+                    ok, message = agent._execute_host_firewall_policy(action, "watcher-node-a")
+                    self.assertFalse(ok)
+                    self.assertIn("live readback is unavailable", message)
+            save.assert_not_called()
+
+        drifted_snapshot = {**verified_snapshot, "status": "drifted", "drift_count": 1}
+        with mock.patch.object(agent.speedtest_guard, "save_policy") as save:
+            with mock.patch.object(agent, "_runman_host_firewall_request", return_value=(True, "applied")):
+                with mock.patch.object(agent, "_runman_firewall_readback", return_value={
+                    "status": "ready", "snapshot": drifted_snapshot,
+                }):
+                    ok, message = agent._execute_host_firewall_policy(action, "watcher-node-a")
+                    self.assertFalse(ok)
+                    self.assertIn("drift or missing rules", message)
+            save.assert_not_called()
 
         with mock.patch.object(agent.speedtest_guard, "save_policy") as save:
             with mock.patch.object(agent, "_runman_host_firewall_request") as send:

@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { ChinaMap } from './ChinaMap';
+import React, { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { carrierComparison, compareProvinces, connectionSummary, mainCarriers, summaryState, ConnectionSummary } from './model';
 import { carriers, latencyColor, Target } from './types';
+
+const ChinaMap = lazy(() => import('./ChinaMap').then(module => ({ default: module.ChinaMap })));
 
 const Summary: React.FC<{ value: ConnectionSummary }> = ({ value: s }) => <>
   <strong title="有效目标中位时延" style={{ color: s.value === null ? '#94a3b8' : latencyColor(s.value) }}>{s.value === null ? '—' : s.value.toFixed(1)}{s.value !== null && <small> ms</small>}</strong>
@@ -26,7 +27,9 @@ export const CarrierComparison: React.FC<{ nodes: Target[]; province: string; on
       <div className="tcp-carrier-tabs" role="group" aria-label="手机地图运营商">{mainCarriers.map(c => <button key={c} aria-pressed={mobileCarrier === c} onClick={() => setMobileCarrier(c)}>{carriers[c]}</button>)}</div>
       <div className="tcp-carrier-maps">{mainCarriers.filter(c => !mobile || mobileCarrier === c).map(c => <div className={`tcp-carrier-map ${mobileCarrier === c ? 'is-mobile-active' : ''}`} key={c}>
         <div className="tcp-carrier-heading"><h3>{carriers[c]}</h3><button className="tcp-text" onClick={() => onDetail(c)}>查看节点明细</button></div>
-        <ChinaMap nodes={nodes} province={province} carrier={c} status="" onSelect={onSelect} />
+        <Suspense fallback={<div className="tcp-map-loading" role="status">正在载入 {carriers[c]} 地图…</div>}>
+          <ChinaMap nodes={nodes} province={province} carrier={c} status="" onSelect={onSelect} />
+        </Suspense>
         <div className="tcp-carrier-summary"><Summary value={connectionSummary(nodes.filter(n => n.carrier === c && (!province || n.province === province)))} /></div>
       </div>)}</div>
       <LatencyLegend />

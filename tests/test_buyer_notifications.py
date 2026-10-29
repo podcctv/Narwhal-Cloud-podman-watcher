@@ -64,6 +64,33 @@ class BuyerTests(unittest.TestCase):
         with server.db() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM buyer_outbox ORDER BY id")]
 
+    def test_records_exposes_telegram_banner_backlog_and_recent_events(self):
+        with server.db() as conn:
+            conn.execute(
+                "INSERT INTO buyer_user_notices(id,alert_id,host_id,runtime,project,container_name,subject,created_at,expires_at,telegram_status,banner_status) VALUES('live',7,'host','incus','default','c1','Notice',?,?, 'failed','written')",
+                (self.now, self.now + 3600),
+            )
+            conn.execute(
+                "INSERT INTO buyer_user_notices(id,alert_id,host_id,runtime,project,container_name,subject,created_at,expires_at,telegram_status,banner_status) VALUES('expired',8,'host','incus','default','c1','Expired',?,?, 'queued','queued')",
+                (self.now - 7200, self.now - 1),
+            )
+            conn.execute(
+                "INSERT INTO buyer_user_notice_events(notice_id,channel,status,attempt,ts,detail) VALUES('live','telegram','failed',2,?,'timeout')",
+                (self.now,),
+            )
+            conn.execute(
+                "INSERT INTO buyer_user_notice_events(notice_id,channel,status,attempt,ts,detail) VALUES('expired','banner','queued',0,?,'old')",
+                (self.now - 7200,),
+            )
+            conn.commit()
+
+        endpoint = next(route.endpoint for route in server.app.routes if getattr(route, "path", "") == "/api/v1/buyer/records")
+        data = endpoint()
+        self.assertEqual(data["notice_channel_counts"]["telegram"], {"failed": 1})
+        self.assertEqual(data["notice_channel_counts"]["banner"], {"written": 1})
+        self.assertEqual(len(data["notice_events"]), 1)
+        self.assertEqual(data["notice_events"][0]["notice_id"], "live")
+
     def test_report_enqueues_only_and_missing_mapping_blocks(self):
         with mock.patch.object(buyer,"deliver") as send:
             self.ingest()

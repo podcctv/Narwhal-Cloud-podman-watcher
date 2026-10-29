@@ -1017,14 +1017,39 @@ def attach(app, db):
     def records():
         conn=db()
         try:
+            delivery = delivery_status_summary(conn)
             return {"items":[dict(r) for r in conn.execute("SELECT o.*,COALESCE(c.next_at,0) AS machine_next_at FROM buyer_outbox o LEFT JOIN buyer_cooldowns c ON o.machine_id=c.machine_id ORDER BY o.id DESC LIMIT 100")],
                     "counts":dict(conn.execute("SELECT status,COUNT(*) FROM buyer_outbox GROUP BY status")),
+                    **delivery,
                     "targets":[dict(r) for r in conn.execute("SELECT * FROM buyer_targets LIMIT 1000")],
                     "hosts":[dict(r) for r in conn.execute("SELECT host_id,runtime,project,container_name FROM reports GROUP BY host_id,runtime,project,container_name HAVING MAX(ts)>=? LIMIT 1000",(int(time.time())-900,))],
                     "mapping_sync":buyer_mapping.status(conn),
                     "mapping_issues":[dict(r) for r in conn.execute("SELECT * FROM buyer_mapping_issues LIMIT 2000")]}
         finally:
             conn.close()
+
+    def delivery_status_summary(conn, now=None):
+        now = int(time.time()) if now is None else int(now)
+        channel_counts = {
+            "telegram": dict(conn.execute(
+                "SELECT COALESCE(telegram_status,'queued'),COUNT(*) FROM buyer_user_notices WHERE expires_at>? GROUP BY telegram_status",
+                (now,),
+            ).fetchall()),
+            "banner": dict(conn.execute(
+                "SELECT COALESCE(banner_status,'queued'),COUNT(*) FROM buyer_user_notices WHERE expires_at>? GROUP BY banner_status",
+                (now,),
+            ).fetchall()),
+        }
+        notice_events = [dict(r) for r in conn.execute(
+            """SELECT e.id,e.notice_id,e.channel,e.status,e.attempt,e.ts,e.detail,
+                      n.alert_id,n.host_id,n.runtime,n.project,n.container_name,n.subject
+               FROM buyer_user_notice_events e
+               LEFT JOIN buyer_user_notices n ON n.id=e.notice_id
+               WHERE COALESCE(n.expires_at,0)>?
+               ORDER BY e.ts DESC,e.id DESC LIMIT 50""",
+            (now,),
+        ).fetchall()]
+        return {"notice_channel_counts": channel_counts, "notice_events": notice_events}
 
     @app.post("/api/v1/buyer/sync")
     async def sync():

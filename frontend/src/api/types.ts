@@ -399,6 +399,12 @@ export interface SecurityStatusItem {
     last_seen?: number;
     report_age_seconds?: number | null;
     agent_version?: string;
+    capabilities?: string[];
+    samples_24h?: number;
+    healthy_samples_24h?: number;
+    failed_samples_24h?: number;
+    healthy_rate_percent_24h?: number | null;
+    last_sample_at?: number;
     missing_count?: number;
     issues?: Array<{ component?: string; state?: string; reason?: string; guidance?: string }>;
   };

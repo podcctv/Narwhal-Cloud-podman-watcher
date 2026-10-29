@@ -221,6 +221,9 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(status["items"][0]["total_rx_bps"], 1234)
         self.assertEqual(status["items"][0]["access_log"]["requests_per_second"], 2)
         self.assertEqual(status["items"][0]["today_peak_inbound_ips"], 7)
+        self.assertEqual(status["items"][0]["collection_health"]["samples_24h"], 1)
+        self.assertEqual(status["items"][0]["collection_health"]["healthy_samples_24h"], 0)
+        self.assertGreater(len(status["items"][0]["collection_health"]["capabilities"]), 0)
         latest_body = json.loads(server.latest().body)
         self.assertEqual(latest_body["server_version"], server.APP_VERSION)
         self.assertEqual(latest_body["items"][0]["agent_version"], "1.0.0")
@@ -249,6 +252,38 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn('aria-expanded={expanded}', telemetry)
         self.assertIn('const pageSize = 4', telemetry)
         self.assertIn('按主机名称筛选', telemetry)
+
+    def test_collection_health_exposes_24h_completeness_and_reported_capabilities(self):
+        now = int(time.time())
+        payload = {
+            "enabled": True,
+            "host_audit": {"enabled": True},
+            "cpu_guard": {"state": "healthy"},
+            "memory_guard": {"state": "healthy"},
+            "io_guard": {"state": "healthy"},
+            "host_firewall": {"readback": {"status": "ready"}, "events_api": "ready"},
+            "host_cpu": {"psi": {name: {"status": "ready"} for name in ("cpu", "memory", "io")}},
+        }
+        conn = server.db()
+        conn.execute("INSERT INTO hosts(host_id,last_seen,agent_version) VALUES('health-host',?,'1.7.162')", (now,))
+        conn.execute("INSERT INTO host_security(host_id,ts,payload_json) VALUES('health-host',?,?)", (now, json.dumps(payload)))
+        conn.execute(
+            "INSERT INTO host_collection_health_hourly(host_id,bucket_start,total_samples,healthy_samples,last_sample_at,last_status,last_missing_count,agent_version) VALUES('health-host',?,4,3,?,'partial',1,'1.7.162')",
+            (now - (now % 3600), now),
+        )
+        conn.commit()
+        conn.close()
+        server._security_status_cache = None
+        server._security_status_cache_time = 0
+
+        item = json.loads(server.security_status().body)["items"][0]
+        health = item["collection_health"]
+        self.assertEqual(health["samples_24h"], 4)
+        self.assertEqual(health["healthy_samples_24h"], 3)
+        self.assertEqual(health["failed_samples_24h"], 1)
+        self.assertEqual(health["healthy_rate_percent_24h"], 75.0)
+        self.assertIn("磁盘 I/O 保护", health["capabilities"])
+        self.assertIn("RFW 规则读回", health["capabilities"])
 
     def test_telemetry_distinguishes_single_container_and_aggregate_peaks(self):
         now = int(time.time())

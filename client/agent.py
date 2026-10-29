@@ -9553,6 +9553,43 @@ def _runman_firewall_readback() -> Dict[str, object]:
             connection.close()
 
 
+def _verify_runman_firewall_policy_readback(expected_revision: int) -> Tuple[bool, str]:
+    """Require a live RFW readback to confirm the policy written in this action."""
+    readback = _runman_firewall_readback()
+    if readback.get("status") != "ready":
+        reason = str(readback.get("reason") or readback.get("status") or "unavailable")[:120]
+        return False, f"RFW accepted the write but live readback is unavailable ({reason})"
+    snapshot = readback.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return False, "RFW policy write was not verified: live readback has no snapshot"
+    if snapshot.get("policy_revision") != expected_revision:
+        return False, (
+            "RFW policy write was not verified: readback revision "
+            f"{snapshot.get('policy_revision')} does not match requested revision {expected_revision}"
+        )
+    if (
+        snapshot.get("status") != "in_sync"
+        or snapshot.get("drift_count") != 0
+        or snapshot.get("missing_count") != 0
+    ):
+        return False, "RFW policy write was not verified: readback reports drift or missing rules"
+    expected_rules = snapshot.get("expected_rules")
+    if not isinstance(expected_rules, list) or any(
+        not isinstance(rule, dict) or rule.get("sync_state") != "in_sync"
+        for rule in expected_rules
+    ):
+        return False, "RFW policy write was not verified: one or more managed rules are not in sync"
+    rules = snapshot.get("rules")
+    if not isinstance(rules, list) or any(
+        isinstance(rule, dict)
+        and rule.get("origin") == "platform"
+        and rule.get("sync_state") != "in_sync"
+        for rule in rules
+    ):
+        return False, "RFW policy write was not verified: a platform rule is not in sync"
+    return True, "RFW live readback confirms the requested revision and all managed rules are in sync"
+
+
 def _runman_firewall_events(cursor: str = "") -> Dict[str, object]:
     observed_at = int(time.time())
     result: Dict[str, object] = {
@@ -9694,6 +9731,10 @@ def _execute_host_firewall_policy(action: Dict, node_id: str) -> Tuple[bool, str
         ok, message = _runman_host_firewall_request(rfw_policy)
         if not ok:
             return False, message
+        verified, verification_message = _verify_runman_firewall_policy_readback(policy["revision"])
+        if not verified:
+            return False, verification_message
+        message = (message + "; " if message else "") + verification_message
     policy_ok, policy_message = speedtest_guard.save_policy({
         "revision": policy["revision"],
         "services": abuse.get("services", []),

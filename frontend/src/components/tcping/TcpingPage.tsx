@@ -1,12 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowDown, ArrowRight, Check, ExternalLink, Globe2, Loader2, Play, RotateCw, Server, ShieldCheck } from 'lucide-react';
-import { ChinaMap } from './ChinaMap';
 import { CarrierComparison } from './CarrierComparison';
 import { filterTargets } from './model';
 import { active, carriers, Directory, Job, jobStatus, latencyColor, median, publicRequest, PublicError, Scope, scopes, Source, sourceStatus, utc, virtualizationLabel } from './types';
 import './tcping.css';
 import './tcping-catalog.css';
 import './tcping-carriers.css';
+
+const ChinaMap = lazy(() => import('./ChinaMap').then(module => ({ default: module.ChinaMap })));
 
 const resultLabel = (error: string) => ({ timeout: '连接超时', refused: '连接被拒', network_error: '网络错误', dns_error: 'DNS 失败', blocked_dns: '地址不安全', deadline: '执行超时', worker_error: '执行错误', cancelled: '已取消' }[error] || '无有效连接');
 const productNameKey = (value: string) => value.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
@@ -121,7 +122,9 @@ export const TcpingPage: React.FC = () => {
     {view === 'compare' && <p className="tcp-map-note">下方节点明细可单独筛选运营商和状态，不会隐藏上方三网对比中的失败结果。</p>}
     <section className={`tcp-workspace ${view === 'compare' ? 'tcp-comparison-details' : ''}`}>{view === 'detail' && <article className="tcp-panel tcp-map-panel">
       <div className="tcp-panel-title"><h2>连接分布</h2><div className="tcp-map-title-tools"><span>{province ? `${province} · 省级聚焦` : '全国'} · {carriers[carrier] || '全部运营商'} · ms</span>{province && <button className="tcp-text tcp-map-reset" onClick={() => setProvince('')}><RotateCw size={13} />全国视图</button>}</div></div>
-      <ChinaMap nodes={nodes} province={province} carrier={carrier} status={status} onSelect={p => setProvince(prev => prev === p ? '' : p)} />
+      <Suspense fallback={<div className="tcp-map-loading" role="status">正在载入全国节点地图…</div>}>
+        <ChinaMap nodes={nodes} province={province} carrier={carrier} status={status} onSelect={p => setProvince(prev => prev === p ? '' : p)} />
+      </Suspense>
       <div className="tcp-legend">{[['#34d399', '<50'], ['#a3e635', '50–100'], ['#facc15', '100–200'], ['#fb923c', '200–250'], ['#f87171', '≥250'], ['#334155', '未测'], ['#7f1d1d', '全失败']].map(([color, label]) => <span key={label}><i style={{ background: color }} />{label}</span>)}</div>
       <p className="tcp-map-note">地图与列表按同一省份、运营商和状态筛选染色；选择省份后地图单独放大该省，点“全国视图”返回。未返回不等于失败。台湾使用指定 TCP 目标（端口 36901）；港澳暂无节点。</p>
     </article>}

@@ -315,6 +315,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             <Signal title="采集完整性与修复提示" level={collectionLevel}>
               <p>Agent {collectionHealth.agent_version || t.agent_version || '未知'} · 最后心跳 {t.last_seen_utc8 || '—'}</p>
               <p>最后安全采样 {collectionHealth.last_report_at ? auditTime(collectionHealth.last_report_at) : '暂无安全采样'}</p>
+              {Number(collectionHealth.samples_24h || 0) > 0 && <p className="tabular-nums">近24小时采集完整率 {collectionHealth.healthy_rate_percent_24h ?? 0}% · 完整 {fmtNumber(collectionHealth.healthy_samples_24h || 0, 0)} / {fmtNumber(collectionHealth.samples_24h || 0, 0)} 次 · 缺项 {fmtNumber(collectionHealth.failed_samples_24h || 0, 0)} 次</p>}
+              {collectionHealth.capabilities?.length ? <div className="flex flex-wrap gap-1">{collectionHealth.capabilities.map(capability => <span key={capability} className="rounded border border-slate-700 px-1.5 py-0.5 text-[11px] text-slate-300">{capability}</span>)}</div> : <p>Agent 能力清单尚未上报。</p>}
               {collectionHealth.issues?.length ? collectionHealth.issues.map((item, index) => <div key={`${item.component || 'component'}-${index}`} className="rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
                 <p className="font-semibold">{item.component || '数据项'} · {item.state || '待核实'}</p>
                 <p>{item.reason || '采样不完整'}</p>

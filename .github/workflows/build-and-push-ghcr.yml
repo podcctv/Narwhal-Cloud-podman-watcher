@@ -98,9 +98,70 @@ jobs:
           sudo apt-get install -y nftables iproute2 libnetfilter-queue1
           sudo unshare --net --mount --fork --propagation private "$(command -v python)" tests/admission_linux_probe.py
 
+  compatibility-tests:
+    name: Compatibility tests · Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install compatibility test dependencies
+        run: python -m pip install -r client/requirements.txt -r server/requirements.txt httpx==0.28.1
+
+      - name: Check Incus/Podman, legacy Agent, RFW and admission compatibility
+        run: >-
+          python -m unittest
+          tests.test_agent_runtimes
+          tests.test_host_firewall_policy
+          tests.test_server_runtime
+          tests.test_admission
+
+  image-architecture-smoke:
+    name: Container image smoke · ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Read application version
+        id: app-version
+        shell: bash
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and import-check server image
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          APP_VERSION: ${{ steps.app-version.outputs.version }}
+        run: |
+          docker buildx build --platform "$TARGET_PLATFORM" --load \
+            --build-arg APP_VERSION="$APP_VERSION" \
+            --build-arg APP_REVISION="${GITHUB_SHA}" \
+            --tag narwhal-monitor-server-compat:ci ./server
+          docker run --rm --platform "$TARGET_PLATFORM" --entrypoint python narwhal-monitor-server-compat:ci \
+            -c "import app, inbound_assessment; print('server imports OK')"
+
   build-and-push:
     if: github.event_name != 'pull_request'
-    needs: test
+    needs: [test, compatibility-tests, image-architecture-smoke]
     runs-on: ubuntu-latest
     strategy:
       matrix:

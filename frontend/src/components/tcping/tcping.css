@@ -7,3 +7,4 @@
 .tcp-catalog{flex-wrap:wrap}
 .tcp-auto-source{margin-top:16px;padding:16px 20px;border:1px solid var(--tcp-line);border-radius:10px;background:var(--tcp-surface)}.tcp-auto-source label{display:flex;align-items:center;gap:10px;min-height:44px;cursor:pointer;font-size:14px}.tcp-auto-source input{width:20px;min-height:20px;flex:none;accent-color:var(--tcp-accent)}.tcp-auto-source p{color:var(--tcp-muted);font-size:12px;line-height:1.8;margin:4px 0 0}.tcp-auto-source>span{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--tcp-accent)}
 .tcp-admin-grid>*{min-width:0}.tcp-admin-list button>span{min-width:0;overflow-wrap:anywhere}.tcp-admin-list button>small{flex:none}.tcp-admin-form select{min-width:0;width:100%}
+.tcp-map-loading{display:grid;min-height:400px;place-items:center;background:radial-gradient(ellipse at 50% 50%,#132137 0,transparent 72%);color:var(--tcp-muted);font-size:13px}

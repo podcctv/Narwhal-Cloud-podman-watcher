@@ -287,6 +287,18 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_host_security_host_ts ON host_security(host_id, ts);
         CREATE INDEX IF NOT EXISTS idx_host_security_ts ON host_security(ts);
+        CREATE TABLE IF NOT EXISTS host_collection_health_hourly (
+            host_id TEXT NOT NULL,
+            bucket_start INTEGER NOT NULL,
+            total_samples INTEGER NOT NULL DEFAULT 0,
+            healthy_samples INTEGER NOT NULL DEFAULT 0,
+            last_sample_at INTEGER NOT NULL DEFAULT 0,
+            last_status TEXT NOT NULL DEFAULT 'unknown',
+            last_missing_count INTEGER NOT NULL DEFAULT 0,
+            agent_version TEXT NOT NULL DEFAULT 'unknown',
+            PRIMARY KEY(host_id, bucket_start)
+        );
+        CREATE INDEX IF NOT EXISTS idx_collection_health_bucket ON host_collection_health_hourly(bucket_start, host_id);
         CREATE TABLE IF NOT EXISTS host_firewall_event_state (
             host_id TEXT PRIMARY KEY,
             instance_id TEXT NOT NULL,
@@ -659,6 +671,7 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
             jobs = [
                 ("reports", "ts < ?", (raw_cutoff,)),
                 ("host_security", "ts < ?", (raw_cutoff,)),
+                ("host_collection_health_hourly", "bucket_start < ?", (now - 30 * 86400,)),
                 ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status<>'released')", (cutoff,)),
                 ("security_actions", "status IN ('succeeded','failed','cancelled') AND updated_at < ?", (cutoff,)),
                 ("security_alert_decisions", "created_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
@@ -682,10 +695,10 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
             # Drain offline hosts in batches before removing their identity.
             offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.host_id=hosts.host_id AND q.status<>'released') LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
             for host in offline:
-                for table in ("reports", "host_security", "security_actions", "security_alerts", "connection_overloads", "host_firewall_readbacks"):
+                for table in ("reports", "host_security", "host_collection_health_hourly", "security_actions", "security_alerts", "connection_overloads", "host_firewall_readbacks"):
                     progress += prune(table, "host_id=?", (host[0],))
                 remains = any(conn.execute(f"SELECT 1 FROM {table} WHERE host_id=? LIMIT 1", (host[0],)).fetchone()
-                              for table in ("reports", "host_security", "security_actions", "security_alerts"))
+                              for table in ("reports", "host_security", "host_collection_health_hourly", "security_actions", "security_alerts"))
                 if not remains:
                     conn.execute("DELETE FROM hosts WHERE host_id=?", (host[0],))
                     conn.commit()
@@ -2998,7 +3011,7 @@ def _maybe_queue_fleet_firewall_policy(
         return False
     fleet_revision = int(fleet["revision"])
     state = conn.execute(
-        "SELECT source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
+        "SELECT revision,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
     ).fetchone()
     already_on_fleet_revision = (
         state is not None and int(state["source_fleet_revision"] or 0) >= fleet_revision
@@ -3010,9 +3023,9 @@ def _maybe_queue_fleet_firewall_policy(
         and live_readback.get("stale") is False
         and live_readback.get("sync_status") == "drifted"
     )
-    if already_on_fleet_revision and not drift_repair_needed:
-        return False
     latest = _latest_host_firewall_action(conn, host_id)
+    same_fleet_revision = False
+    retry_failed_unverified = False
     if latest is not None:
         try:
             latest_params = json.loads(latest["params_json"] or "{}")
@@ -3021,18 +3034,40 @@ def _maybe_queue_fleet_firewall_policy(
         same_fleet_revision = int(latest_params.get("fleet_revision") or 0) == fleet_revision
         if same_fleet_revision and latest["status"] in {"queued", "dispatched", "running"}:
             return False
-        if same_fleet_revision and latest["status"] == "failed" and ts - int(latest["updated_at"] or 0) < 900:
-            return False
-        # A fresh drift readback must have been observed after the previous
-        # successful apply before scheduling another repair. This prevents the
-        # same pre-apply snapshot from causing an action loop.
-        if (
-            same_fleet_revision
-            and latest["status"] == "succeeded"
-            and drift_repair_needed
-            and int(live_readback.get("observed_at") or 0) <= int(latest["updated_at"] or 0)
-        ):
-            return False
+        if same_fleet_revision and latest["status"] == "failed":
+            if ts - int(latest["updated_at"] or 0) < 900:
+                return False
+            failed_for_revision = int(conn.execute(
+                """SELECT COUNT(*) FROM security_actions
+                   WHERE host_id=? AND action_type='apply_host_firewall_policy' AND status='failed'
+                     AND json_valid(params_json)
+                     AND CAST(json_extract(params_json,'$.fleet_revision') AS INTEGER)=?""",
+                (host_id, fleet_revision),
+            ).fetchone()[0] or 0)
+            snapshot = live_readback.get("snapshot") if isinstance(live_readback.get("snapshot"), dict) else {}
+            readback_matches_policy = (
+                live_readback.get("status") == "ready"
+                and live_readback.get("stale") is False
+                and live_readback.get("sync_status") == "in_sync"
+                and live_readback.get("drift_count") == 0
+                and live_readback.get("missing_count") == 0
+                and state is not None
+                and snapshot.get("policy_revision") == int(state["revision"] or 0)
+            )
+            retry_failed_unverified = failed_for_revision < 3 and not readback_matches_policy
+    if already_on_fleet_revision and not drift_repair_needed and not retry_failed_unverified:
+        return False
+    # A fresh drift readback must have been observed after the previous
+    # successful apply before scheduling another repair. This prevents the
+    # same pre-apply snapshot from causing an action loop.
+    if (
+        latest is not None
+        and same_fleet_revision
+        and latest["status"] == "succeeded"
+        and drift_repair_needed
+        and int(live_readback.get("observed_at") or 0) <= int(latest["updated_at"] or 0)
+    ):
+        return False
     if _policy_required_protocols(policy):
         compatibility = _policy_protocol_compatibility(policy, live_readback)
         if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
@@ -3566,6 +3601,29 @@ async def report(
                 "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
                 (host_id, ts, json.dumps(historical_security, ensure_ascii=False)),
             )
+            if ts > int(previous_sample or 0):
+                sample_health = _security_collection_health(
+                    security, {}, ts, ts, agent_version, ts, False, include_gfw=False
+                )
+                bucket_start = ts - (ts % 3600)
+                healthy_sample = int(sample_health.get("status") == "healthy")
+                conn.execute(
+                    """
+                    INSERT INTO host_collection_health_hourly(
+                        host_id,bucket_start,total_samples,healthy_samples,last_sample_at,
+                        last_status,last_missing_count,agent_version
+                    ) VALUES(?,?,1,?,?,?,?,?)
+                    ON CONFLICT(host_id,bucket_start) DO UPDATE SET
+                        total_samples=host_collection_health_hourly.total_samples+1,
+                        healthy_samples=host_collection_health_hourly.healthy_samples+excluded.healthy_samples,
+                        last_sample_at=CASE WHEN excluded.last_sample_at>=host_collection_health_hourly.last_sample_at THEN excluded.last_sample_at ELSE host_collection_health_hourly.last_sample_at END,
+                        last_status=CASE WHEN excluded.last_sample_at>=host_collection_health_hourly.last_sample_at THEN excluded.last_status ELSE host_collection_health_hourly.last_status END,
+                        last_missing_count=CASE WHEN excluded.last_sample_at>=host_collection_health_hourly.last_sample_at THEN excluded.last_missing_count ELSE host_collection_health_hourly.last_missing_count END,
+                        agent_version=CASE WHEN excluded.last_sample_at>=host_collection_health_hourly.last_sample_at THEN excluded.agent_version ELSE host_collection_health_hourly.agent_version END
+                    """,
+                    (host_id, bucket_start, healthy_sample, ts, sample_health.get("status", "unknown"),
+                     int(sample_health.get("missing_count") or 0), agent_version),
+                )
             _maybe_queue_fleet_firewall_policy(conn, host_id, node_id, ts, security)
         fingerprints = None
         if isinstance(security, dict) and security.get("enabled", True) and ts > previous_sample:
@@ -6119,6 +6177,33 @@ def security_alert_history(
     )
 
 
+def _security_collection_capabilities(payload: Dict[str, Any]) -> List[str]:
+    """List capabilities actually present in the latest security payload."""
+    capabilities: List[str] = []
+    if payload.get("enabled") is True:
+        capabilities.append("主机安全采样")
+    audit = payload.get("host_audit") if isinstance(payload.get("host_audit"), dict) else {}
+    if audit.get("enabled") is True:
+        capabilities.append("主机审计")
+    for key, label in (("cpu_guard", "CPU 保护"), ("memory_guard", "内存保护"), ("io_guard", "磁盘 I/O 保护")):
+        if isinstance(payload.get(key), dict):
+            capabilities.append(label)
+    firewall = payload.get("host_firewall") if isinstance(payload.get("host_firewall"), dict) else {}
+    readback = firewall.get("readback") if isinstance(firewall.get("readback"), dict) else {}
+    if readback.get("status") == "ready":
+        capabilities.append("RFW 规则读回")
+    if firewall.get("events_api") == "ready":
+        capabilities.append("RFW 事件")
+    sources = payload.get("access_sources") if isinstance(payload.get("access_sources"), list) else []
+    if any(isinstance(source, dict) and source.get("enabled") is not False for source in sources):
+        capabilities.append("访问日志")
+    cpu = payload.get("host_cpu") if isinstance(payload.get("host_cpu"), dict) else {}
+    psi = cpu.get("psi") if isinstance(cpu.get("psi"), dict) else {}
+    if all(isinstance(psi.get(name), dict) and psi[name].get("status") == "ready" for name in ("cpu", "memory", "io")):
+        capabilities.append("宿主机 PSI")
+    return capabilities
+
+
 def _security_collection_health(
     payload: Dict[str, Any],
     gfw: Dict[str, Any],
@@ -6127,6 +6212,7 @@ def _security_collection_health(
     agent_version: str,
     now: int,
     stale: bool,
+    include_gfw: bool = True,
 ) -> Dict[str, Any]:
     """Summarize missing host telemetry with the reason and next action."""
     issues: List[Dict[str, str]] = []
@@ -6200,9 +6286,10 @@ def _security_collection_health(
                   f"宿主机 PSI 指标不可用：{missing}",
                   "确认 Linux 内核启用了 PSI 并可读取 /proc/pressure；cgroup PSI 缺失时不能按容器维度判断等待压力。")
 
-    gfw_status = str(gfw.get("status") or "unassessed")
-    if gfw_status in {"unassessed", "stale", "investigating"}:
-        issue("国内 TCP 连通性", gfw_status, str(gfw.get("reason") or "探测样本不足"), "检查是否存在公网 TCP 映射，并保证至少有独立国内与海外探针在线。")
+    if include_gfw:
+        gfw_status = str(gfw.get("status") or "unassessed")
+        if gfw_status in {"unassessed", "stale", "investigating"}:
+            issue("国内 TCP 连通性", gfw_status, str(gfw.get("reason") or "探测样本不足"), "检查是否存在公网 TCP 映射，并保证至少有独立国内与海外探针在线。")
 
     if stale:
         status = "stale"
@@ -6218,6 +6305,7 @@ def _security_collection_health(
         "last_seen": last_seen,
         "report_age_seconds": max(0, now - last_seen) if last_seen else None,
         "agent_version": agent_version,
+        "capabilities": _security_collection_capabilities(payload),
         "missing_count": len(issues),
         "issues": issues[:20],
     }
@@ -6304,7 +6392,18 @@ def security_status() -> JSONResponse:
             """,
             (today_start_ts,),
         ).fetchall()
-        gfw_by_host = gfw_monitor.status_map(conn, int(time.time()))
+        health_now = int(time.time())
+        health_cutoff = health_now - 86400
+        health_bucket_cutoff = health_cutoff - (health_cutoff % 3600)
+        collection_health_rows = conn.execute(
+            """
+            SELECT host_id,SUM(total_samples) AS total_samples,
+                   SUM(healthy_samples) AS healthy_samples,MAX(last_sample_at) AS last_sample_at
+            FROM host_collection_health_hourly WHERE bucket_start>=? GROUP BY host_id
+            """,
+            (health_bucket_cutoff,),
+        ).fetchall()
+        gfw_by_host = gfw_monitor.status_map(conn, health_now)
     finally:
         conn.close()
 
@@ -6337,6 +6436,18 @@ def security_status() -> JSONResponse:
                 peaks_by_host[h]["peak_tx_bps"], float(r["peak_tx_bps"] or 0.0)
             )
 
+    collection_samples_by_host: Dict[str, Dict[str, Any]] = {}
+    for sample_row in collection_health_rows:
+        sample_total = max(0, int(sample_row["total_samples"] or 0))
+        sample_healthy = max(0, min(sample_total, int(sample_row["healthy_samples"] or 0)))
+        collection_samples_by_host[str(sample_row["host_id"])] = {
+            "samples_24h": sample_total,
+            "healthy_samples_24h": sample_healthy,
+            "failed_samples_24h": max(0, sample_total - sample_healthy),
+            "healthy_rate_percent_24h": round(100 * sample_healthy / sample_total, 1) if sample_total else None,
+            "last_sample_at": max(0, int(sample_row["last_sample_at"] or 0)),
+        }
+
     items = []
     for row in rows:
         host_id = row["host_id"]
@@ -6356,6 +6467,10 @@ def security_status() -> JSONResponse:
         collection_health = _security_collection_health(
             payload, gfw_status, host_last_seen, sample_timestamp, host_agent_version, int(time.time()), stale
         )
+        collection_health.update(collection_samples_by_host.get(host_id, {
+            "samples_24h": 0, "healthy_samples_24h": 0, "failed_samples_24h": 0,
+            "healthy_rate_percent_24h": None, "last_sample_at": 0,
+        }))
         items.append(
             {
                 "host_id": host_id,
