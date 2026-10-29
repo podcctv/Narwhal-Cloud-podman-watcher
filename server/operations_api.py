@@ -12,11 +12,13 @@ from fastapi import APIRouter, HTTPException, Request
 try:
     from . import operations as ops
     from . import fleet_updates
+    from . import buyer_mapping
     from . import inbound_assessment, ip_reputation
     from . import upgrade_health
 except ImportError:
     import operations as ops
     import fleet_updates
+    import buyer_mapping
     import inbound_assessment, ip_reputation
     import upgrade_health
 
@@ -423,6 +425,26 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             where = " WHERE " + " AND ".join(filters) if filters else ""
             current = rows(conn, "SELECT * FROM ops_service_inventory" + where + " ORDER BY observed_at DESC LIMIT ?", (*params, limit))
             can_view_owner = getattr(request.state, "dashboard_role", "admin") in {"admin", "operator"}
+            buyer_owner_emails = {}
+            buyer_owner_issues = {}
+            if can_view_owner:
+                buyer_owner_emails = {
+                    (owner["host_id"], owner["runtime"], owner["project"], owner["container_name"], owner["vm_id"]): str(owner["user_email"] or "")
+                    for owner in conn.execute(
+                        """
+                        SELECT host_id,runtime,project,container_name,vm_id,user_email
+                        FROM buyer_targets WHERE source='upstream' AND enabled=1 AND scope='user'
+                          AND user_email<>'' AND verified_at>=?
+                        """,
+                        (int(time.time()) - buyer_mapping.TTL,),
+                    )
+                }
+                buyer_owner_issues = {
+                    (issue["host_id"], issue["runtime"], issue["project"], issue["container_name"]): str(issue["reason"] or "")
+                    for issue in conn.execute(
+                        "SELECT host_id,runtime,project,container_name,reason FROM buyer_mapping_issues"
+                    )
+                }
             for item in current:
                 item["listeners"] = ops.loads(item.pop("inventory_json", "[]"), [])
                 item["coverage"] = item.pop("inventory_state", "unavailable")
@@ -437,15 +459,26 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                     (item["host_id"], item["runtime"], item["project"], item["container_name"], container_id),
                 ).fetchone() if container_id else None
                 item["container_id"] = container_id
-                item["owner"] = {"user_email": owner["user_email"], "user_note": owner["user_note"], "updated_at": owner["updated_at"]} if can_view_owner and owner else {"user_email": "", "user_note": "", "updated_at": 0}
+                manual_email = str(owner["user_email"] or "") if can_view_owner and owner else ""
+                upstream_email = buyer_owner_emails.get((item["host_id"], item["runtime"], item["project"], item["container_name"], container_id), "") if can_view_owner else ""
+                mapping_issue = buyer_owner_issues.get((item["host_id"], item["runtime"], item["project"], item["container_name"]), "") if can_view_owner else ""
+                item["owner"] = {
+                    "user_email": manual_email or upstream_email,
+                    "user_email_source": "manual" if manual_email else "upstream" if upstream_email else "unmatched" if mapping_issue else "",
+                    "user_email_status": mapping_issue if not (manual_email or upstream_email) else "",
+                    "user_note": owner["user_note"] if can_view_owner and owner else "",
+                    "updated_at": int(owner["updated_at"] or 0) if can_view_owner and owner else 0,
+                }
             changes = rows(conn, "SELECT * FROM ops_service_inventory_changes" + where + " ORDER BY ts DESC,id DESC LIMIT ?", (*params, min(1000, limit * 2)))
             for item in changes:
                 item["data"] = ops.loads(item.pop("payload", "{}"))
                 item["owner"] = next(({
                     "user_email": current_item["owner"]["user_email"],
+                    "user_email_source": current_item["owner"]["user_email_source"],
+                    "user_email_status": current_item["owner"]["user_email_status"],
                     "user_note": current_item["owner"]["user_note"],
                     "updated_at": current_item["owner"]["updated_at"],
-                } for current_item in current if (current_item["host_id"], current_item["runtime"], current_item["project"], current_item["container_name"]) == (item["host_id"], item["runtime"], item["project"], item["container_name"])), {"user_email": "", "user_note": "", "updated_at": 0})
+                } for current_item in current if (current_item["host_id"], current_item["runtime"], current_item["project"], current_item["container_name"]) == (item["host_id"], item["runtime"], item["project"], item["container_name"])), {"user_email": "", "user_email_source": "", "user_email_status": "", "user_note": "", "updated_at": 0})
             return {"items": current, "changes": changes, "retention_days": 90}
         finally:
             conn.close()

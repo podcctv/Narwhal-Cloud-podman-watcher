@@ -65,8 +65,12 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
     if (!identity || !container?.container_id) return;
     setIsSavingUserNote(true);
     try {
+      const preserveUpstreamEmail = container.user_email_source === 'upstream'
+        && userEmail.trim() === (container.user_email || '');
       const saved = await api.saveContainerUserNote({ ...identity, container_id: container.container_id }, {
-        user_email: userEmail.trim(),
+        // Keep an unchanged API-sourced email automatic; saving a note should
+        // not silently convert the upstream value into a manual override.
+        user_email: preserveUpstreamEmail ? '' : userEmail.trim(),
         user_note: userNote.trim(),
       });
       setContainer((current) => current ? { ...current, ...saved } : current);
@@ -285,7 +289,12 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   </div>
                 </div>
                 <label className="block space-y-1.5">
-                  <span className="text-xs font-medium text-slate-300">用户邮箱</span>
+                  <span className="flex items-center gap-2 text-xs font-medium text-slate-300">
+                    用户邮箱
+                    {container?.user_email_source === 'upstream' && <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-300">上游 API 自动同步</span>}
+                    {container?.user_email_source === 'manual' && <span className="rounded-full border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-400">手工备注</span>}
+                    {container?.user_email_source === 'unmatched' && <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">上游实例未匹配</span>}
+                  </span>
                   <input
                     type="email"
                     maxLength={254}
@@ -295,6 +304,9 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
                   />
+                  {container?.user_email_source === 'unmatched' && container.user_email_status && (
+                    <p className="text-[11px] leading-relaxed text-amber-300">{container.user_email_status}。系统不会按容器名称猜邮箱；请核对上游实例 UUID，或手工补充邮箱。</p>
+                  )}
                 </label>
                 <label className="block space-y-1.5">
                   <span className="text-xs font-medium text-slate-300">内部备注 <span className="font-normal text-slate-500">（可选，最多 500 字）</span></span>

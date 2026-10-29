@@ -3591,6 +3591,33 @@ async def report(
     }
 
 
+def _upstream_container_email(conn, identity, container_id, now=None):
+    """Return a fresh upstream email only for the exact mapped VM instance."""
+    container_id = str(container_id or "")[:200]
+    if not container_id:
+        return "", 0
+    now = int(time.time()) if now is None else int(now)
+    row = conn.execute(
+        """
+        SELECT user_email, verified_at FROM buyer_targets
+        WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND vm_id=?
+          AND source='upstream' AND enabled=1 AND scope='user' AND user_email<>''
+          AND verified_at>=?
+        ORDER BY verified_at DESC LIMIT 1
+        """,
+        (*identity, container_id, now - buyer_notifications.buyer_mapping.TTL),
+    ).fetchone()
+    return (str(row["user_email"] or ""), int(row["verified_at"] or 0)) if row else ("", 0)
+
+
+def _buyer_mapping_issue(conn, identity):
+    row = conn.execute(
+        "SELECT reason FROM buyer_mapping_issues WHERE host_id=? AND runtime=? AND project=? AND container_name=?",
+        tuple(identity),
+    ).fetchone()
+    return str(row["reason"] or "") if row else ""
+
+
 @app.get("/api/v1/latest")
 def latest(include_stale: bool = False, request: Request = None) -> JSONResponse:
     global _latest_cache, _latest_cache_time
@@ -3604,6 +3631,27 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             (r["host_id"], r["runtime"], r["project"], r["container_name"], r["container_id"]): dict(r)
             for r in conn.execute("SELECT * FROM container_user_notes")
         }
+        buyer_emails = {}
+        buyer_email_issues = {}
+        if can_view_user_notes:
+            mapped_after = int(time.time()) - buyer_notifications.buyer_mapping.TTL
+            buyer_emails = {
+                (r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"]): str(r["user_email"] or "")
+                for r in conn.execute(
+                    """
+                    SELECT host_id,runtime,project,container_name,vm_id,user_email
+                    FROM buyer_targets WHERE source='upstream' AND enabled=1 AND scope='user'
+                      AND user_email<>'' AND verified_at>=?
+                    """,
+                    (mapped_after,),
+                )
+            }
+            buyer_email_issues = {
+                (r["host_id"], r["runtime"], r["project"], r["container_name"]): str(r["reason"] or "")
+                for r in conn.execute(
+                    "SELECT host_id,runtime,project,container_name,reason FROM buyer_mapping_issues"
+                )
+            }
         host_heartbeats = {
             str(row["host_id"]): int(row["last_seen"])
             for row in conn.execute("SELECT host_id, last_seen FROM hosts").fetchall()
@@ -3648,6 +3696,9 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
         current_container_id = str(payload.get("id") or "")
         note = container_notes.get((r["host_id"], r["runtime"], r["project"], r["container_name"], current_container_id), {})
+        manual_email = str(note.get("user_email") or "") if can_view_user_notes else ""
+        upstream_email = buyer_emails.get((r["host_id"], r["runtime"], r["project"], r["container_name"], current_container_id), "") if can_view_user_notes else ""
+        mapping_issue = buyer_email_issues.get((r["host_id"], r["runtime"], r["project"], r["container_name"]), "") if can_view_user_notes else ""
         admission=admission_rows.get((r['host_id'],r['runtime'],r['project'],r['container_name']))
         reported_identity=(payload.get('security') or {}).get('admission',{}).get('instance_id') or payload.get('stable_id') or payload.get('id') or ''
         if admission and (not admission['instance_id'] or (len(reported_identity)>=12 and admission['instance_id'].startswith(reported_identity))):
@@ -3712,7 +3763,9 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "host_id": r["host_id"],
             "agent_version": str(payload.get("_agent_version") or "unknown"),
             "container_id": payload.get("id", ""),
-            "user_email": note.get("user_email", "") if can_view_user_notes else "",
+            "user_email": manual_email or upstream_email,
+            "user_email_source": "manual" if manual_email else "upstream" if upstream_email else "unmatched" if mapping_issue else "",
+            "user_email_status": mapping_issue if not (manual_email or upstream_email) else "",
             "user_note": note.get("user_note", "") if can_view_user_notes else "",
             "container_name": r["container_name"],
             "runtime": r["runtime"],
@@ -3824,20 +3877,27 @@ def get_container_user_note(
             """,
             (host_id, runtime, project, container_name, container_id),
         ).fetchone()
+        mapped_email, mapped_at = _upstream_container_email(
+            conn, (host_id, runtime, project, container_name), container_id
+        )
+        mapping_issue = _buyer_mapping_issue(conn, (host_id, runtime, project, container_name))
     finally:
         conn.close()
 
+    manual_email = str(row["user_email"] or "") if row else ""
     return JSONResponse({
         "ok": True,
-        "found": row is not None,
+        "found": row is not None or bool(mapped_email),
         "host_id": host_id,
         "runtime": runtime,
         "project": project,
         "container_name": container_name,
         "container_id": container_id,
-        "user_email": row["user_email"] if row else "",
+        "user_email": manual_email or mapped_email,
+        "user_email_source": "manual" if manual_email else "upstream" if mapped_email else "unmatched" if mapping_issue else "",
+        "user_email_status": mapping_issue if not (manual_email or mapped_email) else "",
         "user_note": row["user_note"] if row else "",
-        "updated_at": int(row["updated_at"] or 0) if row else 0,
+        "updated_at": int(row["updated_at"] or 0) if row else mapped_at,
     })
 
 
@@ -3911,10 +3971,21 @@ async def save_container_user_note(request: Request) -> JSONResponse:
                  str(getattr(request.state, "dashboard_user", "dashboard"))[:100]),
             )
         conn.commit()
+        mapped_email, mapped_at = _upstream_container_email(
+            conn, note_key[:4], container_id, now
+        )
+        mapping_issue = _buyer_mapping_issue(conn, note_key[:4])
     finally:
         conn.close()
 
-    return JSONResponse({"ok": True, "user_email": user_email, "user_note": user_note})
+    return JSONResponse({
+        "ok": True,
+        "user_email": user_email or mapped_email,
+        "user_email_source": "manual" if user_email else "upstream" if mapped_email else "unmatched" if mapping_issue else "",
+        "user_email_status": mapping_issue if not (user_email or mapped_email) else "",
+        "user_note": user_note,
+        "updated_at": now if user_email or user_note else mapped_at,
+    })
 
 
 @app.get("/api/v1/history")

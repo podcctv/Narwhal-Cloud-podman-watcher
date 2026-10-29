@@ -20,7 +20,8 @@ def initialize(conn):
     columns = {r[1] for r in conn.execute("PRAGMA table_info(buyer_targets)")}
     for name, definition in (("source", "TEXT NOT NULL DEFAULT 'manual'"),
                              ("vm_id", "TEXT DEFAULT ''"), ("verified_at", "INTEGER DEFAULT 0"),
-                             ("bandwidth_mbps", "REAL NOT NULL DEFAULT 0")):
+                             ("bandwidth_mbps", "REAL NOT NULL DEFAULT 0"),
+                             ("user_email", "TEXT NOT NULL DEFAULT ''")):
         if name not in columns:
             conn.execute(f"ALTER TABLE buyer_targets ADD COLUMN {name} {definition}")
     conn.executescript("""
@@ -43,8 +44,15 @@ def identifier(value):
         return ""
 
 
+def normalize_email(value):
+    email = str(value or "").strip()
+    if len(email) > 254 or not re.fullmatch(r"[^@\s]{1,64}@[^@\s.]+(?:\.[^@\s.]+)+", email):
+        return ""
+    return email
+
+
 def fetch_catalog(cfg, validate_url, opener_factory):
-    """Bounded complete pagination; retain no VM credentials, email or agent token."""
+    """Fetch complete, bounded VM mappings; retain no VM credentials or agent token."""
     base = validate_url(cfg["api_url"], resolve=True)
     deadline = time.monotonic() + 60
     budget = [0]
@@ -92,6 +100,7 @@ def fetch_catalog(cfg, validate_url, opener_factory):
                     raise ValueError("实例与来源机器不一致，未应用任何关联")
                 result.append({"id": identifier(item.get("id")), "machine_id": machine_id,
                                "user_id": str(item.get("user_id") or ""),
+                               "user_email": normalize_email(item.get("user_email")),
                                "runtime": item.get("type"), "status": item.get("status"),
                                "node_name": str(machine.get("name") or "")[:100],
                                "bandwidth_mbps": capacity(item.get("bandwidth_mbps"))})
@@ -168,10 +177,10 @@ def apply(conn, catalog, now):
                 conn.execute("UPDATE buyer_targets SET enabled=0 WHERE host_id=? AND runtime=? AND project=? AND container_name=?", fields)
             counts["unmatched"] += 1
             continue
-        conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,scope,enabled,source,vm_id,verified_at) "
-                     "VALUES(?,?,?,?,?,?,?,'user',1,'upstream',?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET "
-                     "machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,scope='user',enabled=1,source='upstream',vm_id=excluded.vm_id,verified_at=excluded.verified_at",
-                     (*fields, identifier(vm["machine_id"]), vm["user_id"], vm.get("node_name", ""), key, now))
+        conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,user_email,scope,enabled,source,vm_id,verified_at) "
+                     "VALUES(?,?,?,?,?,?,?,?,'user',1,'upstream',?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET "
+                     "machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,user_email=excluded.user_email,scope='user',enabled=1,source='upstream',vm_id=excluded.vm_id,verified_at=excluded.verified_at",
+                     (*fields, identifier(vm["machine_id"]), vm["user_id"], vm.get("node_name", ""), normalize_email(vm.get("user_email")), key, now))
         conn.execute("UPDATE buyer_targets SET bandwidth_mbps=? WHERE host_id=? AND runtime=? AND project=? AND container_name=?", (capacity(vm.get('bandwidth_mbps')), *fields))
         conn.execute("UPDATE buyer_outbox SET machine_id=?,user_id=?,scope='user',due_at=?,last_error='' WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND status IN ('queued','retrying','blocked')",
                      (identifier(vm["machine_id"]), vm["user_id"], now, *fields))

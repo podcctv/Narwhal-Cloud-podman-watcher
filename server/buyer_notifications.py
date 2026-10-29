@@ -52,7 +52,7 @@ def initialize(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS buyer_targets(
       host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,machine_id TEXT,user_id TEXT,
-      node_name TEXT,scope TEXT NOT NULL DEFAULT 'user',enabled INTEGER NOT NULL DEFAULT 1,
+      node_name TEXT,user_email TEXT NOT NULL DEFAULT '',scope TEXT NOT NULL DEFAULT 'user',enabled INTEGER NOT NULL DEFAULT 1,
       PRIMARY KEY(host_id,runtime,project,container_name));
     CREATE TABLE IF NOT EXISTS buyer_outbox(
       id INTEGER PRIMARY KEY,event_key TEXT UNIQUE,alert_id INTEGER,host_id TEXT,runtime TEXT,
@@ -300,7 +300,7 @@ def save_target(conn, data):
         raise ValueError("enabled 必须是布尔值")
     if conn.execute("SELECT 1 FROM buyer_outbox WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND status='sending' LIMIT 1",fields).fetchone():
         raise ValueError("该容器正在投递，请等待结果后修改收件范围")
-    conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,scope,enabled) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,scope=excluded.scope,enabled=excluded.enabled,source='manual',vm_id='',verified_at=0",
+    conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,user_email,scope,enabled) VALUES(?,?,?,?,?,?,?,'',?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,user_email='',scope=excluded.scope,enabled=excluded.enabled,source='manual',vm_id='',verified_at=0",
                  (*fields, machine, user if scope == "user" else "", clean(data.get("node_name"), 100), scope, int(data.get("enabled", True))))
 
 
@@ -696,8 +696,11 @@ def sync_mappings(db, force=False):
         cfg = config(conn)
     finally:
         conn.close()
-    if not force and not cfg["enabled"]:
-        return {"status": "disabled", "message": "买家推送已停用"}
+    # The same verified upstream mapping powers private owner-email display and
+    # recipient routing. Keep it fresh whenever its API key exists, even if
+    # outbound buyer notifications are switched off.
+    if not force and not cfg["api_key"]:
+        return {"status": "disabled", "message": "上游 API Key 未配置"}
     return buyer_mapping.sync(db, cfg, validate_url, lambda: urllib.request.build_opener(NoRedirect), force=force)
 
 

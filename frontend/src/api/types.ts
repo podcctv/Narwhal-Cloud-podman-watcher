@@ -5,6 +5,8 @@ export interface ContainerItem {
   container_name: string;
   container_id?: string;
   user_email?: string;
+  user_email_source?: 'manual' | 'upstream' | 'unmatched' | string;
+  user_email_status?: string;
   user_note?: string;
   status?: string;
   cpu_percent?: number;
@@ -923,6 +925,8 @@ export interface ContainerUserNoteResponse {
   container_name: string;
   container_id: string;
   user_email: string;
+  user_email_source?: 'manual' | 'upstream' | 'unmatched' | string;
+  user_email_status?: string;
   user_note: string;
   updated_at: number;
 }
