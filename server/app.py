@@ -2315,9 +2315,10 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
 
 
 def _empty_host_firewall_policy() -> Dict[str, Any]:
-    # New drafts preselect supported speed-test protections for Incus and
-    # Podman containers. Nothing is sent to a node until an admin explicitly
-    # applies the policy; host processes and Docker are never in this scope.
+    # Default speed-test protections target isolated Incus and Podman
+    # containers. The report reconciler automatically applies this policy only
+    # when the host has no saved policy and no authoritative fleet template.
+    # Host processes and Docker are never in this scope.
     return {
         "rules": [],
         "abuse": {
@@ -2333,6 +2334,97 @@ def _empty_host_firewall_policy() -> Dict[str, Any]:
             "runtimes": [],
         },
     }
+
+
+SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY = "speedtest-auto-default"
+SPEEDTEST_POLICY_MIN_AGENT_VERSION = (1, 7, 136)
+SPEEDTEST_AUTO_RETRY_INTERVAL = 15 * 60
+SPEEDTEST_AUTO_RETRY_WINDOW = 24 * 60 * 60
+SPEEDTEST_AUTO_MAX_FAILURES_PER_WINDOW = 3
+
+
+def _agent_version_tuple(value: Any) -> Tuple[int, int, int] | None:
+    match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:$|[-+])", str(value or "").strip())
+    if not match:
+        return None
+    try:
+        return tuple(int(part) for part in match.groups())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _agent_supports_speedtest_policy(agent_version: Any) -> bool:
+    version = _agent_version_tuple(agent_version)
+    return version is not None and version >= SPEEDTEST_POLICY_MIN_AGENT_VERSION
+
+
+def _maybe_queue_default_speedtest_policy(
+    conn: sqlite3.Connection,
+    host_id: str,
+    node_id: str,
+    agent_version: str,
+    ts: int,
+) -> bool:
+    """Automatically apply the container-only service guard without replacing saved policy."""
+    if not node_id or not _agent_supports_speedtest_policy(agent_version):
+        return False
+    fleet = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
+    if fleet is not None and int(fleet["revision"] or 0) > 0:
+        # An administrator-owned fleet policy is authoritative; its own report
+        # reconciler will apply exactly those selections.
+        return False
+
+    existing = conn.execute(
+        "SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision "
+        "FROM host_firewall_policies WHERE host_id=?", (host_id,),
+    ).fetchone()
+    if existing is not None and str(existing["updated_by"] or "") != SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY:
+        # Any saved single-host policy is an intentional choice, including an
+        # explicit empty/disabled speed-test selection.
+        return False
+
+    desired = _validate_host_firewall_policy(_empty_host_firewall_policy())
+    materialized, _target_status = _materialize_host_firewall_policy(conn, host_id, desired, ts)
+    if materialized is None:
+        return False
+
+    if existing is not None:
+        try:
+            saved = _validate_host_firewall_policy(json.loads(existing["policy_json"] or "{}"))
+        except (HTTPException, TypeError, ValueError):
+            return False
+        if (
+            saved.get("abuse", {}).get("services") != desired.get("abuse", {}).get("services")
+            or saved.get("abuse", {}).get("service_runtimes") != desired.get("abuse", {}).get("service_runtimes")
+            or saved.get("rules")
+        ):
+            return False
+        latest = _latest_host_firewall_action(conn, host_id)
+        if latest is not None:
+            if (
+                str(latest["action_type"] or "") != "apply_host_firewall_policy"
+                or str(latest["requested_by"] or "") != SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY
+            ):
+                return False
+            if latest["status"] in {"queued", "dispatched", "running", "succeeded", "cancelled"}:
+                return False
+            if latest["status"] == "failed":
+                if ts - int(latest["updated_at"] or 0) < SPEEDTEST_AUTO_RETRY_INTERVAL:
+                    return False
+                failures = int(conn.execute(
+                    "SELECT COUNT(*) FROM security_actions WHERE host_id=? "
+                    "AND action_type='apply_host_firewall_policy' AND requested_by=? "
+                    "AND status='failed' AND created_at>=?",
+                    (host_id, SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY, ts - SPEEDTEST_AUTO_RETRY_WINDOW),
+                ).fetchone()[0] or 0)
+                if failures >= SPEEDTEST_AUTO_MAX_FAILURES_PER_WINDOW:
+                    return False
+
+    _enqueue_host_firewall_policy(
+        conn, host_id, node_id, materialized,
+        SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY, ts, 0,
+    )
+    return True
 
 
 def _policy_has_rfw_effect(policy: Dict[str, Any] | None) -> bool:
@@ -2811,7 +2903,7 @@ def _materialize_host_firewall_policy(
 
 def _latest_host_firewall_action(conn: sqlite3.Connection, host_id: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT id,status,result_message,updated_at,params_json FROM security_actions "
+        "SELECT id,status,result_message,updated_at,params_json,action_type,requested_by FROM security_actions "
         "WHERE host_id=? AND action_type IN ('apply_host_firewall_policy','delete_host_firewall_rule') ORDER BY id DESC LIMIT 1",
         (host_id,),
     ).fetchone()
@@ -3170,7 +3262,7 @@ def _fleet_firewall_node_state(
     policy_abuse = (required_policy or {}).get("abuse") or {}
     container_policy_enabled = any(policy_abuse.get(key) is True for key in ("mining", "bt"))
     policy_row = conn.execute(
-        "SELECT revision,source_fleet_revision,policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)
+        "SELECT revision,source_fleet_revision,policy_json,updated_by FROM host_firewall_policies WHERE host_id=?", (host_id,)
     ).fetchone()
     local_revision = int(policy_row["revision"] or 0) if policy_row is not None else 0
     applied_fleet_revision = int(policy_row["source_fleet_revision"] or 0) if policy_row is not None else 0
@@ -3178,6 +3270,10 @@ def _fleet_firewall_node_state(
         policy_row is not None and _stored_policy_has_rfw_effect(str(policy_row["policy_json"] or "{}"))
     )
     action = _latest_host_firewall_action(conn, host_id)
+    auto_speedtest_default = bool(
+        policy_row is not None
+        and str(policy_row["updated_by"] or "") == SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY
+    )
     status = "unregistered"
     if node_id:
         status = "offline" if not online else "awaiting_capability"
@@ -3186,10 +3282,16 @@ def _fleet_firewall_node_state(
                 status = "queued"
             elif action is not None and action["status"] == "failed":
                 status = "apply_failed"
+            elif auto_speedtest_default and action is not None and action["status"] == "succeeded":
+                status = "last_apply_succeeded"
             elif fleet_revision > 0 and applied_fleet_revision == fleet_revision and action is not None and action["status"] == "succeeded":
                 status = "last_apply_succeeded"
             elif fleet_revision > 0:
                 status = "not_synced"
+            elif policy_row is None and not _agent_supports_speedtest_policy(host["agent_version"]):
+                status = "speedtest_agent_update_required"
+            elif policy_row is None:
+                status = "speedtest_auto_pending"
             else:
                 status = "ready"
         elif online and not runtime["stale"] and runtime["control_api"] == "unsupported":
@@ -3240,6 +3342,8 @@ def _fleet_firewall_node_state(
         "live_readback": {key: value for key, value in live_readback.items() if key != "snapshot"},
         "local_revision": local_revision,
         "fleet_revision": applied_fleet_revision,
+        "speedtest_auto_default": auto_speedtest_default,
+        "speedtest_policy_supported": _agent_supports_speedtest_policy(host["agent_version"]),
         "state": status,
         "required_protocols": protocol_status["required_protocols"],
         "unsupported_protocols": protocol_status["unsupported_protocols"],
@@ -3345,6 +3449,7 @@ async def report(
     automatic_deep_samples_queued = 0
     try:
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config)
+        _maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, int(time.time()))
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
         for c in containers:
             stored_payload = dict(c)
@@ -5038,7 +5143,7 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
     conn = db()
     try:
         now = int(time.time())
-        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        host = conn.execute("SELECT node_id,agent_version FROM hosts WHERE host_id=?", (host_id,)).fetchone()
         if host is None:
             raise HTTPException(status_code=404, detail="主机不存在")
         row = conn.execute("SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
@@ -5070,6 +5175,8 @@ def get_host_firewall_policy(host_id: str) -> JSONResponse:
             "interface_inventory": _host_firewall_interface_inventory(conn, host_id, now),
             "live_readback": _host_firewall_live_readback(conn, host_id, now),
             "updated_by": updated_by,
+            "speedtest_auto_default": updated_by == SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY,
+            "speedtest_policy_supported": _agent_supports_speedtest_policy(host["agent_version"]),
             "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
             "latest_action": latest,
             "policy_history": [
@@ -5377,6 +5484,7 @@ def get_fleet_firewall_policy() -> JSONResponse:
         readback_unavailable = sum(1 for item in nodes if item["live_readback"]["status"] in {"unavailable", "unsupported", "unknown"} or item["live_readback"]["stale"])
         return JSONResponse({
             "revision": revision,
+            "automatic_speedtest_default": revision == 0,
             "policy": policy,
             "updated_by": updated_by,
             "updated_at_utc8": format_utc8(updated_at) if updated_at else "",

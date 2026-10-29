@@ -564,6 +564,8 @@ export interface HostFirewallPolicyResponse {
   interface_inventory?: HostFirewallInterfaceInventory;
   live_readback: HostFirewallLiveReadback;
   updated_by: string;
+  speedtest_auto_default?: boolean;
+  speedtest_policy_supported?: boolean;
   updated_at_utc8: string;
   latest_action: null | {
     id: number;
@@ -632,7 +634,9 @@ export interface FleetFirewallHostStatus {
   observed_at: number;
   local_revision: number;
   fleet_revision: number;
-  state: 'unregistered' | 'offline' | 'awaiting_capability' | 'awaiting_rfw_capability' | 'firewall_status_stale' | 'awaiting_interfaces' | 'interfaces_not_found' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
+  speedtest_auto_default?: boolean;
+  speedtest_policy_supported?: boolean;
+  state: 'unregistered' | 'offline' | 'awaiting_capability' | 'speedtest_auto_pending' | 'speedtest_agent_update_required' | 'awaiting_rfw_capability' | 'firewall_status_stale' | 'awaiting_interfaces' | 'interfaces_not_found' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
   required_protocols: string[];
   unsupported_protocols: string[];
   unknown_protocols: string[];
@@ -648,6 +652,7 @@ export interface FleetFirewallHostStatus {
 
 export interface FleetFirewallPolicyResponse {
   revision: number;
+  automatic_speedtest_default?: boolean;
   policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy };
   updated_by: string;
   updated_at_utc8: string;

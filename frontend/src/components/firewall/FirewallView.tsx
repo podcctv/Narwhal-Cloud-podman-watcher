@@ -65,6 +65,7 @@ const statusLabel: Record<string, string> = {
 };
 const fleetStateLabel: Record<string, string> = {
   unregistered: '未注册 Agent', offline: '节点离线', awaiting_capability: '等待能力上报',
+  speedtest_auto_pending: '默认测速保护待自动下发', speedtest_agent_update_required: '需更新 Agent 才能自动保护',
   awaiting_rfw_capability: '等待 RFW 协议能力核验', rfw_protocol_update_required: '缺少所需 RFW 协议能力',
   firewall_status_stale: '防火墙状态过期', runman_update_required: '需更新 Runman', runman_unavailable: 'Runman 不可用', queued: '策略排队中',
   awaiting_interfaces: '等待网卡清单', interfaces_not_found: '未发现目标网桥',
@@ -223,6 +224,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       apply_failed: 0, drifted: 1, interfaces_not_found: 2, awaiting_interfaces: 3,
       runman_update_required: 4, runman_unavailable: 5, firewall_status_stale: 6,
       rfw_protocol_update_required: 7, offline: 8, awaiting_capability: 9,
+      speedtest_agent_update_required: 10, speedtest_auto_pending: 11,
       awaiting_rfw_capability: 10, queued: 11, not_synced: 12,
       last_apply_succeeded: 13, ready: 14, unregistered: 15,
     };
@@ -794,7 +796,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-sky-700/60 bg-sky-950/50 text-sky-300"><Shield className="h-5 w-5" aria-hidden="true" /></span>
         <div className="min-w-0">
           <h2 className="text-lg font-bold text-slate-100">母机防火墙策略</h2>
-          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">单机或全局保存期望策略，由 Watcher 排队并通过本机 Runman 的受限 Unix 接口应用到 RFW。</p>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">RFW 主机规则由 Watcher 经 Runman 受限接口应用；测速服务保护由 Agent 在 Incus / Podman 容器内自动应用。</p>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">8792 是 Agent 面板端口；RFW API 默认仅监听 127.0.0.1:7734（地址可配置）。Watcher 通过 Agent 受限控制通道读回和同步，不需要将 RFW API 暴露到公网。</p>
         </div>
       </div>
@@ -837,11 +839,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <span className={`rounded-full border px-2.5 py-1 ${snapshot?.agent_ready ? 'border-sky-700 bg-sky-950/50 text-sky-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{snapshot?.agent_ready ? 'Watcher 已注册' : 'Watcher 未注册'}</span>
             <span className={`rounded-full border px-2.5 py-1 ${runtimeReady ? 'border-emerald-700 bg-emerald-950/50 text-emerald-200' : snapshot?.runtime_status?.control_api === 'unsupported' ? 'border-amber-700 bg-amber-950/50 text-amber-200' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>{snapshot?.runtime_status?.stale ? '防火墙状态过期' : runtimeReady ? 'Runman 防火墙接口可用' : snapshot?.runtime_status?.control_api === 'unsupported' ? '需更新 Runman' : snapshot?.runtime_status?.control_api === 'unavailable' ? 'Runman 接口不可用' : '等待能力上报'}</span>
             {snapshot && <span className="rounded-full border border-slate-700 bg-slate-950 px-2.5 py-1 text-slate-300">策略版本 #{snapshot.revision}</span>}
+            {snapshot?.speedtest_auto_default && <span className="rounded-full border border-emerald-800 bg-emerald-950/40 px-2.5 py-1 text-emerald-200">默认测速保护自动策略</span>}
             {snapshot?.live_readback && <span className={`rounded-full border px-2.5 py-1 ${snapshot.live_readback.status === 'ready' && !snapshot.live_readback.stale ? snapshot.live_readback.sync_status === 'drifted' ? 'border-rose-800 bg-rose-950/50 text-rose-200' : 'border-emerald-800 bg-emerald-950/50 text-emerald-200' : 'border-amber-800 bg-amber-950/50 text-amber-200'}`}>{readbackStatusLabel[snapshot.live_readback.status]} · {syncStatusLabel[snapshot.live_readback.sync_status || 'unknown']}</span>}
           </div>
         </details>
         {selectedHost?.stale && <p className="mt-3 text-xs leading-5 text-amber-200">母机当前离线。可以保存期望配置，Agent 恢复连接后会自动执行。</p>}
-        {snapshot?.agent_ready && !runtimeReady && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/80">{runtimeStatusHelp(snapshot?.runtime_status)} 如果 RFW 读回同时显示不可用或过期，那是另一条链路；先分别检查 Runman 控制 socket 和 RFW API，再刷新状态。</p>}
+        {!fleetAuthoritative && snapshot && snapshot.revision === 0 && <p className={`mt-3 rounded-lg border p-3 text-xs leading-5 ${snapshot.speedtest_policy_supported ? 'border-emerald-900/60 bg-emerald-950/20 text-emerald-100/80' : 'border-amber-900/60 bg-amber-950/20 text-amber-100/80'}`}>{!snapshot.agent_ready ? '默认测速保护将在 Agent 注册并上报后自动下发。' : snapshot.speedtest_policy_supported ? '这台母鸡没有单机自定义策略；默认测速保护会在节点上报时自动排队，无需确认。' : 'Watcher Agent 版本过旧或无法识别版本；升级到 v1.7.136 或更高版本后，默认测速保护会自动下发。'}</p>}
+        {snapshot?.agent_ready && !runtimeReady && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/80">{runtimeStatusHelp(snapshot?.runtime_status)} 这只影响 RFW 主机规则；默认测速服务保护由 Watcher Agent 独立执行，不依赖 Runman。</p>}
         {snapshot?.live_readback && snapshot.live_readback.status !== 'ready' && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/90"><strong>{readbackReasonLabel[snapshot.live_readback.reason || ''] || 'RFW 读回原因未知'}。</strong> {readbackReasonHelp[snapshot.live_readback.reason || ''] || '检查 Agent、Runman 和 RFW 接口状态；恢复后刷新并等待新读回。'} 最近成功读回的留存规则不能证明当前规则仍生效。</p>}
         {snapshot?.live_readback?.mtproto_support === 'unsupported' && !snapshot.live_readback.stale && <p className="mt-3 rounded-lg border border-rose-900/70 bg-rose-950/30 p-3 text-xs leading-5 text-rose-100/90">这台母机当前运行的 RFW 能力清单没有 MTProto。需要先发布并安装包含 MTProto 检测能力的 RFW 构建，再刷新并确认能力读回；只升级 Watcher Agent 或 Runman 不会补上 RFW 的协议识别实现。</p>}
         {snapshot?.live_readback?.mtproto_support === 'unknown' && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/90">这台母机还没有新鲜的 MTProto 能力读回。先刷新状态并等待节点上报；未知状态下系统不会排队应用 MTProto 规则。</p>}
@@ -870,7 +874,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <h3 className="text-sm font-bold text-slate-100">全局策略模板 <span className="ml-2 font-normal text-slate-400">版本 #{fleetSnapshot?.revision ?? 0}</span></h3>
-          <p className="mt-1 text-xs leading-5 text-slate-400">模板只保存 Incus / Podman 目标；每台母机按自己的最新网卡清单解析 bridge。网卡未上报或没有匹配网络的节点会等待，不会猜接口名或错误套用。</p>
+          <p className="mt-1 text-xs leading-5 text-slate-400">模板只保存 Incus / Podman 目标；每台母机按自己的最新网卡清单解析 bridge。测速保护不依赖 RFW 网桥。未配置全局模板时，没有单机自定义策略的节点会自动应用默认测速保护。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => void loadFleetPolicy()} disabled={fleetLoading} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">{fleetLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}刷新全局状态</button>
@@ -879,6 +883,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             : <button type="button" onClick={() => void copyHostDraftToFleet()} disabled={!snapshotMatchesHost || mutationBusy} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">从所选母鸡复制规则</button>}
         </div>
       </div>
+      {fleetSnapshot?.automatic_speedtest_default && <p className="mt-3 rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-3 text-xs leading-5 text-emerald-100/80">当前尚未保存全局模板。无单机自定义策略的 Incus / Podman 节点会在上报时自动启用默认测速保护；已有单机策略保持不变。需要设定不同的全局范围时，再保存全局模板。</p>}
       {fleetSnapshot && <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {[
           ['管理节点', fleetSnapshot.counts.total], ['在线节点', fleetSnapshot.counts.online],
@@ -926,10 +931,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               <span className={`rounded-full border px-2 py-0.5 text-[10px] ${host.state === 'last_apply_succeeded' || host.state === 'ready' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : host.state === 'apply_failed' || host.state === 'runman_update_required' || host.state === 'rfw_protocol_update_required' || host.state === 'drifted' ? 'border-rose-800 bg-rose-950/40 text-rose-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>{fleetStateLabel[host.state] || host.state}</span>
               <span className={`text-[10px] ${host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-500'}`}>{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '网卡清单过期/未采集' : `${host.container_interfaces.by_runtime.incus.length ? `Incus ${host.container_interfaces.by_runtime.incus.length}` : ''}${host.container_interfaces.by_runtime.incus.length && host.container_interfaces.by_runtime.podman.length ? ' · ' : ''}${host.container_interfaces.by_runtime.podman.length ? `Podman ${host.container_interfaces.by_runtime.podman.length}` : ''}${!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length ? '无可用容器网桥' : ''}`}</span>
               <span className="text-[10px] text-slate-500">Watcher {host.agent_version}</span>
+              {host.speedtest_auto_default && <span className="rounded-full border border-emerald-900 bg-emerald-950/40 px-2 py-0.5 text-[10px] text-emerald-200">默认测速保护自动下发</span>}
               <span className={`text-[10px] ${host.live_readback.sync_status === 'drifted' && !host.live_readback.stale ? 'text-rose-300' : host.live_readback.status === 'ready' && !host.live_readback.stale ? 'text-emerald-300' : 'text-amber-300'}`} title={readbackReasonLabel[host.live_readback.reason || ''] || ''}>{readbackStatusLabel[host.live_readback.status] || '等待读回'}{host.live_readback.stale ? ' · 过期' : ''}{host.live_readback.status !== 'ready' && host.live_readback.reason ? ` · ${readbackReasonLabel[host.live_readback.reason] || host.live_readback.reason}` : ''}</span>
             </summary>
             <div className="grid gap-2 border-t border-slate-800 px-3 py-3 text-[10px] sm:grid-cols-2">
               <div className="text-slate-400">本地修订 <span className="font-mono tabular-nums text-slate-200">#{host.local_revision}</span> · 全局修订 <span className="font-mono tabular-nums text-slate-200">#{host.fleet_revision}</span></div>
+              {(host.speedtest_auto_default || host.state === 'speedtest_auto_pending' || host.state === 'speedtest_agent_update_required') && <div className={host.state === 'speedtest_agent_update_required' || host.state === 'apply_failed' ? 'text-amber-300' : 'text-emerald-300'}>{host.speedtest_auto_default ? host.state === 'apply_failed' ? '测速保护：默认策略自动应用失败；查看下方节点回执，系统按 15 分钟间隔每 24 小时最多尝试 3 次。' : host.state === 'queued' ? '测速保护：默认策略已自动排队；仅 Incus、Podman 容器，宿主机和 Docker 不处理。' : '测速保护：默认策略已自动应用；仅 Incus、Podman 容器，宿主机和 Docker 不处理。' : host.state === 'speedtest_agent_update_required' ? '测速保护：请将 Watcher Agent 更新到 v1.7.136 或更高版本，之后会自动下发。' : '测速保护：等待节点下一次上报，系统会自动排队默认策略，无需手动确认。'}</div>}
               <div className={host.control_api_stale || host.control_api === 'unavailable' || host.control_api === 'unsupported' ? 'text-amber-300' : 'text-slate-400'}>
                 Runman 控制接口：{host.control_api_stale ? '状态过期' : host.control_api === 'ready' ? '可用' : host.control_api === 'unsupported' ? '需更新' : host.control_api === 'unavailable' ? '不可用' : '未知'} · {runtimeReasonLabel[host.control_api_reason || ''] || '旧版 Agent 未提供原因'}{host.control_api_http_status ? '（HTTP ' + host.control_api_http_status + '）' : ''}
               </div>
@@ -1066,9 +1073,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-bold text-slate-100">测速目标与容器服务保护</h3>
-          <span className="rounded-full border border-sky-800 bg-sky-950/30 px-2 py-0.5 text-[10px] text-sky-200">测速保护默认勾选 · 需手动选范围并应用</span>
+          <span className="rounded-full border border-emerald-800 bg-emerald-950/30 px-2 py-0.5 text-[10px] text-emerald-200">默认自动应用 · Incus / Podman</span>
         </div>
-        <p className="mt-1 text-xs leading-5 text-slate-400">新建策略时默认勾选测速服务；必须选择 Incus / Podman 范围并手动应用后才会下发。服务项不需要网卡名；固定端口模板另行选择网桥。打开页面不会自动修改节点。</p>
+        <p className="mt-1 text-xs leading-5 text-slate-400">没有已保存的单机或全局策略时，节点上报后会自动下发默认测速保护，无需点击确认。已保存的策略继续按原选择执行；宿主机自身和 Docker 不在范围内。手动调整后仍需保存应用，服务项不需要网卡名。</p>
       </div>
 
       <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
@@ -1099,8 +1106,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             </label>;
           })}
         </div>
-        <p className="mt-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3 text-[10px] leading-4 text-sky-100/80">测速保护仅针对勾选的 Incus / Podman 容器；宿主机自身和 Docker 容器不在范围内。新策略默认选中 Incus 与 Podman，但这里只是草稿，需管理员明确保存并应用后才会下发。</p>
-        {(abuse.services || []).length > 0 && !(abuse.service_runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">当前未选择容器运行时，所以测速规则不会作用于任何容器。请选择 Incus 和/或 Podman，并手动保存应用后生效。</p>}
+        <p className="mt-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3 text-[10px] leading-4 text-sky-100/80">默认策略会自动作用于 Incus / Podman 容器，宿主机自身和 Docker 容器不受影响。已有自定义策略会保留；手动调整后仍需保存应用。</p>
+        {(abuse.services || []).length > 0 && !(abuse.service_runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">当前策略未选择 Incus / Podman，因此测速保护范围为空。若要启用容器保护，请勾选目标运行时并保存应用。</p>}
         <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-500">Ookla、Cloudflare 和 FAST 仅限制指定入口域名，不封共享 CDN IP；浏览器 DoH、直连 IP 或已有 DNS 缓存可能绕过 hosts 解析限制。TcpQuality IP 列表上游不可读时会保留已安装规则并标记过期，不会宣称刷新成功。</p>
       </div>
 
