@@ -73,11 +73,16 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         port = _integer(item.get("port"))
         process = str(item.get("process") or "").lower()
         if pid and port and process in SUPPORTED_ENGINES:
-            protected.append({
+            endpoint = {
                 "pid": pid, "process": process, "port": port,
                 "listen": str(item.get("listen") or "*"),
-                "port_config_complete": item.get("port_config_complete") is True,
-            })
+            }
+            # Preserve the legacy endpoint shape unless complete config evidence
+            # explicitly confirms the port. False here used to break SOCKS-safe
+            # process target handling even though this guard is protocol-scoped.
+            if item.get("port_config_complete") is True:
+                endpoint["port_config_complete"] = True
+            protected.append(endpoint)
     detected = bool(protected)
     result = {
         "detected": detected,
