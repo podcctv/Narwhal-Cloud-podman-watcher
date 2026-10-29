@@ -18,6 +18,7 @@ COPY gfw_probe.py .
 COPY socks_detector.py .
 COPY host_security_audit.py .
 COPY vmess_guard.py .
+COPY speedtest_guard.py .
 COPY manual_bandwidth.py .
 COPY cpu_guard.py .
 COPY io_guard.py .

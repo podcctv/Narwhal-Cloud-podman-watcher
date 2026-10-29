@@ -1,10 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.135**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.136**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
-### v1.7.135：修复测速保护模块的 Agent 发布打包
+### v1.7.136：修复测速保护模块的 Agent 发布打包
 
-- 将 `speedtest_guard.py` 纳入 Client 首次安装、托管升级校验、升级备份及失败回滚。修复 Agent 已引用新模块但发布脚本未复制它，导致新节点启动导入失败、旧节点无法升级到测速保护逻辑的问题。
+- 将 `speedtest_guard.py` 纳入 Client 首次安装、Docker Agent、托管升级校验、升级备份及失败回滚。修复 Agent 已引用新模块但发布清单未复制它，导致节点启动导入失败或升级后缺少测速保护逻辑的问题。
 - 不改变测速规则默认关闭、逐容器选择、精确目标和已验证后写 Banner 的策略。
 
 ### v1.7.134：完善防火墙策略节点映射兼容性
