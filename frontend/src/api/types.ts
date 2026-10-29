@@ -71,13 +71,75 @@ export interface ProtocolGuardSummary {
   protocol?: 'vmess' | 'trojan' | string;
   state?: 'blocked' | 'partial' | 'unverified' | 'release_pending' | 'not_detected' | string;
   reason?: string;
+  configured_endpoints?: { port?: number; pid?: number; process?: string; port_config_complete?: boolean }[];
   blocked_endpoints?: { proto?: 'tcp' | 'udp' | string; port?: number; pid?: number; process?: string }[];
   pending_endpoints?: { proto?: 'tcp' | 'udp' | string; port?: number; pid?: number; process?: string; reason?: string }[];
+  listener_inventory_source?: string;
+  listener_inventory_reason?: string;
+  evidence_chain?: {
+    configuration?: string;
+    process_owner_and_listener?: string;
+    public_exposure?: string;
+    firewall_readback?: string;
+    listener_inventory_source?: string;
+    listener_inventory_reason?: string;
+    pending_endpoint_count?: number;
+  };
 }
 
 export interface ContainerSecurity {
   vmess_guard?: ProtocolGuardSummary;
   trojan_guard?: ProtocolGuardSummary;
+  cpu_guard?: {
+    state?: 'normal' | 'watching' | 'waiting_for_host_pressure' | 'limited' | 'limit_failed' | 'limited_unverified' | 'limit_unverified' | 'restore_failed' | 'restored' | 'manual_override' | 'manual_reset' | 'state_unavailable' | 'sampling_unavailable' | 'disabled' | string;
+    message?: string;
+    original_limit?: string;
+    active_limit?: string;
+    tier?: number;
+    tier_percent_of_original?: number;
+    high_samples?: number;
+    required_samples?: number;
+    confirmed_duration_seconds?: number;
+    recovery_samples?: number;
+    recovery_samples_required?: number;
+    recovery_duration_seconds?: number;
+    recheck_interval_seconds?: number;
+    container_cpu_percent?: number | null;
+    current_cpu_percent?: number | null;
+    effective_cpus?: number;
+    host_busy_percent?: number | null;
+    host_iowait_percent?: number | null;
+    host_busy_threshold_percent?: number;
+    threshold_percent_of_container_capacity?: number;
+    threshold_percent_of_one_cpu?: number;
+    trigger_basis?: string;
+    top_process?: { pid?: number; process?: string; cpu_percent?: number; available?: boolean; reason?: string };
+    action?: { attempted?: boolean; succeeded?: boolean; message?: string; original_limit?: string; active_limit?: string };
+    last_error?: string;
+    [key: string]: any;
+  };
+  io_guard?: {
+    state?: 'normal' | 'watching' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'limit_failed' | 'limit_readback_unavailable' | 'waiting_for_other_limit' | 'retry_wait' | 'manual_override' | 'orphaned_cgroup' | 'unavailable' | 'warming' | 'state_unavailable' | 'disabled' | string;
+    message?: string;
+    device?: string;
+    device_busy_percent?: number | null;
+    dominant_share_percent?: number;
+    observed_rates?: Record<string, number>;
+    tier?: number;
+    tier_percent_of_baseline?: number;
+    original_limit?: Record<string, string>;
+    active_limit?: Record<string, string>;
+    recovery_samples?: number;
+    recovery_samples_required?: number;
+    recovery_duration_seconds?: number;
+    recovery_elapsed_seconds?: number;
+    recheck_interval_seconds?: number;
+    confirmed_duration_seconds?: number;
+    sample_count?: number;
+    required_samples?: number;
+    last_error?: string;
+    [key: string]: any;
+  };
   admission?: {
     state: 'enforced' | 'unverified' | 'unavailable';
     observed_at?: number;

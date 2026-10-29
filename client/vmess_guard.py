@@ -73,9 +73,18 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         port = _integer(item.get("port"))
         process = str(item.get("process") or "").lower()
         if pid and port and process in SUPPORTED_ENGINES:
+            transports = item.get("transports")
+            transports = (
+                sorted({str(value).lower() for value in transports})
+                if isinstance(transports, list)
+                and transports
+                and all(str(value).lower() in {"tcp", "udp"} for value in transports)
+                else None
+            )
             protected.append({
                 "pid": pid, "process": process, "port": port,
                 "listen": str(item.get("listen") or "*"),
+                "transports": transports,
                 "port_config_complete": item.get("port_config_complete") is True,
             })
     detected = bool(protected)
@@ -85,6 +94,14 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         "state": "not_detected",
         "blocked_endpoints": [],
         "pending_endpoints": [],
+        "configured_endpoints": [
+            {
+                "pid": item["pid"], "process": item["process"], "port": item["port"],
+                "transports": item["transports"],
+                "port_config_complete": item["port_config_complete"],
+            }
+            for item in protected[:MAX_ENDPOINTS]
+        ],
         "release_eligible": False,
     }
     has_scoped_scan_states = isinstance(process_scan_states, list)
@@ -147,19 +164,7 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
                     )
                 pending.append({"pid": pid, "port": port, "process": process, "reason": reason})
                 continue
-        configured_transports = None
-        for item in configured_protocols:
-            if not isinstance(item, dict):
-                continue
-            if (
-                _integer(item.get("pid"), 2, 4194304) == pid
-                and str(item.get("process") or "").lower() == process
-                and _integer(item.get("port")) == port
-                and str(item.get("protocol") or "").lower() == application_protocol
-            ):
-                transports = item.get("transports")
-                configured_transports = set(transports) if isinstance(transports, list) and all(x in {"tcp", "udp"} for x in transports) else None
-                break
+        configured_transports = set(configured["transports"]) if configured["transports"] else None
 
         matches = [item for item in listeners if isinstance(item, dict)
                    and _integer(item.get("pid"), 2, 4194304) == pid

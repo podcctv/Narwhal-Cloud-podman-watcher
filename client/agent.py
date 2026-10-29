@@ -73,6 +73,7 @@ _incus_metrics_cache: Dict[str, object] = {"ts": 0.0, "text": "", "parsed": {}}
 _incus_forward_cache: Dict[str, Dict[str, object]] = {}
 _packet_counters: Dict[str, Dict[str, float]] = {}
 _protocol_counters: Dict[str, Dict[str, float]] = {}
+_syn_recv_guard_state: Dict[str, Dict[str, object]] = {}
 _access_log_states: Dict[str, Dict[str, object]] = {}
 _security_last_sample_ts = 0.0
 _firewall_event_cursor = ""
@@ -615,7 +616,10 @@ def _read_protocol_counters(pid: int) -> Dict[str, int]:
             protocol = header[0].rstrip(":")
             if protocol == "TcpExt":
                 mapping = dict(zip(header[1:], values[1:]))
-                for field in ("TCPInDataOctets", "TCPOutDataOctets"):
+                for field in (
+                    "TCPInDataOctets", "TCPOutDataOctets", "SyncookiesSent",
+                    "ListenOverflows", "ListenDrops",
+                ):
                     if field in mapping:
                         try:
                             result[f"TcpExt_{field}"] = int(mapping.get(field, "0"))
@@ -3013,6 +3017,134 @@ def _security_alert(
     }
 
 
+def _observe_syn_recv_pressure(
+    container: Dict[str, object],
+    syn_recv: int,
+    threshold: float,
+    protocol_rates: Dict[str, object],
+    interval_seconds: float,
+) -> Dict[str, object] | None:
+    """Require sustained SYN_RECV plus independent TCP queue/rate evidence.
+
+    A single SYN_RECV snapshot is an observation, never proof of a flood or a
+    user action. Kernel TcpExt counters (SYN cookies, listen drops/overflows)
+    provide corroboration; high inbound TCP segment rate is a stronger but
+    less specific fallback. This guard only reports signals and never blocks.
+    """
+    stable_id = str(container.get("id") or container.get("stable_id") or container.get("name") or "").strip()
+    runtime = str(container.get("runtime") or "").strip().lower()
+    project = str(container.get("project") or "default").strip()
+    if not stable_id or threshold <= 0:
+        return None
+    key = "|".join((runtime, project, stable_id))
+    now = time.time()
+    if syn_recv < threshold:
+        _syn_recv_guard_state.pop(key, None)
+        return None
+
+    required_samples = min(5, max(2, int(_env_float("ALERT_DDOS_SYN_CONFIRM_SAMPLES", 3))))
+    required_duration = max(60.0, _env_float("ALERT_DDOS_SYN_CONFIRM_DURATION_SECONDS", 300))
+    max_sample_gap = max(180.0, max(1.0, interval_seconds) * 2.5)
+    previous = _syn_recv_guard_state.get(key)
+    samples = previous.get("samples") if isinstance(previous, dict) else []
+    if not isinstance(samples, list):
+        samples = []
+    last_at = float(samples[-1].get("at") or 0) if samples and isinstance(samples[-1], dict) else 0.0
+    if not last_at or now <= last_at or now - last_at > max_sample_gap:
+        samples = []
+
+    cookies_rate = max(0.0, float(protocol_rates.get("TcpExt_SyncookiesSent_per_second") or 0))
+    listen_drops_rate = max(0.0, float(protocol_rates.get("TcpExt_ListenDrops_per_second") or 0))
+    listen_overflows_rate = max(0.0, float(protocol_rates.get("TcpExt_ListenOverflows_per_second") or 0))
+    tcp_segments_rate = max(0.0, float(protocol_rates.get("Tcp_InSegs_per_second") or 0))
+    corroborated = bool(
+        cookies_rate > 0 or listen_drops_rate > 0 or listen_overflows_rate > 0
+        or tcp_segments_rate >= _env_float("ALERT_DDOS_SYN_TCP_RX_PPS", _env_float("ALERT_DDOS_RX_PPS", 50_000))
+    )
+    sample = {
+        "at": now,
+        "syn_recv": int(syn_recv),
+        "tcp_segments_per_second": round(tcp_segments_rate, 2),
+        "syncookies_sent_per_second": round(cookies_rate, 4),
+        "listen_drops_per_second": round(listen_drops_rate, 4),
+        "listen_overflows_per_second": round(listen_overflows_rate, 4),
+        "corroborated": corroborated,
+    }
+    samples.append(sample)
+    samples = samples[-5:]
+    _syn_recv_guard_state[key] = {"samples": samples, "last_seen": now}
+
+    # Bound in-memory state even if a long-running agent sees churned instances.
+    if len(_syn_recv_guard_state) > 5000:
+        cutoff = now - 3600
+        for stale_key, state in list(_syn_recv_guard_state.items()):
+            if float(state.get("last_seen") or 0) < cutoff:
+                _syn_recv_guard_state.pop(stale_key, None)
+
+    first_at = float(samples[0].get("at") or now)
+    duration = max(0.0, now - first_at)
+    corroborating_samples = sum(bool(item.get("corroborated")) for item in samples[-required_samples:])
+    confirmed = (
+        len(samples) >= required_samples
+        and duration >= required_duration
+        and corroborating_samples >= min(2, required_samples)
+    )
+    kernel_pressure_samples = sum(
+        float(item.get("syncookies_sent_per_second") or 0) > 0
+        or float(item.get("listen_drops_per_second") or 0) > 0
+        or float(item.get("listen_overflows_per_second") or 0) > 0
+        for item in samples[-required_samples:]
+    )
+    critical = confirmed and syn_recv >= threshold * 2 and kernel_pressure_samples >= min(2, required_samples)
+    last_delta = int(syn_recv) - int(samples[-2].get("syn_recv") or 0) if len(samples) > 1 else 0
+    state = "sustained_pressure" if confirmed else "observing"
+    kernel_confirmed = kernel_pressure_samples >= min(2, required_samples)
+    if confirmed:
+        title = "持续 TCP 握手压力（辅助指标已佐证）"
+        reason = "连续样本和独立 TCP/内核辅助指标已达到确认条件"
+    else:
+        title = "未完成连接偏多（观察中）"
+        reason = "单次/持续 SYN_RECV 数量本身不足以确认攻击；尚未满足持续时间与独立佐证条件"
+    message = (
+        f"SYN_RECV {syn_recv}，阈值 {int(threshold)}；连续样本 {len(samples)}/{required_samples}，"
+        f"持续 {int(duration)} 秒，较上次变化 {last_delta:+d}。"
+        f"TCP 入站段速率 {tcp_segments_rate:.1f}/秒，SYN cookies {cookies_rate:.3f}/秒，"
+        f"监听队列丢弃 {listen_drops_rate:.3f}/秒、溢出 {listen_overflows_rate:.3f}/秒。"
+        f"{reason}；{'内核队列压力信号已确认。' if kernel_confirmed else '本轮只有 TCP 入站段速率佐证，内核队列压力尚未确认。'}"
+        "这是网络保护信号，不代表客户滥用，未自动封锁。"
+    )
+    alert = _security_alert(
+        "ddos_syn",
+        "critical" if critical else "warning",
+        title,
+        message,
+        syn_recv,
+        threshold,
+        container,
+    )
+    alert.update(
+        alert_key=f"syn-recv:{runtime}:{project}:{stable_id[:160]}",
+        protection_only=True,
+        syn_guard={
+            "state": state,
+            "confirmed": confirmed,
+            "sample_count": len(samples),
+            "required_samples": required_samples,
+            "duration_seconds": int(duration),
+            "required_duration_seconds": int(required_duration),
+            "corroborating_samples": corroborating_samples,
+            "kernel_pressure_samples": kernel_pressure_samples,
+            "kernel_pressure_confirmed": kernel_confirmed,
+            "syn_recv": int(syn_recv),
+            "threshold": threshold,
+            **sample,
+            "reason_is_user_abuse": False,
+            "automatic_blocking": False,
+        },
+    )
+    return alert
+
+
 def _apply_protocol_guard_plan(
     plan: Dict[str, object], protocol: str, *, runtime_name: str, identity: str,
     pid: int, namespace_epoch: str, host_or_shared_network: bool,
@@ -3097,6 +3229,50 @@ def _apply_protocol_guard_plan(
         reason = "shared_network_namespace" if host_or_shared_network else "container_namespace_unavailable"
         status.update(state="release_pending", reason=reason, blocked_endpoints=[], pending_endpoints=[])
     return status
+
+
+def _finalize_protocol_guard_evidence(status: Dict[str, object]) -> None:
+    """Expose the final namespace-firewall readback beside config/listener evidence."""
+    blocked = status.get("blocked_endpoints") if isinstance(status.get("blocked_endpoints"), list) else []
+    configured = status.get("configured_endpoints") if isinstance(status.get("configured_endpoints"), list) else []
+    complete_configured = [
+        item for item in configured
+        if isinstance(item, dict) and item.get("port_config_complete") is True
+    ]
+    state = str(status.get("state") or "unverified")
+    reason = str(status.get("reason") or "")
+    if blocked and state in {"blocked", "partial"}:
+        readback = "confirmed" if state == "blocked" else "partially_confirmed"
+    elif state == "release_pending":
+        readback = "removal_unverified"
+    elif state in {"not_detected", "internal_only", "disabled"}:
+        readback = "not_required"
+    elif reason.startswith("firewall_"):
+        readback = "failed_or_unavailable"
+    else:
+        readback = "not_confirmed"
+    if status.get("detected") is True:
+        if configured and len(complete_configured) == len(configured):
+            configuration = "confirmed"
+        elif complete_configured:
+            configuration = "partially_confirmed"
+        else:
+            configuration = "pending_or_unverified"
+    elif state == "not_detected" and not reason:
+        configuration = "not_detected"
+    else:
+        configuration = "not_detected_or_incomplete"
+    status["evidence_chain"] = {
+        "configuration": configuration,
+        "configured_endpoint_count": len(configured),
+        "complete_configured_endpoint_count": len(complete_configured),
+        "process_owner_and_listener": "confirmed_for_blocked_endpoints" if blocked else "pending_or_unverified",
+        "public_exposure": "confirmed_for_blocked_endpoints" if blocked else "pending_or_internal_only",
+        "firewall_readback": readback,
+        "listener_inventory_source": str(status.get("listener_inventory_source") or "unknown")[:80],
+        "listener_inventory_reason": str(status.get("listener_inventory_reason") or "")[:180],
+        "pending_endpoint_count": len(status.get("pending_endpoints") or []),
+    }
 def _vmess_endpoint_label(item: Dict[str, object], pending: bool = False) -> str:
     """Describe the exact container process and transport port proven by the guard."""
     if not isinstance(item, dict):
@@ -3288,7 +3464,6 @@ _MOTD_THREAT_TYPES = {
     "http_suspicious_ratio",
     "ddos_bandwidth",
     "ddos_packets",
-    "ddos_syn",
     "port_scan",
     "outbound_fanout",
     "outbound_packet_abuse",
@@ -3437,7 +3612,6 @@ _CRITICAL_BUYER_NOTIFY_TYPES = {
     "http_high_qps",
     "ddos_bandwidth",
     "ddos_packets",
-    "ddos_syn",
 }
 
 _BUYER_NOTIFY_STATE_FILE = os.getenv(
@@ -3462,7 +3636,13 @@ def _summarize_alert_issue(alert: Dict[str, object]) -> str:
         return "检测到可疑高负载恶意挖矿算力进程 (XMRig)"
     if alert_type == "unauthorized_panel_pairing":
         return "检测到未授权对接第三方机场面板服务"
-    if alert_type in ("ddos_bandwidth", "ddos_packets", "ddos_syn", "ddos_host_bandwidth", "ddos_host_packets"):
+    if alert_type == "ddos_syn":
+        guard = alert.get("syn_guard") if isinstance(alert.get("syn_guard"), dict) else {}
+        if guard.get("confirmed") is True:
+            corroboration = "内核队列压力信号已确认" if guard.get("kernel_pressure_confirmed") is True else "TCP 入站段速率达到辅助阈值，内核队列压力尚未确认"
+            return f"持续 TCP 握手压力并有辅助指标佐证（{corroboration}）；这是网络保护提醒，不代表客户滥用"
+        return "未完成连接偏多，系统正在观察；尚无足够证据确认攻击或归因用户，未自动封锁"
+    if alert_type in ("ddos_bandwidth", "ddos_packets", "ddos_host_bandwidth", "ddos_host_packets"):
         return "检测到疑似异常 DDoS 流量或高包速率攻击"
     if alert_type in ("outbound_fanout", "outbound_packet_abuse", "port_scan"):
         return "检测到短时间内大量异常对外扫描与出站连接"
@@ -3778,6 +3958,9 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         "inbound_ips_warning": inbound_unique_ip_threshold,
         "inbound_ips_critical": inbound_unique_ip_threshold * 2,
         "rx_pps_warning": ddos_rx_pps, "syn_recv_warning": ddos_syn,
+        "syn_recv_confirm_samples": min(5, max(2, int(_env_float("ALERT_DDOS_SYN_CONFIRM_SAMPLES", 3)))),
+        "syn_recv_confirm_duration_seconds": max(60, int(_env_float("ALERT_DDOS_SYN_CONFIRM_DURATION_SECONDS", 300))),
+        "syn_recv_tcp_rx_pps_corroboration": _env_float("ALERT_DDOS_SYN_TCP_RX_PPS", ddos_rx_pps),
         "http_rps_warning": _env_float("ALERT_CC_TOTAL_RPS", 100),
         "ip_rps_warning": _env_float("ALERT_CC_IP_RPS", 30),
         "http_4xx_warning": _env_float("ALERT_CC_4XX_RATE", 0.5),
@@ -4096,6 +4279,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         rx_pps = float(security.get("net_rx_pps") or 0)
         tx_pps = float(security.get("net_tx_pps") or 0)
         syn_recv = int(security.get("syn_recv_count") or 0)
+        protocol_rates = security.get("protocol_rates") if isinstance(security.get("protocol_rates"), dict) else {}
         summary["total_rx_bps"] = float(summary["total_rx_bps"]) + rx_bps
         summary["total_tx_bps"] = float(summary["total_tx_bps"]) + tx_bps
         summary["total_rx_pps"] = float(summary["total_rx_pps"]) + rx_pps
@@ -4146,18 +4330,13 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     container,
                 )
             )
-        if syn_recv >= ddos_syn:
-            alerts.append(
-                _security_alert(
-                    "ddos_syn",
-                    "critical" if syn_recv >= ddos_syn * 2 else "warning",
-                    "疑似 SYN Flood",
-                    f"SYN_RECV 连接数 {syn_recv} 超过阈值 {int(ddos_syn)}",
-                    syn_recv,
-                    ddos_syn,
-                    container,
-                )
+        connection_metrics = security.get("connection_metrics") if isinstance(security.get("connection_metrics"), dict) else {}
+        if connection_metrics.get("valid") is True and syn_recv >= ddos_syn:
+            syn_alert = _observe_syn_recv_pressure(
+                container, syn_recv, ddos_syn, protocol_rates, interval_seconds
             )
+            if syn_alert:
+                alerts.append(syn_alert)
 
         # Traffic Imbalance (Inbound vs Outbound Asymmetry) Check
         imbalance_min_bps = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_MIN_BPS", "2097152"))  # 2MB/s minimum to avoid idle false alarms
@@ -4874,18 +5053,6 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 ddos_rx_pps,
             )
         )
-    if total_syn_recv >= ddos_syn and "ddos_syn" not in alert_types:
-        alerts.append(
-            _security_alert(
-                "ddos_host_syn",
-                "critical" if total_syn_recv >= ddos_syn * 2 else "warning",
-                "主机疑似 SYN Flood",
-                f"主机容器合计 SYN_RECV {total_syn_recv} 超过阈值 {int(ddos_syn)}",
-                total_syn_recv,
-                ddos_syn,
-            )
-        )
-
     access["container_readable_files"] = container_access_readable_files
     if int(access.get("readable_files") or 0) > 0:
         access["source"] = "host"
@@ -7854,6 +8021,8 @@ def collect_container(
         listener_inventory_complete=vmess_listener_inventory_complete,
         listeners=vmess_plan_inventory,
     )
+    _finalize_protocol_guard_evidence(vmess_status)
+    _finalize_protocol_guard_evidence(trojan_status)
 
     blocked_vmess = {
         (str(item.get("proto") or "").lower(), int(item.get("port") or 0))

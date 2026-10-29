@@ -334,7 +334,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <p>↓ {fmtNumber(t.rx_pps, 0)} pps · ↑ {fmtNumber(t.tx_pps, 0)} pps</p>
               <p>SYN_RECV {fmtNumber(t.syn_recv, 0)}</p>
               <p>本次 DDoS 事件 {networkEvents.length} 项</p>
-              <p className="text-slate-300">包速率 ≥ {fmtNumber(thresholds.rx_pps_warning ?? 50000, 0)} pps、SYN ≥ {thresholds.syn_recv_warning ?? 200} 警告，达到 2 倍危险。</p>
+              <p className="text-slate-300">包速率 ≥ {fmtNumber(thresholds.rx_pps_warning ?? 50000, 0)} pps 单独告警。SYN_RECV ≥ {thresholds.syn_recv_warning ?? 200} 先观察；连续 {Math.min(5, Math.max(2, Number(thresholds.syn_recv_confirm_samples ?? 3)))} 次、至少 {Math.round(Number(thresholds.syn_recv_confirm_duration_seconds ?? 300) / 60)} 分钟，并有持续 TCP 入站段速率或 SYN cookies、监听队列丢弃/溢出等内核信号佐证后，才升级为持续握手压力；危险级别还要求内核队列信号连续佐证。</p>
+              <p className="text-slate-300">握手数不能证明客户行为；本信号不会自动封锁或归因用户。</p>
             </Signal>
             <Signal title="CC / HTTP 信号" level={httpLevel}>
               <p>本次 HTTP 事件 {httpEvents.length} 项</p>

@@ -17,6 +17,7 @@ import { SocksPasswordReview } from './SocksPasswordReview';
 import { UserNoticeAction } from './UserNoticeAction';
 import { isProtectionOnlySignal } from './protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from './connectionEvidence';
+import { ProtocolGuardEvidence } from './ProtocolGuardEvidence';
 
 const elapsed = (seconds: number): string => {
   const units: [number, string][] = [[86400, '天'], [3600, '小时'], [60, '分钟'], [1, '秒']];
@@ -344,6 +345,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                     <p className="text-xs text-slate-300 leading-relaxed">
                       {alert.message}
                     </p>
+                    <ProtocolGuardEvidence alert={alert} />
                     {protectionOnly && (
                       <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2 text-[11px] leading-relaxed text-slate-300">
                         <div className="flex items-center gap-1.5 font-semibold text-sky-200">

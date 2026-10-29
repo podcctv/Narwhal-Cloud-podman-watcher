@@ -656,9 +656,11 @@ def observe(
                         "tier": tier,
                         "tier_percent_of_original": {1: 50, 2: 25, 3: 10}.get(tier),
                         "applied_at": int(record.get("applied_at") or timestamp),
+                        "recheck_interval_seconds": int(interval),
                         "low_samples": int(record.get("low_samples") or 0),
                         "recovery_samples_required": recovery_samples,
                         "recovery_duration_seconds": recovery_duration,
+                        "recovery_elapsed_seconds": max(0, timestamp - int(record.get("low_since") or timestamp)) if int(record.get("low_samples") or 0) else 0,
                         "current_cpu_percent": round(metrics_cpu, 2) if metrics_cpu >= 0 else None,
                         "current_cpu_saturation_percent": round(max(0.0, ratio) * 100.0, 2),
                         "escalation_samples": int(record.get("escalation_high_samples") or 0),
@@ -725,6 +727,7 @@ def observe(
             security["cpu_guard"] = {
                 "state": "watching", "high_samples": int(candidate.get("high_samples") or 0),
                 "required_samples": min_samples,
+                "recheck_interval_seconds": int(interval),
                 "confirmed_duration_seconds": max(0, timestamp - int(candidate.get("high_since") or timestamp)),
                 "container_cpu_percent": round(metrics_cpu, 2),
                 "effective_cpus": round(effective_cpus, 3),
@@ -744,6 +747,7 @@ def observe(
                 "effective_cpus": round(max(0.0, effective_cpus), 3),
                 "host_busy_percent": host_cpu.get("busy_percent"),
                 "threshold_percent_of_container_capacity": high_threshold,
+                "recheck_interval_seconds": int(interval),
                 "reason_is_user_abuse": False,
             }
 

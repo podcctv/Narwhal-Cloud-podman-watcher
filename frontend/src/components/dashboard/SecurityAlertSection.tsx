@@ -18,6 +18,7 @@ import { SocksPasswordReview } from '../alerts/SocksPasswordReview';
 import { UserNoticeAction } from '../alerts/UserNoticeAction';
 import { isProtectionOnlySignal } from '../alerts/protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from '../alerts/connectionEvidence';
+import { ProtocolGuardEvidence } from '../alerts/ProtocolGuardEvidence';
 
 const hasActionEvidence = (alert: SecurityAlert): boolean => {
   if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
@@ -226,6 +227,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 <p className="text-xs text-slate-300 leading-relaxed">
                   {alert.message}
                 </p>
+                <ProtocolGuardEvidence alert={alert} />
                 {protectionOnly && (
                   <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2.5 text-[11px] leading-relaxed text-slate-300">
                     <div className="flex items-center gap-1.5 font-semibold text-sky-200">

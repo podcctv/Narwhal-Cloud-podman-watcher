@@ -467,7 +467,16 @@ def observe(
                         record["stage"] = "active"
                         record["pending"] = None
                         record["last_step_at"] = timestamp
+                    elif stage == "applying" and original and _matches_io_max(io_file_path, device, original):
+                        # For a first application, ``applied`` is initialized
+                        # to the original value. Reading it back proves the
+                        # pending write did not land; it is not an active tier.
+                        record["stage"] = "candidate"
+                        record["pending"] = None
+                        record["last_attempt"] = int(record.get("last_attempt") or timestamp)
                     elif applied and _matches_io_max(io_file_path, device, applied):
+                        # During escalation or restoration this is the last
+                        # verified tier, so keep it while a pending write is retried.
                         record["stage"] = "active"
                         record["pending"] = None
                         record["last_step_at"] = int(record.get("last_step_at") or timestamp)
@@ -602,6 +611,13 @@ def observe(
                             "original_limit": original, "active_limit": record.get("applied"),
                             "recovery_samples": int(record.get("low_samples") or 0),
                             "recovery_samples_required": recovery_samples,
+                            "recovery_duration_seconds": recovery_duration,
+                            "recovery_elapsed_seconds": max(0, timestamp - int(record.get("low_since") or timestamp)) if int(record.get("low_samples") or 0) else 0,
+                            "recheck_interval_seconds": int(interval),
+                            "confirmed_duration_seconds": int(record.get("confirmed_duration") or 0),
+                            "sample_count": int(record.get("high_samples") or 0),
+                            "required_samples": int(record.get("required_samples") or 0),
+                            "last_error": record.get("last_error") or "",
                             "message": record.get("last_error") or "容器 I/O 限额已读回确认；达到持续恢复条件后自动恢复。",
                             "reason_is_user_abuse": False,
                         }
@@ -674,10 +690,23 @@ def observe(
                 "observed_rates": {k: round(_number(v), 2) for k, v in observed_rates.items()},
                 "confirmed_duration_seconds": max(0, timestamp - int(candidate.get("high_since") or timestamp)),
                 "sample_count": int(candidate.get("high_samples") or 0), "required_samples": min_samples,
+                "recheck_interval_seconds": int(interval),
+                "last_error": str(candidate.get("last_error") or ""),
+                "message": str(candidate.get("last_error") or "持续宿主机磁盘压力与容器 I/O 占比偏高，继续采样确认。"),
                 "reason_is_user_abuse": False,
             }
             if (int(candidate.get("high_samples") or 0) >= min_samples
                     and timestamp - int(candidate.get("high_since") or timestamp) >= required_duration):
+                retry_seconds = max(60, int(_number(os.getenv("IO_AUTO_LIMIT_RETRY_SECONDS", "600"), 600)))
+                retry_remaining = retry_seconds - (timestamp - int(candidate.get("last_attempt") or 0))
+                if candidate.get("last_error") and retry_remaining > 0:
+                    security["io_guard"] = {
+                        **security["io_guard"],
+                        "state": "retry_wait",
+                        "retry_after_seconds": retry_remaining,
+                        "message": f"上次 I/O 限额未通过读回确认：{str(candidate.get('last_error'))[:180]}；保留当前限额，约 {retry_remaining} 秒后自动重试。",
+                    }
+                    continue
                 if any(other_key != key for other_key in reserved):
                     security["io_guard"] = {
                         **security.get("io_guard", {}),
@@ -739,6 +768,8 @@ def observe(
                         "tier": int(record.get("tier") or 0), "tier_percent_of_baseline": {1: 50, 2: 25, 3: 10}.get(int(record.get("tier") or 0)),
                         "original_limit": record.get("original"), "active_limit": record.get("applied"),
                         "observed_rates": {k: round(_number(v), 2) for k, v in observed_rates.items()},
+                        "recheck_interval_seconds": int(interval),
+                        "last_error": record.get("last_error") or "",
                         "message": action["message"], "reason_is_user_abuse": False,
                     }
                     alerts.append(_trigger_alert(container, record, action, str(action["message"])))

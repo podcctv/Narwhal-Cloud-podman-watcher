@@ -39,6 +39,64 @@ interface ContainerDrawerProps {
   onRefresh: () => void;
 }
 
+const RESOURCE_GUARD_STATES: Record<string, string> = {
+  normal: '正常',
+  watching: '持续采样中',
+  waiting_for_host_pressure: '等待母鸡压力佐证',
+  limited: '限额已读回确认',
+  active: '限额已读回确认',
+  limit_failed: '限额未确认',
+  limited_unverified: '限额待读回',
+  limit_unverified: '限额待读回',
+  restore_failed: '恢复失败',
+  restored: '原限额已恢复',
+  manual_override: '检测到人工修改',
+  manual_reset: '人工恢复原限额',
+  state_unavailable: '保护状态不可读',
+  sampling_unavailable: '采样不可用',
+  disabled: '未启用',
+  applying: '正在应用并核验',
+  escalating: '正在升级并核验',
+  restoring: '正在恢复并核验',
+  limit_readback_unavailable: '无法读取限额',
+  waiting_for_other_limit: '等待其他容器保护结束',
+  retry_wait: '等待自动重试',
+  orphaned_cgroup: '旧容器限额归属待核实',
+  unavailable: '数据不可用',
+  warming: '正在建立采样基线',
+};
+
+const guardTone = (state?: string) => {
+  if (['limited', 'active'].includes(state || '')) return 'border-sky-500/30 bg-sky-950/30 text-sky-200';
+  if (['limit_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'state_unavailable', 'sampling_unavailable', 'limit_readback_unavailable', 'orphaned_cgroup', 'unavailable'].includes(state || '')) {
+    return 'border-rose-500/30 bg-rose-950/20 text-rose-200';
+  }
+  if (['watching', 'waiting_for_host_pressure', 'applying', 'escalating', 'restoring', 'waiting_for_other_limit', 'retry_wait', 'warming'].includes(state || '')) {
+    return 'border-amber-500/30 bg-amber-950/20 text-amber-200';
+  }
+  if (['normal', 'restored', 'manual_reset'].includes(state || '')) return 'border-emerald-500/25 bg-emerald-950/15 text-emerald-200';
+  return 'border-slate-700 bg-slate-900/60 text-slate-300';
+};
+
+const guardStateLabel = (state?: string) => RESOURCE_GUARD_STATES[state || ''] || '状态待核实';
+
+const formatIoRate = (value?: string | number) => {
+  if (value === 'max' || value === undefined || value === null || value === '') return '不限';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? `${fmtBytes(parsed)}/秒` : '未知';
+};
+
+const formatIoLimit = (value?: Record<string, string>) => {
+  if (!value) return '暂无读回数据';
+  return `读 ${formatIoRate(value.rbps)} · 写 ${formatIoRate(value.wbps)} · 读 IOPS ${value.riops || '不限'} · 写 IOPS ${value.wiops || '不限'}`;
+};
+
+const formatMinutes = (seconds?: number) => {
+  if (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return '0 分钟';
+  const minutes = Math.max(1, Math.round(Number(seconds) / 60));
+  return `${minutes} 分钟`;
+};
+
 export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   identity,
   activeAlerts = [],
@@ -198,6 +256,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
   const socks = sec.socks_proxy;
   const pairing = sec.panel_pairing;
+  const cpuGuard = sec.cpu_guard;
+  const ioGuard = sec.io_guard;
   const activeActionableAlert = activeAlerts.find((alert) => {
     if (
       alert.host_id !== identity.host_id ||
@@ -387,6 +447,78 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                 </span>
               </div>
             </div>
+
+            {(identity.runtime === 'incus' || identity.runtime === 'podman') && (
+              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                      <Gauge className="h-4 w-4 text-sky-300" />
+                      CPU 与磁盘 I/O 自动保护
+                    </h3>
+                    <p className="mt-1 text-[11px] text-slate-400">显示触发依据、已读回限额与恢复进度；保护信号不等于客户滥用认定。</p>
+                  </div>
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] text-slate-300">仅 Incus / Podman</span>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(cpuGuard?.state)}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-xs font-semibold"><Cpu className="h-3.5 w-3.5" />CPU 保护</span>
+                      <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(cpuGuard?.state)}</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-300">
+                      当前 {cpuGuard?.container_cpu_percent ?? cpuGuard?.current_cpu_percent ?? container?.cpu_percent ?? 0}%
+                      {cpuGuard?.effective_cpus ? ` · 配额容量 ${fmtNumber(cpuGuard.effective_cpus, 2)} 核` : ''}
+                      {cpuGuard?.host_busy_percent !== undefined && cpuGuard.host_busy_percent !== null ? ` · 母鸡忙碌 ${fmtNumber(cpuGuard.host_busy_percent, 1)}%` : ''}
+                    </p>
+                    {cpuGuard?.state === 'watching' && (
+                      <p className="text-[11px] text-amber-200">持续高占用 {cpuGuard.high_samples ?? 0}/{cpuGuard.required_samples ?? 0} 次，已观察 {formatMinutes(cpuGuard.confirmed_duration_seconds)}。</p>
+                    )}
+                    {['limited', 'limit_unverified', 'limited_unverified', 'limit_failed', 'restore_failed', 'escalating', 'restoring'].includes(cpuGuard?.state || '') && (
+                      <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
+                        <p>原限额：<span className="font-mono text-slate-100">{cpuGuard?.original_limit || '未记录'}</span></p>
+                        <p>当前限额：<span className="font-mono text-slate-100">{cpuGuard?.active_limit || '等待读回'}</span>{cpuGuard?.tier ? ` · 第 ${cpuGuard.tier} 阶（约原容量 ${cpuGuard.tier_percent_of_original ?? '-'}%）` : ''}</p>
+                        <p>恢复条件：低占用连续 {cpuGuard?.recovery_samples ?? 0}/{cpuGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(cpuGuard?.recovery_duration_seconds)}。</p>
+                      </div>
+                    )}
+                    {cpuGuard?.top_process?.process && (
+                      <p className="text-[11px] text-slate-300">主要进程：<span className="font-mono text-sky-200">{cpuGuard.top_process.process}</span>{cpuGuard.top_process.pid ? ` · PID ${cpuGuard.top_process.pid}` : ''}{cpuGuard.top_process.cpu_percent !== undefined ? ` · ${fmtNumber(cpuGuard.top_process.cpu_percent, 1)}%` : ''}</p>
+                    )}
+                    <p className="text-[11px] leading-relaxed text-slate-400">{cpuGuard?.message || cpuGuard?.action?.message || (cpuGuard?.state === 'normal' ? '当前未达到持续保护条件。' : '等待 Agent 采样与读回状态。')}</p>
+                    {cpuGuard?.recheck_interval_seconds ? <p className="text-[10px] text-slate-500">每约 {formatMinutes(cpuGuard.recheck_interval_seconds)} 复查一次。</p> : null}
+                  </div>
+
+                  <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(ioGuard?.state)}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-xs font-semibold"><HardDrive className="h-3.5 w-3.5" />磁盘 I/O 保护</span>
+                      <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(ioGuard?.state)}</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-300">
+                      {ioGuard?.device ? `设备 ${ioGuard.device}` : '设备待识别'}
+                      {ioGuard?.device_busy_percent !== undefined && ioGuard.device_busy_percent !== null ? ` · 磁盘忙碌 ${fmtNumber(ioGuard.device_busy_percent, 1)}%` : ''}
+                      {ioGuard?.dominant_share_percent !== undefined ? ` · 容器占比 ${fmtNumber(ioGuard.dominant_share_percent, 1)}%` : ''}
+                    </p>
+                    {ioGuard?.state === 'watching' && (
+                      <p className="text-[11px] text-amber-200">持续压力 {ioGuard.sample_count ?? 0}/{ioGuard.required_samples ?? 0} 次，已观察 {formatMinutes(ioGuard.confirmed_duration_seconds)}。</p>
+                    )}
+                    {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'retry_wait'].includes(ioGuard?.state || '') && (
+                      <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
+                        <p>原 I/O 限额：<span className="font-mono text-slate-100">{formatIoLimit(ioGuard?.original_limit)}</span></p>
+                        <p>{['active', 'restore_failed'].includes(ioGuard?.state || '') ? '已读回生效限额' : '待确认限额'}：<span className="font-mono text-slate-100">{['active', 'restore_failed'].includes(ioGuard?.state || '') ? formatIoLimit(ioGuard?.active_limit) : '尚未确认；保留最后一次读回值'}</span>{ioGuard?.tier ? ` · 第 ${ioGuard.tier} 阶（约基线 ${ioGuard.tier_percent_of_baseline ?? '-'}%）` : ''}</p>
+                        <p>恢复条件：低压力连续 {ioGuard?.recovery_samples ?? 0}/{ioGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(ioGuard?.recovery_duration_seconds)}。</p>
+                        {ioGuard?.retry_after_seconds ? <p className="text-amber-200">约 {formatMinutes(ioGuard.retry_after_seconds)} 后自动重试。</p> : null}
+                      </div>
+                    )}
+                    {ioGuard?.observed_rates && (
+                      <p className="text-[11px] text-slate-300">当前读/写：{formatIoRate(ioGuard.observed_rates.rbps)} / {formatIoRate(ioGuard.observed_rates.wbps)}；IOPS {fmtNumber(ioGuard.observed_rates.riops, 0)} / {fmtNumber(ioGuard.observed_rates.wiops, 0)}。</p>
+                    )}
+                    <p className="text-[11px] leading-relaxed text-slate-400">{ioGuard?.message || (ioGuard?.state === 'normal' ? '当前未达到持续宿主机磁盘压力及容器归属条件。' : '等待 Agent 采样与读回状态。')}</p>
+                    {ioGuard?.recheck_interval_seconds ? <p className="text-[10px] text-slate-500">每约 {formatMinutes(ioGuard.recheck_interval_seconds)} 复查一次。</p> : null}
+                  </div>
+                </div>
+              </section>
+            )}
 
             {/* Visual Charts: CPU & Memory */}
             <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
