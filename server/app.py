@@ -2786,6 +2786,9 @@ def _materialize_host_firewall_policy(
     abuse.pop("runtimes", None)
     materialized["abuse"] = abuse
     validated = _validate_host_firewall_policy(materialized)
+    # Normalization adds an empty runtime selector to every policy. Keep the
+    # node-local payload free of fleet-only fields after validation as well.
+    validated["abuse"].pop("runtimes", None)
     return validated, status
 
 

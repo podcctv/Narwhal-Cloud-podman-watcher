@@ -1150,7 +1150,14 @@ class HostFirewallPolicyTests(unittest.TestCase):
                     agent._execute_host_firewall_policy(action, "watcher-node-a"),
                     (True, "applied; policy saved"),
                 )
-                send.assert_called_once_with(action["params"]["policy"])
+                send.assert_called_once_with({
+                    "revision": 4,
+                    "rules": [],
+                    "abuse": {
+                        "speedtest": False, "mining": False, "bt": False,
+                        "interfaces": [],
+                    },
+                })
             save.assert_called_once_with({"revision": 4, "services": [], "runtimes": []})
 
         with mock.patch.object(agent.speedtest_guard, "save_policy") as save:
