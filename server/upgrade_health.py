@@ -111,7 +111,15 @@ def check(operations, report=None):
 
     security_status = by_source.get("security")
     security_ok = security_status in {"healthy", "idle"}
-    if security_ok and report_security is not None and report_security.get("enabled") is not True:
+    # Container reports may put per-container evidence in ``security`` without
+    # the host-level ``enabled`` flag. In that schema, rely on the fresh ops
+    # health status above; only an explicit host-level flag can override it.
+    if (
+        security_ok
+        and report_security is not None
+        and "enabled" in report_security
+        and report_security.get("enabled") is not True
+    ):
         security_ok = False
     if (
         not security_ok
