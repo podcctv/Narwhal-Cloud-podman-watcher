@@ -3623,15 +3623,17 @@ def _buyer_mapping_issue(conn, identity, container_id="", now=None):
     now = int(time.time()) if now is None else int(now)
     mapping = conn.execute(
         """
-        SELECT user_email, verified_at FROM buyer_targets
+        SELECT user_email, verified_at, enabled FROM buyer_targets
         WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND vm_id=?
-          AND source='upstream' AND enabled=1 AND scope='user'
+          AND source='upstream' AND scope='user'
         LIMIT 1
         """,
         (*identity, container_id),
     ).fetchone()
     if not mapping:
         return ""
+    if not int(mapping["enabled"] or 0):
+        return "上游实例映射当前未启用，不显示历史邮箱；请确认实例仍由上游 API 管理并重新核对 UUID。"
     if int(mapping["verified_at"] or 0) < now - buyer_notifications.buyer_mapping.TTL:
         return "上游邮箱映射已过期，暂不显示旧邮箱；容器重新上报并成功匹配后会自动刷新。"
     if not buyer_notifications.buyer_mapping.normalize_email(mapping["user_email"]):
@@ -3670,11 +3672,11 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             }
             buyer_email_mapping_states = {
                 (r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"]):
-                    (str(r["user_email"] or ""), int(r["verified_at"] or 0))
+                    (str(r["user_email"] or ""), int(r["verified_at"] or 0), int(r["enabled"] or 0))
                 for r in conn.execute(
                     """
-                    SELECT host_id,runtime,project,container_name,vm_id,user_email,verified_at
-                    FROM buyer_targets WHERE source='upstream' AND enabled=1 AND scope='user'
+                    SELECT host_id,runtime,project,container_name,vm_id,user_email,verified_at,enabled
+                    FROM buyer_targets WHERE source='upstream' AND scope='user'
                     """
                 )
             }
@@ -3734,8 +3736,10 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         mapping_key = (r["host_id"], r["runtime"], r["project"], r["container_name"], current_container_id)
         mapping_state = buyer_email_mapping_states.get(mapping_key) if can_view_user_notes else None
         if not mapping_issue and not (manual_email or upstream_email) and mapping_state:
-            mapped_email, mapped_at = mapping_state
-            if mapped_at < mapped_after:
+            mapped_email, mapped_at, mapping_enabled = mapping_state
+            if not mapping_enabled:
+                mapping_issue = "上游实例映射当前未启用，不显示历史邮箱；请确认实例仍由上游 API 管理并重新核对 UUID。"
+            elif mapped_at < mapped_after:
                 mapping_issue = "上游邮箱映射已过期，暂不显示旧邮箱；容器重新上报并成功匹配后会自动刷新。"
             elif not buyer_notifications.buyer_mapping.normalize_email(mapped_email):
                 mapping_issue = "上游已匹配此实例，但 API 未提供有效邮箱；可手工补充邮箱。"
