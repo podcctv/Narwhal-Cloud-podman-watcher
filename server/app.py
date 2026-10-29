@@ -5876,6 +5876,7 @@ def security_alerts(active_only: bool = True, limit: int = 200) -> JSONResponse:
             LEFT JOIN hosts h ON h.host_id=a.host_id
             WHERE a.status='active'
               AND a.alert_type<>'admission_unverified'
+              AND a.alert_type <> 'speedtest_attempt_blocked'
               AND (a.container_name<>'' OR h.host_id IS NULL OR h.last_seen>=?)
             ORDER BY a.last_seen DESC, a.id DESC LIMIT ?
             """,
