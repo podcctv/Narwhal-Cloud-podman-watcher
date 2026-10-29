@@ -1,7 +1,7 @@
 """Conservative, reversible CPU protection for Incus and Podman containers.
 
 The guard only limits one container at a time, after sustained container CPU
-saturation coincides with high host CPU utilization. It never stops a process or
+saturation coincides with host CPU PSI contention. It never stops a process or
 container, and it restores the exact saved runtime CPU setting after sustained
 recovery. State is persisted before runtime changes so an agent restart can
 resume verification and restoration safely.
@@ -29,6 +29,34 @@ def _finite_number(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError, OverflowError):
         return default
     return number if math.isfinite(number) else default
+
+
+def _psi_avg10(psi: Any, resource: str) -> float | None:
+    if not isinstance(psi, dict):
+        return None
+    sample = psi.get(resource)
+    if not isinstance(sample, dict) or sample.get("status") != "ready":
+        return None
+    some = sample.get("some")
+    if not isinstance(some, dict):
+        return None
+    value = _finite_number(some.get("avg10"), -1.0)
+    return value if value >= 0 else None
+
+
+def _host_cpu_pressure(
+    host_cpu: dict[str, Any], busy_threshold: float, psi_threshold: float,
+) -> tuple[bool, float | None, str]:
+    """Confirm host CPU contention with PSI, falling back only when PSI is absent."""
+    busy = _finite_number(host_cpu.get("busy_percent"), -1.0)
+    if host_cpu.get("status") != "ready" or busy < busy_threshold:
+        return False, _psi_avg10(host_cpu.get("psi"), "cpu"), "host_busy_below_threshold"
+    psi_some = _psi_avg10(host_cpu.get("psi"), "cpu")
+    if psi_some is None:
+        return True, None, "host_busy_psi_unavailable_fallback"
+    if psi_some < psi_threshold:
+        return False, psi_some, "host_psi_below_threshold"
+    return True, psi_some, "host_busy_and_psi_confirmed"
 
 
 def _read_psi(path: str) -> dict[str, Any]:
@@ -447,6 +475,13 @@ def _alert(
             "host_logical_cpus": host_cpu.get("logical_cpus"),
             "host_load_1m": host_cpu.get("load_1m"),
             "host_psi": host_cpu.get("psi"),
+            "host_cpu_psi_some_avg10": _psi_avg10(host_cpu.get("psi"), "cpu"),
+            "host_cpu_psi_threshold_percent": round(min(50.0, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5))), 2),
+            "host_pressure_basis": _host_cpu_pressure(
+                host_cpu,
+                min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80))),
+                min(50.0, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5))),
+            )[2],
             "resource_pressure": (container.get("security") or {}).get("resource_pressure") if isinstance(container.get("security"), dict) else None,
             "sample_count": high_samples,
             "required_samples": required_samples,
@@ -486,6 +521,8 @@ def observe(
     host_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80.0)))
     recovery_ratio = min(0.8, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_RATIO", "0.5"), 0.5)))
     recovery_host_threshold = min(99.0, max(0.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_HOST_BUSY_PERCENT", "70"), 70.0)))
+    host_psi_threshold = min(50.0, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5.0)))
+    recovery_host_psi_threshold = min(host_psi_threshold, max(0.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_HOST_PSI_PERCENT", "2"), 2.0)))
     required_duration = max(600, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_REQUIRED_SECONDS", "600"), 600)))
     escalation_duration = max(300, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_ESCALATION_SECONDS", "300"), 300)))
     recovery_duration = max(600, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_SECONDS", "600"), 600)))
@@ -505,6 +542,9 @@ def observe(
     alerts: list[dict[str, Any]] = []
     active_keys: set[str] = set()
     host_busy = _finite_number(host_cpu.get("busy_percent"), -1.0) if host_cpu.get("status") == "ready" else -1.0
+    host_pressure_confirmed, host_cpu_psi, host_pressure_basis = _host_cpu_pressure(
+        host_cpu, host_threshold, host_psi_threshold
+    )
 
     for container in containers:
         if not isinstance(container, dict):
@@ -647,7 +687,7 @@ def observe(
                 applied_cpus = max(0.001, _finite_number(record.get("applied_cpus"), effective_cpus * 0.5))
                 ratio = metrics_cpu / (applied_cpus * 100.0) if metrics_cpu >= 0 else -1.0
                 tier = max(1, min(3, int(record.get("tier") or 1)))
-                high_now = record.get("stage") == "active" and ratio * 100.0 >= high_threshold and host_busy >= host_threshold
+                high_now = record.get("stage") == "active" and ratio * 100.0 >= high_threshold and host_pressure_confirmed
                 if high_now and tier < 3:
                     last_high = int(record.get("escalation_last_high") or 0)
                     if last_high <= 0 or timestamp <= last_high or timestamp - last_high > max_gap:
@@ -717,6 +757,7 @@ def observe(
                     and 0 <= ratio <= recovery_ratio
                     and host_cpu.get("status") == "ready"
                     and host_busy < recovery_host_threshold
+                    and (host_cpu_psi is None or host_cpu_psi < recovery_host_psi_threshold)
                 )
                 if record.get("stage") != "candidate" and recovering:
                     if not int(record.get("low_since") or 0):
@@ -770,6 +811,10 @@ def observe(
                         "recovery_elapsed_seconds": max(0, timestamp - int(record.get("low_since") or timestamp)) if int(record.get("low_samples") or 0) else 0,
                         "current_cpu_percent": round(metrics_cpu, 2) if metrics_cpu >= 0 else None,
                         "current_cpu_saturation_percent": round(max(0.0, ratio) * 100.0, 2),
+                        "host_busy_percent": host_busy,
+                        "host_cpu_psi_some_avg10": host_cpu_psi,
+                        "host_cpu_psi_threshold_percent": host_psi_threshold,
+                        "host_pressure_basis": host_pressure_basis,
                         "escalation_samples": int(record.get("escalation_high_samples") or 0),
                         "escalation_required_samples": escalation_samples,
                         "escalation_duration_seconds": max(0, timestamp - int(record.get("escalation_high_since") or timestamp)),
@@ -822,7 +867,7 @@ def observe(
         per_core_pressure = metrics_cpu >= high_threshold
         qualifies = (
             (saturation * 100.0 >= high_threshold or per_core_pressure)
-            and host_busy >= host_threshold
+            and host_pressure_confirmed
             and effective_cpus > 0
             and host_cpu.get("status") == "ready"
         )
@@ -849,6 +894,9 @@ def observe(
                 "effective_cpus": round(effective_cpus, 3),
                 "host_busy_percent": host_busy,
                 "host_iowait_percent": host_cpu.get("iowait_percent"),
+                "host_cpu_psi_some_avg10": host_cpu_psi,
+                "host_cpu_psi_threshold_percent": host_psi_threshold,
+                "host_pressure_basis": host_pressure_basis,
                 "host_busy_threshold_percent": host_threshold,
                 "threshold_percent_of_container_capacity": high_threshold,
                 "threshold_percent_of_one_cpu": high_threshold,
@@ -858,10 +906,13 @@ def observe(
         else:
             instances.pop(key, None)
             security["cpu_guard"] = {
-                "state": "sampling_unavailable" if not sample_available else "normal" if saturation < high_threshold / 100.0 else "waiting_for_host_pressure",
+                "state": "sampling_unavailable" if not sample_available or effective_cpus <= 0 or host_cpu.get("status") != "ready" else "normal" if saturation < high_threshold / 100.0 and not per_core_pressure else "waiting_for_host_psi" if host_busy >= host_threshold and host_cpu_psi is not None and host_cpu_psi < host_psi_threshold else "waiting_for_host_pressure",
                 "container_cpu_percent": round(metrics_cpu, 2) if metrics_cpu >= 0 else None,
                 "effective_cpus": round(max(0.0, effective_cpus), 3),
                 "host_busy_percent": host_cpu.get("busy_percent"),
+                "host_cpu_psi_some_avg10": host_cpu_psi,
+                "host_cpu_psi_threshold_percent": host_psi_threshold,
+                "host_pressure_basis": host_pressure_basis,
                 "threshold_percent_of_container_capacity": high_threshold,
                 "recheck_interval_seconds": int(interval),
                 "reason_is_user_abuse": False,
@@ -994,6 +1045,9 @@ def observe(
             "host_busy_percent": host_cpu.get("busy_percent"),
             "host_iowait_percent": host_cpu.get("iowait_percent"),
             "host_busy_threshold_percent": host_threshold,
+            "host_cpu_psi_some_avg10": host_cpu_psi,
+            "host_cpu_psi_threshold_percent": host_psi_threshold,
+            "host_pressure_basis": host_pressure_basis,
             "threshold_percent_of_one_cpu": high_threshold,
             "tier": 1,
             "tier_percent_of_original": 50,
@@ -1024,6 +1078,7 @@ def observe(
             "container_saturation_percent": high_threshold,
             "one_cpu_usage_percent": high_threshold,
             "host_busy_percent": host_threshold,
+            "host_cpu_psi_some_avg10_percent": host_psi_threshold,
             "required_duration_seconds": required_duration,
             "required_samples": min_samples,
             "target_cpu_ratio": min(0.75, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_TARGET_RATIO", "0.5"), 0.5))),
@@ -1033,6 +1088,7 @@ def observe(
             "recovery_required_duration_seconds": recovery_duration,
             "recovery_ratio_of_limited_capacity": recovery_ratio,
             "recovery_host_busy_percent": recovery_host_threshold,
+            "recovery_host_cpu_psi_some_avg10_percent": recovery_host_psi_threshold,
             "recovery_samples": recovery_samples,
             "max_simultaneous_container_limits": 1,
             "cooldown_seconds": cooldown_seconds,

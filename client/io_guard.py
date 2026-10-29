@@ -1,7 +1,8 @@
 """Fail-closed, reversible per-container cgroup v2 disk I/O protection.
 
 The guard only writes ``io.max`` for a container cgroup after sustained host
-device pressure and measured cgroup attribution. It does not stop workloads,
+I/O PSI pressure and measured cgroup attribution. Device busy time is the
+compatibility fallback when host PSI is unavailable. It does not stop workloads,
 enable controllers, guess block devices, or overwrite a changed administrator
 limit. Original per-device limits are persisted before any write.
 """
@@ -32,6 +33,30 @@ def _number(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError, OverflowError):
         return default
     return result if math.isfinite(result) else default
+
+
+def _psi_avg10(resource_pressure: Any, scope: str) -> float | None:
+    if not isinstance(resource_pressure, dict):
+        return None
+    section = resource_pressure.get(scope)
+    sample = section.get("io") if isinstance(section, dict) else None
+    if not isinstance(sample, dict) or sample.get("status") != "ready":
+        return None
+    some = sample.get("some")
+    if not isinstance(some, dict):
+        return None
+    value = _number(some.get("avg10"), -1.0)
+    return value if value >= 0 else None
+
+
+def _host_io_pressure(
+    device_busy: float, host_psi_some: float | None,
+    busy_threshold: float, psi_threshold: float,
+) -> tuple[bool, str]:
+    """Use host I/O PSI when available; retain busy-time fallback on old kernels."""
+    if host_psi_some is None:
+        return device_busy >= busy_threshold, "device_busy_fallback_psi_unavailable"
+    return host_psi_some >= psi_threshold, "host_io_psi"
 
 
 def _read_state(path: str) -> tuple[dict[str, Any], str]:
@@ -328,6 +353,10 @@ def _trigger_alert(container: dict[str, Any], record: dict[str, Any], action: di
         "state": record.get("stage"),
         "device": record.get("device"),
         "device_busy_percent": record.get("device_busy_percent"),
+        "host_io_psi_some_avg10": record.get("host_io_psi_some_avg10"),
+        "container_io_psi_some_avg10": record.get("container_io_psi_some_avg10"),
+        "host_io_psi_threshold_percent": round(min(50.0, max(0.1, _number(os.getenv("IO_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5))), 2),
+        "host_pressure_basis": record.get("host_pressure_basis"),
         "dominant_share_percent": round(_number(record.get("dominant_share")) * 100.0, 1),
         "container_rates": record.get("observed_rates"),
         "device_rates": record.get("device_rates"),
@@ -377,6 +406,8 @@ def observe(
     interval = max(60.0, _number(interval_seconds, 300.0))
     pressure_threshold = min(99.0, max(50.0, _number(os.getenv("IO_AUTO_LIMIT_DEVICE_BUSY_PERCENT", "80"), 80.0)))
     recovery_pressure = min(90.0, max(20.0, _number(os.getenv("IO_AUTO_LIMIT_RECOVERY_BUSY_PERCENT", "60"), 60.0)))
+    host_psi_threshold = min(50.0, max(0.1, _number(os.getenv("IO_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5.0)))
+    recovery_host_psi_threshold = min(host_psi_threshold, max(0.0, _number(os.getenv("IO_AUTO_LIMIT_RECOVERY_PSI_PERCENT", "2"), 2.0)))
     share_threshold = min(0.95, max(0.2, _number(os.getenv("IO_AUTO_LIMIT_CONTAINER_SHARE", "0.5"), 0.5)))
     min_bps = max(1024.0, _number(os.getenv("IO_AUTO_LIMIT_MIN_BPS", str(10 * 1024 * 1024)), 10 * 1024 * 1024))
     min_iops = max(10.0, _number(os.getenv("IO_AUTO_LIMIT_MIN_IOPS", "250"), 250.0))
@@ -414,6 +445,9 @@ def observe(
         seen.add(key)
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         container["security"] = security
+        resource_pressure = security.get("resource_pressure") if isinstance(security.get("resource_pressure"), dict) else {}
+        host_io_psi = _psi_avg10(resource_pressure, "host")
+        container_io_psi = _psi_avg10(resource_pressure, "container")
         cooldown_record = instances.get(key)
         if isinstance(cooldown_record, dict) and cooldown_record.get("stage") == "cooldown":
             remaining = max(0, int(cooldown_record.get("cooldown_until") or 0) - timestamp)
@@ -523,8 +557,14 @@ def observe(
                     record["last_seen"] = timestamp
                     device_sample = host.get("devices", {}).get(device, {}) if isinstance(host.get("devices"), dict) else {}
                     busy = _number(device_sample.get("busy_percent"), -1)
+                    host_pressure_high, host_pressure_basis = _host_io_pressure(
+                        busy, host_io_psi, pressure_threshold, host_psi_threshold
+                    )
                     observed = rates.get(device, {})
                     record["device_busy_percent"] = round(busy, 2) if busy >= 0 else None
+                    record["host_io_psi_some_avg10"] = host_io_psi
+                    record["container_io_psi_some_avg10"] = container_io_psi
+                    record["host_pressure_basis"] = host_pressure_basis
                     record["observed_rates"] = {k: round(_number(v), 2) for k, v in observed.items()}
                     record["device_rates"] = device_sample
                     lower = all(
@@ -532,7 +572,11 @@ def observe(
                         or _number(observed.get(k), 0) <= max(1, _number(applied.get(k)) * 0.5)
                         for k in _IO_KEYS
                     )
-                    low_pressure = busy >= 0 and busy < recovery_pressure
+                    low_pressure = (
+                        host_io_psi < recovery_host_psi_threshold
+                        if host_io_psi is not None
+                        else busy >= 0 and busy < recovery_pressure
+                    )
                     if lower and low_pressure:
                         since = int(record.get("low_since") or timestamp)
                         if timestamp <= since or timestamp - int(record.get("last_low") or 0) > max_gap:
@@ -575,7 +619,7 @@ def observe(
                         observed_iops = _number(observed.get("riops")) + _number(observed.get("wiops"))
                         share = max(observed_bps / host_bps if host_bps > 0 else 0.0,
                                     observed_iops / host_iops if host_iops > 0 else 0.0)
-                        high = busy >= pressure_threshold and share >= share_threshold and (
+                        high = host_pressure_high and share >= share_threshold and (
                             observed_bps >= min_bps or observed_iops >= min_iops
                         )
                         if high and tier < 3:
@@ -624,6 +668,9 @@ def observe(
                         security["io_guard"] = {
                             "state": record.get("stage"), "device": device,
                             "device_busy_percent": record.get("device_busy_percent"),
+                            "host_io_psi_some_avg10": host_io_psi,
+                            "container_io_psi_some_avg10": container_io_psi,
+                            "host_pressure_basis": host_pressure_basis,
                             "dominant_share_percent": round(_number(record.get("dominant_share")) * 100.0, 1),
                             "observed_rates": record.get("observed_rates"),
                             "tier": tier, "tier_percent_of_baseline": {1: 50, 2: 25, 3: 10}.get(tier),
@@ -637,7 +684,7 @@ def observe(
                             "sample_count": int(record.get("high_samples") or 0),
                             "required_samples": int(record.get("required_samples") or 0),
                             "last_error": record.get("last_error") or "",
-                            "message": record.get("last_error") or "容器 I/O 限额已读回确认；达到持续恢复条件后自动恢复。",
+                            "message": record.get("last_error") or "容器 I/O 限额已读回确认；宿主机 I/O PSI 持续回落后自动恢复。",
                             "reason_is_user_abuse": False,
                         }
                         action = {"attempted": True, "succeeded": record.get("stage") == "active",
@@ -670,11 +717,14 @@ def observe(
         }
         # ``rates`` was sampled above so both the active and candidate paths
         # use the same interval delta instead of consuming it twice.
-        pressured: list[tuple[float, str, dict[str, float], dict[str, float]]] = []
+        pressured: list[tuple[float, str, dict[str, float], dict[str, float], str]] = []
         for device, io_rate in rates.items():
             device_stats = host.get("devices", {}).get(device, {})
             busy = _number(device_stats.get("busy_percent"), -1)
-            if busy < pressure_threshold:
+            host_pressure_high, pressure_basis = _host_io_pressure(
+                busy, host_io_psi, pressure_threshold, host_psi_threshold
+            )
+            if not host_pressure_high:
                 continue
             host_bps = _number(device_stats.get("total_bps"), 0)
             host_iops = _number(device_stats.get("total_iops"), 0)
@@ -682,10 +732,10 @@ def observe(
             iops_rate = _number(io_rate.get("riops")) + _number(io_rate.get("wiops"))
             share = max(bytes_rate / host_bps if host_bps > 0 else 0.0, iops_rate / host_iops if host_iops > 0 else 0.0)
             if share >= share_threshold and (bytes_rate >= min_bps or iops_rate >= min_iops):
-                pressured.append((share, device, io_rate, device_stats))
+                pressured.append((share, device, io_rate, device_stats, pressure_basis))
         if pressured:
             pressured.sort(key=lambda item: item[0], reverse=True)
-            share, device, observed_rates, device_stats = pressured[0]
+            share, device, observed_rates, device_stats, pressure_basis = pressured[0]
             if candidate.get("device") and candidate.get("device") != device:
                 candidate["high_samples"] = 0
                 candidate["high_since"] = 0
@@ -705,18 +755,25 @@ def observe(
             }
             candidate.update(device=device, cgroup_path=cgroup_path, observed_rates=observed_rates,
                              device_rates=device_stats, device_busy_percent=_number(device_stats.get("busy_percent")),
-                             dominant_share=round(share, 4), sample_seconds=round(sample_seconds, 2))
+                             dominant_share=round(share, 4), sample_seconds=round(sample_seconds, 2),
+                             host_io_psi_some_avg10=host_io_psi,
+                             container_io_psi_some_avg10=container_io_psi,
+                             host_pressure_basis=pressure_basis)
             instances[key] = candidate
             security["io_guard"] = {
                 "state": "watching", "device": device,
                 "device_busy_percent": candidate["device_busy_percent"],
+                "host_io_psi_some_avg10": host_io_psi,
+                "container_io_psi_some_avg10": container_io_psi,
+                "host_io_psi_threshold_percent": host_psi_threshold,
+                "host_pressure_basis": candidate["host_pressure_basis"],
                 "dominant_share_percent": round(share * 100.0, 1),
                 "observed_rates": {k: round(_number(v), 2) for k, v in observed_rates.items()},
                 "confirmed_duration_seconds": max(0, timestamp - int(candidate.get("high_since") or timestamp)),
                 "sample_count": int(candidate.get("high_samples") or 0), "required_samples": min_samples,
                 "recheck_interval_seconds": int(interval),
                 "last_error": str(candidate.get("last_error") or ""),
-                "message": str(candidate.get("last_error") or "持续宿主机磁盘压力与容器 I/O 占比偏高，继续采样确认。"),
+                "message": str(candidate.get("last_error") or "宿主机 I/O PSI 与容器 I/O 归属持续偏高，继续采样确认。"),
                 "reason_is_user_abuse": False,
             }
             if (int(candidate.get("high_samples") or 0) >= min_samples
@@ -802,9 +859,22 @@ def observe(
         else:
             if isinstance(record, dict) and record.get("stage") == "candidate":
                 instances.pop(key, None)
+            busy_devices = [
+                _number((host.get("devices", {}).get(device) or {}).get("busy_percent"), -1)
+                for device in rates
+            ] if isinstance(host.get("devices"), dict) else []
+            waiting_for_psi = (
+                host_io_psi is not None
+                and host_io_psi < host_psi_threshold
+                and any(value >= pressure_threshold for value in busy_devices)
+            )
             security["io_guard"] = {
-                "state": "sampling_unavailable" if sample_seconds <= 0 else "normal",
-                "message": cgroup_error or "未达到持续宿主机磁盘压力与容器归属阈值。",
+                "state": "sampling_unavailable" if sample_seconds <= 0 else "waiting_for_host_psi" if waiting_for_psi else "normal",
+                "host_io_psi_some_avg10": host_io_psi,
+                "container_io_psi_some_avg10": container_io_psi,
+                "host_io_psi_threshold_percent": host_psi_threshold,
+                "host_pressure_basis": "host_io_psi" if host_io_psi is not None else "device_busy_fallback_psi_unavailable",
+                "message": cgroup_error or ("磁盘设备忙碌率偏高，但宿主机 I/O PSI 尚未达到保护线；暂不限速。" if waiting_for_psi else "未达到持续宿主机磁盘压力与容器归属阈值。"),
                 "reason_is_user_abuse": False,
             }
 
@@ -839,11 +909,13 @@ def observe(
         "unresolved_containers": unresolved,
         "policy": {
             "device_busy_percent": pressure_threshold,
+            "host_io_psi_some_avg10_percent": host_psi_threshold,
             "container_io_share": share_threshold,
             "minimum_bytes_per_second": min_bps,
             "minimum_iops": min_iops,
             "required_duration_seconds": required_duration,
             "recovery_device_busy_percent": recovery_pressure,
+            "recovery_host_io_psi_some_avg10_percent": recovery_host_psi_threshold,
             "recovery_duration_seconds": recovery_duration,
             "tier_percent_of_baseline": [50, 25, 10],
             "max_simultaneous_container_limits": 1,

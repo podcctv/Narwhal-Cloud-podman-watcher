@@ -43,6 +43,7 @@ const RESOURCE_GUARD_STATES: Record<string, string> = {
   normal: '正常',
   watching: '持续采样中',
   waiting_for_host_pressure: '等待母鸡压力佐证',
+  waiting_for_host_psi: '等待母鸡 PSI 佐证',
   waiting_for_pressure: '等待内存压力',
   waiting_for_other_limit: '等待其他资源保护结束',
   limited: '限额已读回确认',
@@ -77,7 +78,7 @@ const guardTone = (state?: string) => {
   if (['limit_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'state_unavailable', 'sampling_unavailable', 'limit_readback_unavailable', 'orphaned_cgroup', 'unavailable', 'apply_unverified'].includes(state || '')) {
     return 'border-rose-500/30 bg-rose-950/20 text-rose-200';
   }
-  if (['watching', 'waiting_for_host_pressure', 'waiting_for_pressure', 'applying', 'escalating', 'restoring', 'waiting_for_other_limit', 'retry_wait', 'warming', 'cooldown', 'psi_unavailable'].includes(state || '')) {
+  if (['watching', 'waiting_for_host_pressure', 'waiting_for_host_psi', 'waiting_for_pressure', 'applying', 'escalating', 'restoring', 'waiting_for_other_limit', 'retry_wait', 'warming', 'cooldown', 'psi_unavailable'].includes(state || '')) {
     return 'border-amber-500/30 bg-amber-950/20 text-amber-200';
   }
   if (['normal', 'restored', 'manual_reset'].includes(state || '')) return 'border-emerald-500/25 bg-emerald-950/15 text-emerald-200';
@@ -490,6 +491,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       当前 {cpuGuard?.container_cpu_percent ?? cpuGuard?.current_cpu_percent ?? container?.cpu_percent ?? 0}%
                       {cpuGuard?.effective_cpus ? ` · 配额容量 ${fmtNumber(cpuGuard.effective_cpus, 2)} 核` : ''}
                       {cpuGuard?.host_busy_percent !== undefined && cpuGuard.host_busy_percent !== null ? ` · 母鸡忙碌 ${fmtNumber(cpuGuard.host_busy_percent, 1)}%` : ''}
+                      {cpuGuard?.host_cpu_psi_some_avg10 != null ? ` · 母鸡 CPU PSI ${fmtNumber(cpuGuard.host_cpu_psi_some_avg10, 2)}%` : cpuGuard?.host_pressure_basis === 'host_busy_psi_unavailable_fallback' ? ' · PSI 不可用，按母鸡忙碌率兼容判断' : ''}
                     </p>
                     {cpuGuard?.state === 'watching' && (
                       <p className="text-[11px] text-amber-200">持续高占用 {cpuGuard.high_samples ?? 0}/{cpuGuard.required_samples ?? 0} 次，已观察 {formatMinutes(cpuGuard.confirmed_duration_seconds)}。</p>
@@ -546,6 +548,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     <p className="text-[11px] leading-relaxed text-slate-300">
                       {ioGuard?.device ? `设备 ${ioGuard.device}` : '设备待识别'}
                       {ioGuard?.device_busy_percent !== undefined && ioGuard.device_busy_percent !== null ? ` · 磁盘忙碌 ${fmtNumber(ioGuard.device_busy_percent, 1)}%` : ''}
+                      {ioGuard?.host_io_psi_some_avg10 != null ? ` · 母鸡 I/O PSI ${fmtNumber(ioGuard.host_io_psi_some_avg10, 2)}%` : ioGuard?.host_pressure_basis === 'device_busy_fallback_psi_unavailable' ? ' · PSI 不可用，按设备忙碌率兼容判断' : ''}
                       {ioGuard?.dominant_share_percent !== undefined ? ` · 容器占比 ${fmtNumber(ioGuard.dominant_share_percent, 1)}%` : ''}
                     </p>
                     {ioGuard?.state === 'watching' && (

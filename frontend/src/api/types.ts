@@ -98,7 +98,7 @@ export interface ContainerSecurity {
   vmess_guard?: ProtocolGuardSummary;
   trojan_guard?: ProtocolGuardSummary;
   cpu_guard?: {
-    state?: 'normal' | 'watching' | 'waiting_for_host_pressure' | 'limited' | 'limit_failed' | 'limited_unverified' | 'limit_unverified' | 'restore_failed' | 'restored' | 'cooldown' | 'manual_override' | 'manual_reset' | 'state_unavailable' | 'sampling_unavailable' | 'disabled' | string;
+    state?: 'normal' | 'watching' | 'waiting_for_host_pressure' | 'waiting_for_host_psi' | 'limited' | 'limit_failed' | 'limited_unverified' | 'limit_unverified' | 'restore_failed' | 'restored' | 'cooldown' | 'manual_override' | 'manual_reset' | 'state_unavailable' | 'sampling_unavailable' | 'disabled' | string;
     message?: string;
     original_limit?: string;
     active_limit?: string;
@@ -118,6 +118,9 @@ export interface ContainerSecurity {
     host_busy_percent?: number | null;
     host_iowait_percent?: number | null;
     host_busy_threshold_percent?: number;
+    host_cpu_psi_some_avg10?: number | null;
+    host_cpu_psi_threshold_percent?: number;
+    host_pressure_basis?: string;
     threshold_percent_of_container_capacity?: number;
     threshold_percent_of_one_cpu?: number;
     trigger_basis?: string;
@@ -127,10 +130,14 @@ export interface ContainerSecurity {
     [key: string]: any;
   };
   io_guard?: {
-    state?: 'normal' | 'watching' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'limit_failed' | 'limit_readback_unavailable' | 'waiting_for_other_limit' | 'retry_wait' | 'manual_override' | 'orphaned_cgroup' | 'unavailable' | 'warming' | 'state_unavailable' | 'disabled' | string;
+    state?: 'normal' | 'watching' | 'waiting_for_host_psi' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'limit_failed' | 'limit_readback_unavailable' | 'waiting_for_other_limit' | 'retry_wait' | 'manual_override' | 'orphaned_cgroup' | 'unavailable' | 'warming' | 'state_unavailable' | 'disabled' | string;
     message?: string;
     device?: string;
     device_busy_percent?: number | null;
+    host_io_psi_some_avg10?: number | null;
+    container_io_psi_some_avg10?: number | null;
+    host_io_psi_threshold_percent?: number;
+    host_pressure_basis?: string;
     dominant_share_percent?: number;
     observed_rates?: Record<string, number>;
     tier?: number;
