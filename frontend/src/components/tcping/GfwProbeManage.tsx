@@ -59,14 +59,14 @@ export const GfwProbeManage: React.FC = () => {
         <strong>被测主机端口覆盖</strong>
         <span className="tabular-nums">{data?.target_coverage?.hosts_with_targets || 0}/{data?.target_coverage?.online_hosts || 0} 台在线主机 · 今日抽测 {data?.target_coverage?.sampled_containers || 0}/{data?.target_coverage?.eligible_containers || 0} 个容器</span>
       </div>
-      <p className="mt-1 leading-5 text-slate-300">自动采集 Incus 代理 / 网络转发、Podman 已发布 TCP 端口，以及容器直接持有的公网 IPv4 + 实际监听端口。每天按稳定轮换抽取每台母鸡最多 2 个不同容器，通常每个容器抽测一个已存在的公网 TCP 端口；已确认受阻的端口优先复测以确认恢复。当天继续按约 5 分钟周期复测样本，累积证据。不会创建端口映射；未抽中的容器或端口仍是未验证状态。宿主机在 NAT 后时，系统不会把出口 IP 猜成入站公网 IP。</p>
+      <p className="mt-1 leading-5 text-slate-300">自动采集 Incus 代理 / 网络转发、Podman 已发布 TCP 端口、宿主机明确的 TCP DNAT 规则，以及容器直接持有的公网 IPv4 + 实际监听端口。每天按稳定轮换抽取每台母鸡最多 2 个不同容器，通常每个容器抽测一个已存在的公网 TCP 端口；已确认受阻的端口优先复测以确认恢复。当天继续按约 5 分钟周期复测样本，累积证据。不会创建端口映射；未抽中的容器或端口仍是未验证状态。上游 NAT 若未在宿主机配置中留下明确端口转发，系统不会把出口 IP 猜成入站公网 IP。</p>
       <p className="mt-1 text-slate-400">今日 UTC {data?.target_coverage?.sample_date_utc || '—'} · 抽测端点 {data?.target_coverage?.target_endpoints || 0} 个 · 有明确映射的端点共 {data?.target_coverage?.eligible_endpoints || 0} 个</p>
       {!!data?.target_coverage?.missing_reasons?.length && <div className="mt-2 space-y-1 text-amber-200">
         {data.target_coverage.missing_reasons.map(item => <p key={item.reason} className="break-words">{item.hosts} 台：{item.reason}</p>)}
       </div>}
       <details className="mt-2 border-t border-slate-800 pt-2 text-slate-300">
         <summary className="cursor-pointer font-semibold text-sky-300">没有可探测端口时怎么处理？</summary>
-        <p className="mt-2 leading-5">先确认容器确实提供公网 TCP 服务：Incus 使用 proxy 设备或 network forward；Podman 通过端口发布（例如 -p）；直连公网 IP 的容器需有公网地址和 TCP 监听。Agent 会自动采集这些配置并周期上报。若只有宿主机私网地址、上游 NAT 公网地址没有登记，当前无法安全自动确定公网 IP；需先明确 NAT 的公网地址和端口转发关系，不能只填一个猜测端口。</p>
+        <p className="mt-2 leading-5">Agent 会自动读取 Incus / Podman 端口发布、容器公网地址和宿主机现有 TCP DNAT 规则，并与容器实际监听端口核对。若公网映射由宿主机之外的上游 NAT 提供，且宿主机没有对应转发规则或可读映射，当前没有可靠数据可自动确定公网地址与端口；系统会继续显示待评估，不猜测并探测端口。</p>
       </details>
     </div>
     {error && <p className="mt-3 rounded-lg border border-rose-800 bg-rose-950/30 p-2 text-xs text-rose-200" role="alert">{error}</p>}

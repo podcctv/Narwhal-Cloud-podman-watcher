@@ -1,6 +1,6 @@
 """Conservative, namespace-local VMess/Trojan inbound port guard.
 
-Only a protected-protocol endpoint that is present in a completely parsed live process
+Only a protected-protocol endpoint in a stable, completely parsed process
 configuration and matched to the same PID/transport/port listener is eligible.
 The guard drops that transport/port in the container's own network namespace;
 it never signals or restarts a process or container.
@@ -132,7 +132,13 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
             start_ticks = str(process_state.get("start_ticks") or "") if isinstance(process_state, dict) else ""
             reason = str(process_state.get("reason") or "") if isinstance(process_state, dict) else ""
             process_state_verified = process_state_name == "complete" and start_ticks.isdigit()
-            port_config_verified = configured.get("port_config_complete") is True and start_ticks.isdigit()
+            # A stable complete config plus an exact current listener is enough
+            # for a port-scoped firewall rule. Some containers hide /proc start
+            # ticks; that must not leave a configured VMess/Trojan port forever
+            # pending. Generation evidence is still required for the stronger
+            # whole-process scan state, and any observed scan race invalidates
+            # port_config_complete before it reaches this planner.
+            port_config_verified = configured.get("port_config_complete") is True
             if not process_state_verified and not port_config_verified:
                 if not _SAFE_SCAN_REASON.fullmatch(reason):
                     reason = "process_scan_state_missing" if process_state_name == "missing" else (

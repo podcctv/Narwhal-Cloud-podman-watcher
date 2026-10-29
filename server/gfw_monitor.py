@@ -101,13 +101,13 @@ def _listen_endpoint(item):
         target = str(item.get("target") or "").lower()
         if not target.endswith("/tcp"):
             return "", 0
-    elif source in {"incus-proxy", "incus-forward"}:
+    elif source in {"incus-proxy", "incus-forward", "host-dnat"}:
         target = str(item.get("target") or "").lower()
         if listen.lower().startswith("udp:") or target.startswith("udp:"):
             return "", 0
         # Incus network-forward records carry the protocol on both endpoints.
         # Do not silently accept an untyped or non-TCP forward as a TCP probe.
-        if source == "incus-forward" and (not listen.lower().startswith("tcp:") or not target.startswith("tcp:")):
+        if source in {"incus-forward", "host-dnat"} and (not listen.lower().startswith("tcp:") or not target.startswith("tcp:")):
             return "", 0
         if listen.lower().startswith("tcp:"):
             listen = listen[4:]

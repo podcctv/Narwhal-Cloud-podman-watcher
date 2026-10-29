@@ -4936,15 +4936,15 @@ def collect_suspicious_processes(name: str, runtime: str = "", project: str = ""
     ]
     if not patterns:
         return []
+    # Miner indicators identify executables, not arbitrary scripts mentioning
+    # a miner name. Searching the full ps row caused repeat false positives for
+    # `sh` launchers whose command line merely contained the string "xmrig".
+    exact_miner_names = {"xmrig", "kinsing", "kdevtmpfsi", "watchbog", "cryptonight", "minerd", "pwnrig"}
     output = run(_runtime_exec_cmd(runtime, name, "ps -eo pid,pcpu,comm,args 2>/dev/null", project))
     matches: List[Dict[str, object]] = []
     for line in output.splitlines():
         text = line.strip()
         if not text or text.lower().startswith("pid"):
-            continue
-        lowered = text.lower()
-        matched_pattern = next((pattern for pattern in patterns if pattern in lowered), "")
-        if not matched_pattern:
             continue
         parts = text.split(None, 3)
         try:
@@ -4955,13 +4955,33 @@ def collect_suspicious_processes(name: str, runtime: str = "", project: str = ""
             cpu_percent = float(parts[1])
         except (IndexError, ValueError):
             cpu_percent = 0.0
+        process_name = posixpath.basename(parts[2]).lower() if len(parts) > 2 else ""
+        command = parts[3] if len(parts) > 3 else ""
+        argv0 = ""
+        try:
+            argv0 = posixpath.basename(shlex.split(command, posix=True)[0]).lower() if command else ""
+        except (ValueError, IndexError):
+            pass
+        lowered = text.lower()
+        matched_pattern = next(
+            (pattern for pattern in patterns
+             if pattern in exact_miner_names and (process_name == pattern or argv0 == pattern)),
+            "",
+        )
+        if not matched_pattern:
+            matched_pattern = next(
+                (pattern for pattern in patterns if pattern not in exact_miner_names and pattern in lowered),
+                "",
+            )
+        if not matched_pattern:
+            continue
         matches.append(
             {
                 "pid": pid,
                 "cpu_percent": cpu_percent,
-                "process": posixpath.basename(parts[2]).lower() if len(parts) > 2 else "",
+                "process": process_name,
                 "pattern": matched_pattern,
-                "command": _redact_process_command(parts[3] if len(parts) > 3 else text),
+                "command": _redact_process_command(command or text),
             }
         )
         if len(matches) >= 20:
@@ -6105,9 +6125,17 @@ def _collect_socks_config_evidence(
             protocol_process_start_ticks[(int(proc['pid']), str(proc['process']))] = start_ticks
             if not start_ticks:
                 process_protocol_complete = False
-                process_port_config_complete = False
                 protocol_complete = False
-                process_scan_reason = process_scan_reason or 'process_changed_during_config_scan'
+                # Missing /proc start-clock data makes generation attribution
+                # incomplete, but does not invalidate stable, fully parsed
+                # config. Exact PID/name/transport/port listener matching and
+                # shared-port checks still gate protocol blocking. If either
+                # clock read existed but changed/disappeared, it is a scan race.
+                if start_ticks_before.isdigit() or start_ticks_after.isdigit():
+                    process_port_config_complete = False
+                    process_scan_reason = process_scan_reason or 'process_changed_during_config_scan'
+                else:
+                    process_scan_reason = process_scan_reason or 'process_start_generation_unavailable'
                 inventory_reason = inventory_reason or process_scan_reason
             for endpoint in configured_inbound_protocols[process_endpoint_start:]:
                 if endpoint.get('protocol') in {'vmess', 'trojan'}:
@@ -6600,7 +6628,12 @@ def _incus_security_risks(item: Dict[str, object]) -> List[Dict[str, str]]:
 
 
 def _incus_network_exposure(item: Dict[str, object]) -> List[Dict[str, str]]:
-    devices = item.get("expanded_devices") if isinstance(item.get("expanded_devices"), dict) else {}
+    expanded_devices = item.get("expanded_devices") if isinstance(item.get("expanded_devices"), dict) else {}
+    local_devices = item.get("devices") if isinstance(item.get("devices"), dict) else {}
+    # Incus may omit expanded_devices from older/all-project JSON responses.
+    # Local proxy devices are still explicit exposure evidence.
+    devices = dict(local_devices)
+    devices.update(expanded_devices)
     mappings: List[Dict[str, str]] = []
     for device_name, raw_device in devices.items():
         if not isinstance(raw_device, dict) or str(raw_device.get("type") or "") != "proxy":
@@ -6615,6 +6648,52 @@ def _incus_network_exposure(item: Dict[str, object]) -> List[Dict[str, str]]:
             }
         )
     return mappings
+
+
+def _host_dnat_network_exposure(
+    runtime_name: str,
+    network_addresses: List[str],
+    host_conntrack: Dict[str, object] | None,
+) -> List[Dict[str, str]]:
+    """Map explicit host TCP DNAT rules to a matching Incus/Podman address."""
+    if runtime_name not in {"incus", "podman"} or not isinstance(host_conntrack, dict):
+        return []
+    addresses = {str(value) for value in network_addresses if _is_trackable_ip(str(value))}
+    mappings = host_conntrack.get("nat_mappings")
+    if not addresses or not isinstance(mappings, list):
+        return []
+    exposures: List[Dict[str, str]] = []
+    seen = set()
+    for mapping in mappings[:2000]:
+        if not isinstance(mapping, dict) or str(mapping.get("proto") or "").lower() != "tcp":
+            continue
+        target_host = str(mapping.get("target_host") or "")
+        if target_host not in addresses:
+            continue
+        try:
+            public_port = int(mapping.get("public_port") or 0)
+            target_port = int(mapping.get("container_port") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not (1 <= public_port <= 65535 and 1 <= target_port <= 65535):
+            continue
+        bind_host = str(mapping.get("host") or "")
+        if bind_host and not _is_trackable_ip(bind_host):
+            continue
+        bind_host = bind_host or "0.0.0.0"
+        key = (bind_host, public_port, target_host, target_port)
+        if key in seen:
+            continue
+        seen.add(key)
+        exposures.append({
+            "source": "host-dnat",
+            "listen": f"tcp:{bind_host}:{public_port}",
+            "target": f"tcp:{target_host}:{target_port}",
+            "nat": "true",
+        })
+        if len(exposures) >= 128:
+            break
+    return exposures
 
 def collect_hy2_indicators(
     name: str,
@@ -7336,6 +7415,13 @@ def collect_container(
                         network_addresses.append(value)
         except Exception:
             pass
+    for exposure in _host_dnat_network_exposure(runtime_name, network_addresses, host_conntrack):
+        signature = (exposure.get("source"), exposure.get("listen"), exposure.get("target"))
+        if not any(
+            (item.get("source"), item.get("listen"), item.get("target")) == signature
+            for item in network_exposure if isinstance(item, dict)
+        ):
+            network_exposure.append(exposure)
     if pid:
         conn_count = _count_connections_from_pid(pid)
         if conn_count <= 0:
@@ -7849,6 +7935,10 @@ def collect_container(
         "image": image,
         "runtime": runtime_name,
         "project": project,
+        # GFW probing needs the container's actual public address when directly
+        # routed (for example Incus macvlan/ipvlan). This was collected but not
+        # serialized, so the server saw zero eligible endpoints on those nodes.
+        "network_addresses": sorted({str(value) for value in network_addresses if str(value)}),
         "cpu_percent": cpu_percent,
         "cpu_pressure_percent": cpu_pressure_percent,
         "cpu_pressure_sample_available": cpu_pressure_sample_available,

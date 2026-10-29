@@ -1,6 +1,13 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.151**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.152**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.152：修复 GFW 自动端点采集与 VMess 端口保护
+
+- 修复 Agent 已采集容器公网地址、但未写入上报数据的问题；GFW 服务现在可以自动发现 Incus 直连公网容器的实际 TCP 监听端口。
+- Agent 自动读取明确的宿主机 TCP DNAT 规则，并只把目标 IP 与已知 Incus / Podman 容器地址匹配；配合 Incus proxy / network forward 和 Podman 发布端口，无需手工登记容器端口，不根据 NAT 出口 IP 猜测入站地址。
+- VMess / Trojan 配置完整且读取稳定、当前监听 PID / 协议 / 传输 / 端口唯一匹配时，即使容器隐藏进程启动 tick，也自动应用端口级防火墙保护；扫描过程中观察到进程或配置变化、共享端口、监听不匹配、命名空间不安全或规则读回失败时仍不阻断、不报告成功。
+- 修复 XMRig 误报：`xmrig` 等矿工特征仅匹配精确进程名或可执行文件名，不再因 `sh` 等脚本命令行中提到 `xmrig` 就持续告警。
 
 ### v1.7.151：上游邮箱同步与状态可见性
 
