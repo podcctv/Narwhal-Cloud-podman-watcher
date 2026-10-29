@@ -260,6 +260,45 @@ def issue(alert, details):
         if restore_failed:
             advice = "原磁盘 I/O 限额未能自动恢复；临时保护仍可能生效。请管理员检查 cgroup v2 io.max 后手动恢复原值。"
         return title, "；".join(facts) + "。", advice
+    if kind == "memory_pressure_protection":
+        memory = details.get("memory_guard") if isinstance(details.get("memory_guard"), dict) else {}
+        action = details.get("automatic_remediation") if isinstance(details.get("automatic_remediation"), dict) else {}
+        applied = action.get("succeeded") is True and memory.get("limit_applied") is not False
+        restore_failed = memory.get("restore_failed") is True or memory.get("state") == "restore_failed"
+        if restore_failed:
+            title = "服务器内存压力已回落，但原内存设置未能恢复"
+        elif applied:
+            title = "服务器持续内存压力，已启用可恢复保护"
+        else:
+            title = "服务器内存保护未能确认生效"
+        facts = []
+        current = num(memory.get("memory_current_bytes"))
+        maximum = num(memory.get("memory_max_bytes"))
+        if maximum > 0:
+            facts.append(f"容器内存 {fmt(current / 1024 / 1024)} / {fmt(maximum / 1024 / 1024)} MiB（{fmt(memory.get('memory_used_percent'))}%）")
+        if memory.get("host_psi_some_avg10") is not None:
+            facts.append(f"母鸡内存 PSI {fmt(memory.get('host_psi_some_avg10'))}%")
+        if memory.get("container_psi_some_avg10") is not None:
+            facts.append(f"容器内存 PSI {fmt(memory.get('container_psi_some_avg10'))}%")
+        if memory.get("confirmed_duration_seconds") is not None:
+            facts.append(f"持续确认 {fmt(num(memory.get('confirmed_duration_seconds')) / 60)} 分钟（有效采样 {fmt(memory.get('sample_count'))}/{fmt(memory.get('required_samples'))} 次）")
+        if applied:
+            tier = max(1, min(3, int(num(memory.get("tier")) or 1)))
+            ratio = int(num(memory.get("tier_percent_of_max")) or {1: 90, 2: 80, 3: 70}.get(tier, 90))
+            original = clean(memory.get("original_limit") or "不限", 40)
+            active = clean(memory.get("active_limit") or "待读回", 40)
+            facts.append(f"第 {tier} 阶将 memory.high 从 {original} 调整为 {active}（约 memory.max 的 {ratio}%）")
+            facts.append("该阈值会触发内存回收与节流，不修改 memory.max，也不会停止进程或容器")
+        else:
+            facts.append(clean(memory.get("message") or "系统未确认 memory.high 限额生效；未停止进程或容器。", 300))
+        advice = (
+            "这是主机资源保护措施，不代表认定客户滥用。系统会在母鸡和容器内存压力持续回落后恢复原 memory.high；请检查容器内存占用较高的服务及其缓存配置。"
+            if applied and not restore_failed else
+            "这是主机资源保护提醒，不代表认定客户滥用。请管理员检查 Agent 权限、cgroup v2 内存控制器及 memory.high 读回结果。"
+        )
+        if restore_failed:
+            advice = "临时 memory.high 仍可能生效，但原设置未能自动恢复。请管理员核查 cgroup 状态后恢复原限额；系统没有停止进程或容器。"
+        return title, "；".join(facts) + "。", advice
     if kind in METRICS:
         description, label, unit, advice = METRICS[kind]
         value, threshold = num(alert.get("value")), num(alert.get("threshold"))
@@ -421,9 +460,9 @@ def render(alert, state, node="", action=None):
         details, "vmess" if alert.get("alert_type") == "vmess_port_blocked" else "trojan"
     ):
         outcome = ""
-    if alert.get("alert_type") in {"cpu_pressure_protection", "io_pressure_protection"}:
+    if alert.get("alert_type") in {"cpu_pressure_protection", "memory_pressure_protection", "io_pressure_protection"}:
         outcome = ""
-    subject = "服务器服务策略提醒" if alert.get("alert_type") in {"vmess_port_blocked", "trojan_port_blocked"} else "服务器资源保护提醒" if alert.get("alert_type") in {"cpu_pressure_protection", "io_pressure_protection"} else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
+    subject = "服务器服务策略提醒" if alert.get("alert_type") in {"vmess_port_blocked", "trojan_port_blocked"} else "服务器资源保护提醒" if alert.get("alert_type") in {"cpu_pressure_protection", "memory_pressure_protection", "io_pressure_protection"} else "服务器运行提醒" if alert.get("alert_type") in {"http_5xx_ratio", "ops_bandwidth_saturation", "ops_baseline_anomaly", "hy2_high_concurrency"} else "服务器安全提醒"
     if state == "verified":
         subject = "服务器安全复查通知"
         text = f"{identity}此前{description}。\n本次复查未再发现该问题。请保持安全设置，并留意后续使用情况。"

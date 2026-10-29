@@ -495,6 +495,7 @@ def observe(
     recovery_samples = max(3, int(math.ceil(recovery_duration / interval)) + 1,
                            int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_SAMPLES", "3"), 3)))
     retry_seconds = max(300, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RETRY_SECONDS", "600"), 600)))
+    cooldown_seconds = max(300, int(_finite_number(os.getenv("CPU_AUTO_LIMIT_COOLDOWN_SECONDS", "900"), 900)))
     path = state_path or STATE_PATH
     state, state_error = _read_state(path)
     allow_new_limits = allow_new_limits and not state_error
@@ -521,6 +522,18 @@ def observe(
         container["security"] = security
         security["resource_pressure"] = _resource_pressure(container, host_cpu.get("psi") or {})
         record = instances.get(key)
+
+        if isinstance(record, dict) and record.get("stage") == "cooldown":
+            remaining = max(0, int(record.get("cooldown_until") or 0) - timestamp)
+            if remaining:
+                security["cpu_guard"] = {
+                    "state": "cooldown", "retry_after_seconds": remaining,
+                    "message": f"CPU 保护刚恢复，冷却中；约 {remaining} 秒后重新评估。",
+                    "reason_is_user_abuse": False,
+                }
+                continue
+            instances.pop(key, None)
+            record = None
 
         if isinstance(record, dict) and record.get("stage") in {"applying", "escalating", "active", "restoring", "restore_failed", "apply_unverified", "manual_override"}:
             current, read_error = _read_limit(runtime, binary, project, name)
@@ -725,9 +738,11 @@ def observe(
                         restored, restore_output = _restore_limit(runtime, binary, project, name, original)
                         after, after_error = _read_limit(runtime, binary, project, name)
                         if restored and not after_error and _matches(runtime, after, original):
-                            instances.pop(key, None)
+                            instances[key] = {"stage": "cooldown", "cooldown_until": timestamp + cooldown_seconds,
+                                              "last_seen": timestamp, "restored_at": timestamp}
                             active_keys.discard(key)
-                            security["cpu_guard"] = {"state": "restored", "message": "容器 CPU 使用已连续恢复正常，原 CPU 配置已还原。"}
+                            security["cpu_guard"] = {"state": "restored", "cooldown_until": timestamp + cooldown_seconds,
+                                                      "message": "容器 CPU 使用已持续恢复，原 CPU 配置已读回确认；进入冷却期后再重新评估。"}
                             continue
                         record["stage"] = "restore_failed"
                         record["last_error"] = (restore_output or after_error or "恢复配置读回不一致")[:400]
@@ -788,6 +803,15 @@ def observe(
         if not allow_new_limits:
             instances.pop(key, None)
             security["cpu_guard"] = {"state": "disabled", "reason_is_user_abuse": False}
+            continue
+
+        other_active = any(
+            isinstance(security.get(guard_name), dict)
+            and security[guard_name].get("state") in {"active", "limited", "restore_failed", "applying", "escalating", "restoring", "limit_unverified", "limited_unverified", "apply_unverified", "orphaned_cgroup"}
+            for guard_name in ("io_guard", "memory_guard")
+        )
+        if other_active:
+            security["cpu_guard"] = {"state": "waiting_for_other_limit", "message": "该容器已有内存或磁盘 I/O 保护；暂不叠加 CPU 限额。", "reason_is_user_abuse": False}
             continue
 
         if isinstance(record, dict) and record.get("stage") == "candidate":
@@ -1011,6 +1035,7 @@ def observe(
             "recovery_host_busy_percent": recovery_host_threshold,
             "recovery_samples": recovery_samples,
             "max_simultaneous_container_limits": 1,
+            "cooldown_seconds": cooldown_seconds,
         },
         "host_cpu": host_cpu,
         "state_error": state_error,

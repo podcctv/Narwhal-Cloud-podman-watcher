@@ -43,6 +43,8 @@ const RESOURCE_GUARD_STATES: Record<string, string> = {
   normal: '正常',
   watching: '持续采样中',
   waiting_for_host_pressure: '等待母鸡压力佐证',
+  waiting_for_pressure: '等待内存压力',
+  waiting_for_other_limit: '等待其他资源保护结束',
   limited: '限额已读回确认',
   active: '限额已读回确认',
   limit_failed: '限额未确认',
@@ -52,6 +54,7 @@ const RESOURCE_GUARD_STATES: Record<string, string> = {
   restored: '原限额已恢复',
   manual_override: '检测到人工修改',
   manual_reset: '人工恢复原限额',
+  cooldown: '恢复后冷却中',
   state_unavailable: '保护状态不可读',
   sampling_unavailable: '采样不可用',
   disabled: '未启用',
@@ -59,19 +62,22 @@ const RESOURCE_GUARD_STATES: Record<string, string> = {
   escalating: '正在升级并核验',
   restoring: '正在恢复并核验',
   limit_readback_unavailable: '无法读取限额',
-  waiting_for_other_limit: '等待其他容器保护结束',
   retry_wait: '等待自动重试',
   orphaned_cgroup: '旧容器限额归属待核实',
   unavailable: '数据不可用',
   warming: '正在建立采样基线',
+  unsupported: '不支持自动保护',
+  psi_unavailable: 'PSI 采样不可用',
+  existing_limit_stricter: '保留现有限额',
+  apply_unverified: '限额结果待核验',
 };
 
 const guardTone = (state?: string) => {
   if (['limited', 'active'].includes(state || '')) return 'border-sky-500/30 bg-sky-950/30 text-sky-200';
-  if (['limit_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'state_unavailable', 'sampling_unavailable', 'limit_readback_unavailable', 'orphaned_cgroup', 'unavailable'].includes(state || '')) {
+  if (['limit_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'state_unavailable', 'sampling_unavailable', 'limit_readback_unavailable', 'orphaned_cgroup', 'unavailable', 'apply_unverified'].includes(state || '')) {
     return 'border-rose-500/30 bg-rose-950/20 text-rose-200';
   }
-  if (['watching', 'waiting_for_host_pressure', 'applying', 'escalating', 'restoring', 'waiting_for_other_limit', 'retry_wait', 'warming'].includes(state || '')) {
+  if (['watching', 'waiting_for_host_pressure', 'waiting_for_pressure', 'applying', 'escalating', 'restoring', 'waiting_for_other_limit', 'retry_wait', 'warming', 'cooldown', 'psi_unavailable'].includes(state || '')) {
     return 'border-amber-500/30 bg-amber-950/20 text-amber-200';
   }
   if (['normal', 'restored', 'manual_reset'].includes(state || '')) return 'border-emerald-500/25 bg-emerald-950/15 text-emerald-200';
@@ -94,6 +100,12 @@ const formatIoRate = (value?: string | number) => {
 const formatIoLimit = (value?: Record<string, string>) => {
   if (!value) return '暂无读回数据';
   return `读 ${formatIoRate(value.rbps)} · 写 ${formatIoRate(value.wbps)} · 读 IOPS ${value.riops || '不限'} · 写 IOPS ${value.wiops || '不限'}`;
+};
+
+const formatMemoryHigh = (value?: string | number | null) => {
+  if (value === 'max' || value === undefined || value === null || value === '') return '不限';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? fmtBytes(parsed) : '未知';
 };
 
 const formatMinutes = (seconds?: number) => {
@@ -263,6 +275,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const pairing = sec.panel_pairing;
   const cpuGuard = sec.cpu_guard;
   const ioGuard = sec.io_guard;
+  const memoryGuard = sec.memory_guard;
   const resourcePressure = sec.resource_pressure;
   const activeActionableAlert = activeAlerts.find((alert) => {
     if (
@@ -460,14 +473,14 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <div>
                     <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
                       <Gauge className="h-4 w-4 text-sky-300" />
-                      CPU 与磁盘 I/O 自动保护
+                      CPU、内存与磁盘 I/O 自动保护
                     </h3>
                     <p className="mt-1 text-[11px] text-slate-400">显示触发依据、已读回限额与恢复进度；保护信号不等于客户滥用认定。</p>
                   </div>
                   <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] text-slate-300">仅 Incus / Podman</span>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
                   <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(cpuGuard?.state)}`}>
                     <div className="flex items-center justify-between gap-2">
                       <span className="flex items-center gap-1.5 text-xs font-semibold"><Cpu className="h-3.5 w-3.5" />CPU 保护</span>
@@ -493,6 +506,36 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     )}
                     <p className="text-[11px] leading-relaxed text-slate-400">{cpuGuard?.message || cpuGuard?.action?.message || (cpuGuard?.state === 'normal' ? '当前未达到持续保护条件。' : '等待 Agent 采样与读回状态。')}</p>
                     {cpuGuard?.recheck_interval_seconds ? <p className="text-[10px] text-slate-500">每约 {formatMinutes(cpuGuard.recheck_interval_seconds)} 复查一次。</p> : null}
+                  </div>
+
+                  <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(memoryGuard?.state)}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-xs font-semibold"><Activity className="h-3.5 w-3.5" />内存保护</span>
+                      <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(memoryGuard?.state)}</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-300">
+                      当前 {memoryGuard?.memory_current_bytes != null ? fmtBytes(memoryGuard.memory_current_bytes) : '未知'}
+                      {memoryGuard?.memory_max_bytes != null ? ` / ${fmtBytes(memoryGuard.memory_max_bytes)}` : ' / 未设上限'}
+                      {memoryGuard?.memory_used_percent != null ? ` · ${fmtNumber(memoryGuard.memory_used_percent, 1)}%` : ''}
+                    </p>
+                    <p className="text-[11px] text-slate-300">
+                      内存 PSI：母鸡 {memoryGuard?.host_psi_some_avg10 != null ? `${fmtNumber(memoryGuard.host_psi_some_avg10, 1)}%` : '不可用'}
+                      {' · '}容器 {memoryGuard?.container_psi_some_avg10 != null ? `${fmtNumber(memoryGuard.container_psi_some_avg10, 1)}%` : '不可用'}
+                    </p>
+                    {memoryGuard?.state === 'watching' && (
+                      <p className="text-[11px] text-amber-200">高内存与 PSI 持续 {memoryGuard.high_samples ?? 0}/{memoryGuard.required_samples ?? 0} 次，已观察 {formatMinutes(memoryGuard.confirmed_duration_seconds)}。</p>
+                    )}
+                    {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'apply_unverified'].includes(memoryGuard?.state || '') && (
+                      <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
+                        <p>原 memory.high：<span className="font-mono text-slate-100">{formatMemoryHigh(memoryGuard?.original_limit)}</span></p>
+                        <p>当前 memory.high：<span className="font-mono text-slate-100">{formatMemoryHigh(memoryGuard?.active_limit)}</span>{memoryGuard?.tier ? ` · 第 ${memoryGuard.tier} 阶（约 memory.max 的 ${memoryGuard.tier_percent_of_max ?? '-'}%）` : ''}</p>
+                        <p>恢复条件：低 PSI 连续 {memoryGuard?.recovery_samples ?? 0}/{memoryGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(memoryGuard?.recovery_duration_seconds)}。</p>
+                      </div>
+                    )}
+                    {memoryGuard?.state === 'cooldown' && memoryGuard.retry_after_seconds ? (
+                      <p className="text-[11px] text-amber-200">原限额已恢复，约 {formatMinutes(memoryGuard.retry_after_seconds)} 后重新评估。</p>
+                    ) : null}
+                    <p className="text-[11px] leading-relaxed text-slate-400">{memoryGuard?.message || (memoryGuard?.state === 'normal' ? '当前未达到持续内存压力保护条件。' : '等待 Agent 采样与限额读回。')}</p>
                   </div>
 
                   <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(ioGuard?.state)}`}>

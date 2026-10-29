@@ -22,5 +22,6 @@ COPY speedtest_guard.py .
 COPY manual_bandwidth.py .
 COPY cpu_guard.py .
 COPY io_guard.py .
+COPY memory_guard.py .
 
 CMD ["python", "agent.py"]

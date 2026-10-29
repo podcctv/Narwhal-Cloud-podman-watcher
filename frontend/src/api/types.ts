@@ -98,7 +98,7 @@ export interface ContainerSecurity {
   vmess_guard?: ProtocolGuardSummary;
   trojan_guard?: ProtocolGuardSummary;
   cpu_guard?: {
-    state?: 'normal' | 'watching' | 'waiting_for_host_pressure' | 'limited' | 'limit_failed' | 'limited_unverified' | 'limit_unverified' | 'restore_failed' | 'restored' | 'manual_override' | 'manual_reset' | 'state_unavailable' | 'sampling_unavailable' | 'disabled' | string;
+    state?: 'normal' | 'watching' | 'waiting_for_host_pressure' | 'limited' | 'limit_failed' | 'limited_unverified' | 'limit_unverified' | 'restore_failed' | 'restored' | 'cooldown' | 'manual_override' | 'manual_reset' | 'state_unavailable' | 'sampling_unavailable' | 'disabled' | string;
     message?: string;
     original_limit?: string;
     active_limit?: string;
@@ -110,6 +110,7 @@ export interface ContainerSecurity {
     recovery_samples?: number;
     recovery_samples_required?: number;
     recovery_duration_seconds?: number;
+    retry_after_seconds?: number;
     recheck_interval_seconds?: number;
     container_cpu_percent?: number | null;
     current_cpu_percent?: number | null;
@@ -126,7 +127,7 @@ export interface ContainerSecurity {
     [key: string]: any;
   };
   io_guard?: {
-    state?: 'normal' | 'watching' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'limit_failed' | 'limit_readback_unavailable' | 'waiting_for_other_limit' | 'retry_wait' | 'manual_override' | 'orphaned_cgroup' | 'unavailable' | 'warming' | 'state_unavailable' | 'disabled' | string;
+    state?: 'normal' | 'watching' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'limit_failed' | 'limit_readback_unavailable' | 'waiting_for_other_limit' | 'retry_wait' | 'manual_override' | 'orphaned_cgroup' | 'unavailable' | 'warming' | 'state_unavailable' | 'disabled' | string;
     message?: string;
     device?: string;
     device_busy_percent?: number | null;
@@ -140,11 +141,36 @@ export interface ContainerSecurity {
     recovery_samples_required?: number;
     recovery_duration_seconds?: number;
     recovery_elapsed_seconds?: number;
+    retry_after_seconds?: number;
     recheck_interval_seconds?: number;
     confirmed_duration_seconds?: number;
     sample_count?: number;
     required_samples?: number;
     last_error?: string;
+    [key: string]: any;
+  };
+  memory_guard?: {
+    state?: 'normal' | 'watching' | 'waiting_for_pressure' | 'waiting_for_other_limit' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'manual_override' | 'unsupported' | 'psi_unavailable' | 'existing_limit_stricter' | 'orphaned_cgroup' | 'sampling_unavailable' | 'state_unavailable' | 'disabled' | 'limit_failed' | 'apply_unverified' | string;
+    message?: string;
+    memory_current_bytes?: number;
+    memory_max_bytes?: number | null;
+    memory_used_percent?: number | null;
+    host_psi_some_avg10?: number | null;
+    container_psi_some_avg10?: number | null;
+    original_limit?: string;
+    active_limit?: string;
+    tier?: number;
+    tier_percent_of_max?: number;
+    confirmed_duration_seconds?: number;
+    high_samples?: number;
+    required_samples?: number;
+    recovery_samples?: number;
+    recovery_samples_required?: number;
+    recovery_duration_seconds?: number;
+    retry_after_seconds?: number;
+    cooldown_until?: number;
+    restore_failed?: boolean;
+    limit_applied?: boolean;
     [key: string]: any;
   };
   admission?: {

@@ -383,6 +383,7 @@ def observe(
     required_duration = max(300, int(_number(os.getenv("IO_AUTO_LIMIT_REQUIRED_SECONDS", "300"), 300)))
     recovery_duration = max(600, int(_number(os.getenv("IO_AUTO_LIMIT_RECOVERY_SECONDS", "600"), 600)))
     escalation_duration = max(300, int(_number(os.getenv("IO_AUTO_LIMIT_ESCALATION_SECONDS", "300"), 300)))
+    cooldown_seconds = max(300, int(_number(os.getenv("IO_AUTO_LIMIT_COOLDOWN_SECONDS", "900"), 900)))
     min_samples = max(2, int(math.ceil(required_duration / interval)) + 1)
     recovery_samples = max(3, int(math.ceil(recovery_duration / interval)) + 1)
     max_gap = max(180, int(interval * 2.5))
@@ -413,6 +414,18 @@ def observe(
         seen.add(key)
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         container["security"] = security
+        cooldown_record = instances.get(key)
+        if isinstance(cooldown_record, dict) and cooldown_record.get("stage") == "cooldown":
+            remaining = max(0, int(cooldown_record.get("cooldown_until") or 0) - timestamp)
+            if remaining:
+                _cgroup_previous.pop(key, None)
+                security["io_guard"] = {
+                    "state": "cooldown", "retry_after_seconds": remaining,
+                    "message": f"磁盘 I/O 保护刚恢复，冷却中；约 {remaining} 秒后重新评估。",
+                    "reason_is_user_abuse": False,
+                }
+                continue
+            instances.pop(key, None)
         try:
             pid = int(container.get("pid") or 0)
         except (TypeError, ValueError, OverflowError):
@@ -459,9 +472,11 @@ def observe(
                 if stage in {"applying", "escalating", "restoring"}:
                     if pending and _matches_io_max(io_file_path, device, pending):
                         if stage == "restoring":
-                            instances.pop(key, None)
+                            instances[key] = {"stage": "cooldown", "cooldown_until": timestamp + cooldown_seconds,
+                                              "last_seen": timestamp, "restored_at": timestamp}
                             reserved.discard(key)
-                            security["io_guard"] = {"state": "restored", "message": "磁盘 I/O 压力已回落，原容器 I/O 限额已读回确认并恢复。"}
+                            security["io_guard"] = {"state": "restored", "cooldown_until": timestamp + cooldown_seconds,
+                                                     "message": "原容器 I/O 限额已读回确认并恢复；进入冷却期后再重新评估。"}
                             record = None
                             continue
                         record["applied"] = pending
@@ -544,8 +559,10 @@ def observe(
                         else:
                             ok, output = _write_io_max(io_file_path, device, original or {})
                             if ok and _matches_io_max(io_file_path, device, original):
-                                instances.pop(key, None)
-                                security["io_guard"] = {"state": "restored", "message": "磁盘 I/O 压力已连续恢复，原容器 I/O 限额已恢复。"}
+                                instances[key] = {"stage": "cooldown", "cooldown_until": timestamp + cooldown_seconds,
+                                                  "last_seen": timestamp, "restored_at": timestamp}
+                                security["io_guard"] = {"state": "restored", "cooldown_until": timestamp + cooldown_seconds,
+                                                         "message": "磁盘 I/O 压力已持续恢复，原容器限额已读回确认；进入冷却期后再重新评估。"}
                                 reserved.discard(key)
                                 continue
                             record["stage"] = "restore_failed"
@@ -641,6 +658,11 @@ def observe(
             continue
         if host.get("state") != "ready":
             security["io_guard"] = {"state": "warming", "message": host.get("message") or "等待宿主机磁盘采样", "reason_is_user_abuse": False}
+            continue
+
+        cpu_guard = security.get("cpu_guard") if isinstance(security.get("cpu_guard"), dict) else {}
+        if cpu_guard.get("state") in {"active", "limited", "restore_failed", "applying", "escalating", "restoring", "limit_unverified", "limited_unverified", "apply_unverified", "orphaned_cgroup"}:
+            security["io_guard"] = {"state": "waiting_for_other_limit", "message": "该容器已有 CPU 保护；暂不叠加磁盘 I/O 限额。", "reason_is_user_abuse": False}
             continue
 
         candidate = record if isinstance(record, dict) and record.get("stage") == "candidate" else {
@@ -825,6 +847,7 @@ def observe(
             "recovery_duration_seconds": recovery_duration,
             "tier_percent_of_baseline": [50, 25, 10],
             "max_simultaneous_container_limits": 1,
+            "cooldown_seconds": cooldown_seconds,
         },
         "host_devices": host.get("devices", {}),
         "alerts": alerts,

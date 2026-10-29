@@ -908,9 +908,10 @@ def process_security_alerts(
                 if alert_type == 'container_connection_count':
                     was_escalated = _alert_details(existing['details_json']).get('connection_policy', {}).get('escalated')
                     should_notify = should_notify or bool(raw_alert.get('connection_policy', {}).get('escalated') and not was_escalated)
-                if alert_type in {"cpu_pressure_protection", "io_pressure_protection"}:
+                if alert_type in {"cpu_pressure_protection", "io_pressure_protection", "memory_pressure_protection"}:
                     previous_details = _alert_details(existing["details_json"])
-                    guard_key = "cpu_guard" if alert_type == "cpu_pressure_protection" else "io_guard"
+                    guard_key = {"cpu_pressure_protection": "cpu_guard", "io_pressure_protection": "io_guard",
+                                 "memory_pressure_protection": "memory_guard"}[alert_type]
                     try:
                         previous_tier = int((previous_details.get(guard_key) or {}).get("tier") or 0)
                         current_tier = int((raw_alert.get(guard_key) or {}).get("tier") or 0)
@@ -6177,7 +6178,7 @@ def _security_collection_health(
             elif parse_errors:
                 issue(label, "partial", f"{parse_errors} 行日志解析失败", "核对 access log 格式与解析器设置；请求统计可能不完整。")
 
-        for key, label in (("cpu_guard", "CPU 压力保护"), ("io_guard", "磁盘 I/O 保护")):
+        for key, label in (("cpu_guard", "CPU 压力保护"), ("memory_guard", "内存压力保护"), ("io_guard", "磁盘 I/O 保护")):
             guard = payload.get(key) if isinstance(payload.get(key), dict) else None
             if guard is None:
                 issue(label, "missing", "Agent 未上报保护采样", "升级 Agent 到支持该采集项的版本，并检查服务运行状态。")
