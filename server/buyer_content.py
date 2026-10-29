@@ -160,6 +160,18 @@ def issue(alert, details):
         return '服务器网络保护需要管理员检查','当前无法确认采样或保护规则已生效；未将证据不足视为恢复。','请发工单，由管理员核查处理。'
     if kind=='pasarguard_node_removed':
         return '服务器发现禁止运行的 PasarGuard Node 服务', '已核实程序或镜像归属，具体清理结果见下方处理回执。', '请勿再次安装此服务；如有疑问，请发工单。'
+    if kind == "speedtest_attempt_blocked":
+        guard = details.get("speedtest_guard") if isinstance(details.get("speedtest_guard"), dict) else {}
+        labels = {"ookla": "Ookla Speedtest", "cloudflare": "Cloudflare Speed Test", "fast": "FAST.com", "tcpquality": "TcpQuality / Lisaweb"}
+        targets = []
+        for item in guard.get("blocked_attempts", []) if isinstance(guard.get("blocked_attempts"), list) else []:
+            if not isinstance(item, dict) or item.get("service") not in labels:
+                continue
+            target = clean(item.get("target"), 160)
+            if target:
+                targets.append(f"{labels[item['service']]}（{target}）")
+        facts = "已拦截的测速目标：" + "、".join(sorted(set(targets))[:8]) + "。" if targets else clean(alert.get("message"), 300)
+        return "测速连接请求已被拦截", facts, "这是管理员设置的资源保护策略，不代表认定您有滥用行为。如确有测速或业务需要，请联系管理员申请临时放行。"
     if kind == "cpu_pressure_protection":
         cpu = details.get("cpu_guard") if isinstance(details.get("cpu_guard"), dict) else {}
         action = details.get("automatic_remediation") if isinstance(details.get("automatic_remediation"), dict) else {}

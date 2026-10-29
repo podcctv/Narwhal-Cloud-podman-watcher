@@ -202,6 +202,82 @@ def _reconcile_vmess_policy_notice(conn, alert, now, cfg):
     return _reconcile_protocol_policy_notice(conn, alert, now, cfg, "vmess")
 
 
+def _speedtest_attempt_evidence(alert):
+    """Validate outbound hit counters before any customer-specific notice."""
+    try:
+        details = buyer_content.loads(alert["details_json"])
+    except (KeyError, IndexError, TypeError):
+        return []
+    guard = details.get("speedtest_guard") if isinstance(details, dict) else None
+    rows = guard.get("blocked_attempts") if isinstance(guard, dict) else None
+    allowed = {"ookla", "cloudflare", "fast", "tcpquality"}
+    results = set()
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        service = str(item.get("service") or "").lower()
+        target_value = str(item.get("target") or "").strip().lower().rstrip(".")
+        packets = item.get("packets")
+        if service not in allowed or type(packets) is not int or packets <= 0 or len(target_value) > 253:
+            continue
+        valid = False
+        try:
+            address = ipaddress.ip_address(target_value)
+            valid = service == "tcpquality" and address.is_global
+        except ValueError:
+            if service == "ookla":
+                valid = target_value == "speedtest.net"
+            elif service == "cloudflare":
+                valid = target_value == "speed.cloudflare.com"
+            elif service == "fast":
+                valid = target_value in {"fast.com", "www.fast.com"}
+            elif service == "tcpquality":
+                valid = target_value == "tcpquality.ibsgss.uk" or bool(
+                    re.fullmatch(r"speedtest(?:\.[a-z0-9-]+)+\.leaseweb\.net", target_value)
+                )
+        if valid:
+            results.add((service, target_value))
+    return sorted(results)
+
+
+def _reconcile_speedtest_attempt_notice(conn, alert, now, cfg):
+    """Deliver a blocked test attempt only to the exactly mapped container user."""
+    event_key = f"{alert['id']}:{alert['first_seen']}:speedtest-attempt"
+    evidence = _speedtest_attempt_evidence(alert)
+    state = current_state(conn, alert)
+    age = now - int(alert["last_seen"] or 0)
+    mapped = target(conn, alert, now)
+    exact_instance = bool(evidence and _protocol_alert_matches_live_container(conn, alert))
+    eligible = bool(
+        evidence and exact_instance
+        # A test may complete between Agent samples. Keep the original
+        # counter-backed event eligible briefly after the alert is resolved.
+        and state in {"active", "recurring", "resolved", "verified"}
+        and -30 <= age <= 900
+        and alert["severity"] == "warning"
+        and cfg["enabled"] and cfg["api_key"]
+        and mapped and mapped["scope"] == "user" and mapped["user_id"]
+    )
+    if not eligible:
+        conn.execute(
+            "UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='测速拦截提醒要求新鲜命中计数和精确的单用户容器映射；未广播' WHERE alert_id=? AND status IN ('queued','retrying','blocked')",
+            (now, alert["id"]),
+        )
+        return
+    conn.execute(
+        "UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='测速拦截提醒收件快照已更新' WHERE alert_id=? AND event_key<>? AND status IN ('queued','retrying','blocked')",
+        (now, alert["id"], event_key),
+    )
+    if conn.execute("SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')").fetchone()[0] >= 10000:
+        return
+    subject, message = render(alert, state, mapped["node_name"], conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO buyer_outbox(event_key,alert_id,host_id,runtime,project,container_name,state,severity,subject,message,machine_id,user_id,scope,status,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (event_key, alert["id"], *(alert[k] for k in ("host_id", "runtime", "project", "container_name")), state,
+         alert["severity"], subject, message, mapped["machine_id"], mapped["user_id"], "user", "queued", now, now, now),
+    )
+
+
 def valid_uuid(value):
     try:
         return str(uuid.UUID(str(value)))
@@ -339,6 +415,9 @@ def reconcile(conn, host, now):
             continue
         if alert["alert_type"] == "ops_traffic_quota":
             conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
+            continue
+        if alert["alert_type"] == "speedtest_attempt_blocked":
+            _reconcile_speedtest_attempt_notice(conn, alert, now, cfg)
             continue
         if is_protection_only_alert(alert):
             if alert["alert_type"] in {"vmess_port_blocked", "trojan_port_blocked"}:
@@ -680,7 +759,29 @@ def work_once(db, now=None, sender=deliver):
         eligible=[]
         for row in conn.execute("SELECT * FROM buyer_outbox WHERE status IN ('queued','retrying','blocked') AND due_at<=? ORDER BY id LIMIT 200",(now,)).fetchall():
             a=conn.execute("SELECT * FROM security_alerts WHERE id=?",(row["alert_id"],)).fetchone()
-            if not a or current_state(conn,a)!=row["state"] or a["severity"]!=row["severity"] or a["first_seen"]!=int(row["event_key"].split(":")[1]) or a["status"] in {"suppressed","dismissed"} or (cfg["min_severity"]=="critical" and a["severity"]!="critical") or (row["state"] in {"resolved","verified"} and not cfg["recovery"]):
+            if not a:
+                conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=? WHERE id=?",(now,row["id"]))
+                continue
+            speedtest_attempt_event = row["event_key"] == f"{a['id']}:{a['first_seen']}:speedtest-attempt"
+            if speedtest_attempt_event:
+                age = now - int(a["last_seen"] or 0)
+                valid_attempt = bool(
+                    a["alert_type"] == "speedtest_attempt_blocked"
+                    and _speedtest_attempt_evidence(a)
+                    and -30 <= age <= 900
+                    and a["severity"] == "warning"
+                    and a["status"] not in {"suppressed", "dismissed"}
+                )
+                if not valid_attempt:
+                    conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='测速拦截计数证据已过期或告警已抑制；未发送' WHERE id=?", (now, row["id"]))
+                    continue
+            elif (current_state(conn,a)!=row["state"] or a["severity"]!=row["severity"]
+                  or a["status"] in {"suppressed","dismissed"}
+                  or (row["state"] in {"resolved","verified"} and not cfg["recovery"])):
+                conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=? WHERE id=?",(now,row["id"]))
+                continue
+            if (a["severity"]!=row["severity"] or a["first_seen"]!=int(row["event_key"].split(":")[1])
+                    or (cfg["min_severity"]=="critical" and a["severity"]!="critical")):
                 conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=? WHERE id=?",(now,row["id"]))
                 continue
             if buyer_content.loads(a["details_json"]).get("data_stale") and row['state'] not in {'verified','resolved'}:
@@ -699,6 +800,11 @@ def work_once(db, now=None, sender=deliver):
             t=target(conn,row,now)
             if vmess_policy_event and (not t or t["scope"] != "user" or not t["user_id"]):
                 conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='单用户收件映射已失效；未向整机广播' WHERE id=?", (now, row["id"]))
+                continue
+            if speedtest_attempt_event and (
+                    not t or t["scope"] != "user" or not t["user_id"]
+                    or t["machine_id"] != row["machine_id"] or t["user_id"] != row["user_id"]):
+                conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='测速提醒要求原始单用户映射仍有效；未向整机或其他用户广播' WHERE id=?", (now, row["id"]))
                 continue
             if not t:
                 issue=conn.execute("SELECT reason FROM buyer_mapping_issues WHERE host_id=? AND runtime=? AND project=? AND container_name=?",tuple(row[k] for k in buyer_mapping.IDENTITY)).fetchone()

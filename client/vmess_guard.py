@@ -25,7 +25,12 @@ SUPPORTED_PROTOCOLS = {"vmess", "trojan"}
 SUPPORTED_GUARD_TYPES = SUPPORTED_PROTOCOLS | {"speedtest"}
 MAX_ENDPOINTS = 32
 MAX_DESTINATION_IPS = 256
+MAX_DOMAIN_TARGETS = 160
 _SAFE_SCAN_REASON = re.compile(r"[a-z0-9_]{1,64}")
+_SAFE_DOMAIN = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_DOMAIN_SINK_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
+    "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
+))
 
 
 def _integer(value, minimum=1, maximum=65535):
@@ -68,7 +73,11 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
         port = _integer(item.get("port"))
         process = str(item.get("process") or "").lower()
         if pid and port and process in SUPPORTED_ENGINES:
-            protected.append({"pid": pid, "process": process, "port": port, "listen": str(item.get("listen") or "*")})
+            protected.append({
+                "pid": pid, "process": process, "port": port,
+                "listen": str(item.get("listen") or "*"),
+                "port_config_complete": item.get("port_config_complete") is True,
+            })
     detected = bool(protected)
     result = {
         "detected": detected,
@@ -116,12 +125,15 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
     saw_loopback_only = False
     for configured in protected:
         pid, process, port = configured["pid"], configured["process"], configured["port"]
+        process_state_verified = process_states is None and scan_state == "complete"
         if process_states is not None:
             process_state = process_states.get((pid, process))
             process_state_name = str(process_state.get("state") or "partial").lower() if isinstance(process_state, dict) else "missing"
             start_ticks = str(process_state.get("start_ticks") or "") if isinstance(process_state, dict) else ""
             reason = str(process_state.get("reason") or "") if isinstance(process_state, dict) else ""
-            if process_state_name != "complete" or not start_ticks.isdigit():
+            process_state_verified = process_state_name == "complete" and start_ticks.isdigit()
+            port_config_verified = configured.get("port_config_complete") is True and start_ticks.isdigit()
+            if not process_state_verified and not port_config_verified:
                 if not _SAFE_SCAN_REASON.fullmatch(reason):
                     reason = "process_scan_state_missing" if process_state_name == "missing" else (
                         "process_start_generation_unavailable" if process_state_name == "complete"
@@ -157,7 +169,14 @@ def plan(runtime, configured_protocols, listeners, network_exposure=None, scan_s
             transport = str(listener.get("proto") or "").lower()
             protocols = listener.get("application_protocols")
             protocols = {str(value).lower() for value in protocols} if isinstance(protocols, list) else set()
-            if listener.get("application_protocol_evidence") != "config_matches_live_pid_and_port" or protocols != {application_protocol}:
+            port_config_protocols = listener.get("protocol_port_config_complete_protocols")
+            port_config_listener_verified = (
+                isinstance(port_config_protocols, list)
+                and application_protocol in {str(value).lower() for value in port_config_protocols}
+            )
+            if (listener.get("application_protocol_evidence") != "config_matches_live_pid_and_port"
+                    or protocols != {application_protocol}
+                    or not (process_state_verified or port_config_listener_verified)):
                 pending.append({"pid": pid, "port": port, "process": process, "reason": "listener_protocol_or_owner_ambiguous"})
                 continue
 
@@ -267,6 +286,81 @@ def _owned_destinations(readback, marker):
     return result
 
 
+def _normalize_domain_targets(values):
+    result = set()
+    for item in values if isinstance(values, (list, tuple, set)) else []:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").strip().lower().rstrip(".")
+        try:
+            address = ipaddress.ip_address(str(item.get("ip") or "").strip())
+        except ValueError:
+            continue
+        if _SAFE_DOMAIN.fullmatch(domain) and any(address in network for network in _DOMAIN_SINK_NETWORKS):
+            result.add((domain, str(address)))
+        if len(result) > MAX_DOMAIN_TARGETS:
+            return None
+    return result
+
+
+def _owned_domain_targets(readback, marker):
+    pattern = re.compile(r'comment "' + re.escape(marker) + r'-domain-([a-z0-9.-]{1,253}-[0-9a-fA-F:.]+)"')
+    result = set()
+    for match in pattern.finditer(str(readback or "")):
+        suffix = match.group(1)
+        address_match = re.search(r'-((?:[0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F]*:[0-9a-fA-F:.]+)$', suffix)
+        if not address_match:
+            continue
+        domain = suffix[:address_match.start()].lower().rstrip(".")
+        try:
+            address = ipaddress.ip_address(address_match.group(1))
+        except ValueError:
+            continue
+        if _SAFE_DOMAIN.fullmatch(domain) and any(address in network for network in _DOMAIN_SINK_NETWORKS):
+            result.add((domain, str(address)))
+    return result
+
+
+def _speedtest_activity(readback, marker):
+    domains, destinations = {}, {}
+    comment_pattern = re.compile(r'comment "' + re.escape(marker) + r'-([^" ]+)"')
+    counter_pattern = re.compile(r'\bcounter packets ([0-9]+) bytes ([0-9]+)\b')
+    for line in str(readback or "").splitlines():
+        comment = comment_pattern.search(line)
+        counter = counter_pattern.search(line)
+        if not comment or not counter:
+            continue
+        packets, byte_count = int(counter.group(1)), int(counter.group(2))
+        if packets <= 0:
+            continue
+        suffix = comment.group(1)
+        if suffix.startswith("domain-"):
+            target_suffix = suffix[len("domain-"):]
+            address_match = re.search(r'-((?:[0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F]*:[0-9a-fA-F:.]+)$', target_suffix)
+            if not address_match:
+                continue
+            domain = target_suffix[:address_match.start()].lower().rstrip(".")
+            if _SAFE_DOMAIN.fullmatch(domain):
+                prior = domains.get(domain, {"domain": domain, "packets": 0, "bytes": 0})
+                prior["packets"] += packets
+                prior["bytes"] += byte_count
+                domains[domain] = prior
+        elif suffix.startswith("dst-"):
+            raw_ip = suffix[len("dst-"):]
+            try:
+                address = ipaddress.ip_address(raw_ip)
+            except ValueError:
+                continue
+            if address.is_global:
+                prior = destinations.get(str(address), {"ip": str(address), "packets": 0, "bytes": 0})
+                prior["packets"] += packets
+                prior["bytes"] += byte_count
+                destinations[str(address)] = prior
+    return sorted(domains.values(), key=lambda item: item["domain"]), sorted(
+        destinations.values(), key=lambda item: (ipaddress.ip_address(item["ip"]).version, int(ipaddress.ip_address(item["ip"])))
+    )
+
+
 def _confirmed_protocol_live_endpoints(live_listeners, application_protocol):
     """Return exclusive live endpoints proven to belong to one protected config.
 
@@ -302,8 +396,12 @@ def _confirmed_protocol_live_endpoints(live_listeners, application_protocol):
                 isinstance(item.get("application_protocols"), list)
                 and {str(value).lower() for value in item["application_protocols"]} == {application_protocol}
                 and item.get("application_protocol_evidence") == "config_matches_live_pid_and_port"
-                and (item.get("protocol_process_scan_complete") is True
-                     or (application_protocol == "vmess" and item.get("vmess_process_scan_complete") is True))
+                and (
+                    item.get("protocol_process_scan_complete") is True
+                    or (application_protocol == "vmess" and item.get("vmess_process_scan_complete") is True)
+                    or (isinstance(item.get("protocol_port_config_complete_protocols"), list)
+                        and application_protocol in {str(value).lower() for value in item["protocol_port_config_complete_protocols"]})
+                )
                 and _integer(item.get("pid"), 2, 4194304) > 0
                 and str(item.get("process") or "").lower() in SUPPORTED_ENGINES
                 for item in listeners
@@ -336,9 +434,11 @@ def _firewall_failure_reason(completed, fallback):
     return fallback
 
 
-def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint_map, destination_ips, pid, expected_epoch, runner, namespace_fd,
+def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint_map, destination_ips, domain_targets, pid, expected_epoch, runner, namespace_fd,
                            *, release_if_absent=False, live_listeners=None, preserve_existing=False):
-    result = {"state": "unverified", "blocked_endpoints": [], "blocked_destination_ips": [], "reason": "firewall_apply_failed"}
+    result = {"state": "unverified", "blocked_endpoints": [], "blocked_destination_ips": [],
+              "blocked_domain_targets": [], "blocked_domain_hits": [], "blocked_destination_hits": [],
+              "reason": "firewall_apply_failed"}
 
     def call(args, data=None):
         try:
@@ -369,6 +469,8 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
 
     existing_endpoints = _owned_endpoints(current.stdout, marker) if exists else set()
     existing_destinations = _owned_destinations(current.stdout, marker) if exists else set()
+    existing_domain_targets = _owned_domain_targets(current.stdout, marker) if exists else set()
+    domain_hits, destination_hits = _speedtest_activity(current.stdout, marker) if application_protocol == "speedtest" and exists else ([], [])
     if endpoint_map is None:
         endpoint_map = {
             key: {"proto": key[0], "port": key[1]} for key in existing_endpoints
@@ -378,6 +480,13 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
         final_destinations = set(existing_destinations)
     else:
         final_destinations = set(destination_ips)
+    if domain_targets is None:
+        final_domain_targets = set(existing_domain_targets)
+    else:
+        final_domain_targets = set(domain_targets)
+    if len(final_domain_targets) > MAX_DOMAIN_TARGETS:
+        result["reason"] = "domain_target_limit_exceeded"
+        return result
     if len(final_destinations) > MAX_DESTINATION_IPS:
         result["reason"] = "destination_ip_limit_exceeded"
         return result
@@ -389,7 +498,7 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
             if (transport, port) in live:
                 endpoint_map[(transport, port)] = {"proto": transport, "port": port}
 
-    if not endpoint_map and not final_destinations:
+    if not endpoint_map and not final_destinations and not final_domain_targets:
         if exists and release_if_absent:
             if not isinstance(live_listeners, list):
                 result["reason"] = "release_evidence_unavailable"
@@ -437,15 +546,23 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
     if endpoint_map:
         lines.append(f"add chain inet {table} input {{ type filter hook input priority -20; policy accept; }}")
     for transport, port in sorted(endpoint_map):
+        count_rule = " counter" if application_protocol == "speedtest" else ""
         lines.append(
-            f'add rule inet {table} input meta l4proto {transport} {transport} dport {port} drop comment "{marker}-{transport}-{port}"'
+            f'add rule inet {table} input meta l4proto {transport} {transport} dport {port}{count_rule} drop comment "{marker}-{transport}-{port}"'
         )
-    if final_destinations:
+    if final_destinations or final_domain_targets:
         lines.append(f"add chain inet {table} output {{ type filter hook output priority -20; policy accept; }}")
         for destination in sorted(final_destinations, key=lambda item: (ipaddress.ip_address(item).version, int(ipaddress.ip_address(item)))):
             family = "ip6" if ipaddress.ip_address(destination).version == 6 else "ip"
+            count_rule = " counter" if application_protocol == "speedtest" else ""
             lines.append(
-                f'add rule inet {table} output {family} daddr {destination} drop comment "{marker}-dst-{destination}"'
+                f'add rule inet {table} output {family} daddr {destination}{count_rule} drop comment "{marker}-dst-{destination}"'
+            )
+        for domain, address in sorted(final_domain_targets):
+            parsed = ipaddress.ip_address(address)
+            family = "ip6" if parsed.version == 6 else "ip"
+            lines.append(
+                f'add rule inet {table} output {family} daddr {address} counter drop comment "{marker}-domain-{domain}-{address}"'
             )
     script = "\n".join(lines) + "\n"
     checked = call(prefix + ["--check", "-f", "-"], script)
@@ -468,6 +585,10 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
         if f'{marker}-dst-{destination}' not in (readback.stdout or ""):
             result["reason"] = "firewall_destination_readback_incomplete"
             return result
+    for domain, address in final_domain_targets:
+        if f'{marker}-domain-{domain}-{address}' not in (readback.stdout or ""):
+            result["reason"] = "firewall_domain_target_readback_incomplete"
+            return result
     if _pid_epoch(pid) != expected_epoch:
         # The descriptor pins the namespace, so cleanup cannot touch a newly
         # reused PID's network. A fresh collection can re-apply if still valid.
@@ -478,15 +599,20 @@ def _reconcile_owned_table(prefix, table, marker, application_protocol, endpoint
         "state": "blocked",
         "blocked_endpoints": [endpoint_map[key] for key in sorted(endpoint_map)],
         "blocked_destination_ips": sorted(final_destinations, key=lambda item: (ipaddress.ip_address(item).version, int(ipaddress.ip_address(item)))),
+        "blocked_domain_targets": [{"domain": domain, "ip": address} for domain, address in sorted(final_domain_targets)],
+        "blocked_domain_hits": domain_hits,
+        "blocked_destination_hits": destination_hits,
         "reason": "",
     }
 
 
-def reconcile(pid, identity, expected_epoch, endpoints, *, destination_ips=None, host_network=False, runner=None, nsenter_path=None,
+def reconcile(pid, identity, expected_epoch, endpoints, *, destination_ips=None, domain_targets=None, host_network=False, runner=None, nsenter_path=None,
               nft_path=None, release_if_absent=False, live_listeners=None, preserve_existing=False,
               application_protocol="vmess"):
     """Atomically reconcile an owned nft table in one isolated network namespace."""
-    result = {"state": "unverified", "blocked_endpoints": [], "blocked_destination_ips": [], "reason": "firewall_apply_failed"}
+    result = {"state": "unverified", "blocked_endpoints": [], "blocked_destination_ips": [],
+              "blocked_domain_targets": [], "blocked_domain_hits": [], "blocked_destination_hits": [],
+              "reason": "firewall_apply_failed"}
     if type(pid) is not int or pid <= 1 or not isinstance(identity, str) or not identity:
         result["reason"] = "container_identity_unavailable"
         return result
@@ -529,6 +655,10 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, destination_ips=None,
             if len(normalized_destinations) > MAX_DESTINATION_IPS:
                 result["reason"] = "destination_ip_limit_exceeded"
                 return result
+    normalized_domain_targets = None if domain_targets is None else _normalize_domain_targets(domain_targets)
+    if domain_targets is not None and normalized_domain_targets is None:
+        result["reason"] = "domain_target_limit_exceeded"
+        return result
 
     digest = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:12]
     table = f"narwhal_{application_protocol}_{digest}"
@@ -540,7 +670,7 @@ def reconcile(pid, identity, expected_epoch, endpoints, *, destination_ips=None,
     try:
         prefix = [nsenter_path, f"--net=/proc/self/fd/{namespace_fd}", "--", nft_path]
         return _reconcile_owned_table(
-            prefix, table, marker, application_protocol, endpoint_map, normalized_destinations, pid, expected_epoch,
+            prefix, table, marker, application_protocol, endpoint_map, normalized_destinations, normalized_domain_targets, pid, expected_epoch,
             runner or subprocess.run, namespace_fd, release_if_absent=release_if_absent,
             live_listeners=live_listeners, preserve_existing=preserve_existing,
         )

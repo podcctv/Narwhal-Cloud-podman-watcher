@@ -65,6 +65,7 @@ TARGET_RETRY_SECONDS = 10 * 60
 MAX_TARGET_BYTES = 2 * 1024 * 1024
 MAX_TARGET_IPS = 128
 MAX_TARGET_DOMAINS = 64
+TCPQUALITY_LEASEWEB_PATTERN = "speedtest.*.leaseweb.net"
 GET_NODES_URL = "https://tcpquality.ibsgss.uk/getNodes?format=tsv&scope=tos"
 TCPQUALITY_CORE_URL = "https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality-core.sh"
 # Last-known hostnames from the official script are useful for a visibly
@@ -89,6 +90,37 @@ _target_retry_after = 0
 def _valid_leaseweb_domain(value):
     value = str(value or "").strip().lower().rstrip(".")
     return value if re.fullmatch(r"speedtest(?:\.[a-z0-9-]+)+\.leaseweb\.net", value) else ""
+
+
+def _domain_sentinel_targets(domains):
+    """Give each exact protected hostname a stable, non-routable v4/v6 sink."""
+    maximum = MAX_TARGET_DOMAINS + sum(len(items) for items in SERVICE_DOMAINS.values())
+    values = sorted({str(item).strip().lower().rstrip(".") for item in domains or []
+                     if _valid_domain(item)})[:maximum]
+    v4_networks = tuple(ipaddress.ip_network(value) for value in (
+        "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24",
+    ))
+    v6_network = ipaddress.ip_network("2001:db8::/32")
+    result = []
+    for index, domain in enumerate(values):
+        network_index, host_index = divmod(index, 254)
+        if network_index >= len(v4_networks):
+            break
+        ipv4 = str(v4_networks[network_index].network_address + host_index + 1)
+        ipv6 = str(v6_network.network_address + index + 1)
+        result.extend(({"domain": domain, "ip": ipv4}, {"domain": domain, "ip": ipv6}))
+    return result
+
+
+def _valid_domain(value):
+    value = str(value or "").strip().lower().rstrip(".")
+    if not value or len(value) > 253:
+        return False
+    labels = value.split(".")
+    return len(labels) >= 2 and all(
+        len(label) <= 63 and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+        for label in labels
+    )
 
 
 def _public_ips(values):
@@ -428,12 +460,14 @@ def domains_for_services(services):
 
 
 def _hosts_script(domains):
-    domains = [domain for domain in domains if re.fullmatch(r"[a-z0-9.-]{1,253}", domain)]
-    block = "\n".join(
-        [HOSTS_BEGIN]
-        + [line for domain in domains for line in (f"0.0.0.0 {domain}", f":: {domain}")]
-        + [HOSTS_END]
-    )
+    targets = _domain_sentinel_targets(domains)
+    domain_map = {}
+    for item in targets:
+        domain_map.setdefault(item["domain"], []).append(item["ip"])
+    domains = sorted(domain_map)
+    block = "\n".join([HOSTS_BEGIN] + [
+        f"{address} {domain}" for domain in domains for address in domain_map[domain]
+    ] + [HOSTS_END])
     expected = block if domains else ""
     lines = [
         "set -eu",
@@ -469,7 +503,8 @@ def _hosts_script(domains):
             'grep -Fqx "$begin" "$f" && grep -Fqx "$end" "$f" || { echo hosts_readback_failed; exit 25; }',
         ])
         for domain in domains:
-            lines.append(f"grep -Fqx '0.0.0.0 {domain}' \"$f\" && grep -Fqx ':: {domain}' \"$f\" || {{ echo hosts_readback_failed; exit 25; }}")
+            for address in domain_map[domain]:
+                lines.append(f"grep -Fqx '{address} {domain}' \"$f\" || {{ echo hosts_readback_failed; exit 25; }}")
     lines.append("echo hosts_policy_readback_ok")
     return "\n".join(lines) + "\n"
 
@@ -677,7 +712,7 @@ def reconcile_container(*, runtime, name, project="", identity="", pid=0, namesp
 
     inbound_services = INBOUND_SERVICES
     has_inbound_guard = bool(set(selected).intersection(inbound_services))
-    has_namespace_guard = has_inbound_guard or "tcpquality" in selected
+    has_namespace_guard = has_inbound_guard or "tcpquality" in selected or bool(selected_domains)
     should_cleanup_guard = not has_namespace_guard and cleanup_key not in _guard_cleanup_cache
     if selected and has_namespace_guard:
         # On an incomplete listener scan, preserve the existing ingress rules;
@@ -692,10 +727,12 @@ def reconcile_container(*, runtime, name, project="", identity="", pid=0, namesp
             )
         else:
             destination_request = []
+        domain_target_request = _domain_sentinel_targets(selected_domains)
         guard = vmess_guard.reconcile(
             namespace_pid, identity, current_epoch or namespace_epoch,
             endpoint_request,
             destination_ips=destination_request,
+            domain_targets=domain_target_request,
             host_network=bool(network_shared),
             release_if_absent=bool(complete and not pending),
             live_listeners=live_listeners if complete and not pending else None,
@@ -706,6 +743,7 @@ def reconcile_container(*, runtime, name, project="", identity="", pid=0, namesp
         guard = vmess_guard.reconcile(
             namespace_pid, identity, current_epoch or namespace_epoch, [],
             destination_ips=[],
+            domain_targets=[],
             host_network=bool(network_shared), release_if_absent=False,
             live_listeners=live_listeners if complete else None,
             preserve_existing=False, application_protocol="speedtest",
@@ -737,6 +775,20 @@ def reconcile_container(*, runtime, name, project="", identity="", pid=0, namesp
 
     blocked_endpoints = guard.get("blocked_endpoints") if isinstance(guard.get("blocked_endpoints"), list) else []
     blocked_destination_ips = guard.get("blocked_destination_ips") if isinstance(guard.get("blocked_destination_ips"), list) else []
+    blocked_domain_targets = guard.get("blocked_domain_targets") if isinstance(guard.get("blocked_domain_targets"), list) else []
+    requested_domain_targets = _domain_sentinel_targets(selected_domains)
+    domain_target_keys = {
+        (str(item.get("domain") or ""), str(item.get("ip") or ""))
+        for item in blocked_domain_targets if isinstance(item, dict)
+    }
+    domain_targets_ok = bool(
+        not selected_domains or (
+            guard.get("state") == "blocked"
+            and len(domain_target_keys) == len(requested_domain_targets)
+            and all((item["domain"], item["ip"]) in domain_target_keys for item in requested_domain_targets)
+        )
+    )
+    effective_domains = list(selected_domains) if hosts_state == "blocked" and domain_targets_ok else []
     destination_state = "not_required"
     if "tcpquality" in selected:
         if not requested_destination_ips:
@@ -746,11 +798,11 @@ def reconcile_container(*, runtime, name, project="", identity="", pid=0, namesp
         else:
             destination_state = "unverified"
 
-    state = "blocked" if (blocked_domains or blocked_endpoints or blocked_destination_ips) else "not_detected"
+    state = "blocked" if (effective_domains or blocked_endpoints or blocked_destination_ips) else "not_detected"
     reason = str(guard.get("reason") or "")
-    if hosts_state == "unverified" and selected_domains:
+    if selected_domains and (hosts_state == "unverified" or not domain_targets_ok):
         state = "partial" if (blocked_endpoints or blocked_destination_ips) else "unverified"
-        reason = "hosts_policy_unverified"
+        reason = "hosts_policy_unverified" if hosts_state == "unverified" else "domain_drop_readback_unverified"
     if selected and pending:
         state = "partial" if (blocked_endpoints or blocked_domains or blocked_destination_ips) else "unverified"
         reason = reason or "service_evidence_incomplete"
@@ -760,6 +812,36 @@ def reconcile_container(*, runtime, name, project="", identity="", pid=0, namesp
     if has_inbound_guard and detected.intersection(inbound_services) and guard.get("state") != "blocked":
         state = "partial" if (blocked_domains or blocked_destination_ips) else "unverified"
         reason = reason or "firewall_readback_unverified"
+    blocked_attempts = []
+    if guard.get("state") == "blocked" and selected:
+        services_by_domain = {}
+        for service_name in selected:
+            for domain in SERVICE_DOMAINS.get(service_name, ()):
+                services_by_domain.setdefault(domain, set()).add(service_name)
+        if "tcpquality" in selected:
+            for domain in target_inventory.get("domains", []) if isinstance(target_inventory, dict) else []:
+                services_by_domain.setdefault(domain, set()).add("tcpquality")
+        attempts_by_key = {}
+        for item in guard.get("blocked_domain_hits", []) if isinstance(guard.get("blocked_domain_hits"), list) else []:
+            if not isinstance(item, dict) or int(item.get("packets") or 0) <= 0:
+                continue
+            domain = str(item.get("domain") or "").lower()
+            service_candidates = services_by_domain.get(domain, set())
+            if not service_candidates and "tcpquality" in selected and _valid_leaseweb_domain(domain):
+                service_candidates = {"tcpquality"}
+            for service_name in service_candidates:
+                key = (service_name, domain)
+                row = attempts_by_key.setdefault(key, {"service": service_name, "target": domain, "packets": 0})
+                row["packets"] += int(item.get("packets") or 0)
+        if "tcpquality" in selected:
+            for item in guard.get("blocked_destination_hits", []) if isinstance(guard.get("blocked_destination_hits"), list) else []:
+                if not isinstance(item, dict) or int(item.get("packets") or 0) <= 0:
+                    continue
+                address = str(item.get("ip") or "")
+                key = ("tcpquality", address)
+                row = attempts_by_key.setdefault(key, {"service": "tcpquality", "target": address, "packets": 0})
+                row["packets"] += int(item.get("packets") or 0)
+        blocked_attempts = sorted(attempts_by_key.values(), key=lambda item: (item["service"], item["target"]))[:32]
     return {
         "state": state,
         "reason": reason,
@@ -767,10 +849,14 @@ def reconcile_container(*, runtime, name, project="", identity="", pid=0, namesp
         "policy_revision": policy["revision"],
         "services": selected,
         "detected_services": sorted(detected),
-        "blocked_domains": blocked_domains,
+        "blocked_domains": effective_domains,
         "hosts_state": hosts_state,
+        "domain_targets_state": "blocked" if domain_targets_ok and selected_domains and guard.get("state") == "blocked" else "unverified" if selected_domains else "not_required",
+        "domain_target_pattern": TCPQUALITY_LEASEWEB_PATTERN if "tcpquality" in selected else "",
+        "domain_target_count": len(requested_domain_targets),
         "blocked_endpoints": blocked_endpoints[:32],
         "blocked_destination_ips": blocked_destination_ips[:MAX_TARGET_IPS],
+        "blocked_attempts": blocked_attempts,
         "destination_state": destination_state,
         "target_inventory_state": target_inventory.get("state") if target_inventory else "not_required",
         "target_inventory_reason": target_inventory.get("reason") if target_inventory else "",

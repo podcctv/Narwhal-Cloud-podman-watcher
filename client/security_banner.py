@@ -108,7 +108,7 @@ def customer_copy(entry, english=False):
                  'vmess_block_release_unverified':'VMess 端口恢复待核实',
                  'trojan_port_blocked':'Trojan 入站端口已自动阻断','trojan_block_unverified':'Trojan 入站保护待核实',
                  'trojan_block_release_unverified':'Trojan 端口恢复待核实',
-                 'speedtest_service_blocked':'测速目标连接已按策略限制'}.get(entry.get('type'), title or '运行异常')
+                 'speedtest_attempt_blocked':'测速连接请求已拦截'}.get(entry.get('type'), title or '运行异常')
     details = entry.get('customer') if isinstance(entry.get('customer'), dict) else {}
     extra = []
     advice = 'Please check the related settings and background tasks.' if english else '请检查相关设置和后台任务；需要协助时请联系管理员。'
@@ -147,6 +147,9 @@ def customer_copy(entry, english=False):
     elif entry.get('type') == 'speedtest_service_blocked':
         advice = ('This is an administrator-configured resource policy, not an abuse finding. Only the listed DNS targets, destination IPs, or verified service listeners were restricted after local readback; no process or container was stopped.'
                   if english else '这是管理员设置的资源保护策略，不代表认定用户滥用。仅对消息列出的出站域名、测速目标 IP 或已确认入站服务入口应用了限制，并经本地读回确认；没有停止进程或容器。如业务需要访问这些目标，请联系管理员。')
+    elif entry.get('type') == 'speedtest_attempt_blocked':
+        advice = ('The requested speed-test connection was blocked by the administrator resource policy. This is not an abuse finding. Contact the administrator if you need an exception.'
+                  if english else '这次测速目标连接已被管理员设置的资源保护规则拦截，不代表认定您有滥用行为。如确有业务需要，请联系管理员申请临时放行。')
     elif entry.get('type') in {'malicious_process', 'confirmed_abuse'}:
         advice = 'Please review the program source and startup tasks; contact the administrator before restoring access.' if english else '请检查程序来源及启动任务；如已隔离，请联系管理员复核后恢复。'
     elif entry.get('type') in {'cpu', 'memory', 'process_fanout_abuse'}:
