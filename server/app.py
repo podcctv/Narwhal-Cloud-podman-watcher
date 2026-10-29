@@ -6129,10 +6129,12 @@ def _security_collection_health(
     def issue(component: str, state: str, reason: str, guidance: str) -> None:
         issues.append({"component": component, "state": state, "reason": reason[:240], "guidance": guidance[:240]})
 
-    if stale:
+    if last_seen and now - last_seen > STALE_SECONDS:
         issue("Agent 上报", "stale", "节点心跳已超过数据有效期", "检查 narwhal-agent 服务、出站网络和主控地址；恢复后等待下一次上报。")
     if not report_ts:
         issue("主机安全遥测", "missing", "没有收到主机安全采样", "确认 Agent 已升级并启用安全采集，再检查 Agent 日志。")
+    elif now - report_ts > STALE_SECONDS:
+        issue("主机安全遥测", "stale", "最近一次安全采样已超过数据有效期", "检查安全采集任务是否持续运行；等待 Agent 上传新安全采样后再判断当前状态。")
     if report_ts and payload.get("enabled") is not True:
         issue("主机安全遥测", "disabled", "节点未启用安全采集", "在系统设置中启用主机安全采集，并等待 Agent 下一次上报。")
 
@@ -6345,7 +6347,7 @@ def security_status() -> JSONResponse:
         sample_timestamp = int(row["security_ts"] or 0)
         report_timestamp = int(row["ts"] or 0)
         host_agent_version = str(row["agent_version"] or "unknown")[:80]
-        stale = time.time() - host_last_seen > STALE_SECONDS
+        stale = time.time() - report_timestamp > STALE_SECONDS
         collection_health = _security_collection_health(
             payload, gfw_status, host_last_seen, sample_timestamp, host_agent_version, int(time.time()), stale
         )

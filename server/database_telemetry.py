@@ -35,7 +35,7 @@ def initialize(conn: sqlite3.Connection) -> None:
             wal_checkpointed_frames INTEGER
         )"""
     )
-    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(database_storage_samples)")}
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(database_storage_samples)")}
     for name, definition in (
         ("checkpoint_busy", "INTEGER"),
         ("wal_log_frames", "INTEGER"),
