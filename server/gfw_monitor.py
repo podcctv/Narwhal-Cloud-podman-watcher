@@ -399,6 +399,26 @@ def _active_roles(conn, now):
     return result
 
 
+def _source_coverage_for_host(roles, node_id):
+    """Return probe sources available to test a host, excluding the host itself."""
+    available = {
+        role: [source for source in roles.get(role, []) if source["node_id"] != node_id]
+        for role in ("mainland", "overseas")
+    }
+    required = {"mainland": MIN_MAINLAND, "overseas": MIN_OVERSEAS}
+    missing = [role for role in required if len(available[role]) < required[role]]
+    if not missing:
+        return available, ""
+    own_roles = [role for role in required if any(source["node_id"] == node_id for source in roles.get(role, []))]
+    counts = f"国内 {len(available['mainland'])}/{MIN_MAINLAND}、海外 {len(available['overseas'])}/{MIN_OVERSEAS}"
+    if own_roles:
+        own_label = "国内" if own_roles[0] == "mainland" else "海外"
+        reason = f"该主机本身是{own_label}探针，探针不会自测；排除本机后仅有 {counts} 个可用探测点"
+    else:
+        reason = f"独立探针覆盖不足：当前 {counts} 个可用探测点"
+    return available, reason
+
+
 def _schedule(conn, now):
     roles = _active_roles(conn, now)
     if len(roles["mainland"]) < MIN_MAINLAND or len(roles["overseas"]) < MIN_OVERSEAS:
@@ -414,16 +434,13 @@ def _schedule(conn, now):
             continue
         if conn.execute("SELECT 1 FROM gfw_cycles WHERE host_id=? AND status IN ('queued','running') LIMIT 1", (host["host_id"],)).fetchone():
             continue
-        host_roles = {role: [source for source in roles[role] if source["node_id"] != host["node_id"]][:need]
-                      for role, need in (("mainland", MIN_MAINLAND), ("overseas", MIN_OVERSEAS))}
-        if len(host_roles["mainland"]) < MIN_MAINLAND or len(host_roles["overseas"]) < MIN_OVERSEAS:
-            own_role = next((role for role in ("mainland", "overseas") if any(item["node_id"] == host["node_id"] for item in roles[role])), "")
-            missing = []
-            if len(host_roles["mainland"]) < MIN_MAINLAND:
-                missing.append(f"{MIN_MAINLAND} 个非本机国内探测点")
-            if len(host_roles["overseas"]) < MIN_OVERSEAS:
-                missing.append(f"{MIN_OVERSEAS} 个非本机海外探测点")
-            reason = "作为探测节点不能自测；请补充" + "和".join(missing) if own_role else "可用探测点不足；请配置至少 2 个国内和 1 个海外探测节点"
+        host_roles, coverage_reason = _source_coverage_for_host(roles, host["node_id"])
+        host_roles = {role: sources[:need] for role, sources, need in (
+            ("mainland", host_roles["mainland"], MIN_MAINLAND),
+            ("overseas", host_roles["overseas"], MIN_OVERSEAS),
+        )}
+        if coverage_reason:
+            reason = coverage_reason + "；需增加不同主机上的在线探针"
             conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
                          (host["host_id"], host["node_id"], now, _json({"reason": reason, "targets": []})))
             continue  # Never use a node to probe its own public endpoint.
@@ -473,8 +490,17 @@ def _apply_cycle(conn, cycle, now):
     blocked_cycle = False
     for target in targets:
         by_role = {"mainland": {"success": 0, "failed": 0, "total": 0}, "overseas": {"success": 0, "failed": 0, "total": 0}}
+        probe_sources = []
         for job in jobs:
             result = conn.execute("SELECT success,error,latency_ms FROM gfw_probe_results WHERE job_id=? AND target_id=?", (job["id"], target["id"])).fetchone()
+            probe_sources.append({
+                "source_host_id": str(job["source_host_id"] or "")[:200],
+                "role": job["role"],
+                "job_status": job["status"],
+                "success": bool(result["success"]) if result else None,
+                "latency_ms": result["latency_ms"] if result else None,
+                "error": str((result["error"] if result else job["error"]) or "")[:160],
+            })
             if not result:
                 continue
             stats = by_role[job["role"]]
@@ -492,7 +518,7 @@ def _apply_cycle(conn, cycle, now):
         else:
             status = "unknown"
         endpoint = {"ip": target["ip"], "port": target["port"], "interface": target.get("interface", ""),
-                    "status": status, "mainland": main, "overseas": over}
+                    "status": status, "mainland": main, "overseas": over, "probes": probe_sources}
         owner = endpoint_containers.get(target["id"])
         if isinstance(owner, dict):
             endpoint.update({"runtime": str(owner.get("runtime") or ""),
@@ -723,16 +749,19 @@ def report_failure(conn, payload, now):
 
 def status_map(conn, now):
     counts = _role_counts(conn, now)
+    active_roles = _active_roles(conn, now)
     result = {}
     rows = conn.execute("SELECT * FROM hosts ORDER BY host_id LIMIT 500").fetchall()
     for host in rows:
         state_row = conn.execute("SELECT * FROM gfw_states WHERE host_id=? AND node_id=?", (host["host_id"], host["node_id"])).fetchone()
         history = [dict(event) for event in conn.execute("SELECT event_type,at,duration_seconds,normal_duration_seconds FROM gfw_events WHERE host_id=? ORDER BY at DESC,id DESC LIMIT 6", (host["host_id"],))]
+        host_sources, source_reason = _source_coverage_for_host(active_roles, host["node_id"])
+        source_counts = {role: len(sources) for role, sources in host_sources.items()}
         if state_row:
             state = state_row["state"]
             last_sample_at = int(state_row["last_sample_at"] or 0)
             stale = last_sample_at > 0 and now - last_sample_at > STALE_SECONDS
-            coverage_insufficient = counts["mainland"] < MIN_MAINLAND or counts["overseas"] < MIN_OVERSEAS
+            coverage_insufficient = bool(source_reason)
             try:
                 evidence = json.loads(state_row["evidence_json"] or "{}")
             except ValueError:
@@ -757,7 +786,9 @@ def status_map(conn, now):
                 since = int(state_row["normal_since"] or 0)
             duration = max(0, now - since) if since else 0
             if coverage_insufficient:
-                reason = "探测节点不足：需至少 2 个在线国内点和 1 个在线海外点"
+                reason = source_reason + "；本机不会作为自己的探测来源"
+                if stale:
+                    reason = "探测数据已过期；" + reason
             elif status == "investigating" and not reason:
                 reason = "本轮证据不足或端点变化；当前不确认恢复，也不把未知样本计入持续时长"
             result[host["host_id"]] = {"status": status, "last_known_state": state, "stale": stale,
@@ -765,14 +796,16 @@ def status_map(conn, now):
                 "blocked_count": int(state_row["blocked_count"] or 0), "last_sample_at": int(state_row["last_sample_at"] or 0),
                 "last_classification": state_row["last_classification"], "pending_block_rounds": int(state_row["pending_block_count"] or 0),
                 "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"],
+                "available_mainland_sources": source_counts["mainland"], "available_overseas_sources": source_counts["overseas"],
                 "evidence": evidence.get("targets", []) if isinstance(evidence, dict) else [], "sample": sample,
-                "reason": "探测数据已过期" if stale else reason, "history": history}
+                "reason": reason or ("探测数据已过期" if stale else ""), "history": history}
         else:
             result[host["host_id"]] = {"status": "unassessed", "last_known_state": "unassessed", "stale": False,
                 "since": 0, "duration_seconds": 0, "last_normal_duration_seconds": 0, "blocked_count": 0,
                 "last_sample_at": 0, "last_classification": "unknown", "pending_block_rounds": 0,
                 "mainland_sources": counts["mainland"], "overseas_sources": counts["overseas"], "evidence": [], "sample": {},
-                "reason": "需配置至少 2 个国内和 1 个海外探测节点" if counts["mainland"] < MIN_MAINLAND or counts["overseas"] < MIN_OVERSEAS else "等待 Agent 自动上报可验证的公网容器 TCP 端点", "history": history}
+                "available_mainland_sources": source_counts["mainland"], "available_overseas_sources": source_counts["overseas"],
+                "reason": source_reason + "；本机不会作为自己的探测来源" if source_reason else "探针覆盖已就绪，等待首轮自动发现端点并完成 TCP 抽测", "history": history}
     return result
 
 
@@ -788,14 +821,29 @@ def attach(app, db, verify_signature, signed_response):
         try:
             candidates = [dict(row) for row in conn.execute("SELECT host_id,node_id,agent_version,last_seen FROM hosts WHERE node_id<>'' ORDER BY host_id LIMIT 300")]
             roles = {row["node_id"]: row["role"] for row in conn.execute("SELECT node_id,role FROM gfw_probe_roles")}
+            active_roles = _active_roles(conn, now)
             online_hosts = [item for item in candidates if now - int(item.get("last_seen") or 0) <= STALE_SECONDS]
             target_hosts = 0
+            ready_hosts = 0
+            independent_probe_hosts = 0
             target_endpoints = 0
             eligible_endpoints = 0
             eligible_containers = 0
             sampled_containers = 0
             missing_reasons = {}
+            probe_missing_reasons = {}
+            probe_job_counts = {"complete": 0, "failed": 0, "expired": 0, "queued": 0, "running": 0, "cancelled": 0}
+            probe_jobs_since = now - 86400
+            for job in conn.execute("SELECT status,COUNT(*) AS count FROM gfw_probe_jobs WHERE created_at>=? GROUP BY status", (probe_jobs_since,)):
+                if job["status"] in probe_job_counts:
+                    probe_job_counts[job["status"]] = int(job["count"] or 0)
+            last_probe_job = conn.execute("SELECT MAX(finished_at) FROM gfw_probe_jobs WHERE created_at>=? AND status IN ('complete','failed','expired')", (probe_jobs_since,)).fetchone()
             for item in online_hosts:
+                _source_candidates, source_reason = _source_coverage_for_host(active_roles, item["node_id"])
+                if not source_reason:
+                    independent_probe_hosts += 1
+                else:
+                    probe_missing_reasons[source_reason] = probe_missing_reasons.get(source_reason, 0) + 1
                 state = conn.execute("SELECT state,evidence_json FROM gfw_states WHERE host_id=? AND node_id=?",
                                      (item["host_id"], item["node_id"])).fetchone()
                 pinned_endpoint_keys = _blocked_endpoint_keys(state["evidence_json"]) if state and state["state"] == "blocked" else set()
@@ -812,6 +860,8 @@ def attach(app, db, verify_signature, signed_response):
                 if targets:
                     target_hosts += 1
                     target_endpoints += len(targets)
+                    if not source_reason:
+                        ready_hosts += 1
                 else:
                     label = reason or "未发现可验证的公网 TCP 端点"
                     missing_reasons[label] = missing_reasons.get(label, 0) + 1
@@ -820,6 +870,8 @@ def attach(app, db, verify_signature, signed_response):
                     "target_coverage": {
                         "online_hosts": len(online_hosts),
                         "hosts_with_targets": target_hosts,
+                        "hosts_with_independent_probes": independent_probe_hosts,
+                        "hosts_ready_for_probe": ready_hosts,
                         "target_endpoints": target_endpoints,
                         "eligible_endpoints": eligible_endpoints,
                         "eligible_containers": eligible_containers,
@@ -827,7 +879,10 @@ def attach(app, db, verify_signature, signed_response):
                         "sample_limit_per_host": DAILY_CONTAINER_SAMPLE_LIMIT,
                         "sample_date_utc": _utc_sample_date(now).isoformat(),
                         "missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
+                        "probe_missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(probe_missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
                     },
+                    "probe_health": {"window_seconds": 86400, "jobs": probe_job_counts,
+                                     "last_finished_at": int(last_probe_job[0] or 0) if last_probe_job else 0},
                     "candidates": [{**item, "role": roles.get(item["node_id"], "disabled")} for item in candidates]}
         finally:
             conn.close()

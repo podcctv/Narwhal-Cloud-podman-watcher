@@ -309,10 +309,25 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                 <span>国内成功 {comparedEndpoint.mainland?.success || 0}/{comparedEndpoint.mainland?.total || 0}</span>
                 <span>海外成功 {comparedEndpoint.overseas?.success || 0}/{comparedEndpoint.overseas?.total || 0}</span>
               </div> : null}
+              {comparedEndpoint?.probes && comparedEndpoint.probes.length > 0 && <div className="mt-2 rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
+                <p className="mb-1 font-semibold text-slate-200">同一端点的探针结果</p>
+                <div className="grid min-w-0 gap-1 sm:grid-cols-2">
+                  {comparedEndpoint.probes.map((probe, index) => {
+                    const succeeded = probe.success === true;
+                    const failed = probe.success === false;
+                    const stateClass = succeeded ? 'text-emerald-300' : failed ? 'text-amber-300' : 'text-slate-400';
+                    const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}` : failed ? `TCP 连接失败${probe.error ? ` · ${probe.error}` : ''}` : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
+                    return <div key={`${probe.role}-${probe.source_host_id}-${index}`} className="min-w-0 rounded-md border border-slate-800 px-2 py-1">
+                      <p className="break-all text-xs text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}</p>
+                      <p className={`break-words text-xs ${stateClass}`}>{stateText}</p>
+                    </div>;
+                  })}
+                </div>
+              </div>}
               {gfwStatus === 'blocked' && Number(gfw.last_normal_duration_seconds || 0) > 0 && <p>上次恢复后正常 {durationDays(gfw.last_normal_duration_seconds)}，之后再次出现国内不可达。</p>}
               {(gfwStatus === 'stale' || gfwStatus === 'investigating') && <p className="text-slate-300">{gfw.reason || (gfwStatus === 'stale' ? '探测数据已过期；不把离线或缺少样本算作恢复。' : '本轮证据不足；不确认阻断或恢复，也不把未知样本计入持续时间。')}</p>}
               {gfwStatus === 'unassessed' && <p className="text-slate-300">{gfw.reason || '需要至少 2 个国内、1 个海外探测点，并发现明确的公网 TCP 端口映射。'}</p>}
-              <p className="text-slate-300">比较同一公网 TCP 端点；这是连通性信号，不单独证明封锁来源。</p>
+              <p className="text-slate-300">比较同一公网 TCP 端点；ICMP ping 失败不能单独证明 GFW，TCP 探测也只说明不同网络来源的连通差异，不单独证明封锁来源。</p>
               {gfw.history && gfw.history.length > 0 && <details className="mt-1 rounded-lg border border-slate-700/70 bg-slate-950/20 px-2 py-1.5">
                 <summary className="cursor-pointer font-semibold">阻断 / 恢复历史（{gfw.history.length} 条）</summary>
                 <div className="mt-2 space-y-2">

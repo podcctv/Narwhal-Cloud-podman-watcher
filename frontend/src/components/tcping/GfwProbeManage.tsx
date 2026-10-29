@@ -11,6 +11,8 @@ interface ManageData {
   target_coverage?: {
     online_hosts: number;
     hosts_with_targets: number;
+    hosts_with_independent_probes?: number;
+    hosts_ready_for_probe?: number;
     target_endpoints: number;
     eligible_endpoints?: number;
     eligible_containers?: number;
@@ -18,7 +20,9 @@ interface ManageData {
     sample_limit_per_host?: number;
     sample_date_utc?: string;
     missing_reasons: Array<{ reason: string; hosts: number }>;
+    probe_missing_reasons?: Array<{ reason: string; hosts: number }>;
   };
+  probe_health?: { window_seconds: number; jobs: Record<string, number>; last_finished_at: number };
   candidates: Candidate[];
 }
 
@@ -46,7 +50,7 @@ export const GfwProbeManage: React.FC = () => {
       <div className="flex min-w-0 items-start gap-3">
         <span className="rounded-lg border border-sky-800 bg-sky-950/50 p-2 text-sky-300"><Radio size={18} /></span>
         <div><h2 className="font-semibold text-slate-100">国内连通性探测节点</h2>
-          <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-300">此处只配置“从哪里探测”。同一公网端点至少 2 个国内点失败、海外点成功，连续 3 轮后记录为 GFW Blocked；原端点连续 2 轮恢复后结束周期。端口由 Agent 自动发现，不需要在探针设置里手填。</p>
+          <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-300">此处只配置“从哪里探测”。同一公网 TCP 端点至少 2 个国内点连接失败、海外点连接成功，连续 3 轮后记录为 GFW Blocked；原端点连续 2 轮恢复后结束周期。端口由 Agent 自动发现，不需要手填。ICMP ping 不通可能是禁 ping、路由或防火墙问题，不单独作为 GFW 证据。</p>
         </div>
       </div>
       <button type="button" className="tcp-text" onClick={() => load().catch(e => setError((e as Error).message))} disabled={!data || !!busyNode} aria-label="刷新探测节点"><RefreshCw size={15} /></button>
@@ -56,14 +60,21 @@ export const GfwProbeManage: React.FC = () => {
     </div>
     <div className="mt-2 rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-xs text-slate-200">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <strong>被测主机端口覆盖</strong>
-        <span className="tabular-nums">{data?.target_coverage?.hosts_with_targets || 0}/{data?.target_coverage?.online_hosts || 0} 台在线主机 · 今日抽测 {data?.target_coverage?.sampled_containers || 0}/{data?.target_coverage?.eligible_containers || 0} 个容器</span>
+        <strong>被测主机与有效探测覆盖</strong>
+        <span className="tabular-nums">可发现端点 {data?.target_coverage?.hosts_with_targets || 0}/{data?.target_coverage?.online_hosts || 0} 台 · 当前可实际探测 {data?.target_coverage?.hosts_ready_for_probe || 0} 台 · 今日抽测 {data?.target_coverage?.sampled_containers || 0}/{data?.target_coverage?.eligible_containers || 0} 个容器</span>
       </div>
+      <p className="mt-1 text-slate-300">“可发现端点”表示找到了明确的公网 IP:TCP 端口；“可实际探测”还要求排除目标主机自身后，国内与海外探针数量仍满足判定门槛。探针不会自测，所以总探针数量达标不代表每台探针主机都可被评估。</p>
       <p className="mt-1 leading-5 text-slate-300">自动采集 Incus 代理 / 网络转发、Podman 已发布 TCP 端口、宿主机明确的 TCP DNAT 规则，以及容器直接持有的公网 IPv4 + 实际监听端口。每天按稳定轮换抽取每台母鸡最多 2 个不同容器，通常每个容器抽测一个已存在的公网 TCP 端口；已确认受阻的端口优先复测以确认恢复。当天继续按约 5 分钟周期复测样本，累积证据。不会创建端口映射；未抽中的容器或端口仍是未验证状态。上游 NAT 若未在宿主机配置中留下明确端口转发，系统不会把出口 IP 猜成入站公网 IP。</p>
       <p className="mt-1 text-slate-400">今日 UTC {data?.target_coverage?.sample_date_utc || '—'} · 抽测端点 {data?.target_coverage?.target_endpoints || 0} 个 · 有明确映射的端点共 {data?.target_coverage?.eligible_endpoints || 0} 个</p>
       {!!data?.target_coverage?.missing_reasons?.length && <div className="mt-2 space-y-1 text-amber-200">
         {data.target_coverage.missing_reasons.map(item => <p key={item.reason} className="break-words">{item.hosts} 台：{item.reason}</p>)}
       </div>}
+      {!!data?.target_coverage?.probe_missing_reasons?.length && <div className="mt-2 space-y-1 text-amber-200">
+        {data.target_coverage.probe_missing_reasons.map(item => <p key={item.reason} className="break-words">{item.hosts} 台：{item.reason}</p>)}
+      </div>}
+      {data?.probe_health && <p className="mt-2 border-t border-slate-800 pt-2 text-slate-300">
+        最近 24 小时探针任务：回传完成 {data.probe_health.jobs.complete || 0} · 失败 {data.probe_health.jobs.failed || 0} · 超时 {data.probe_health.jobs.expired || 0} · 排队/运行 {data.probe_health.jobs.queued || 0}/{data.probe_health.jobs.running || 0}；最近完成 {data.probe_health.last_finished_at ? new Date(data.probe_health.last_finished_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无'}。任务完成代表探针已回传，不代表端口可达。
+      </p>}
       <details className="mt-2 border-t border-slate-800 pt-2 text-slate-300">
         <summary className="cursor-pointer font-semibold text-sky-300">没有可探测端口时怎么处理？</summary>
         <p className="mt-2 leading-5">Agent 会自动读取 Incus / Podman 端口发布、容器公网地址和宿主机现有 TCP DNAT 规则，并与容器实际监听端口核对。若公网映射由宿主机之外的上游 NAT 提供，且宿主机没有对应转发规则或可读映射，当前没有可靠数据可自动确定公网地址与端口；系统会继续显示待评估，不猜测并探测端口。</p>
