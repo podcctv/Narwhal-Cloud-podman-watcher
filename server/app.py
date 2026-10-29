@@ -2315,9 +2315,9 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
 
 
 def _empty_host_firewall_policy() -> Dict[str, Any]:
-    # New drafts preselect supported speed-test protections, but deliberately
-    # leave the runtime scope empty. Nothing is sent to a node until an admin
-    # selects Incus and/or Podman and explicitly applies the policy.
+    # New drafts preselect supported speed-test protections for Incus and
+    # Podman containers. Nothing is sent to a node until an admin explicitly
+    # applies the policy; host processes and Docker are never in this scope.
     return {
         "rules": [],
         "abuse": {
@@ -2328,7 +2328,7 @@ def _empty_host_firewall_policy() -> Dict[str, Any]:
                 "cloudflare", "fast", "iperf3_server", "librespeed",
                 "ookla", "ookla_server", "openspeedtest", "tcpquality",
             ],
-            "service_runtimes": [],
+            "service_runtimes": ["incus", "podman"],
             "interfaces": [],
             "runtimes": [],
         },

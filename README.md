@@ -1,10 +1,15 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.137**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.138**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.138：测速保护默认限定 Incus / Podman 容器
+
+- 新建防火墙策略默认勾选 8 类测速服务保护，并默认选中 Incus 与 Podman 容器范围；测速服务规则不作用于宿主机自身或 Docker 容器。
+- 这些选项只是策略草稿，只有管理员在单机或全局策略界面明确保存并应用后才会下发；打开页面或升级不会自动改变节点。已有策略保持原有范围与选择。
 
 ### v1.7.137：启用默认保护策略但要求明确作用范围
 
-- 新建防火墙策略时默认勾选 Ookla、Cloudflare、FAST、TcpQuality / Lisaweb、iPerf3 服务端、LibreSpeed、OpenSpeedTest 和 Ookla Server 保护；Incus / Podman 目标范围保持未选。必须明确选择运行时并手动应用后才会下发，不会因升级或打开页面自动改动节点；已有明确关闭的策略保持不变。
+- 新建防火墙策略时默认勾选 Ookla、Cloudflare、FAST、TcpQuality / Lisaweb、iPerf3 服务端、LibreSpeed、OpenSpeedTest 和 Ookla Server 保护；目标范围与是否下发由管理员控制，不会因升级或打开页面自动改动节点；已有明确关闭的策略保持不变。
 - Agent 安装器为 VMess 与 Trojan 自动保护显式写入默认启用值，同时保留用户在本机配置中的明确覆盖。拦截仍要求完整配置、进程、监听及端口独占证据，只处理已确认的目标端口。
 - 不启用按 5201 等固定端口的全局测速阻断。
 
