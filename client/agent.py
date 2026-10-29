@@ -6110,7 +6110,8 @@ def _collect_socks_config_evidence(
                 process_scan_reason = process_scan_reason or 'process_changed_during_config_scan'
                 inventory_reason = inventory_reason or process_scan_reason
             for endpoint in configured_inbound_protocols[process_endpoint_start:]:
-                endpoint['port_config_complete'] = process_port_config_complete
+                if endpoint.get('protocol') in {'vmess', 'trojan'}:
+                    endpoint['port_config_complete'] = process_port_config_complete
         cli = socks_detector.gost_cli(process_output, proc['pid']) if enabled and proc['process'] == 'gost' else None
         if cli:
             # -L is inbound, -F chains are deliberately excluded. A config plus CLI
