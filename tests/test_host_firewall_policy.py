@@ -1144,16 +1144,23 @@ class HostFirewallPolicyTests(unittest.TestCase):
                 "policy": {"revision": 4, "rules": [], "abuse": {"speedtest": False, "mining": False, "bt": False}},
             },
         }
-        with mock.patch.object(agent, "_runman_host_firewall_request", return_value=(True, "applied")) as send:
-            self.assertEqual(agent._execute_host_firewall_policy(action, "watcher-node-a"), (True, "applied"))
-            send.assert_called_once_with(action["params"]["policy"])
+        with mock.patch.object(agent.speedtest_guard, "save_policy", return_value=(True, "policy saved")) as save:
+            with mock.patch.object(agent, "_runman_host_firewall_request", return_value=(True, "applied")) as send:
+                self.assertEqual(
+                    agent._execute_host_firewall_policy(action, "watcher-node-a"),
+                    (True, "applied; policy saved"),
+                )
+                send.assert_called_once_with(action["params"]["policy"])
+            save.assert_called_once_with({"revision": 4, "services": [], "runtimes": []})
 
-        with mock.patch.object(agent, "_runman_host_firewall_request") as send:
-            self.assertFalse(agent._execute_host_firewall_policy(action, "different-node")[0])
-            send.assert_not_called()
-            action["runtime"] = "incus"
-            self.assertFalse(agent._execute_host_firewall_policy(action, "watcher-node-a")[0])
-            send.assert_not_called()
+        with mock.patch.object(agent.speedtest_guard, "save_policy") as save:
+            with mock.patch.object(agent, "_runman_host_firewall_request") as send:
+                self.assertFalse(agent._execute_host_firewall_policy(action, "different-node")[0])
+                send.assert_not_called()
+                action["runtime"] = "incus"
+                self.assertFalse(agent._execute_host_firewall_policy(action, "watcher-node-a")[0])
+                send.assert_not_called()
+            save.assert_not_called()
 
     def test_client_deletes_only_confirmed_manual_rule_on_matching_host(self):
         rule = {

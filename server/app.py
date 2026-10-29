@@ -2780,9 +2780,12 @@ def _materialize_host_firewall_policy(
     abuse = dict(policy.get("abuse") or {})
     if any(abuse.get(key) is True for key in ("mining", "bt")):
         abuse["interfaces"] = targets
+    # Runtime selectors are only a fleet/single-host input. Resolve them to
+    # discovered bridges before validating the host-local policy, otherwise
+    # derived interfaces conflict with the selector.
+    abuse.pop("runtimes", None)
     materialized["abuse"] = abuse
     validated = _validate_host_firewall_policy(materialized)
-    validated["abuse"].pop("runtimes", None)
     return validated, status
 
 
