@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.163**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.164**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.164：修复容器镜像缺少规则对账模块
+
+- 将 `control_reconciliation.py` 纳入 Server 镜像，修复镜像启动时模块导入失败；此问题会阻止 GHCR 镜像发布和生产自动更新。
 
 ### v1.7.163：补齐规则读回总览与运维闭环
 
