@@ -41,6 +41,12 @@ class BandwidthPolicyError(ValueError):
     pass
 
 
+class BandwidthMutationError(BandwidthPolicyError):
+    def __init__(self, message: str, rollback_state: str):
+        super().__init__(message)
+        self.rollback_state = rollback_state
+
+
 def _runner(args: list[str], timeout: float = 8, output_limit: int = 2000) -> tuple[int, str]:
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
@@ -532,6 +538,26 @@ def _remove_filter(
     return True
 
 
+def _rollback_bandwidth_mutation(operation: dict[str, Any]) -> None:
+    """Restore one prior owned filter or remove a filter newly added this cycle."""
+    target = operation["target"]
+    direction = str(operation["direction"])
+    prefix = target["prefix"]
+    interface = target["interface"]
+    owner_key = target["owner_key"]
+    if operation.get("previously_owned"):
+        try:
+            rate = int(operation.get("previous_rate_mbps") or 0)
+        except (TypeError, ValueError):
+            rate = 0
+        if rate <= 0:
+            raise BandwidthPolicyError("previous owned tc rate is unavailable; rollback cannot be verified")
+        _apply_filter(prefix, interface, owner_key, direction, rate, True,
+                      operation.get("previous_pref"))
+        return
+    _remove_filter(prefix, interface, owner_key, direction)
+
+
 def _resolve_entry(
     host_id: str, item: dict[str, Any], containers: list[dict[str, Any]],
     peer_inventory: list[tuple[str, str, str, int]] | None = None,
@@ -577,36 +603,78 @@ def _remove_entry(entry: dict[str, Any], expected_host: str, actual_host: str, a
     # Policies are bound to an enrollment. A replacement node with the same
     # display name must never remove or inherit the former machine's filters.
     if expected_host != actual_host or entry.get("expected_node_id") != actual_node:
-        return []
+        raise BandwidthPolicyError("stored tc ownership belongs to a different host enrollment")
     interface = str(entry.get("interface") or "")
     if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", interface):
-        return []
+        raise BandwidthPolicyError("stored tc ownership has an invalid interface identity")
     prefix = entry.get("prefix") if isinstance(entry.get("prefix"), list) else []
     if entry.get("scope") == "host":
         try:
             if socket.if_nametoindex(interface) != int(entry.get("interface_index") or 0):
+                # The original network device was removed; the kernel removed
+                # its qdisc and filters with it. Do not touch a new device that
+                # later reused the same interface name.
                 return []
         except (OSError, TypeError, ValueError):
-            return []
+            # An absent device has no qdisc to retain. Invalid saved metadata,
+            # however, is not proof that the owned rule disappeared.
+            if isinstance(entry.get("interface_index"), int) and entry.get("interface_index", 0) > 0:
+                return []
+            raise BandwidthPolicyError("stored host interface identity could not be verified") from None
     else:
         try:
-            if os.stat(f"/proc/{int(entry.get('pid') or 0)}/ns/net").st_ino != int(entry.get("namespace_inode") or 0):
-                return []
+            pid = int(entry.get("pid") or 0)
+            namespace_inode = int(entry.get("namespace_inode") or 0)
+        except (TypeError, ValueError):
+            raise BandwidthPolicyError("stored container network namespace identity is invalid") from None
+        if pid <= 0 or namespace_inode <= 0:
+            raise BandwidthPolicyError("stored container network namespace identity is unavailable")
+        try:
+            current_namespace = os.stat(f"/proc/{pid}/ns/net").st_ino
+            if current_namespace != namespace_inode:
+                raise BandwidthPolicyError("container network namespace changed; prior filter cleanup cannot be verified")
             code, output = _call(prefix, ["ip", "-j", "link", "show", "dev", interface])
-            links = json.loads(output) if code == 0 else []
+            if code != 0:
+                raise BandwidthPolicyError("container interface inventory is unavailable during cleanup")
+            links = json.loads(output)
             current_index = int(links[0]["ifindex"]) if links and isinstance(links[0], dict) else 0
+            if current_index <= 0:
+                raise BandwidthPolicyError("container interface identity could not be verified")
             if current_index != int(entry.get("interface_index") or 0):
+                # The original link no longer exists in this namespace.
                 return []
-        except (OSError, TypeError, ValueError):
+        except FileNotFoundError:
             # The old container namespace no longer exists; its tc rules died
             # with it, so forgetting the local record is safe.
             return []
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise BandwidthPolicyError("container network namespace cleanup could not be verified: " + str(exc)[:160]) from None
     removed = []
     preferences = entry.get("filter_prefs") if isinstance(entry.get("filter_prefs"), dict) else {}
-    for direction in ("download", "upload"):
-        if _remove_filter(prefix, interface, str(entry.get("owner_key") or ""), direction,
-                          preferences.get(direction)):
-            removed.append(direction)
+    rates = entry.get("rates_mbps") if isinstance(entry.get("rates_mbps"), dict) else {}
+    try:
+        for direction in ("download", "upload"):
+            if _remove_filter(prefix, interface, str(entry.get("owner_key") or ""), direction,
+                              preferences.get(direction)):
+                removed.append(direction)
+    except (BandwidthPolicyError, OSError, ValueError) as remove_error:
+        rollback_errors = []
+        for direction in reversed(removed):
+            try:
+                rate = int(rates.get(direction) or 0)
+                if rate <= 0:
+                    raise BandwidthPolicyError(f"previous {direction} rate is unavailable")
+                _apply_filter(prefix, interface, str(entry.get("owner_key") or ""), direction,
+                              rate, True, preferences.get(direction))
+            except (BandwidthPolicyError, OSError, TypeError, ValueError) as rollback_error:
+                rollback_errors.append(f"{direction}: {str(rollback_error)[:120]}")
+        detail = f"; removed filters restored and readback verified: {','.join(reversed(removed))}" if removed and not rollback_errors else ""
+        if rollback_errors:
+            detail = "; rollback could not be verified: " + "; ".join(rollback_errors[:3])
+        raise BandwidthMutationError(
+            "owned bandwidth filter cleanup failed: " + str(remove_error)[:180] + detail,
+            "failed" if rollback_errors else "verified" if removed else "not_needed",
+        ) from None
     return removed
 
 
@@ -1223,7 +1291,9 @@ def reconcile(
     state.update(host_id=host_id, expected_node_id=node_id)
     entries = state["entries"]
     previous_status = state.get("status")
-    status: dict[str, Any] = {"revision": 0, "state": "unconfigured", "items": []}
+    status: dict[str, Any] = {"revision": 0, "state": "unconfigured", "items": [],
+                              "retry": {"state": "not_scheduled", "attempts": None, "after_seconds": None},
+                              "rollback": {"state": "not_needed", "attempted": False}}
     try:
         normalized = validate_policy(policy, host_id, node_id)
     except BandwidthPolicyError as exc:
@@ -1263,6 +1333,7 @@ def reconcile(
     status["auto_throttle"] = automatic_status
     desired: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     requested_keys = set()
+    cleanup_blocked_keys: set[str] = set()
     failures = False
     for item in effective_limits:
         if item["scope"] == "host":
@@ -1278,7 +1349,8 @@ def reconcile(
             status["items"].append({"scope": item["scope"], "target": item.get("container_name", item.get("interface")),
                                     "state": "failed", "message": str(exc)[:240]})
 
-    newly_installed: list[tuple[dict[str, Any], str]] = []
+    rollback_operations: list[dict[str, Any]] = []
+    rollback_attempts: list[dict[str, Any]] = []
     for key, old in list(entries.items()):
         # A temporarily unavailable target must not silently lose a previously
         # applied limit. Keep the old owned filter until its target can be
@@ -1292,14 +1364,33 @@ def reconcile(
         if new and same_netns:
             continue
         try:
-            _remove_entry(old, host_id, host_id, node_id)
+            removed_directions = _remove_entry(old, host_id, host_id, node_id)
+            old_rates = old.get("rates_mbps") if isinstance(old.get("rates_mbps"), dict) else {}
+            old_prefs = old.get("filter_prefs") if isinstance(old.get("filter_prefs"), dict) else {}
+            for direction in removed_directions:
+                rollback_operations.append({
+                    "target": old, "direction": direction, "previously_owned": True,
+                    "previous_rate_mbps": old_rates.get(direction), "previous_pref": old_prefs.get(direction),
+                })
             entries.pop(key, None)
+        except BandwidthMutationError as exc:
+            failures = True
+            cleanup_blocked_keys.add(key)
+            if exc.rollback_state != "not_needed":
+                rollback_attempts.append({"state": exc.rollback_state, "direction": "cleanup", "message": str(exc)[:180]})
+            status["items"].append({"scope": old.get("scope"), "target": old.get("container_name", old.get("interface")),
+                                    "state": "cleanup_failed", "message": str(exc)[:240]})
         except BandwidthPolicyError as exc:
             failures = True
+            cleanup_blocked_keys.add(key)
             status["items"].append({"scope": old.get("scope"), "target": old.get("container_name", old.get("interface")),
                                     "state": "cleanup_failed", "message": str(exc)[:240]})
 
     for key, (item, target) in desired.items():
+        if key in cleanup_blocked_keys:
+            status["items"].append({"scope": item["scope"], "target": item.get("container_name", item.get("interface")),
+                                    "state": "failed", "message": "旧的 tc 所有限额无法确认清理，已保留原记录并跳过新规则应用"})
+            continue
         old = entries.get(key) if isinstance(entries.get(key), dict) else None
         target = {**target, "expected_node_id": node_id}
         same_target = bool(old and old.get("namespace_inode") == target.get("namespace_inode")
@@ -1336,10 +1427,20 @@ def reconcile(
             owned = direction in old_directions
             try:
                 if rate:
-                    applied_pref = _apply_filter(
-                        target["prefix"], target["interface"], target["owner_key"], direction,
-                        rate, owned, filter_prefs.get(direction),
-                    )
+                    operation = {"target": target, "direction": direction, "previously_owned": owned,
+                                 "previous_rate_mbps": old_rates.get(direction), "previous_pref": old_prefs.get(direction)}
+                    try:
+                        applied_pref = _apply_filter(
+                            target["prefix"], target["interface"], target["owner_key"], direction,
+                            rate, owned, filter_prefs.get(direction),
+                        )
+                    except (BandwidthPolicyError, OSError, ValueError):
+                        try:
+                            _rollback_bandwidth_mutation(operation)
+                            rollback_attempts.append({"state": "verified", "direction": direction})
+                        except (BandwidthPolicyError, OSError, ValueError) as rollback_exc:
+                            rollback_attempts.append({"state": "failed", "direction": direction, "message": str(rollback_exc)[:180]})
+                        raise
                     # Keep persisted state JSON-safe if an older integration
                     # wrapper reports success without returning the selected
                     # preference. The production implementation always
@@ -1351,13 +1452,15 @@ def reconcile(
                     rates[direction] = rate
                     filter_prefs[direction] = applied_pref
                     confirmed_at[direction] = int(time.time())
-                    if not owned:
-                        newly_installed.append((target, direction))
+                    rollback_operations.append(operation)
                     status["items"].append({**report_identity, "direction": direction,
                                             "rate_mbps": rate, "state": "applied"})
                 elif owned:
+                    operation = {"target": target, "direction": direction, "previously_owned": True,
+                                 "previous_rate_mbps": old_rates.get(direction), "previous_pref": old_prefs.get(direction)}
                     _remove_filter(target["prefix"], target["interface"], target["owner_key"],
                                    direction, filter_prefs.get(direction))
+                    rollback_operations.append(operation)
                     installed.discard(direction)
                     rates.pop(direction, None)
                     filter_prefs.pop(direction, None)
@@ -1379,6 +1482,11 @@ def reconcile(
         else:
             entries.pop(key, None)
     status["state"] = "failed" if failures else "applied" if desired else "unconfigured"
+    status["retry"] = {"state": "next_agent_cycle" if failures else "not_scheduled", "attempts": None, "after_seconds": None}
+    if rollback_attempts:
+        rollback_failed = any(item.get("state") == "failed" for item in rollback_attempts)
+        status["rollback"] = {"state": "failed" if rollback_failed else "verified", "attempted": True,
+                              "results": rollback_attempts[:8]}
     status["updated_at"] = int(time.time())
     status["active_limits"] = _active_bandwidth_limits(entries, previous_status)
     state["revision"] = normalized["revision"]
@@ -1386,20 +1494,23 @@ def reconcile(
     try:
         _write_state(state_path, state)
     except OSError:
-        # If this was a new policy, remove only filters added in this pass.
-        # Existing filters remain represented by the previously persisted state.
-        rollback_failed = False
-        for target, direction in reversed(newly_installed):
+        rollback_errors: list[str] = []
+        restored = 0
+        for operation in reversed(rollback_operations):
             try:
-                _remove_filter(target["prefix"], target["interface"], target["owner_key"], direction)
-            except BandwidthPolicyError:
-                rollback_failed = True
+                _rollback_bandwidth_mutation(operation)
+                restored += 1
+            except (BandwidthPolicyError, OSError, ValueError) as exc:
+                rollback_errors.append(str(exc)[:180])
         persisted = _read_state(state_path)
         persisted_entries = persisted.get("entries") if isinstance(persisted.get("entries"), dict) else {}
         status["active_limits"] = _active_bandwidth_limits(persisted_entries, persisted.get("status"))
+        status["rollback"] = {"state": "failed" if rollback_errors else "verified", "attempted": bool(rollback_operations),
+                              "restored": restored, "errors": rollback_errors[:5]}
+        status["retry"] = {"state": "next_agent_cycle", "attempts": None, "after_seconds": None}
         status.update(
             state="failed",
-            message="local ownership state could not be saved; " + ("rollback was not confirmed" if rollback_failed else "new filters were rolled back"),
+            message="本地 tc 所有权状态保存失败；" + ("回滚存在未确认项" if rollback_errors else "已恢复保存前的限额并逐项读回确认"),
         )
     return status
 

@@ -397,7 +397,11 @@ export interface SecurityStatusItem {
     controls?: Array<{
       control?: string; status?: string; reason?: string; last_confirmed_at?: number;
       expected?: Record<string, any> | null; actual?: Record<string, any> | null;
-      samples?: Array<{ container?: string; state?: string; expected?: any; actual?: any; reason?: string; readback_confirmed?: boolean }>;
+      retry?: { state?: string; attempts?: number | null; after_seconds?: number | null; pending?: number };
+      rollback?: { state?: string; target_revision?: number | null; target?: any; current_limit?: any; failed?: number };
+      samples?: Array<{ container?: string; state?: string; expected?: any; actual?: any; reason?: string; readback_confirmed?: boolean;
+        retry?: { state?: string; attempts?: number | null; after_seconds?: number | null; pending?: number };
+        rollback?: { state?: string; target_revision?: number | null; target?: any; current_limit?: any; failed?: number } }>;
     }>;
   };
   agent_version?: string;

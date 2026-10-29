@@ -27,6 +27,15 @@ class Request:
         return self.raw
 
 
+def run_immediate(coroutine):
+    """Run endpoint tests whose only await is the immediately resolved body stub."""
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("test endpoint unexpectedly yielded control")
+
+
 class HostFirewallPolicyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -82,6 +91,13 @@ class HostFirewallPolicyTests(unittest.TestCase):
         if isinstance(abuse, dict) and any(abuse.get(key) is True for key in ("speedtest", "mining", "bt")):
             self.set_host_interface_inventory()
         return asyncio.run(server.update_host_firewall_policy("host-a", Request(payload or self.policy(), role)))
+
+    def save_immediate(self, payload=None, role="admin"):
+        candidate = payload or self.policy()
+        abuse = candidate.get("abuse") if isinstance(candidate, dict) else None
+        if isinstance(abuse, dict) and any(abuse.get(key) is True for key in ("speedtest", "mining", "bt")):
+            self.set_host_interface_inventory()
+        return run_immediate(server.update_host_firewall_policy("host-a", Request(payload or self.policy(), role)))
 
     def install_rfw_capabilities(self, host_id, protocols, observed_at=None):
         observed_at = self.now if observed_at is None else observed_at
@@ -172,6 +188,50 @@ class HostFirewallPolicyTests(unittest.TestCase):
         conn = server.db()
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM security_actions WHERE action_type='delete_host_firewall_rule'").fetchone()[0], 1)
         conn.close()
+
+    def test_policy_retry_queues_current_revision_without_rollback_metadata(self):
+        self.save_immediate()
+        conn = server.db()
+        conn.execute("UPDATE security_actions SET status='failed',result_message='apply failed'")
+        conn.commit()
+        conn.close()
+        self.install_rfw_capabilities("host-a", ["tcp"])
+
+        response = run_immediate(server.retry_host_firewall_policy(Request({"host_id": "host-a"})))
+        self.assertEqual(response.status_code, 202)
+        conn = server.db()
+        action = conn.execute("SELECT * FROM security_actions ORDER BY id DESC LIMIT 1").fetchone()
+        params = json.loads(action["params_json"])
+        conn.close()
+        self.assertEqual(action["status"], "queued")
+        self.assertEqual(params["policy"]["revision"], json.loads(response.body)["revision"])
+        self.assertNotIn("rollback", params)
+
+    def test_policy_rollback_records_historical_target_revision(self):
+        previous = self.policy()
+        previous["rules"][0]["port_start"] = 8443
+        self.save_immediate(previous)
+        conn = server.db()
+        conn.execute("UPDATE security_actions SET status='failed'")
+        conn.commit()
+        conn.close()
+        self.save_immediate()
+        conn = server.db()
+        conn.execute("UPDATE security_actions SET status='failed'")
+        conn.commit()
+        conn.close()
+        self.install_rfw_capabilities("host-a", ["tcp"])
+
+        response = run_immediate(server.rollback_host_firewall_policy(Request({"host_id": "host-a"})))
+        self.assertEqual(response.status_code, 202)
+        body = json.loads(response.body)
+        self.assertEqual(body["restored_revision"], 1)
+        conn = server.db()
+        action = conn.execute("SELECT * FROM security_actions ORDER BY id DESC LIMIT 1").fetchone()
+        params = json.loads(action["params_json"])
+        conn.close()
+        self.assertEqual(action["status"], "queued")
+        self.assertEqual(params["rollback"], {"requested": True, "target_revision": 1})
 
     def test_manual_rule_delete_rejects_viewer_stale_and_platform_owned_rules(self):
         manual = {

@@ -229,8 +229,58 @@ class ManualBandwidthTests(unittest.TestCase):
             result = limiter.reconcile(TARGET, HOST, NODE, [], state_path=path,
                                        resolve=lambda host, item, containers: dict(target))
         self.assertEqual(result["state"], "failed")
-        self.assertIn("rolled back", result["message"])
+        self.assertEqual(result["rollback"]["state"], "verified")
         self.assertEqual(remove.call_count, 2)
+
+    def test_partial_filter_cleanup_restores_removed_direction_and_reports_rollback(self):
+        path = self.state_path()
+        entry = {
+            "key": "host:eth0", "owner_key": "node-a:host:eth0", "scope": "host",
+            "prefix": [], "interface": "eth0", "interface_index": 2,
+            "namespace_inode": "host", "expected_node_id": NODE,
+            "directions": ["download", "upload"], "rates_mbps": {"download": 80, "upload": 50},
+            "filter_prefs": {"download": 49150, "upload": 49151},
+            "confirmed_at": {"download": 100, "upload": 100},
+        }
+        Path(path).write_text(json.dumps({"schema": 1, "host_id": HOST, "expected_node_id": NODE,
+                                          "entries": {"host:eth0": entry}}), encoding="utf-8")
+        remove = patch.object(limiter, "_remove_filter", side_effect=[True, limiter.BandwidthPolicyError("second direction failed")])
+        restore = patch.object(limiter, "_apply_filter", return_value=49150)
+        with patch.object(limiter.socket, "if_nametoindex", return_value=2), remove as remove_mock, restore as restore_mock:
+            result = limiter.reconcile({**TARGET, "revision": 2, "limits": []}, HOST, NODE, [], state_path=path)
+
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["rollback"]["state"], "verified")
+        self.assertEqual(result["rollback"]["results"][0]["direction"], "cleanup")
+        self.assertEqual(restore_mock.call_count, 1)
+        self.assertEqual(restore_mock.call_args.args[4], 80)
+        self.assertEqual(remove_mock.call_count, 2)
+        persisted = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.assertIn("host:eth0", persisted["entries"])
+
+    def test_unverified_old_filter_cleanup_blocks_replacing_same_target(self):
+        path = self.state_path()
+        old_entry = {
+            "key": "host:eth0", "owner_key": "node-a:host:eth0", "scope": "host",
+            "prefix": [], "interface": "eth0", "interface_index": 2,
+            "namespace_inode": "host", "expected_node_id": NODE,
+            "directions": ["download"], "rates_mbps": {"download": 80},
+            "filter_prefs": {"download": 49150}, "confirmed_at": {"download": 100},
+        }
+        Path(path).write_text(json.dumps({"schema": 1, "host_id": HOST, "expected_node_id": NODE,
+                                          "entries": {"host:eth0": old_entry}}), encoding="utf-8")
+        target = {**old_entry, "interface_index": 3}
+        with patch.object(limiter, "_remove_entry", side_effect=limiter.BandwidthPolicyError("old identity unreadable")), \
+                patch.object(limiter, "_ensure_clsact") as clsact, patch.object(limiter, "_apply_filter") as apply:
+            result = limiter.reconcile(TARGET, HOST, NODE, [], state_path=path,
+                                       resolve=lambda host, item, containers: dict(target))
+
+        self.assertEqual(result["state"], "failed")
+        self.assertTrue(any("旧的 tc 所有限额" in item.get("message", "") for item in result["items"]))
+        clsact.assert_not_called()
+        apply.assert_not_called()
+        persisted = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.assertEqual(persisted["entries"]["host:eth0"]["interface_index"], 2)
 
 
 if __name__ == "__main__":

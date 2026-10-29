@@ -17,6 +17,26 @@ const tones: Record<Level, string> = {
   unknown: 'border-slate-700 bg-slate-950/30 text-slate-300',
 };
 const labels: Record<Level, string> = { normal: '正常', warning: '警告', critical: '危险', unknown: '未评估' };
+const controlRetryLabel = (retry?: { state?: string; attempts?: number | null; after_seconds?: number | null; pending?: number }) => {
+  if (!retry?.state || retry.state === 'not_scheduled') return '未安排自动重试';
+  if (retry.state === 'waiting') return `等待冷却 · ${fmtNumber(retry.after_seconds || 0, 0)} 秒后复查${retry.pending ? ` · ${retry.pending} 项` : ''}`;
+  if (retry.state === 'next_agent_cycle' || retry.state === 'next_agent_sample') return `下个 Agent 周期复查${retry.pending ? ` · ${retry.pending} 项` : ''}`;
+  if (retry.state === 'pending_agent') return '等待 Agent 执行';
+  if (retry.state === 'exhausted_or_failed') return `失败 · 当前未安排自动重试${retry.attempts != null ? ` · ${retry.attempts} 次尝试` : ''}`;
+  return retry.state;
+};
+const controlRollbackLabel = (rollback?: { state?: string; target_revision?: number | null; failed?: number }) => {
+  if (!rollback?.state || rollback.state === 'not_reported') return '未收到回滚状态';
+  const text: Record<string, string> = {
+    not_requested: '未请求回滚', not_started: '尚未触发恢复', available: '原限额已记录，可恢复',
+    in_progress: '恢复中，等待读回', awaiting_readback: '操作已完成，等待实际状态读回',
+    verified: '已恢复并读回确认', failed: '恢复失败，原限额仍未确认', manual_change: '检测到管理员手动调整',
+    not_applicable: '不适用', available_or_per_sample: '按容器分别保留原限额', unverified: '恢复状态待核实',
+  };
+  const label = text[rollback.state] || rollback.state;
+  const failed = rollback.failed ? ` · ${rollback.failed} 项失败` : '';
+  return `${rollback.target_revision ? `${label} · 目标版本 ${rollback.target_revision}` : label}${failed}`;
+};
 const coverageLabel = (value?: string) => value === 'complete' ? '完整'
   : value === 'partial' ? '部分' : value === 'unavailable' ? '不可用' : '未提供';
 const thresholdLevel = (value: number, warning: number, critical: number): Level =>
@@ -238,8 +258,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const reconciliationControls = reconciliation.controls || [];
         const reconciliationLevel: Level = reconciliation.status === 'verified' ? 'normal'
           : reconciliation.status === 'attention' ? 'warning' : 'unknown';
-        const controlLabels: Record<string, string> = { tc: 'tc 网卡限速', cgroup_cpu: 'cgroup CPU', cgroup_io: 'cgroup 磁盘 I/O', nftables_admission: 'nftables 容器准入', rfw: 'RFW 防火墙' };
-        const controlStatusLabels: Record<string, string> = { verified: '读回一致', attention: '需核查', failed: '失败', stale: '样本过期', unverified: '未核实', drift: '规则有差异', unconfigured: '未配置' };
+        const controlLabels: Record<string, string> = { tc: 'tc 网卡限速', cgroup_cpu: 'cgroup CPU', cgroup_memory: 'cgroup 内存', cgroup_io: 'cgroup 磁盘 I/O', nftables_admission: 'nftables 容器准入', rfw: 'RFW 防火墙' };
+        const controlStatusLabels: Record<string, string> = { verified: '读回一致', attention: '需核查', applying: '等待执行', failed: '失败', stale: '样本过期', unverified: '未核实', drift: '规则有差异', unconfigured: '未配置' };
         const collectionHealth = t.collection_health || {};
         const collectionStatus = String(collectionHealth.status || 'unavailable');
         const collectionLevel: Level = collectionStatus === 'healthy' ? 'normal'
@@ -390,8 +410,14 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                 <p className="font-semibold text-slate-200">{controlLabels[control.control || ''] || control.control || '规则'} · {controlStatusLabels[control.status || ''] || control.status || '未知'}</p>
                 {control.control === 'tc' && <p>期望版本 {control.expected?.revision ?? '—'} · 当前已读回 {control.actual?.active_limits ?? 0} 条限额</p>}
                 {control.control === 'rfw' && <p>期望版本 {control.expected?.revision ?? '—'} · 运行规则 {control.actual?.rule_count ?? '—'} · 差异 {control.actual?.drift_count ?? 0} / 缺失 {control.actual?.missing_count ?? 0}</p>}
-                {['cgroup_cpu', 'cgroup_io', 'nftables_admission'].includes(control.control || '') && <p>已核实活动 {control.actual?.verified_active ?? 0} 个 · 未核实 {control.actual?.unverified ?? 0} 个 · 人工改动 {control.actual?.manual_override ?? 0} 个</p>}
-                {control.samples?.map((sample, sampleIndex) => <p key={`${sample.container}-${sampleIndex}`} className="mt-1 break-all text-slate-400">{sample.container} · {sample.state}{sample.expected ? ` · 目标 ${typeof sample.expected === 'string' ? sample.expected : JSON.stringify(sample.expected)}` : ''}{sample.actual ? ` · 当前 ${typeof sample.actual === 'string' ? sample.actual : JSON.stringify(sample.actual)}` : ''}{sample.reason ? ` · ${sample.reason}` : ''}</p>)}
+                {['cgroup_cpu', 'cgroup_memory', 'cgroup_io', 'nftables_admission'].includes(control.control || '') && <p>已核实活动 {control.actual?.verified_active ?? 0} 个 · 未核实 {control.actual?.unverified ?? 0} 个 · 人工改动 {control.actual?.manual_override ?? 0} 个 · 恢复失败 {control.actual?.restore_failed ?? 0} 个</p>}
+                {control.retry && <p className="mt-1 text-xs text-slate-400">重试：{controlRetryLabel(control.retry)}</p>}
+                {control.rollback && <p className="text-xs text-slate-400">恢复/回滚：{controlRollbackLabel(control.rollback)}</p>}
+                {control.samples?.map((sample, sampleIndex) => <div key={`${sample.container}-${sampleIndex}`} className="mt-1 break-all text-xs text-slate-400">
+                  <p>{sample.container} · {sample.state}{sample.expected ? ` · 目标 ${typeof sample.expected === 'string' ? sample.expected : JSON.stringify(sample.expected)}` : ''}{sample.actual ? ` · 当前 ${typeof sample.actual === 'string' ? sample.actual : JSON.stringify(sample.actual)}` : ''}{sample.reason ? ` · ${sample.reason}` : ''}</p>
+                  {sample.retry && <p>重试：{controlRetryLabel(sample.retry)}</p>}
+                  {sample.rollback && <p>恢复：{controlRollbackLabel(sample.rollback)}</p>}
+                </div>)}
                 {control.reason && <p className="mt-1 text-slate-400">{control.reason}</p>}
                 {control.last_confirmed_at ? <p className="mt-1 text-[10px] text-slate-500">最近成功读回 {auditTime(control.last_confirmed_at)}</p> : null}
               </div>)}

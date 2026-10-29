@@ -444,11 +444,18 @@ def observe(
                         continue
                     record.update(stage="restore_failed", last_error=output or "恢复后的 memory.high 读回不一致")
 
+            expected_high = str(record.get("pending") or "") if record.get("stage") == "restoring" else str(record.get("applied") or "")
+            readback_confirmed = bool(expected_high) and current_high == expected_high
+            if readback_confirmed:
+                record["readback_confirmed_at"] = timestamp
             record["confirmed_duration"] = max(0, timestamp - int(record.get("high_since") or record.get("applied_at") or timestamp))
             current_tier = max(1, min(3, int(record.get("tier") or 1)))
             status.update(state=record.get("stage"), tier=current_tier,
                           tier_percent_of_max={1: 90, 2: 80, 3: 70}.get(current_tier),
                           original_limit=record.get("original"), active_limit=record.get("applied"),
+                          expected_limit=expected_high or record.get("applied"), actual_limit=current_high,
+                          readback_confirmed=readback_confirmed,
+                          readback_confirmed_at=int(record.get("readback_confirmed_at") or timestamp) if readback_confirmed else 0,
                           confirmed_duration_seconds=record["confirmed_duration"],
                           high_samples=int(record.get("high_samples") or record.get("escalation_samples") or 0),
                           required_samples=min_samples, recovery_samples=int(record.get("low_samples") or 0),

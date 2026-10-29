@@ -11,12 +11,15 @@ const fullName = (name: string) => ({ 内蒙古: '内蒙古自治区', 广西: '
 type MapFeature = { properties?: { name?: string }; [key: string]: unknown };
 type MapData = { features: MapFeature[]; [key: string]: unknown };
 const registeredMaps = new Set<string>();
+const chinaMapUrl = new URL('../../china-map.json', import.meta.url).href;
 let mapDataPromise: Promise<MapData> | null = null;
 function loadMapData() {
   if (!mapDataPromise) {
-    mapDataPromise = import('../../china-map.json').then(({ default: china }) => {
-      const mapData = china as unknown as MapData;
-      echarts.registerMap('narwhal-china', china as Parameters<typeof echarts.registerMap>[1]);
+    mapDataPromise = fetch(chinaMapUrl, { credentials: 'same-origin' }).then(response => {
+      if (!response.ok) throw new Error(`Map data request failed (${response.status})`);
+      return response.json() as Promise<MapData>;
+    }).then(mapData => {
+      echarts.registerMap('narwhal-china', mapData as unknown as Parameters<typeof echarts.registerMap>[1]);
       registeredMaps.add('narwhal-china');
       return mapData;
     });

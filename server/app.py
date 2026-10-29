@@ -2923,10 +2923,39 @@ def _materialize_host_firewall_policy(
 
 def _latest_host_firewall_action(conn: sqlite3.Connection, host_id: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT id,status,result_message,updated_at,params_json,action_type,requested_by FROM security_actions "
+        "SELECT id,status,result_message,created_at,updated_at,attempts,params_json,action_type,requested_by FROM security_actions "
         "WHERE host_id=? AND action_type IN ('apply_host_firewall_policy','delete_host_firewall_rule') ORDER BY id DESC LIMIT 1",
         (host_id,),
     ).fetchone()
+
+
+def _host_firewall_action_summary(conn: sqlite3.Connection, host_id: str) -> Dict[str, Any]:
+    row = _latest_host_firewall_action(conn, host_id)
+    if row is None:
+        return {}
+    try:
+        params = json.loads(row["params_json"] or "{}")
+    except (TypeError, ValueError):
+        params = {}
+    params = params if isinstance(params, dict) else {}
+    rollback = params.get("rollback") if isinstance(params.get("rollback"), dict) else {}
+    action_policy = params.get("policy") if isinstance(params.get("policy"), dict) else {}
+    policy_revision = action_policy.get("revision")
+    rollback_revision = rollback.get("target_revision") if rollback.get("requested") is True else None
+    return {
+        "id": int(row["id"]),
+        "status": str(row["status"] or "unknown"),
+        "action_type": str(row["action_type"] or ""),
+        "attempts": int(row["attempts"] or 0),
+        "created_at": int(row["created_at"] or 0),
+        "updated_at": int(row["updated_at"] or 0),
+        "result_message": str(row["result_message"] or "")[:240],
+        "policy_revision": policy_revision if type(policy_revision) is int and policy_revision >= 0 else None,
+        "rollback": {
+            "requested": rollback.get("requested") is True,
+            "target_revision": rollback_revision if type(rollback_revision) is int and rollback_revision >= 0 else None,
+        },
+    }
 
 
 def _enqueue_host_firewall_policy(
@@ -2937,6 +2966,7 @@ def _enqueue_host_firewall_policy(
     requested_by: str,
     now: int,
     fleet_revision: int,
+    rollback_target_revision: int | None = None,
 ) -> int:
     existing = conn.execute(
         "SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
@@ -2971,6 +3001,8 @@ def _enqueue_host_firewall_policy(
     action_params = {"expected_node_id": node_id, "policy": policy_with_revision, "requires_rfw": requires_rfw}
     if fleet_revision > 0:
         action_params["fleet_revision"] = int(fleet_revision)
+    if rollback_target_revision is not None:
+        action_params["rollback"] = {"requested": True, "target_revision": int(rollback_target_revision)}
     cur = conn.execute(
         "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
         "VALUES(0,?,'host','','__host__','apply_host_firewall_policy',?,'queued',?,?,?)",
@@ -5475,7 +5507,10 @@ async def rollback_host_firewall_policy(request: Request) -> JSONResponse:
         if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
             raise HTTPException(status_code=409, detail="RFW 实时协议能力不满足历史策略，未下发回滚")
         requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
-        action_id = _enqueue_host_firewall_policy(conn, host_id, node_id, materialized, requested_by, now, 0)
+        action_id = _enqueue_host_firewall_policy(
+            conn, host_id, node_id, materialized, requested_by, now, 0,
+            rollback_target_revision=int(history["revision"]),
+        )
         revision = int(conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()[0])
         conn.commit()
         return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "restored_revision": int(history["revision"]), "action_id": action_id, "queued": True})
@@ -6440,11 +6475,13 @@ def security_status() -> JSONResponse:
                 host_payload = json.loads(host_row["payload_json"] or "{}")
             except (TypeError, ValueError):
                 host_payload = {}
+            firewall_readback = _host_firewall_live_readback(conn, host_key, health_now)
+            firewall_readback["latest_action"] = _host_firewall_action_summary(conn, host_key)
             reconciliation_by_host[host_key] = control_reconciliation.build_control_reconciliation(
                 {**(host_payload if isinstance(host_payload, dict) else {}), "observed_at": int(host_row["security_ts"] or 0)},
                 container_controls_by_host.get(host_key, []),
                 firewall_policy_by_host.get(host_key),
-                _host_firewall_live_readback(conn, host_key, health_now),
+                firewall_readback,
                 health_now,
             )
     finally:
@@ -6701,7 +6738,7 @@ def stats(minutes: int = 720) -> JSONResponse:
 def serve_static_asset(path: str):
     file_path = (ASSETS_DIR / path).resolve()
     if file_path.is_file() and ASSETS_DIR in file_path.parents:
-        return FileResponse(file_path)
+        return FileResponse(file_path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
     raise HTTPException(status_code=404, detail="Asset not found")
 
 
