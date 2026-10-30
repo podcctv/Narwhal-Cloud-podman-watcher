@@ -176,6 +176,21 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install frontend dependencies from lockfile
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+
+      - name: Build frontend into the server image
+        run: |
+          npm run build --prefix frontend
+          find server/static -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          cp -a frontend/dist/. server/static/
+
       - name: Require version bump for runtime changes
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.before != '0000000000000000000000000000000000000000'
         shell: bash

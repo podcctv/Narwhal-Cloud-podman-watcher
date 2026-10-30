@@ -1,6 +1,11 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.171**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.172**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.172：确保前端构建产物进入生产镜像
+
+- GHCR 发布前在镜像构建工作区重新构建前端，并将 `frontend/dist` 同步到 `server/static`；避免 CI 只验证前端构建、生产镜像却继续打包旧静态资源。
+- TCPing 主机来源列表在侧栏内滚动，主机卡片保留自然高度，不再因 Flex 收缩被压扁。
 
 ### v1.7.171：修复 TCPing 来源主机列表挤压
 
