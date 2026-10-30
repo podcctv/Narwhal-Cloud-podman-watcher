@@ -1,6 +1,11 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.177**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.178**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.178：修复窄屏 TCPing 主机列表挤压
+
+- TCPing 在 980px 以下切换为上下布局，避免平板宽度下测试结果区域过窄。
+- 主机来源卡片提高最小高度并保留独立列表滚动；手机继续使用横向卡片浏览。
 
 ### v1.7.177：修复 TCPing 主机列表挤压
 
