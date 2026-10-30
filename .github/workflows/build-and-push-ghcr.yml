@@ -187,10 +187,7 @@ jobs:
 
       - name: Build frontend into the server image
         working-directory: frontend
-        run: |
-          npm run build
-          find ../server/static -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-          cp -a dist/. ../server/static/
+        run: npm run build
 
       - name: Require version bump for runtime changes
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.before != '0000000000000000000000000000000000000000'
