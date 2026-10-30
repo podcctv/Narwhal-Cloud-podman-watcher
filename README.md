@@ -1,6 +1,13 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.169**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.170**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.170：修复容器资源保护采样与限额归属
+
+- 按 Incus UUID / Podman 容器 ID 从 init 进程的子 cgroup 精确定位容器资源边界；CPU PSI、内存用量与 `memory.high`、磁盘 `io.stat` 与 `io.max` 都在该边界采集或应用。无法按 ID 唯一匹配时停止自动修改，不回退到宿主机或进程子 cgroup。
+- CPU 自动保护默认阈值调整为分配容量的 65%；仍需持续 10 分钟，并且宿主机 CPU 忙碌率达到 80%、PSI 达到 5%（PSI 不可用时使用已记录的忙碌率回退），才按 50% → 25% → 10% 阶梯限额。
+- CPU、内存和磁盘 I/O 使用不同内核控制器，可在同一容器同时保护；每项仍独立保存原值、检查管理员改动、读回确认并按恢复条件还原。
+- Client 托管更新若配置仍为 `AUTO_UPDATE_ENABLED=true`，会重新启用被停用的 15 分钟更新 timer，避免节点永久停留在旧 Agent 版本。
 
 ### v1.7.169：重塑 TCPing 测试与结果交互
 

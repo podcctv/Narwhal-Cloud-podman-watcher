@@ -479,7 +479,7 @@ cp "$ROOT_DIR/client/incus_metrics.py" "$CLIENT_APP_DIR/incus_metrics.py"
 cp "$ROOT_DIR/client/disk_cleanup.py" "$CLIENT_APP_DIR/disk_cleanup.py"
 cp "$ROOT_DIR/client/disk_cleanup_worker.py" "$CLIENT_APP_DIR/disk_cleanup_worker.py"
 cp "$ROOT_DIR/client/security_banner.py" "$CLIENT_APP_DIR/security_banner.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard resource_cgroup cpu_guard io_guard memory_guard; do
   cp "$ROOT_DIR/client/$module.py" "$CLIENT_APP_DIR/$module.py"
 done
 cp "$ROOT_DIR/client/tcp_probe.py" "$CLIENT_APP_DIR/tcp_probe.py"
@@ -529,6 +529,19 @@ systemctl enable narwhal-monitor-client.service >/dev/null
 systemctl restart narwhal-monitor-client.service
 if [[ "${NARWHAL_MANAGED_UPDATE:-0}" != "1" ]]; then
   bash "$ROOT_DIR/scripts/setup-auto-update.sh" client "$ROOT_DIR"
+fi
+CLIENT_AUTO_UPDATE_ENV_FILE="/opt/narwhal-monitor/client-auto-update.env"
+CLIENT_AUTO_UPDATE_TIMER="/etc/systemd/system/narwhal-monitor-client-update.timer"
+if [[ -f "$CLIENT_AUTO_UPDATE_ENV_FILE" ]] \
+  && is_truthy "$(load_kv_from_file "$CLIENT_AUTO_UPDATE_ENV_FILE" AUTO_UPDATE_ENABLED || true)"; then
+  if [[ ! -f "$CLIENT_AUTO_UPDATE_TIMER" ]]; then
+    bash "$ROOT_DIR/scripts/setup-auto-update.sh" client "$ROOT_DIR"
+  fi
+  if [[ -f "$CLIENT_AUTO_UPDATE_TIMER" ]]; then
+    systemctl daemon-reload
+    systemctl enable --now narwhal-monitor-client-update.timer >/dev/null
+    echo "[OK] Client automatic-update timer enabled from its existing AUTO_UPDATE_ENABLED=true setting."
+  fi
 fi
 check_incus_visibility "$runtimes" "$incus_project"
 

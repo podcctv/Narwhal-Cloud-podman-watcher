@@ -18,6 +18,11 @@ import time
 import uuid
 from typing import Any, Callable
 
+try:
+    from client.resource_cgroup import resolve_container_cgroup
+except ImportError:
+    from resource_cgroup import resolve_container_cgroup
+
 
 STATE_PATH = os.getenv("NARWHAL_CPU_GUARD_STATE", "/var/lib/narwhal-agent/cpu-guard.json")
 _host_cpu_previous: tuple[int, int, int, float] | None = None
@@ -94,25 +99,16 @@ def _host_psi() -> dict[str, Any]:
             for resource in ("cpu", "memory", "io")}
 
 
-def _container_psi(pid_value: Any) -> dict[str, Any]:
-    try:
-        pid = int(pid_value or 0)
-    except (TypeError, ValueError, OverflowError):
-        pid = 0
-    if pid <= 1:
-        return {"status": "unavailable", "reason": "容器宿主机 PID 不可用"}
-    root = os.path.realpath(os.getenv("NARWHAL_CGROUP_ROOT", "/sys/fs/cgroup"))
-    try:
-        with open(f"/proc/{pid}/cgroup", "r", encoding="ascii", errors="ignore") as stream:
-            relative = next((line[3:].strip() for line in stream if line.startswith("0::")), "")
-        if not relative or relative == "/" or "(deleted)" in relative:
-            return {"status": "unavailable", "reason": "未能确认容器 cgroup v2 路径"}
-        target = os.path.realpath(os.path.join(root, relative.lstrip("/")))
-        if os.path.commonpath((root, target)) != root or target == root:
-            return {"status": "unavailable", "reason": "容器 cgroup 路径越出受控目录"}
-    except (OSError, ValueError, StopIteration) as exc:
-        return {"status": "unavailable", "reason": type(exc).__name__}
-    resources = {resource: _read_psi(os.path.join(target, f"{resource}.pressure"))
+def _container_psi(container: dict[str, Any]) -> dict[str, Any]:
+    target, error = resolve_container_cgroup(
+        container.get("pid"),
+        container.get("runtime"),
+        container.get("stable_id") or container.get("id"),
+        container.get("name"),
+    )
+    if target is None:
+        return {"status": "unavailable", "reason": error}
+    resources = {resource: _read_psi(str(target / f"{resource}.pressure"))
                  for resource in ("cpu", "memory", "io")}
     available = [value for value in resources.values() if value.get("status") == "ready"]
     if not available:
@@ -123,7 +119,7 @@ def _container_psi(pid_value: Any) -> dict[str, Any]:
 
 
 def _resource_pressure(container: dict[str, Any], host_pressure: dict[str, Any]) -> dict[str, Any]:
-    cgroup = _container_psi(container.get("pid"))
+    cgroup = _container_psi(container)
     cpu_percent = _finite_number(container.get("cpu_pressure_percent"), -1.0)
     cgroup_cpu = cgroup.get("cpu") if isinstance(cgroup.get("cpu"), dict) else {}
     host_cpu = host_pressure.get("cpu") if isinstance(host_pressure.get("cpu"), dict) else {}
@@ -486,8 +482,8 @@ def _alert(
             "sample_count": high_samples,
             "required_samples": required_samples,
             "confirmed_duration_seconds": max(0, int(duration)),
-            "threshold_percent_of_container_capacity": round(_finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "90"), 90), 2),
-            "threshold_percent_of_one_cpu": round(_finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "90"), 90), 2),
+            "threshold_percent_of_container_capacity": round(_finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "65"), 65), 2),
+            "threshold_percent_of_one_cpu": round(_finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "65"), 65), 2),
             "host_busy_threshold_percent": round(_finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80), 2),
             "top_process": top_process,
             "limit_applied": limited,
@@ -517,7 +513,7 @@ def observe(
     allow_new_limits = allow_new_limits and cpu_auto_enabled
     timestamp = int(time.time()) if now is None else int(now)
     interval = max(60.0, _finite_number(interval_seconds, 300.0))
-    high_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "90"), 90.0)))
+    high_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "65"), 65.0)))
     host_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80.0)))
     recovery_ratio = min(0.8, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_RATIO", "0.5"), 0.5)))
     recovery_host_threshold = min(99.0, max(0.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_HOST_BUSY_PERCENT", "70"), 70.0)))
@@ -856,15 +852,6 @@ def observe(
         if not allow_new_limits:
             instances.pop(key, None)
             security["cpu_guard"] = {"state": "disabled", "reason_is_user_abuse": False}
-            continue
-
-        other_active = any(
-            isinstance(security.get(guard_name), dict)
-            and security[guard_name].get("state") in {"active", "limited", "restore_failed", "applying", "escalating", "restoring", "limit_unverified", "limited_unverified", "apply_unverified", "orphaned_cgroup"}
-            for guard_name in ("io_guard", "memory_guard")
-        )
-        if other_active:
-            security["cpu_guard"] = {"state": "waiting_for_other_limit", "message": "该容器已有内存或磁盘 I/O 保护；暂不叠加 CPU 限额。", "reason_is_user_abuse": False}
             continue
 
         if isinstance(record, dict) and record.get("stage") == "candidate":

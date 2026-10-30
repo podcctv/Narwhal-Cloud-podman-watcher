@@ -18,6 +18,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+try:
+    from client.resource_cgroup import resolve_container_cgroup
+except ImportError:
+    from resource_cgroup import resolve_container_cgroup
+
 
 STATE_PATH = os.getenv("NARWHAL_IO_GUARD_STATE", "/var/lib/narwhal-agent/io-guard.json")
 CGROUP_ROOT = Path(os.getenv("NARWHAL_CGROUP_ROOT", "/sys/fs/cgroup"))
@@ -138,25 +143,22 @@ def _parse_io_stat(path: Path) -> dict[str, dict[str, int]]:
     return output
 
 
-def _read_cgroup(pid: int) -> tuple[str | None, dict[str, dict[str, int]], str]:
-    if pid <= 1:
-        return None, {}, "容器宿主机 PID 不可用"
+def _read_cgroup(container: dict[str, Any]) -> tuple[str | None, dict[str, dict[str, int]], str]:
+    target, error = resolve_container_cgroup(
+        container.get("pid"),
+        container.get("runtime"),
+        container.get("stable_id") or container.get("id"),
+        container.get("name"),
+    )
+    if target is None:
+        return None, {}, error
     try:
-        lines = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii", errors="ignore").splitlines()
-        cgroup_line = next((line for line in lines if line.startswith("0::")), "")
-        relative = cgroup_line[3:].strip()
-        if not relative or relative == "/" or "(deleted)" in relative:
-            return None, {}, "未能确认非根 cgroup v2 路径"
-        root = CGROUP_ROOT.resolve(strict=True)
-        target = (root / relative.lstrip("/")).resolve(strict=True)
-        if target == root or not target.is_relative_to(root):
-            return None, {}, "容器 cgroup 路径越出受控目录"
         # cgroup.controllers lists controllers available to *children*, not
         # controllers enabled for this cgroup. The io.max/io.stat files on the
         # exact leaf are the evidence we need; requiring "io" in that file
         # incorrectly rejects ordinary leaf cgroups with no children.
         if not (target / "io.max").is_file():
-            return None, {}, "该 cgroup 未提供可验证的 v2 I/O 控制器"
+            return None, {}, "匹配的容器资源 cgroup 未提供可验证的 v2 I/O 控制器"
         events = (target / "cgroup.events").read_text(encoding="ascii", errors="ignore")
         if not re.search(r"(?m)^populated 1\s*$", events):
             return None, {}, "容器 cgroup 当前没有活动进程"
@@ -464,7 +466,7 @@ def observe(
             pid = int(container.get("pid") or 0)
         except (TypeError, ValueError, OverflowError):
             pid = 0
-        cgroup_path, io_stats, cgroup_error = _read_cgroup(pid)
+        cgroup_path, io_stats, cgroup_error = _read_cgroup(container)
         if not cgroup_path or not io_stats:
             security["io_guard"] = {"state": "unavailable", "message": cgroup_error or "容器 I/O 数据不可用", "reason_is_user_abuse": False}
             record = instances.get(key)
@@ -714,11 +716,6 @@ def observe(
             continue
         if host.get("state") != "ready":
             security["io_guard"] = {"state": "warming", "message": host.get("message") or "等待宿主机磁盘采样", "reason_is_user_abuse": False}
-            continue
-
-        cpu_guard = security.get("cpu_guard") if isinstance(security.get("cpu_guard"), dict) else {}
-        if cpu_guard.get("state") in {"active", "limited", "restore_failed", "applying", "escalating", "restoring", "limit_unverified", "limited_unverified", "apply_unverified", "orphaned_cgroup"}:
-            security["io_guard"] = {"state": "waiting_for_other_limit", "message": "该容器已有 CPU 保护；暂不叠加磁盘 I/O 限额。", "reason_is_user_abuse": False}
             continue
 
         candidate = record if isinstance(record, dict) and record.get("stage") == "candidate" else {

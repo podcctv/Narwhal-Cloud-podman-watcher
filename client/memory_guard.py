@@ -17,6 +17,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+try:
+    from client.resource_cgroup import resolve_container_cgroup
+except ImportError:
+    from resource_cgroup import resolve_container_cgroup
+
 
 STATE_PATH = os.getenv("NARWHAL_MEMORY_GUARD_STATE", "/var/lib/narwhal-agent/memory-guard.json")
 CGROUP_ROOT = Path(os.getenv("NARWHAL_CGROUP_ROOT", "/sys/fs/cgroup"))
@@ -60,25 +65,19 @@ def _read_pressure(path: Path) -> dict[str, Any]:
     }
 
 
-def _cgroup(pid_value: Any) -> tuple[Path | None, dict[str, Any], str]:
+def _cgroup(container: dict[str, Any]) -> tuple[Path | None, dict[str, Any], str]:
+    target, error = resolve_container_cgroup(
+        container.get("pid"),
+        container.get("runtime"),
+        container.get("stable_id") or container.get("id"),
+        container.get("name"),
+    )
+    if target is None:
+        return None, {}, error
     try:
-        pid = int(pid_value or 0)
-    except (TypeError, ValueError, OverflowError):
-        pid = 0
-    if pid <= 1:
-        return None, {}, "容器宿主机 PID 不可用"
-    try:
-        lines = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii", errors="ignore").splitlines()
-        relative = next((line[3:].strip() for line in lines if line.startswith("0::")), "")
-        if not relative or relative == "/" or "(deleted)" in relative:
-            return None, {}, "未能确认非根 cgroup v2 路径"
-        root = CGROUP_ROOT.resolve(strict=True)
-        target = (root / relative.lstrip("/")).resolve(strict=True)
-        if target == root or not target.is_relative_to(root):
-            return None, {}, "容器 cgroup 路径越出受控目录"
         required = ("memory.current", "memory.max", "memory.high", "memory.pressure", "cgroup.events")
         if any(not (target / name).is_file() for name in required):
-            return None, {}, "该 cgroup 未提供完整的 v2 memory controller"
+            return None, {}, "匹配的容器资源 cgroup 未提供完整的 v2 memory controller"
         events = (target / "cgroup.events").read_text(encoding="ascii", errors="ignore")
         if not re.search(r"(?m)^populated 1\s*$", events):
             return None, {}, "容器 cgroup 当前没有活动进程"
@@ -245,7 +244,7 @@ def observe(
         seen.add(key)
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         container["security"] = security
-        cgroup_path, metrics, cgroup_error = _cgroup(container.get("pid"))
+        cgroup_path, metrics, cgroup_error = _cgroup(container)
         cgroup_pressure = metrics.get("pressure") if isinstance(metrics.get("pressure"), dict) else {}
         cgroup_some = _pressure_value(cgroup_pressure, "some")
         maximum = metrics.get("max_bytes")
@@ -488,12 +487,6 @@ def observe(
             continue
         if host_pressure.get("status") != "ready" or cgroup_pressure.get("status") != "ready":
             status.update(state="psi_unavailable", message="宿主机或容器 memory PSI 不可用；为避免误限额，本轮不自动修改。")
-            security["memory_guard"] = status
-            instances.pop(key, None)
-            continue
-        other_guards = [security.get("cpu_guard"), security.get("io_guard")]
-        if any(isinstance(item, dict) and item.get("state") in {"active", "limited", "restore_failed", "restoring", "escalating"} for item in other_guards):
-            status.update(state="waiting_for_other_limit", message="该容器已有 CPU 或磁盘 I/O 保护；暂不叠加内存 high 限额。")
             security["memory_guard"] = status
             instances.pop(key, None)
             continue
