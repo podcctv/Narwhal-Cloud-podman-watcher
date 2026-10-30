@@ -2,6 +2,7 @@
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import secrets
 import time
@@ -108,17 +109,79 @@ def _public_network_id(value):
         return ""
 
 
-def _request_source_network(request):
-    """Read a public peer address supplied by Cloudflare or the direct socket."""
+def _trusted_proxy_peer(request):
+    """Require both the installer-generated proxy token and its exact bridge peer."""
     headers = getattr(request, "headers", {})
-    # Cloudflare overwrites this header on proxied requests. Do not trust the
-    # generic X-Real-IP header, which an untrusted caller can supply verbatim.
-    raw = str(headers.get("cf-connecting-ip") or "").split(",", 1)[0].strip()
-    network_id = _public_network_id(raw)
-    if network_id:
-        return network_id
+    expected_token = str(os.environ.get("NARWHAL_PROXY_TRUST_TOKEN") or "")
+    supplied_token = str(headers.get("x-narwhal-proxy-token") or "")
+    if not expected_token or not supplied_token or not secrets.compare_digest(expected_token, supplied_token):
+        return False
+
     client = getattr(request, "client", None)
-    return _public_network_id(getattr(client, "host", ""))
+    peer = str(getattr(client, "host", "") or "").strip()
+    try:
+        peer_address = ipaddress.ip_address(peer)
+        if isinstance(peer_address, ipaddress.IPv6Address) and peer_address.ipv4_mapped:
+            peer_address = peer_address.ipv4_mapped
+    except ValueError:
+        return False
+
+    configured = str(os.environ.get("NARWHAL_TRUSTED_PROXY_CIDRS") or "")
+    for value in re.split(r"[,;\s]+", configured):
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if peer_address.version == network.version and peer_address in network:
+            return True
+    return False
+
+
+def _ip_is_in_networks(value, configured):
+    try:
+        address = ipaddress.ip_address(str(value or "").strip())
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+    except ValueError:
+        return False
+    for item in re.split(r"[,;\s]+", str(configured or "")):
+        if not item:
+            continue
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            continue
+        if address.version == network.version and address in network:
+            return True
+    return False
+
+
+def _request_source_network(request):
+    """Use a direct public peer or an authenticated Caddy peer verified by Cloudflare ranges."""
+    client = getattr(request, "client", None)
+    peer = str(getattr(client, "host", "") or "").strip()
+    direct_network = _public_network_id(peer)
+    if direct_network:
+        return direct_network
+
+    # Caddy overwrites its internal peer/token headers. They are accepted only
+    # when the request came from a configured Podman gateway. A CF-Connecting-IP
+    # value is trusted only when Caddy's actual peer is in the official CF ranges.
+    if not _trusted_proxy_peer(request):
+        return ""
+    headers = getattr(request, "headers", {})
+    proxy_peer = str(headers.get("x-narwhal-proxy-peer") or "").strip()
+    cf_client_ip = str(headers.get("cf-connecting-ip") or "").strip()
+    cloudflare_ranges = os.environ.get("NARWHAL_CLOUDFLARE_CIDRS", "")
+    if _ip_is_in_networks(proxy_peer, cloudflare_ranges):
+        return _public_network_id(cf_client_ip)
+    # If CF ranges could not be verified, do not count a forwarded CF header or
+    # the apparent edge address as a probe network. Keep the sample unknown.
+    if cf_client_ip and not cloudflare_ranges.strip():
+        return ""
+    return _public_network_id(proxy_peer)
 
 
 def _probe_online(last_seen, payload, now):
@@ -1146,8 +1209,12 @@ def report(conn, payload, now, source_network_id=""):
         source_network_id = str(observed_network) if observed_network.is_global else ""
     except (TypeError, ValueError):
         source_network_id = ""
-    conn.execute("UPDATE gfw_probe_roles SET source_network_id=?,source_network_updated_at=? WHERE node_id=?",
-                 (source_network_id[:64], now, row["source_node_id"]))
+    # A report without a verifiable public source is still valid probe evidence,
+    # but it must not erase a previously verified role identity. Its timestamp
+    # remains unchanged and the usual freshness window will expire it naturally.
+    if source_network_id:
+        conn.execute("UPDATE gfw_probe_roles SET source_network_id=?,source_network_updated_at=? WHERE node_id=?",
+                     (source_network_id[:64], now, row["source_node_id"]))
     conn.execute("UPDATE gfw_probe_jobs SET source_network_id=? WHERE id=? AND status='running'",
                  (source_network_id[:64], row["id"]))
     results = payload["results"]

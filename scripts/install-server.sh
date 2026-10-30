@@ -8,6 +8,7 @@ SERVER_INSTALL_ENV_FILE="/opt/narwhal-monitor/server-install.env"
 SERVER_DATA_DIR="/opt/narwhal-monitor/server-data"
 TLS_DIR="/opt/narwhal-monitor/caddy"
 TLS_CA_EXPORT_DIR="/opt/narwhal-monitor/tls-ca"
+CLOUDFLARE_PROXY_RANGES_FILE="$TLS_DIR/cloudflare-trusted-proxies.txt"
 CONTAINER_NAME="narwhal-monitor-server"
 TLS_CONTAINER_NAME="narwhal-monitor-caddy"
 DEPLOY_LOCK_FILE="/run/narwhal-monitor-server-deploy-v2.lock"
@@ -180,6 +181,149 @@ ensure_narwhal_network() {
   echo "[WARN] 所有候选子网均无法创建专用网络，回退到 Podman 默认网络（可能存在私网冲突风险）。"
   NARWHAL_NETWORK_NAME=""
   return 0
+}
+
+discover_trusted_proxy_cidrs() {
+  local network gateway_list gateway cidr result=""
+  local -a networks=()
+  [[ -n "$NARWHAL_NETWORK_NAME" ]] && networks+=("$NARWHAL_NETWORK_NAME")
+  # replace_server_container may fall back to Podman's default network.
+  networks+=("podman")
+  for network in "${networks[@]}"; do
+    gateway_list="$(podman network inspect "$network" --format '{{range .Subnets}}{{.Gateway}} {{end}}' 2>/dev/null || true)"
+    for gateway in $gateway_list; do
+      if [[ "$gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        cidr="$gateway/32"
+      elif [[ "$gateway" =~ ^[0-9A-Fa-f:]+$ ]]; then
+        cidr="$gateway/128"
+      else
+        continue
+      fi
+      case " $result " in
+        *" $cidr "*) ;;
+        *) result="${result:+$result }$cidr" ;;
+      esac
+    done
+  done
+  printf '%s' "$result"
+}
+
+validate_cloudflare_proxy_ranges_file() {
+  local file="$1"
+  local line ipv4_count=0 ipv6_count=0
+  [[ -s "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" ]] && continue
+    if [[ "$line" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+      ipv4_count=$((ipv4_count + 1))
+    elif [[ "$line" =~ ^[0-9A-Fa-f:]+/[0-9]{1,3}$ ]]; then
+      ipv6_count=$((ipv6_count + 1))
+    else
+      return 1
+    fi
+  done <"$file"
+  (( ipv4_count > 0 && ipv6_count > 0 ))
+}
+
+fetch_cloudflare_trusted_proxy_ranges() {
+  local temp_file ipv4_file ipv6_file ranges
+  mkdir -p "$TLS_DIR"
+  temp_file="$(mktemp "$TLS_DIR/cloudflare-ranges.XXXXXX")"
+  ipv4_file="${temp_file}.v4"
+  ipv6_file="${temp_file}.v6"
+  if command -v curl >/dev/null 2>&1 \
+    && curl -fsSL --connect-timeout 5 --max-time 20 https://www.cloudflare.com/ips-v4 -o "$ipv4_file" \
+    && curl -fsSL --connect-timeout 5 --max-time 20 https://www.cloudflare.com/ips-v6 -o "$ipv6_file" \
+    && cat "$ipv4_file" "$ipv6_file" >"$temp_file" \
+    && validate_cloudflare_proxy_ranges_file "$temp_file"; then
+    install -m 0644 "$temp_file" "$CLOUDFLARE_PROXY_RANGES_FILE"
+    ranges="$(tr '\n' ' ' <"$CLOUDFLARE_PROXY_RANGES_FILE" | xargs)"
+    rm -f "$temp_file" "$ipv4_file" "$ipv6_file"
+    printf '%s' "$ranges"
+    return 0
+  fi
+  rm -f "$temp_file" "$ipv4_file" "$ipv6_file"
+  if validate_cloudflare_proxy_ranges_file "$CLOUDFLARE_PROXY_RANGES_FILE"; then
+    echo "[WARN] Cloudflare IP range refresh failed; reusing the last validated list." >&2
+    ranges="$(tr '\n' ' ' <"$CLOUDFLARE_PROXY_RANGES_FILE" | xargs)"
+    printf '%s' "$ranges"
+    return 0
+  fi
+  echo "[WARN] Cloudflare IP ranges are unavailable; forwarded client identity will remain untrusted." >&2
+  return 1
+}
+
+patch_narwhal_proxy_identity_headers() {
+  local file="$1"
+  local port="$2"
+  local previous_port="${3:-}"
+  local temp_file
+  temp_file="$(mktemp "${file}.tmp.XXXXXX")"
+  if ! awk -v port="$port" -v previous_port="$previous_port" '
+    function brace_delta(value, opens, closes, copy) {
+      copy = value
+      opens = gsub(/\{/, "", copy)
+      copy = value
+      closes = gsub(/\}/, "", copy)
+      return opens - closes
+    }
+    BEGIN { matched = 0; in_target = 0; depth = 0 }
+    {
+      if (in_target) {
+        if ($0 ~ /header_up[[:space:]]+X-Narwhal-Proxy-Token([[:space:]]|$)/) token_seen = 1
+        if ($0 ~ /header_up[[:space:]]+X-Narwhal-Proxy-Peer([[:space:]]|$)/) peer_seen = 1
+        depth += brace_delta($0)
+        if (depth == 0) {
+          if (!token_seen) print block_indent "  header_up X-Narwhal-Proxy-Token {" sprintf("%c", 36) "NARWHAL_PROXY_TRUST_TOKEN}"
+          if (!peer_seen) print block_indent "  header_up X-Narwhal-Proxy-Peer {http.request.remote.host}"
+          in_target = 0
+        }
+        print
+        next
+      }
+
+      if ($0 ~ /^[[:space:]]*reverse_proxy[[:space:]]+127\.0\.0\.1:[0-9]+[[:space:]]*\{[[:space:]]*$/) {
+        target = $0
+        sub(/^[[:space:]]*reverse_proxy[[:space:]]+127\.0\.0\.1:/, "", target)
+        sub(/[[:space:]]*\{[[:space:]]*$/, "", target)
+        if (target == port || (previous_port != "" && target == previous_port)) {
+          block_indent = $0
+          sub(/reverse_proxy.*/, "", block_indent)
+          print block_indent "reverse_proxy 127.0.0.1:" port " {"
+          matched++
+          in_target = 1
+          depth = 1
+          token_seen = 0
+          peer_seen = 0
+          next
+        }
+      }
+
+      if ($0 ~ /^[[:space:]]*reverse_proxy[[:space:]]+127\.0\.0\.1:[0-9]+[[:space:]]*$/) {
+        target = $0
+        sub(/^[[:space:]]*reverse_proxy[[:space:]]+127\.0\.0\.1:/, "", target)
+        if (target == port || (previous_port != "" && target == previous_port)) {
+          indent = $0
+          sub(/reverse_proxy.*/, "", indent)
+          print indent "reverse_proxy 127.0.0.1:" port " {"
+          print indent "  header_up X-Narwhal-Proxy-Token {" sprintf("%c", 36) "NARWHAL_PROXY_TRUST_TOKEN}"
+          print indent "  header_up X-Narwhal-Proxy-Peer {http.request.remote.host}"
+          print indent "}"
+          matched++
+          next
+        }
+      }
+      print
+    }
+    END { if (matched == 0 || in_target) exit 2 }
+  ' "$file" >"$temp_file"; then
+    rm -f "$temp_file"
+    echo "[ERROR] Caddyfile 中未找到 Narwhal 后端 127.0.0.1:$port 的可安全更新路由。" >&2
+    return 1
+  fi
+  chmod 0600 "$temp_file"
+  mv -f "$temp_file" "$file"
 }
 
 ask_with_default() {
@@ -760,6 +904,9 @@ setup_tls_proxy() {
   local tls_cert_mode="$5"
   local cloudflare_api_token="$6"
   local caddy_image="$7"
+  local previous_port="${8:-}"
+  local proxy_trust_token
+  proxy_trust_token="$(load_kv_from_file "$SERVER_ENV_FILE" NARWHAL_PROXY_TRUST_TOKEN || true)"
 
   mkdir -p "$TLS_CA_EXPORT_DIR"
 
@@ -779,48 +926,59 @@ setup_tls_proxy() {
 
   local caddyfile="$TLS_DIR/Caddyfile.new"
   rm -f "$caddyfile"
-  if [[ "$tls_cert_mode" == "internal" || "$host_is_ip" == "yes" ]]; then
-    cat >"$caddyfile" <<CADDY
-https://$host {
-  tls internal
-  reverse_proxy 127.0.0.1:${upstream_port}
+  if [[ -f "$TLS_DIR/Caddyfile" ]]; then
+    # Preserve operator-managed Caddy sites and routes; change only the Narwhal
+    # backend upstream(s). A full regeneration here used to silently drop them.
+    cp -p "$TLS_DIR/Caddyfile" "$caddyfile"
+    if ! patch_narwhal_proxy_identity_headers "$caddyfile" "$upstream_port" "$previous_port"; then
+      rm -f "$caddyfile"
+      return 1
+    fi
+  else
+    : >"$caddyfile"
+    if [[ -n "$tls_email" ]]; then
+      cat >>"$caddyfile" <<CADDY
+{
+  email $tls_email
 }
 CADDY
-  else
-    if [[ "$tls_cert_mode" == "cloudflare_dns" ]]; then
+    fi
+    if [[ "$tls_cert_mode" == "internal" || "$host_is_ip" == "yes" ]]; then
+      cat >>"$caddyfile" <<CADDY
+https://$host {
+  tls internal
+  reverse_proxy 127.0.0.1:${upstream_port} {
+    header_up X-Narwhal-Proxy-Token {\$NARWHAL_PROXY_TRUST_TOKEN}
+    header_up X-Narwhal-Proxy-Peer {http.request.remote.host}
+  }
+}
+CADDY
+    elif [[ "$tls_cert_mode" == "cloudflare_dns" ]]; then
       if [[ -z "$cloudflare_api_token" ]]; then
         echo "[ERROR] TLS cert mode 'cloudflare_dns' requires Cloudflare API token."
         rm -f "$caddyfile"
         return 1
       fi
-      cat >"$caddyfile" <<CADDY
-{
-$( [[ -n "$tls_email" ]] && echo "  email $tls_email" )
-}
+      cat >>"$caddyfile" <<CADDY
 https://$host {
   tls {
     dns cloudflare {\$CLOUDFLARE_API_TOKEN}
   }
-  reverse_proxy 127.0.0.1:${upstream_port}
+  reverse_proxy 127.0.0.1:${upstream_port} {
+    header_up X-Narwhal-Proxy-Token {\$NARWHAL_PROXY_TRUST_TOKEN}
+    header_up X-Narwhal-Proxy-Peer {http.request.remote.host}
+  }
 }
 CADDY
     else
-      if [[ -n "$tls_email" ]]; then
-        cat >"$caddyfile" <<CADDY
-{
-  email $tls_email
-}
+      cat >>"$caddyfile" <<CADDY
 https://$host {
-  reverse_proxy 127.0.0.1:${upstream_port}
+  reverse_proxy 127.0.0.1:${upstream_port} {
+    header_up X-Narwhal-Proxy-Token {\$NARWHAL_PROXY_TRUST_TOKEN}
+    header_up X-Narwhal-Proxy-Peer {http.request.remote.host}
+  }
 }
 CADDY
-      else
-        cat >"$caddyfile" <<CADDY
-https://$host {
-  reverse_proxy 127.0.0.1:${upstream_port}
-}
-CADDY
-      fi
     fi
   fi
 
@@ -890,6 +1048,7 @@ CADDY
     : >"$TLS_DIR/Caddyfile.rollback.absent"
   fi
   mv -f "$caddyfile" "$TLS_DIR/Caddyfile"
+  chmod 0600 "$TLS_DIR/Caddyfile"
   if ! stage_container_replacement "$TLS_CONTAINER_NAME" "TLS Proxy"; then
     restore_caddy_config
     return 1
@@ -905,6 +1064,9 @@ CADDY
   )
   if [[ "$tls_cert_mode" == "cloudflare_dns" ]]; then
     podman_args+=( -e "CLOUDFLARE_API_TOKEN=$cloudflare_api_token" )
+  fi
+  if [[ -n "$proxy_trust_token" ]]; then
+    podman_args+=( -e "NARWHAL_PROXY_TRUST_TOKEN=$proxy_trust_token" )
   fi
   podman_args+=( "$caddy_image" )
 
@@ -935,8 +1097,11 @@ CADDY
     return 1
   fi
   if ! podman exec "$TLS_CONTAINER_NAME" caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
-    echo "[WARN] TLS Proxy 配置校验未通过（若容器已在运行通常不影响实际服务）；日志如下："
+    echo "[ERROR] TLS Proxy 配置校验失败，恢复原配置与容器。日志如下："
     podman logs --tail 100 "$TLS_CONTAINER_NAME" 2>&1 || true
+    restore_caddy_config
+    rollback_container_replacement "$TLS_CONTAINER_NAME" "TLS Proxy" || true
+    return 1
   fi
   if ! wait_for_tls_http "$host"; then
     podman logs --tail 100 "$TLS_CONTAINER_NAME" 2>&1 || true
@@ -1096,7 +1261,7 @@ main() {
   default_tls_cert_mode="$(load_non_empty_or_default "$SERVER_INSTALL_ENV_FILE" TLS_CERT_MODE "$default_tls_cert_mode")"
   default_cloudflare_api_token="$(load_non_empty_or_default "$SERVER_INSTALL_ENV_FILE" CLOUDFLARE_API_TOKEN "$default_cloudflare_api_token")"
 
-  local env_secret env_th env_alert_webhook_url env_alert_webhook_min_severity env_public_base_url env_telegram_proxy_url env_dashboard_username env_dashboard_password
+  local env_secret env_th env_alert_webhook_url env_alert_webhook_min_severity env_public_base_url env_telegram_proxy_url env_dashboard_username env_dashboard_password env_proxy_trust_token
   local env_conn_warning_threshold env_conn_critical_threshold env_connection_stop_threshold env_connection_stop_duration_seconds env_connection_stop_max_gap_seconds env_offline_host_purge_seconds env_tcping_taiwan_host
   env_secret="$(load_kv_from_file "$SERVER_ENV_FILE" SHARED_SECRET || true)"
   env_th="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_DISK_THRESHOLD_PERCENT || true)"
@@ -1106,6 +1271,7 @@ main() {
   env_telegram_proxy_url="$(load_kv_from_file "$SERVER_ENV_FILE" TELEGRAM_PROXY_URL || true)"
   env_dashboard_username="$(load_kv_from_file "$SERVER_ENV_FILE" DASHBOARD_USERNAME || true)"
   env_dashboard_password="$(load_kv_from_file "$SERVER_ENV_FILE" DASHBOARD_PASSWORD || true)"
+  env_proxy_trust_token="$(load_kv_from_file "$SERVER_ENV_FILE" NARWHAL_PROXY_TRUST_TOKEN || true)"
   env_conn_warning_threshold="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_CONN_WARNING_THRESHOLD || true)"
   env_conn_critical_threshold="$(load_kv_from_file "$SERVER_ENV_FILE" ALERT_CONN_CRITICAL_THRESHOLD || true)"
   env_connection_stop_threshold="$(load_kv_from_file "$SERVER_ENV_FILE" CONNECTION_STOP_THRESHOLD || true)"
@@ -1126,6 +1292,7 @@ main() {
   local default_telegram_proxy_url="${env_telegram_proxy_url:-}"
   default_dashboard_username="${env_dashboard_username:-$default_dashboard_username}"
   default_dashboard_password="${env_dashboard_password:-$default_dashboard_password}"
+  local default_proxy_trust_token="${env_proxy_trust_token:-$(generate_secret)$(generate_secret)}"
   default_conn_warning_threshold="${env_conn_warning_threshold:-$default_conn_warning_threshold}"
   default_conn_critical_threshold="${env_conn_critical_threshold:-$default_conn_critical_threshold}"
   default_connection_stop_threshold="${env_connection_stop_threshold:-$default_connection_stop_threshold}"
@@ -1223,6 +1390,9 @@ RAW_RETENTION_SECONDS=$raw_retention
 REPORT_MAX_ROWS=$report_max_rows
 HOST_SECURITY_MAX_ROWS=$host_security_max_rows
 TCPING_TAIWAN_HOST=$env_tcping_taiwan_host
+NARWHAL_PROXY_TRUST_TOKEN=$default_proxy_trust_token
+NARWHAL_TRUSTED_PROXY_CIDRS=
+NARWHAL_CLOUDFLARE_CIDRS=
 SHARED_SECRET=$secret
 ALERT_DISK_THRESHOLD_PERCENT=$th
 ALERT_CONN_WARNING_THRESHOLD=$default_conn_warning_threshold
@@ -1287,6 +1457,22 @@ ENV
 
   # 创建专用网络并规避与宿主机已有私网（如 10.88.0.0/16）的冲突。
   ensure_narwhal_network
+  local trusted_proxy_cidrs
+  trusted_proxy_cidrs="$(discover_trusted_proxy_cidrs)"
+  replace_kv_in_file "$SERVER_ENV_FILE" NARWHAL_TRUSTED_PROXY_CIDRS "$trusted_proxy_cidrs"
+  if [[ -n "$trusted_proxy_cidrs" ]]; then
+    echo "[INFO] GFW 来源识别信任的代理连接点：$trusted_proxy_cidrs"
+  else
+    echo "[WARN] 未能确认 Podman 代理网关；经本机反代的探针来源将保持未核验。"
+  fi
+  local cloudflare_proxy_cidrs=""
+  if cloudflare_proxy_cidrs="$(fetch_cloudflare_trusted_proxy_ranges)"; then
+    replace_kv_in_file "$SERVER_ENV_FILE" NARWHAL_CLOUDFLARE_CIDRS "$cloudflare_proxy_cidrs"
+    echo "[INFO] GFW 来源识别已加载官方 Cloudflare IPv4/IPv6 网段。"
+  else
+    replace_kv_in_file "$SERVER_ENV_FILE" NARWHAL_CLOUDFLARE_CIDRS ""
+    echo "[WARN] 未能校验 Cloudflare 地址；经 Cloudflare 的探针样本将保持未核验。"
+  fi
   install_narwhal_forwarding_compat
 
   # 镜像版本必须与安装脚本一致；校验发生在删除当前 Server 之前。
@@ -1302,7 +1488,7 @@ ENV
     resolved_port_changed="yes"
   fi
 
-  if ! setup_tls_proxy "$tls_host" "$port" "$tls_enable" "$tls_email" "$tls_cert_mode" "$cloudflare_api_token" "$caddy_image"; then
+  if ! setup_tls_proxy "$tls_host" "$port" "$tls_enable" "$tls_email" "$tls_cert_mode" "$cloudflare_api_token" "$caddy_image" "$default_port"; then
     rollback_container_replacement "$CONTAINER_NAME" "Server" || true
     echo "[ERROR] TLS Proxy 部署失败，Server 已回滚到上一版本。"
     exit 1

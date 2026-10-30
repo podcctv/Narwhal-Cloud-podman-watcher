@@ -135,6 +135,7 @@ export const api = {
         sample_alerts: item.sample_alerts || [],
         host_audit: item.host_audit && typeof item.host_audit === 'object' ? item.host_audit : {},
         control_reconciliation: item.control_reconciliation && typeof item.control_reconciliation === 'object' ? item.control_reconciliation : { status: 'unconfigured', controls: [] },
+        gfw_reachability: item.gfw_reachability && typeof item.gfw_reachability === 'object' ? item.gfw_reachability : {},
         access_sources: item.access_sources?.length ? item.access_sources : [{ label: '宿主机日志（旧版采集）', ...access }],
         today_peak_container_conn_count: Number(item.today_peak_container_conn_count || 0),
         host_id: String(item.host_id || ''),

@@ -1,6 +1,13 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.182**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.183**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.183：修复 GFW 来源识别与状态展示
+
+- GFW 探针回报经 Caddy / Podman 时，只有安装器生成的代理令牌、可信 Podman 网关和 Cloudflare 官方来源网段同时通过校验，才采用转发的客户端 IP；伪造的 `CF-Connecting-IP` 不会被计为探针来源。
+- 无法核验来源网段的回报仍保存端口探测结果，但不会参与独立网络判定，也不会清除探针最近一次已核验身份；该旧身份仍会按原新鲜度窗口过期。
+- Server 更新只为 Narwhal 后端反代添加来源识别头，保留 Caddyfile 中其他手工站点和转发路由；无效 Caddyfile 会触发配置与容器回滚。
+- 修复安全状态 API 前端映射遗漏 `gfw_reachability` 的问题，总览卡片可显示服务端诊断原因、最近有效证据和状态历史。
 
 ### v1.7.182：分离 RFW 规则与容器保护状态
 
