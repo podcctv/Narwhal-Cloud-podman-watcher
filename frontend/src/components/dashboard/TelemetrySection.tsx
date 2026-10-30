@@ -291,7 +291,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             : targetReadiness.status === 'ambiguous_container_mapping' ? '端口归属不唯一'
             : targetReadiness.status === 'public_tcp_endpoint_missing' ? '缺少可测端口'
             : targetReadiness.status === 'awaiting_scheduler' ? '等待自动调度'
-            : targetReadiness.status === 'ready' ? '等待首轮探测' : '探测条件不足',
+            : targetReadiness.status === 'ready' ? '等待首轮探测' : '等待诊断原因',
         };
         const gfwLastState = gfw.last_known_state === 'blocked' ? '疑似 GFW Blocked' : gfw.last_known_state === 'recovered' ? '已恢复' : gfw.last_known_state === 'normal' ? '国内外可达' : '未评估';
         const gfwDuration = gfwStatus === 'blocked' ? `持续 ${durationDays(gfw.duration_seconds)}`

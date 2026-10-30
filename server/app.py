@@ -2641,7 +2641,7 @@ def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: in
             "status": "unknown", "observed_at": 0, "last_success_at": 0, "stale": True,
             "reason": "unknown",
             "sync_status": "unknown", "rule_count": 0, "managed_rule_count": 0,
-            "drift_count": 0, "missing_count": 0, "rfw_api_version": "",
+            "drift_count": 0, "missing_count": 0, "policy_revision": None, "rfw_api_version": "",
             "capabilities_known": False, "supported_protocols": [],
             "protocol_capabilities": {protocol: "unknown" for protocol in RFW_APPLICATION_PROTOCOLS},
             "mtproto_support": "unknown", "snapshot": None,
@@ -2684,6 +2684,7 @@ def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: in
         "managed_rule_count": int(snapshot.get("managed_rule_count") or 0) if snapshot else 0,
         "drift_count": int(snapshot.get("drift_count") or 0) if snapshot else 0,
         "missing_count": int(snapshot.get("missing_count") or 0) if snapshot else 0,
+        "policy_revision": int(snapshot.get("policy_revision") or 0) if snapshot else None,
         "rfw_api_version": str(snapshot.get("rfw_api_version") or "") if capabilities_known else "",
         "capabilities_known": capabilities_known,
         "supported_protocols": supported_protocols,
@@ -3329,24 +3330,66 @@ def _fleet_firewall_node_state(
         ]
         for runtime_name in ("incus", "podman")
     }
-    _targets, target_status = _host_firewall_policy_targets(conn, host_id, required_policy or {}, now)
-    protocol_status = _policy_protocol_compatibility(
-        {"rules": [{"protocol": protocol} for protocol in (required_protocols or [])]}, live_readback
-    )
-    policy_abuse = (required_policy or {}).get("abuse") or {}
-    container_policy_enabled = any(policy_abuse.get(key) is True for key in ("mining", "bt"))
     policy_row = conn.execute(
         "SELECT revision,source_fleet_revision,policy_json,updated_by FROM host_firewall_policies WHERE host_id=?", (host_id,)
     ).fetchone()
     local_revision = int(policy_row["revision"] or 0) if policy_row is not None else 0
     applied_fleet_revision = int(policy_row["source_fleet_revision"] or 0) if policy_row is not None else 0
-    rfw_required = _policy_has_rfw_effect(required_policy) or (
-        policy_row is not None and _stored_policy_has_rfw_effect(str(policy_row["policy_json"] or "{}"))
+    stored_policy_raw = str(policy_row["policy_json"] or "{}") if policy_row is not None else "{}"
+    try:
+        local_policy = _validate_host_firewall_policy(json.loads(stored_policy_raw)) if policy_row is not None else _empty_host_firewall_policy()
+    except (HTTPException, TypeError, ValueError):
+        local_policy = _empty_host_firewall_policy()
+    # A configured fleet template is authoritative. Otherwise the node-local
+    # policy is authoritative; when none exists, the default container-only
+    # service protection is the desired policy and is reported separately.
+    effective_policy = (
+        required_policy if fleet_revision > 0 and isinstance(required_policy, dict)
+        else local_policy
+    )
+    _targets, target_status = _host_firewall_policy_targets(conn, host_id, effective_policy, now)
+    protocol_status = _policy_protocol_compatibility(effective_policy, live_readback)
+    policy_abuse = effective_policy.get("abuse") if isinstance(effective_policy.get("abuse"), dict) else {}
+    container_policy_enabled = any(policy_abuse.get(key) is True for key in ("mining", "bt"))
+    rfw_required = _policy_has_rfw_effect(effective_policy) or (
+        policy_row is not None and _stored_policy_has_rfw_effect(stored_policy_raw)
     )
     action = _latest_host_firewall_action(conn, host_id)
+    try:
+        action_params = json.loads(action["params_json"] or "{}") if action is not None else {}
+    except (TypeError, ValueError):
+        action_params = {}
+    action_params = action_params if isinstance(action_params, dict) else {}
+    action_policy = action_params.get("policy") if isinstance(action_params.get("policy"), dict) else {}
+    action_requires_rfw = (
+        action_params.get("requires_rfw") is True
+        or str(action["action_type"] or "") == "delete_host_firewall_rule"
+        # Older queued actions predate the explicit requires_rfw flag. Their
+        # own policy payload still proves whether they target RFW.
+        or (
+            str(action["action_type"] or "") == "apply_host_firewall_policy"
+            and _policy_has_rfw_effect(action_policy)
+        )
+    ) if action is not None else False
+    rfw_action = action if action_requires_rfw else None
     auto_speedtest_default = bool(
         policy_row is not None
         and str(policy_row["updated_by"] or "") == SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY
+    )
+    rfw_status = _host_firewall_component_status(
+        registered=bool(node_id), online=online, configured=rfw_required,
+        runtime=runtime, live_readback=live_readback, protocol_status=protocol_status,
+        target_status=target_status, container_policy_enabled=container_policy_enabled,
+        action=rfw_action, local_revision=local_revision,
+        expected_fleet_revision=fleet_revision, applied_fleet_revision=applied_fleet_revision,
+    )
+    container_protection_status = _host_container_protection_status(
+        conn, host_id=host_id, now=now, online=online,
+        agent_version=str(host["agent_version"] or "unknown"),
+        policy=effective_policy, policy_row_exists=policy_row is not None,
+        policy_revision=local_revision, auto_default=(fleet_revision == 0 and policy_row is None) or auto_speedtest_default,
+        latest_action=action, fleet_revision=fleet_revision,
+        applied_fleet_revision=applied_fleet_revision,
     )
     status = "unregistered"
     if node_id:
@@ -3419,6 +3462,9 @@ def _fleet_firewall_node_state(
         "speedtest_auto_default": auto_speedtest_default,
         "speedtest_policy_supported": _agent_supports_speedtest_policy(host["agent_version"]),
         "state": status,
+        "rfw_status": rfw_status,
+        "rfw_configured": rfw_required,
+        "container_protection_status": container_protection_status,
         "required_protocols": protocol_status["required_protocols"],
         "unsupported_protocols": protocol_status["unsupported_protocols"],
         "unknown_protocols": protocol_status["unknown_protocols"],
@@ -3435,6 +3481,171 @@ def _fleet_firewall_node_state(
             "updated_at_utc8": format_utc8(int(action["updated_at"] or 0)),
         },
     }
+
+
+def _host_firewall_component_status(
+    *, registered: bool, online: bool, configured: bool, runtime: Dict[str, Any],
+    live_readback: Dict[str, Any], protocol_status: Dict[str, List[str]],
+    target_status: str, container_policy_enabled: bool, action: sqlite3.Row | None,
+    local_revision: int, expected_fleet_revision: int, applied_fleet_revision: int,
+) -> str:
+    """Classify RFW from current RFW evidence only, never from Agent file persistence."""
+    if not registered:
+        return "unregistered"
+    if not online:
+        return "offline"
+    if not configured:
+        return "not_configured"
+    if runtime.get("stale"):
+        return "status_stale"
+    if runtime.get("control_api") == "unsupported":
+        return "runman_update_required"
+    if runtime.get("control_api") == "unavailable":
+        return "runman_unavailable"
+    if runtime.get("control_api") != "ready":
+        return "awaiting_capability"
+    if live_readback.get("status") == "ready" and not live_readback.get("stale"):
+        if protocol_status.get("unsupported_protocols"):
+            return "rfw_protocol_update_required"
+        if protocol_status.get("unknown_protocols"):
+            return "awaiting_rfw_capability"
+    if live_readback.get("status") != "ready" or live_readback.get("stale"):
+        return "readback_unavailable"
+    if live_readback.get("sync_status") == "drifted":
+        return "drifted"
+    observed_revision = live_readback.get("policy_revision")
+    if (
+        live_readback.get("sync_status") == "in_sync"
+        and int(live_readback.get("drift_count") or 0) == 0
+        and int(live_readback.get("missing_count") or 0) == 0
+        and type(observed_revision) is int
+        and observed_revision == local_revision
+        and (expected_fleet_revision == 0 or applied_fleet_revision == expected_fleet_revision)
+    ):
+        return "verified"
+    if container_policy_enabled and target_status == "inventory_unavailable":
+        return "awaiting_interfaces"
+    if container_policy_enabled and target_status in {"runtime_not_found", "interface_not_found"}:
+        return "interfaces_not_found"
+    if action is not None and action["status"] in {"queued", "dispatched", "running"}:
+        return "queued"
+    if action is not None and action["status"] == "failed":
+        return "apply_failed"
+    return "not_synced"
+
+
+def _host_container_protection_status(
+    conn: sqlite3.Connection, *, host_id: str, now: int, online: bool,
+    agent_version: str, policy: Dict[str, Any], policy_row_exists: bool,
+    policy_revision: int, auto_default: bool, latest_action: sqlite3.Row | None,
+    fleet_revision: int, applied_fleet_revision: int,
+) -> Dict[str, Any]:
+    """Aggregate per-container Agent readbacks for Incus/Podman protection."""
+    abuse = policy.get("abuse") if isinstance(policy, dict) and isinstance(policy.get("abuse"), dict) else {}
+    services = sorted({str(item).strip().lower() for item in abuse.get("services", []) if isinstance(item, str) and item.strip()})
+    runtimes = sorted({str(item).strip().lower() for item in abuse.get("service_runtimes", []) if item in {"incus", "podman"}})
+    configured = bool(services and runtimes)
+    result: Dict[str, Any] = {
+        "configured": configured, "state": "not_configured", "services": services,
+        "runtimes": runtimes, "policy_revision": policy_revision,
+        "observed_at": 0, "age_seconds": None, "containers_seen": 0,
+        "containers_fresh": 0, "containers_verified": 0,
+        "containers_waiting_revision": 0, "containers_unverified": 0,
+        "containers_stale": 0, "reason": "",
+    }
+    if not configured:
+        return result
+    if not online:
+        result.update(state="node_offline", reason="node_offline")
+        return result
+    if not _agent_supports_speedtest_policy(agent_version):
+        result.update(state="agent_update_required", reason="agent_update_required")
+        return result
+    if not policy_row_exists or policy_revision < 1:
+        state = "waiting_policy" if auto_default or fleet_revision > 0 else "policy_not_applied"
+        result.update(state=state, reason="policy_not_applied")
+        return result
+
+    action = latest_action
+    if action is not None:
+        try:
+            params = json.loads(action["params_json"] or "{}")
+        except (TypeError, ValueError):
+            params = {}
+        action_policy = params.get("policy") if isinstance(params, dict) and isinstance(params.get("policy"), dict) else {}
+        action_revision = action_policy.get("revision")
+        action_is_current = type(action_revision) is int and action_revision == policy_revision
+        if action_is_current and action["status"] in {"queued", "dispatched", "running"}:
+            result.update(state="applying", reason="policy_action_pending")
+            return result
+        if action_is_current and action["status"] == "failed":
+            result.update(state="apply_failed", reason="policy_action_failed")
+            return result
+    if fleet_revision > 0 and applied_fleet_revision != fleet_revision:
+        result.update(state="waiting_policy", reason="fleet_policy_not_applied")
+        return result
+
+    placeholders = ",".join("?" for _ in runtimes)
+    rows = conn.execute(
+        "SELECT runtime,project,container_name,ts,payload_json FROM ("
+        "SELECT runtime,project,container_name,ts,payload_json,"
+        "ROW_NUMBER() OVER (PARTITION BY runtime,project,container_name ORDER BY ts DESC,id DESC) AS row_number "
+        f"FROM reports WHERE host_id=? AND runtime IN ({placeholders}) AND ts>=?"
+        ") WHERE row_number=1 ORDER BY runtime,project,container_name",
+        (host_id, *runtimes, now - 24 * 60 * 60),
+    ).fetchall()
+    result["containers_seen"] = len(rows)
+    if not rows:
+        result.update(state="waiting_samples", reason="no_container_reports")
+        return result
+
+    latest_at = max(int(row["ts"] or 0) for row in rows)
+    result["observed_at"] = latest_at
+    result["age_seconds"] = max(0, now - latest_at) if latest_at else None
+    verified = waiting_revision = unverified = stale = fresh = 0
+    for row in rows:
+        sampled_at = int(row["ts"] or 0)
+        if sampled_at <= 0 or sampled_at > now + 30 or now - sampled_at > STALE_SECONDS:
+            stale += 1
+            continue
+        fresh += 1
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        security = payload.get("security") if isinstance(payload, dict) and isinstance(payload.get("security"), dict) else {}
+        guard = security.get("speedtest_guard") if isinstance(security.get("speedtest_guard"), dict) else None
+        if guard is None:
+            unverified += 1
+            continue
+        reported_revision = guard.get("policy_revision")
+        if type(reported_revision) is not int or reported_revision != policy_revision:
+            waiting_revision += 1
+            continue
+        reported_services = sorted({str(item).strip().lower() for item in guard.get("services", []) if isinstance(item, str) and item.strip()})
+        expected_services = services if row["runtime"] in runtimes else []
+        guard_state = str(guard.get("state") or "")
+        if reported_services == expected_services and guard_state in {"blocked", "not_detected"}:
+            verified += 1
+        else:
+            unverified += 1
+
+    result.update({
+        "containers_fresh": fresh, "containers_verified": verified,
+        "containers_waiting_revision": waiting_revision,
+        "containers_unverified": unverified, "containers_stale": stale,
+    })
+    if fresh == 0:
+        result.update(state="samples_stale", reason="container_samples_stale")
+    elif verified == fresh and waiting_revision == 0 and unverified == 0 and stale == 0:
+        result.update(state="active", reason="all_fresh_samples_verified")
+    elif verified:
+        result.update(state="partial", reason="some_container_samples_unverified")
+    elif waiting_revision:
+        result.update(state="waiting_revision", reason="agent_has_not_reported_desired_revision")
+    else:
+        result.update(state="unverified", reason="guard_readback_missing_or_failed")
+    return result
 
 
 def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any]) -> str:
@@ -5718,6 +5929,14 @@ def get_fleet_firewall_policy() -> JSONResponse:
                 "required_protocols_supported_hosts": sum(1 for item in nodes if item["required_protocols"] and not item["unsupported_protocols"] and not item["unknown_protocols"]),
                 "required_protocols_unsupported_hosts": sum(1 for item in nodes if item["unsupported_protocols"]),
                 "required_protocols_unknown_hosts": sum(1 for item in nodes if item["unknown_protocols"]),
+                "rfw_configured_hosts": sum(1 for item in nodes if item["rfw_configured"]),
+                "rfw_verified_hosts": sum(1 for item in nodes if item["rfw_status"] == "verified"),
+                "rfw_attention_hosts": sum(1 for item in nodes if item["rfw_configured"] and item["rfw_status"] != "verified"),
+                "container_protection_configured_hosts": sum(1 for item in nodes if item["container_protection_status"]["configured"]),
+                "container_protection_active_hosts": sum(1 for item in nodes if item["container_protection_status"]["configured"] and item["container_protection_status"]["state"] == "active"),
+                "container_protection_attention_hosts": sum(1 for item in nodes if item["container_protection_status"]["configured"] and item["container_protection_status"]["state"] != "active"),
+                "container_protection_containers_seen": sum(int(item["container_protection_status"]["containers_seen"] or 0) for item in nodes),
+                "container_protection_containers_verified": sum(int(item["container_protection_status"]["containers_verified"] or 0) for item in nodes),
             },
             # Rules are read from the running RFW userspace API and compared
             # with Runman's ownership map; this is not a direct eBPF map dump.

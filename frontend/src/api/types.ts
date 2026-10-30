@@ -697,6 +697,7 @@ export interface HostFirewallLiveReadback {
   managed_rule_count?: number;
   drift_count?: number;
   missing_count?: number;
+  policy_revision?: number | null;
   rfw_api_version?: string;
   capabilities_known?: boolean;
   supported_protocols?: string[];
@@ -800,6 +801,24 @@ export interface FleetFirewallHostStatus {
   fleet_revision: number;
   speedtest_auto_default?: boolean;
   speedtest_policy_supported?: boolean;
+  rfw_configured: boolean;
+  rfw_status: 'unregistered' | 'offline' | 'not_configured' | 'status_stale' | 'runman_update_required' | 'runman_unavailable' | 'awaiting_capability' | 'readback_unavailable' | 'rfw_protocol_update_required' | 'awaiting_rfw_capability' | 'awaiting_interfaces' | 'interfaces_not_found' | 'queued' | 'apply_failed' | 'drifted' | 'verified' | 'not_synced';
+  container_protection_status: {
+    configured: boolean;
+    state: 'not_configured' | 'node_offline' | 'agent_update_required' | 'waiting_policy' | 'policy_not_applied' | 'applying' | 'apply_failed' | 'waiting_samples' | 'samples_stale' | 'active' | 'partial' | 'waiting_revision' | 'unverified';
+    services: string[];
+    runtimes: Array<'incus' | 'podman'>;
+    policy_revision: number;
+    observed_at: number;
+    age_seconds: number | null;
+    containers_seen: number;
+    containers_fresh: number;
+    containers_verified: number;
+    containers_waiting_revision: number;
+    containers_unverified: number;
+    containers_stale: number;
+    reason: string;
+  };
   state: 'unregistered' | 'offline' | 'awaiting_capability' | 'speedtest_auto_pending' | 'speedtest_agent_update_required' | 'awaiting_rfw_capability' | 'firewall_status_stale' | 'awaiting_interfaces' | 'interfaces_not_found' | 'rfw_protocol_update_required' | 'runman_update_required' | 'runman_unavailable' | 'queued' | 'apply_failed' | 'drifted' | 'last_apply_succeeded' | 'not_synced' | 'ready';
   required_protocols: string[];
   unsupported_protocols: string[];
@@ -821,7 +840,7 @@ export interface FleetFirewallPolicyResponse {
   updated_by: string;
   updated_at_utc8: string;
   hosts: FleetFirewallHostStatus[];
-  counts: { total: number; registered: number; online: number; control_ready: number; last_apply_succeeded: number; deferred: number; network_deferred: number; live_readback_current: number; drifted_hosts: number; readback_unavailable: number; mtproto_supported_hosts: number; mtproto_unsupported_hosts: number; mtproto_capability_unknown_hosts: number; required_protocols_supported_hosts: number; required_protocols_unsupported_hosts: number; required_protocols_unknown_hosts: number };
+  counts: { total: number; registered: number; online: number; control_ready: number; last_apply_succeeded: number; deferred: number; network_deferred: number; live_readback_current: number; drifted_hosts: number; readback_unavailable: number; mtproto_supported_hosts: number; mtproto_unsupported_hosts: number; mtproto_capability_unknown_hosts: number; required_protocols_supported_hosts: number; required_protocols_unsupported_hosts: number; required_protocols_unknown_hosts: number; rfw_configured_hosts: number; rfw_verified_hosts: number; rfw_attention_hosts: number; container_protection_configured_hosts: number; container_protection_active_hosts: number; container_protection_attention_hosts: number; container_protection_containers_seen: number; container_protection_containers_verified: number };
   live_rule_readback_supported: boolean;
 }
 

@@ -63,14 +63,44 @@ const defaultDraft = (): RuleDraft => ({
 const statusLabel: Record<string, string> = {
   queued: '排队中', dispatched: '节点处理中', running: '执行中', succeeded: '已应用', failed: '执行失败', cancelled: '已被新配置取代',
 };
-const fleetStateLabel: Record<string, string> = {
-  unregistered: '未注册 Agent', offline: '节点离线', awaiting_capability: '等待能力上报',
-  speedtest_auto_pending: '默认测速保护待自动下发', speedtest_agent_update_required: '需更新 Agent 才能自动保护',
-  awaiting_rfw_capability: '等待 RFW 协议能力核验', rfw_protocol_update_required: '缺少所需 RFW 协议能力',
-  firewall_status_stale: '防火墙状态过期', runman_update_required: '需更新 Runman', runman_unavailable: 'Runman 不可用', queued: '策略排队中',
-  awaiting_interfaces: '等待网卡清单', interfaces_not_found: '未发现目标网桥',
-  apply_failed: '策略应用失败', drifted: '实际规则偏差', last_apply_succeeded: '最近回执成功', not_synced: '待同步', ready: '已就绪',
+const rfwStateLabel: Record<string, string> = {
+  unregistered: '未注册', offline: '母机离线', not_configured: '未配置 RFW 规则',
+  status_stale: 'RFW 状态过期', runman_update_required: '需更新 Runman', runman_unavailable: 'Runman 不可用',
+  awaiting_capability: '等待 Runman 能力', readback_unavailable: 'RFW 读回不可用',
+  rfw_protocol_update_required: '需更新 RFW 协议能力', awaiting_rfw_capability: '等待 RFW 能力读回',
+  awaiting_interfaces: '等待网卡清单', interfaces_not_found: '未找到所选网桥', queued: 'RFW 规则排队中',
+  apply_failed: 'RFW 应用失败', drifted: 'RFW 实际规则有偏差', verified: 'RFW 规则已核验', not_synced: 'RFW 规则未同步',
 };
+const containerProtectionStateLabel: Record<string, string> = {
+  not_configured: '容器保护未配置', node_offline: '母机离线', agent_update_required: '需更新 Agent',
+  waiting_policy: '等待策略下发', policy_not_applied: '策略未应用', applying: '策略下发中',
+  apply_failed: '策略下发失败', waiting_samples: '等待容器采样', samples_stale: '容器采样过期',
+  active: '容器保护已核验', partial: '部分容器待核验', waiting_revision: '等待目标修订上报',
+  unverified: '容器保护未核验',
+};
+const containerProtectionReasonLabel: Record<string, string> = {
+  no_container_reports: '还没有所选运行时的容器采样；等待母机下一轮上报。',
+  policy_not_applied: '目标修订尚未写入 Agent；检查母机在线状态和策略动作回执。',
+  policy_action_pending: '策略正在下发，等待容器报告该修订。',
+  policy_action_failed: '策略下发动作失败；查看母机动作回执中的错误。',
+  container_samples_stale: '最新容器采样已过期；确认 Agent 持续上报。',
+  some_container_samples_unverified: '部分容器的配置扫描或网络规则读回尚未通过。',
+  agent_has_not_reported_desired_revision: 'Agent 仍在报告旧修订；等待下一轮采样，或检查其升级/执行状态。',
+  guard_readback_missing_or_failed: '采样中缺少保护回执，或 Agent 未能确认规则状态。',
+};
+const rfwStateTone = (state: string) => state === 'not_configured'
+  ? 'border-slate-700 bg-slate-900 text-slate-400'
+  : state === 'verified' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200'
+    : ['drifted', 'apply_failed', 'runman_update_required', 'rfw_protocol_update_required'].includes(state)
+      ? 'border-rose-800 bg-rose-950/40 text-rose-200' : 'border-amber-800 bg-amber-950/40 text-amber-200';
+const containerProtectionStateTone = (state: string) => state === 'not_configured'
+  ? 'border-slate-700 bg-slate-900 text-slate-400'
+  : state === 'active' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200'
+    : state === 'apply_failed' ? 'border-rose-800 bg-rose-950/40 text-rose-200'
+      : 'border-amber-800 bg-amber-950/40 text-amber-200';
+const hostNeedsFleetAttention = (host: FleetFirewallPolicyResponse['hosts'][number]) => !host.online
+  || (host.rfw_configured && host.rfw_status !== 'verified')
+  || (host.container_protection_status.configured && host.container_protection_status.state !== 'active');
 const protocolLabels: Record<string, string> = {
   http: 'HTTP', tls: 'TLS', socks: 'SOCKS', ssh: 'SSH', fet: 'FET',
   wireguard: 'WireGuard', openvpn: 'OpenVPN', quic: 'QUIC', mtproto: 'MTProto',
@@ -209,11 +239,17 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     [eligibleInterfaces, hostInterfaceFilter],
   );
   const fleetHosts = fleetSnapshot?.hosts || [];
-  const fleetAttentionCount = fleetHosts.filter((host) => !['last_apply_succeeded', 'ready'].includes(host.state)).length;
+  const fleetAttentionCount = fleetHosts.filter(hostNeedsFleetAttention).length;
+  const fleetRfwConfiguredCount = fleetHosts.filter((host) => host.rfw_configured).length;
+  const fleetRfwVerifiedCount = fleetHosts.filter((host) => host.rfw_status === 'verified').length;
+  const fleetProtectionConfiguredCount = fleetHosts.filter((host) => host.container_protection_status.configured).length;
+  const fleetProtectionActiveCount = fleetHosts.filter((host) => host.container_protection_status.configured && host.container_protection_status.state === 'active').length;
+  const fleetProtectionVerifiedContainers = fleetHosts.reduce((total, host) => total + host.container_protection_status.containers_verified, 0);
+  const fleetProtectionSeenContainers = fleetHosts.reduce((total, host) => total + host.container_protection_status.containers_seen, 0);
   const fleetInterfaceIssueCount = fleetHosts.filter((host) => host.container_interfaces.status !== 'ready'
     || host.container_interfaces.stale
     || (!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length)).length;
-  const fleetDriftedCount = fleetHosts.filter((host) => host.state === 'drifted').length;
+  const fleetDriftedCount = fleetHosts.filter((host) => host.rfw_status === 'drifted').length;
   const fleetNetworkCoverage = useMemo(() => ({
     incus: fleetHosts.filter((host) => host.container_interfaces.status === 'ready' && !host.container_interfaces.stale && host.container_interfaces.by_runtime.incus.length > 0).length,
     podman: fleetHosts.filter((host) => host.container_interfaces.status === 'ready' && !host.container_interfaces.stale && host.container_interfaces.by_runtime.podman.length > 0).length,
@@ -221,24 +257,29 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const filteredFleetHosts = useMemo(() => {
     const query = fleetHostSearch.trim().toLocaleLowerCase();
     const rank: Record<string, number> = {
-      apply_failed: 0, drifted: 1, interfaces_not_found: 2, awaiting_interfaces: 3,
-      runman_update_required: 4, runman_unavailable: 5, firewall_status_stale: 6,
-      rfw_protocol_update_required: 7, offline: 8, awaiting_capability: 9,
-      speedtest_agent_update_required: 10, speedtest_auto_pending: 11,
-      awaiting_rfw_capability: 10, queued: 11, not_synced: 12,
-      last_apply_succeeded: 13, ready: 14, unregistered: 15,
+      apply_failed: 0, drifted: 1, runman_update_required: 2, runman_unavailable: 3,
+      rfw_protocol_update_required: 4, readback_unavailable: 5, not_synced: 6,
+      interfaces_not_found: 7, awaiting_interfaces: 8, status_stale: 9, queued: 10,
+      offline: 11, awaiting_capability: 12, awaiting_rfw_capability: 13, verified: 14,
+      active: 14, not_configured: 15,
     };
     return fleetHosts.filter((host) => {
       if (query && !host.host_id.toLocaleLowerCase().includes(query)) return false;
-      if (fleetHostFilter === 'attention' && ['last_apply_succeeded', 'ready'].includes(host.state)) return false;
+      if (fleetHostFilter === 'attention' && !hostNeedsFleetAttention(host)) return false;
       if (fleetHostFilter === 'online' && !host.online) return false;
       if (fleetHostFilter === 'offline' && host.online) return false;
       if (fleetHostFilter === 'interfaces' && host.container_interfaces.status === 'ready'
         && !host.container_interfaces.stale
         && (host.container_interfaces.by_runtime.incus.length > 0 || host.container_interfaces.by_runtime.podman.length > 0)) return false;
-      if (fleetHostFilter === 'drifted' && host.state !== 'drifted') return false;
+      if (fleetHostFilter === 'drifted' && host.rfw_status !== 'drifted') return false;
       return true;
-    }).sort((a, b) => (rank[a.state] ?? 20) - (rank[b.state] ?? 20) || a.host_id.localeCompare(b.host_id));
+    }).sort((a, b) => {
+      const aStatus = a.rfw_configured ? a.rfw_status : a.container_protection_status.configured ? a.container_protection_status.state : (a.online ? 'not_configured' : 'offline');
+      const bStatus = b.rfw_configured ? b.rfw_status : b.container_protection_status.configured ? b.container_protection_status.state : (b.online ? 'not_configured' : 'offline');
+      const aPriority = hostNeedsFleetAttention(a) ? rank[aStatus] ?? 20 : 30;
+      const bPriority = hostNeedsFleetAttention(b) ? rank[bStatus] ?? 20 : 30;
+      return aPriority - bPriority || a.host_id.localeCompare(b.host_id);
+    });
   }, [fleetHostFilter, fleetHostSearch, fleetHosts]);
   const fleetPageCount = Math.max(1, Math.ceil(filteredFleetHosts.length / FLEET_NODE_PAGE_SIZE));
   const currentFleetNodePage = Math.min(fleetNodePage, fleetPageCount - 1);
@@ -886,24 +927,30 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       {fleetSnapshot?.automatic_speedtest_default && <p className="mt-3 rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-3 text-xs leading-5 text-emerald-100/80">当前尚未保存全局模板。无单机自定义策略的 Incus / Podman 节点会在上报时自动启用默认测速保护；已有单机策略保持不变。需要设定不同的全局范围时，再保存全局模板。</p>}
       {fleetSnapshot && <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {[
-          ['管理节点', fleetSnapshot.counts.total], ['在线节点', fleetSnapshot.counts.online],
-          ['应用成功', fleetSnapshot.counts.last_apply_succeeded], ['需关注', fleetAttentionCount],
+          ['管理节点', fleetSnapshot.counts.total],
+          ['RFW 已核验', `${fleetRfwVerifiedCount}/${fleetRfwConfiguredCount}`],
+          ['容器保护已核验', `${fleetProtectionActiveCount}/${fleetProtectionConfiguredCount}`],
+          ['需关注', fleetAttentionCount],
         ].map(([label, value]) => <div key={String(label)} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
           <div className="text-[10px] text-slate-500">{label}</div><div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">{value}</div>
         </div>)}
       </div>}
       {fleetSnapshot && <details className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-        <summary className="cursor-pointer select-none text-xs font-medium text-slate-300">更多同步指标 <span className="ml-1 text-slate-500">待处理 {fleetSnapshot.counts.deferred} · 网卡待映射 {fleetSnapshot.counts.network_deferred} · 策略偏差 {fleetSnapshot.counts.drifted_hosts}</span></summary>
+        <summary className="cursor-pointer select-none text-xs font-medium text-slate-300">更多核验指标 <span className="ml-1 text-slate-500">RFW 需关注 {fleetSnapshot.counts.rfw_attention_hosts} · 容器策略需关注 {fleetSnapshot.counts.container_protection_attention_hosts} · 规则偏差 {fleetSnapshot.counts.drifted_hosts}</span></summary>
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
           {[
-            ['Runman 可用', fleetSnapshot.counts.control_ready], ['读回正常', fleetSnapshot.counts.live_readback_current],
-            ['读回异常 / 过期', fleetSnapshot.counts.readback_unavailable],
+            ['RFW 已配置 / 已核验', `${fleetSnapshot.counts.rfw_configured_hosts} / ${fleetSnapshot.counts.rfw_verified_hosts}`],
+            ['容器策略主机已配置 / 已核验', `${fleetSnapshot.counts.container_protection_configured_hosts} / ${fleetSnapshot.counts.container_protection_active_hosts}`],
+            ['容器最新采样已核验', `${fleetProtectionVerifiedContainers} / ${fleetProtectionSeenContainers}`],
+            ['Runman 可用', fleetSnapshot.counts.control_ready], ['RFW 读回正常', fleetSnapshot.counts.live_readback_current],
+            ['RFW 读回异常 / 过期', fleetSnapshot.counts.readback_unavailable],
             ['协议支持 / 需升级 / 待核验', `${fleetSnapshot.counts.required_protocols_supported_hosts} / ${fleetSnapshot.counts.required_protocols_unsupported_hosts} / ${fleetSnapshot.counts.required_protocols_unknown_hosts}`],
           ].map(([label, value]) => <div key={String(label)} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
             <div className="text-[10px] text-slate-500">{label}</div><div className="mt-1 font-mono text-sm font-semibold tabular-nums text-slate-200">{value}</div>
           </div>)}
         </div>
       </details>}
+      <p className="mt-3 rounded-lg border border-sky-900/50 bg-sky-950/20 p-3 text-[10px] leading-5 text-sky-100/80">RFW 状态只由母机实时规则读回、规则修订号与能力状态判定。测速保护单独按 Incus / Podman 容器的最新 Agent 采样核验；仅保存策略或收到动作成功回执，不算容器保护已验证。</p>
       <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
         <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Incus 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.incus}/{fleetHosts.length}</strong> 台</span>
         <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Podman 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.podman}/{fleetHosts.length}</strong> 台</span>
@@ -928,19 +975,19 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           {visibleFleetHosts.map((host) => <details key={host.host_id} className="rounded-lg border border-slate-800 bg-slate-950/70">
             <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5">
               <strong className="min-w-0 flex-1 break-all text-[11px] text-slate-200">{host.host_id}</strong>
-              <span className={`rounded-full border px-2 py-0.5 text-[10px] ${host.state === 'last_apply_succeeded' || host.state === 'ready' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : host.state === 'apply_failed' || host.state === 'runman_update_required' || host.state === 'rfw_protocol_update_required' || host.state === 'drifted' ? 'border-rose-800 bg-rose-950/40 text-rose-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>{fleetStateLabel[host.state] || host.state}</span>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] ${rfwStateTone(host.rfw_status)}`}>RFW · {rfwStateLabel[host.rfw_status] || host.rfw_status}</span>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] ${containerProtectionStateTone(host.container_protection_status.state)}`}>容器 · {containerProtectionStateLabel[host.container_protection_status.state] || host.container_protection_status.state}</span>
               <span className={`text-[10px] ${host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-500'}`}>{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '网卡清单过期/未采集' : `${host.container_interfaces.by_runtime.incus.length ? `Incus ${host.container_interfaces.by_runtime.incus.length}` : ''}${host.container_interfaces.by_runtime.incus.length && host.container_interfaces.by_runtime.podman.length ? ' · ' : ''}${host.container_interfaces.by_runtime.podman.length ? `Podman ${host.container_interfaces.by_runtime.podman.length}` : ''}${!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length ? '无可用容器网桥' : ''}`}</span>
               <span className="text-[10px] text-slate-500">Watcher {host.agent_version}</span>
-              {host.speedtest_auto_default && <span className="rounded-full border border-emerald-900 bg-emerald-950/40 px-2 py-0.5 text-[10px] text-emerald-200">默认测速保护自动下发</span>}
-              <span className={`text-[10px] ${host.live_readback.sync_status === 'drifted' && !host.live_readback.stale ? 'text-rose-300' : host.live_readback.status === 'ready' && !host.live_readback.stale ? 'text-emerald-300' : 'text-amber-300'}`} title={readbackReasonLabel[host.live_readback.reason || ''] || ''}>{readbackStatusLabel[host.live_readback.status] || '等待读回'}{host.live_readback.stale ? ' · 过期' : ''}{host.live_readback.status !== 'ready' && host.live_readback.reason ? ` · ${readbackReasonLabel[host.live_readback.reason] || host.live_readback.reason}` : ''}</span>
             </summary>
             <div className="grid gap-2 border-t border-slate-800 px-3 py-3 text-[10px] sm:grid-cols-2">
-              <div className="text-slate-400">本地修订 <span className="font-mono tabular-nums text-slate-200">#{host.local_revision}</span> · 全局修订 <span className="font-mono tabular-nums text-slate-200">#{host.fleet_revision}</span></div>
-              {(host.speedtest_auto_default || host.state === 'speedtest_auto_pending' || host.state === 'speedtest_agent_update_required') && <div className={host.state === 'speedtest_agent_update_required' || host.state === 'apply_failed' ? 'text-amber-300' : 'text-emerald-300'}>{host.speedtest_auto_default ? host.state === 'apply_failed' ? '测速保护：默认策略自动应用失败；查看下方节点回执，系统按 15 分钟间隔每 24 小时最多尝试 3 次。' : host.state === 'queued' ? '测速保护：默认策略已自动排队；仅 Incus、Podman 容器，宿主机和 Docker 不处理。' : '测速保护：默认策略已自动应用；仅 Incus、Podman 容器，宿主机和 Docker 不处理。' : host.state === 'speedtest_agent_update_required' ? '测速保护：请将 Watcher Agent 更新到 v1.7.136 或更高版本，之后会自动下发。' : '测速保护：等待节点下一次上报，系统会自动排队默认策略，无需手动确认。'}</div>}
-              <div className={host.control_api_stale || host.control_api === 'unavailable' || host.control_api === 'unsupported' ? 'text-amber-300' : 'text-slate-400'}>
-                Runman 控制接口：{host.control_api_stale ? '状态过期' : host.control_api === 'ready' ? '可用' : host.control_api === 'unsupported' ? '需更新' : host.control_api === 'unavailable' ? '不可用' : '未知'} · {runtimeReasonLabel[host.control_api_reason || ''] || '旧版 Agent 未提供原因'}{host.control_api_http_status ? '（HTTP ' + host.control_api_http_status + '）' : ''}
-              </div>
-              {host.live_readback.status !== 'ready' && <div className="text-amber-300">RFW 读回：{readbackReasonLabel[host.live_readback.reason || ''] || '旧版 Agent 未提供失败原因'}。{readbackReasonHelp[host.live_readback.reason || ''] || '检查 Agent、Runman 与 RFW 接口后刷新。'}</div>}
+              <div className="text-slate-400">RFW 本地期望修订 <span className="font-mono tabular-nums text-slate-200">#{host.local_revision}</span> · RFW 实际读回修订 <span className="font-mono tabular-nums text-slate-200">{host.live_readback.policy_revision == null ? '未知' : `#${host.live_readback.policy_revision}`}</span> · 全局模板修订 <span className="font-mono tabular-nums text-slate-200">#{host.fleet_revision}</span></div>
+              {!host.rfw_configured
+                ? <div className="text-slate-400">RFW：当前策略没有配置母机级规则，因此无需等待 RFW 读回；这不影响下方容器级保护。</div>
+                : <div className={host.rfw_status === 'verified' ? 'text-emerald-300' : host.rfw_status === 'drifted' || host.rfw_status === 'apply_failed' ? 'text-rose-300' : 'text-amber-300'}>
+                  RFW：{rfwStateLabel[host.rfw_status] || host.rfw_status} · Runman {host.control_api_stale ? '状态过期' : host.control_api === 'ready' ? '可用' : host.control_api === 'unsupported' ? '需更新' : host.control_api === 'unavailable' ? '不可用' : '未知'} · {readbackStatusLabel[host.live_readback.status] || '等待读回'}{host.live_readback.stale ? '（过期）' : ''}{host.live_readback.status !== 'ready' && host.live_readback.reason ? ` · ${readbackReasonLabel[host.live_readback.reason] || host.live_readback.reason}` : ''}{host.control_api_http_status ? ` · HTTP ${host.control_api_http_status}` : ''}
+                </div>}
+              {host.rfw_configured && host.live_readback.status !== 'ready' && <div className="text-slate-400 sm:col-span-2">{readbackReasonHelp[host.live_readback.reason || ''] || '检查 Watcher、Runman 与 RFW 接口后刷新；策略回执本身不能证明规则当前生效。'}</div>}
               <div className={host.unsupported_protocols?.length ? 'text-rose-300' : host.unknown_protocols?.length ? 'text-amber-300' : 'text-emerald-300'}>
                 {host.required_protocols?.length
                   ? host.unsupported_protocols?.length
@@ -951,6 +998,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
                   : '当前策略无需应用层协议能力'}{host.live_readback.rfw_api_version ? ` · RFW API ${host.live_readback.rfw_api_version}` : ''}
               </div>
               <div className="text-slate-400">实际规则 <span className="font-mono tabular-nums text-slate-200">{host.live_readback.rule_count ?? 0}</span> 条 · 平台管理 <span className="font-mono tabular-nums text-slate-200">{host.live_readback.managed_rule_count ?? 0}</span> 条{(host.live_readback.drift_count || host.live_readback.missing_count) ? ` · 偏差 ${host.live_readback.drift_count || 0} / 缺失 ${host.live_readback.missing_count || 0}` : ''}</div>
+              <div className={host.container_protection_status.state === 'active' ? 'text-emerald-300' : host.container_protection_status.state === 'apply_failed' ? 'text-rose-300' : 'text-amber-300'}>
+                容器保护：{containerProtectionStateLabel[host.container_protection_status.state] || host.container_protection_status.state}{host.container_protection_status.configured
+                  ? ` · ${host.container_protection_status.services.join('、')} · ${host.container_protection_status.runtimes.join(' / ')} · 最新样本核验 ${host.container_protection_status.containers_verified}/${host.container_protection_status.containers_fresh} 个 · 24 小时见到 ${host.container_protection_status.containers_seen} 个`
+                  : ' · 未选择测速服务或 Incus / Podman 范围'}{host.container_protection_status.age_seconds != null ? ` · 最新采样 ${Math.floor(host.container_protection_status.age_seconds / 60)} 分钟前` : ''}
+              </div>
+              {host.container_protection_status.configured && host.container_protection_status.state !== 'active' && <div className="text-amber-300">待核验明细：修订未更新 {host.container_protection_status.containers_waiting_revision} · Agent 回执缺失/未确认 {host.container_protection_status.containers_unverified} · 采样过期 {host.container_protection_status.containers_stale} · {containerProtectionReasonLabel[host.container_protection_status.reason] || '检查 Agent 版本、策略动作回执和最新容器采样。'}</div>}
               <div className={host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-400'}>
                 网卡清单{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '未就绪 / 过期' : '最新'} · Incus: <code className="text-slate-200">{host.container_interfaces.by_runtime.incus.join(', ') || '无'}</code> · Podman: <code className="text-slate-200">{host.container_interfaces.by_runtime.podman.join(', ') || '无'}</code>
               </div>
