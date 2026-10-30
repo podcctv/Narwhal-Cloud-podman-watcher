@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.175**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.176**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.176：加高 TCPing 主机选择区
+
+- 桌面端主机列表扩大可视高度，并为每台主机卡片设置稳定的最小高度；来源数量多时仅列表滚动，名称、状态与套餐信息不会被挤成窄条。
 
 ### v1.7.175：修复 TCPing 来源主机栏高度与卡片可读性
 
