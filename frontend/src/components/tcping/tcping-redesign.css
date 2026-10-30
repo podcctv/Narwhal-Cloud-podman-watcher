@@ -30,7 +30,7 @@
 .tcp-redesign .tcp-r-alert-warn{border-color:#755a27;background:#231b0f;color:#f3dfaa}.tcp-redesign .tcp-r-alert-warn>svg{color:var(--r-amber)}
 .tcp-redesign .tcp-r-layout{display:grid;grid-template-columns:minmax(250px,290px) minmax(0,1fr);align-items:start;gap:16px}
 .tcp-redesign .tcp-r-source-panel,.tcp-redesign .tcp-r-config,.tcp-redesign .tcp-r-results,.tcp-redesign .tcp-r-guide{border:1px solid var(--r-line);background:#0b1424;border-radius:14px;min-width:0}
-.tcp-redesign .tcp-r-source-panel{position:sticky;top:14px;height:min(740px,max(430px,calc(100vh - 11rem)));display:flex;flex-direction:column;overflow:hidden}
+.tcp-redesign .tcp-r-source-panel{position:sticky;top:14px;height:min(820px,max(460px,calc(100vh - 6rem)));display:flex;flex-direction:column;overflow:hidden}
 .tcp-redesign .tcp-r-panel-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 15px 13px;border-bottom:1px solid #202d41}
 .tcp-redesign .tcp-r-panel-heading h2,.tcp-redesign .tcp-r-config h2,.tcp-redesign .tcp-r-results h2,.tcp-redesign .tcp-r-guide h2{margin:5px 0 3px;font-size:15px;letter-spacing:-.015em}
 .tcp-redesign .tcp-r-panel-heading p,.tcp-redesign .tcp-r-config-head p,.tcp-redesign .tcp-r-results-head p{margin:0;color:var(--r-muted);font-size:10px;line-height:1.5}
@@ -39,8 +39,9 @@
 .tcp-redesign .tcp-r-search:focus-within{border-color:#1781ad;box-shadow:0 0 0 2px #0c4a6e55}
 .tcp-redesign .tcp-r-search svg{flex:none}.tcp-redesign .tcp-r-search input{width:100%;height:36px;min-width:0;padding:0;border:0;outline:0;background:transparent;color:#e7f1fc;font-size:11px}
 .tcp-redesign .tcp-r-search input::placeholder{color:#73849c}.tcp-redesign .tcp-r-search kbd{padding:2px 5px;border:1px solid #34435a;border-radius:4px;color:#94a5bb;font-size:9px}
-.tcp-redesign .tcp-r-source-list{display:flex;flex:1 1 0%;min-height:0;flex-direction:column;gap:8px;overflow:auto;overscroll-behavior:contain;padding:0 10px 10px;scrollbar-width:thin;scrollbar-color:#34455f transparent}
-.tcp-redesign .tcp-r-source{flex:0 0 auto;min-height:92px;overflow:hidden;border:1px solid #27364c;border-radius:10px;background:#0d1728;transition:border-color .16s,background .16s}
+/* Keep each source row readable while the list, rather than its cards, absorbs overflow. */
+.tcp-redesign .tcp-r-source-list{display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:minmax(104px,max-content);align-content:start;flex:1 1 0%;min-height:0;gap:8px;overflow:auto;overscroll-behavior:contain;padding:0 10px 10px;scrollbar-width:thin;scrollbar-color:#34455f transparent}
+.tcp-redesign .tcp-r-source{min-height:104px;overflow:hidden;border:1px solid #27364c;border-radius:10px;background:#0d1728;transition:border-color .16s,background .16s}
 .tcp-redesign .tcp-r-source:hover{border-color:#405874;background:#101c30}.tcp-redesign .tcp-r-source.is-selected{border-color:#38bdf8;background:#10243a;box-shadow:inset 3px 0 #38bdf8}
 .tcp-redesign .tcp-r-source-select{width:100%;min-height:48px;display:grid;grid-template-columns:30px minmax(0,1fr) auto 17px;align-items:center;gap:8px;padding:10px 9px 8px;text-align:left;background:transparent;color:inherit}
 .tcp-redesign .tcp-r-source-icon{width:29px;height:29px;display:grid;place-items:center;border:1px solid #2d4059;border-radius:8px;background:#101f33;color:#80cfff}
