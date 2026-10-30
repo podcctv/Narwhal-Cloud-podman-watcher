@@ -1,6 +1,11 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.185**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.186**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.186：让托管 Agent 更新绕过归档源故障
+
+- Agent 更新优先使用固定提交 SHA 的归档；归档不可达时，回退到 GitHub 文件树与 raw 文件，只下载 Agent 和安装脚本，并按 Git blob SHA 与预期大小校验后再进入升级暂存区。
+- 归档或文件源失败时，升级回执保留具体错误原因；现有失败即暂停、健康门禁、分批推进与回滚保护不变。
 
 ### v1.7.185：修复 GFW 探测调度与地址族诊断
 

@@ -19,7 +19,7 @@ write_result() {
   installed_version=$(awk -F= '$1=="NARWHAL_VERSION"{print $2;exit}' "$base/client.env" 2>/dev/null || true)
   [[ "$installed_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || installed_version=unknown
   umask 077
-  # Every message here is a static, locally defined diagnostic without JSON control characters.
+  # Dynamic source diagnostics are reduced to one line and JSON-escaped before use.
   printf '{"action_id":%s,"status":"%s","version":"%s","mode":"%s","message":"%s"}\n' \
     "$action_id" "$1" "$installed_version" "$mode" "$failure_message" >"$base/managed-update-result.json.tmp"
   mv -f "$base/managed-update-result.json.tmp" "$base/managed-update-result.json"
@@ -141,7 +141,21 @@ elif [[ "$update_mode" == archive ]]; then
   command -v python3 >/dev/null 2>&1 || fail_preflight 'Python 3 is unavailable for archive upgrade'
   current_main=$(python3 "$helper" resolve) || fail_preflight 'could not verify current GitHub main revision'
   [[ "$current_main" == "$revision" ]] || fail_preflight 'main changed; create a new campaign'
-  python3 "$helper" download "$revision" "$stage" || fail_preflight 'could not download immutable update archive'
+  # Older installed Agents only know the original codeload `download` command.
+  # Use the pinned-file fallback only after the helper has been upgraded to advertise it.
+  helper_commands=$(python3 "$helper" --help 2>&1 || true)
+  download_command=download
+  if grep -q 'download-client' <<<"$helper_commands"; then
+    download_command=download-client
+  fi
+  if ! bundle_error=$(python3 "$helper" "$download_command" "$revision" "$stage" 2>&1); then
+    bundle_error=${bundle_error//$'\r'/ }
+    bundle_error=${bundle_error//$'\n'/ }
+    bundle_error=${bundle_error//\\/\\\\}
+    bundle_error=${bundle_error//\"/\\\"}
+    bundle_error=${bundle_error:0:300}
+    fail_preflight "could not download immutable Agent update bundle: ${bundle_error:-unknown source error}"
+  fi
   [[ $(tr -d '[:space:]' <"$stage/VERSION") == "$version" ]] || fail_preflight 'target VERSION does not match the release'
 else
   fail_preflight 'invalid automatic update mode'

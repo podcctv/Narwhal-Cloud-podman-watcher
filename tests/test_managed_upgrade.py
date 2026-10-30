@@ -23,6 +23,13 @@ class ClientPackagingTests(unittest.TestCase):
         self.assertIn("systemctl show --no-pager --property=ActiveState,SubState,MainPID,NRestarts",updater)
         self.assertIn("&& wait_for_client_stable; then",updater)
 
+    def test_managed_archive_upgrade_falls_back_for_legacy_helpers(self):
+        updater=(ROOT/"scripts"/"managed-client-update.sh").read_text(encoding="utf-8")
+        self.assertIn('helper_commands=$(python3 "$helper" --help 2>&1 || true)',updater)
+        self.assertIn("download_command=download",updater)
+        self.assertIn("if grep -q 'download-client' <<<\"$helper_commands\"; then",updater)
+        self.assertIn('"$helper" "$download_command" "$revision" "$stage"',updater)
+
 
 @unittest.skipUnless(os.name=="posix" and shutil.which("bash") and shutil.which("flock"),"Linux shell integration")
 class ManagedUpgradeTests(unittest.TestCase):
