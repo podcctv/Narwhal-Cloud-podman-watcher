@@ -1,6 +1,11 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.183**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.184**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.184：修复 Cloudflare 探针来源网段缓存
+
+- Cloudflare 官方 IPv4 / IPv6 地址清单可能没有文件末尾换行；安装器现在在拼接两份清单时明确插入换行，避免最后一条 IPv4 与第一条 IPv6 被合并并导致整份清单校验失败。
+- 修复后会缓存并注入经过校验的官方网段，使经 Cloudflare 代理到达的 GFW 国内探针来源可以通过可信来源校验。
 
 ### v1.7.183：修复 GFW 来源识别与状态展示
 

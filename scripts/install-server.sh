@@ -232,10 +232,13 @@ fetch_cloudflare_trusted_proxy_ranges() {
   temp_file="$(mktemp "$TLS_DIR/cloudflare-ranges.XXXXXX")"
   ipv4_file="${temp_file}.v4"
   ipv6_file="${temp_file}.v6"
+  # Cloudflare's plain-text range endpoints may omit the final newline. Keep
+  # the last IPv4 range and first IPv6 range on separate lines before
+  # validating the combined cache.
   if command -v curl >/dev/null 2>&1 \
     && curl -fsSL --connect-timeout 5 --max-time 20 https://www.cloudflare.com/ips-v4 -o "$ipv4_file" \
     && curl -fsSL --connect-timeout 5 --max-time 20 https://www.cloudflare.com/ips-v6 -o "$ipv6_file" \
-    && cat "$ipv4_file" "$ipv6_file" >"$temp_file" \
+    && { cat "$ipv4_file"; printf '\n'; cat "$ipv6_file"; } >"$temp_file" \
     && validate_cloudflare_proxy_ranges_file "$temp_file"; then
     install -m 0644 "$temp_file" "$CLOUDFLARE_PROXY_RANGES_FILE"
     ranges="$(tr '\n' ' ' <"$CLOUDFLARE_PROXY_RANGES_FILE" | xargs)"
