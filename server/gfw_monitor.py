@@ -840,13 +840,6 @@ def _schedule(conn, now):
             "mainland": _select_probe_sources(host_roles["mainland"], MIN_MAINLAND),
             "overseas": _select_probe_sources(host_roles["overseas"], MIN_OVERSEAS),
         }
-        if coverage_reason:
-            reason = coverage_reason + "；需增加不同主机上的在线探针"
-            target_readiness = {"status": "probe_coverage_missing", "reason": reason,
-                                "next_step": "恢复离线探针或补足不同主机上的国内/海外探针；探针不会自测"}
-            conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
-                         (host["host_id"], host["node_id"], now, _json({"reason": reason, "targets": [], "target_readiness": target_readiness})))
-            continue  # Never use a node to probe its own public endpoint.
         pinned_endpoint_keys = set()
         if state and state["state"] == "blocked":
             pinned_endpoint_keys = _blocked_endpoint_keys(state["evidence_json"])
@@ -865,6 +858,23 @@ def _schedule(conn, now):
             conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
                          (host["host_id"], host["node_id"], now, _json({"reason": _reason, "targets": [], "sample": sample_metadata["sample"], "target_readiness": target_readiness, "blocked_endpoint_keys": preserved_blocked_endpoints})))
             continue
+        if coverage_reason:
+            reason = coverage_reason + "；需增加不同主机上的在线探针"
+            target_readiness = {
+                "status": "probe_coverage_missing",
+                "reason": reason,
+                "next_step": "恢复离线探针或补足不同主机上的国内/海外探针；探针不会自测",
+            }
+            conn.execute(
+                "INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) "
+                "ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
+                (host["host_id"], host["node_id"], now, _json({
+                    "reason": reason, "targets": [], "sample": sample_metadata["sample"],
+                    "target_readiness": target_readiness,
+                    "blocked_endpoint_keys": sorted([list(key) for key in pinned_endpoint_keys]),
+                })),
+            )
+            continue  # Never use a node to probe its own public endpoint.
         cycle_id = str(uuid.uuid4())
         targets_json = _json(targets)
         conn.execute("INSERT INTO gfw_cycles(id,host_id,node_id,targets_json,status,created_at,deadline_at,result_json) VALUES(?,?,?,?,'queued',?,?,?)",
@@ -1232,8 +1242,17 @@ def status_map(conn, now):
                 target_readiness.setdefault("discovery", cached_discovery)
         if not host_online:
             target_readiness.update({"status": "host_offline", "reason": "母鸡 Agent 心跳已过期，当前不会为该主机调度探测", "next_step": "先恢复 Agent 上报；恢复后系统会自动发现端点并安排探测"})
+        elif target_readiness.get("status") in {
+            "public_tcp_endpoint_missing", "public_address_missing",
+            "interface_inventory_unavailable", "ambiguous_container_mapping",
+        }:
+            # A concrete endpoint-discovery diagnosis is more actionable than
+            # probe coverage, so preserve it even when both conditions exist.
+            pass
         elif source_reason:
             target_readiness.update({"status": "probe_coverage_missing", "reason": source_reason + "；本机不会作为自己的探测来源", "next_step": "恢复离线探针或补足不同主机上的国内/海外探针"})
+        elif target_readiness.get("status") in {"probe_coverage_missing", "host_offline"}:
+            target_readiness.update({"status": "awaiting_scheduler", "reason": "主机与探针覆盖已恢复，等待自动重新发现并调度", "next_step": "等待 Agent 下一轮轮询；系统将自动重试"})
         elif not target_readiness:
             if not state_row:
                 target_readiness = {"status": "awaiting_scheduler", "reason": "服务端尚未执行该主机的首轮发现", "next_step": "等待一个 Agent 轮询周期；若持续无任务，检查服务端 GFW 调度日志"}
@@ -1303,10 +1322,10 @@ def status_map(conn, now):
                 "evidence": evidence.get("targets", []) if isinstance(evidence, dict) else [], "sample": sample,
                 "reason": reason or ("探测数据已过期" if stale else ""), "target_readiness": target_readiness, "history": history}
         else:
-            if source_reason:
-                reason = source_reason + "；本机不会作为自己的探测来源"
-            elif not host_online:
+            if not host_online:
                 reason = "母鸡 Agent 心跳已过期，探测任务暂不调度"
+            elif source_reason:
+                reason = source_reason + "；本机不会作为自己的探测来源"
             elif target_readiness and target_readiness.get("reason"):
                 reason = target_readiness["reason"]
             else:
