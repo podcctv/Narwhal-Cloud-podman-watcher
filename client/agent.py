@@ -2113,53 +2113,65 @@ def _collect_host_conntrack_snapshot() -> Dict[str, object]:
                 if _is_trackable_ip(value):
                     host_addresses.add(value)
     nat_mappings: List[Dict[str, object]] = []
-    nat_output = run(["sh", "-lc", "iptables-save -t nat 2>/dev/null || true"])
-    for line in nat_output.splitlines():
-        proto_match = re.search(r"(?:^|\s)-p\s+(tcp|udp)\b", line, re.IGNORECASE)
-        port_match = re.search(r"(?:^|\s)--dport\s+(\d+)\b", line)
-        target_match = re.search(r"(?:^|\s)--to-destination\s+([^\s]+)", line)
-        if not port_match or not target_match:
-            continue
-        target_host, target_port = _parse_socket_endpoint(target_match.group(1))
-        destination_match = re.search(r"(?:^|\s)-d\s+([^\s/]+)(?:/\d+)?", line)
-        nat_mappings.append(
-            {
-                "proto": proto_match.group(1).lower() if proto_match else "",
-                "host": destination_match.group(1) if destination_match else "",
-                "public_port": int(port_match.group(1)),
-                "target_host": target_host,
-                "container_port": target_port,
-            }
-        )
-    if not nat_mappings:
-        nft_output = run(
-            [
-                "sh",
-                "-lc",
-                "if command -v nft >/dev/null 2>&1; then "
-                "nft list ruleset 2>/dev/null | grep -E '(^|[[:space:]])dnat[[:space:]]+to[[:space:]]' | "
-                "sed -n '1,2000p'; fi",
-            ]
-        )
-        for line in nft_output.splitlines():
-            mapping_match = re.search(
-                r"\b(tcp|udp)\s+dport\s+(\d+).*?\bdnat\s+to\s+([^\s]+)",
-                line,
-                re.IGNORECASE,
-            )
-            if not mapping_match:
+    for save_command, mapping_source in (("iptables-save", "iptables-dnat"), ("ip6tables-save", "ip6tables-dnat")):
+        nat_output = run(["sh", "-lc", f"{save_command} -t nat 2>/dev/null || true"])
+        for line in nat_output.splitlines():
+            proto_match = re.search(r"(?:^|\s)-p\s+(tcp|udp)\b", line, re.IGNORECASE)
+            port_match = re.search(r"(?:^|\s)--dport\s+(\d+)\b", line)
+            target_match = re.search(r"(?:^|\s)--to-destination\s+([^\s]+)", line)
+            if not port_match or not target_match:
                 continue
-            target_host, target_port = _parse_socket_endpoint(mapping_match.group(3))
-            destination_match = re.search(r"\b(?:ip|ip6)\s+daddr\s+([^\s]+)", line)
+            target_host, target_port = _parse_socket_endpoint(target_match.group(1))
+            destination_match = re.search(r"(?:^|\s)-d\s+([^\s/]+)(?:/\d+)?", line)
             nat_mappings.append(
                 {
-                    "proto": mapping_match.group(1).lower(),
+                    "proto": proto_match.group(1).lower() if proto_match else "",
                     "host": destination_match.group(1) if destination_match else "",
-                    "public_port": int(mapping_match.group(2)),
+                    "public_port": int(port_match.group(1)),
                     "target_host": target_host,
                     "container_port": target_port,
+                    "source": mapping_source,
                 }
             )
+    # Hosts may run both compatibility NAT rules and native nftables rules.
+    # Read both inventories instead of treating any iptables output (including
+    # unrelated or UDP-only entries) as proof that nftables has no TCP DNAT.
+    nft_output = run(
+        [
+            "sh",
+            "-lc",
+            "if command -v nft >/dev/null 2>&1; then "
+            "nft list ruleset 2>/dev/null | grep -E '(^|[[:space:]])dnat[[:space:]]+to[[:space:]]' | "
+            "sed -n '1,2000p'; fi",
+        ]
+    )
+    existing_nat_keys = {
+        (str(item.get("proto") or ""), str(item.get("host") or ""), int(item.get("public_port") or 0),
+         str(item.get("target_host") or ""), int(item.get("container_port") or 0))
+        for item in nat_mappings
+    }
+    for line in nft_output.splitlines():
+        mapping_match = re.search(
+            r"\b(tcp|udp)\s+dport\s+(\d+).*?\bdnat\s+to\s+([^\s]+)",
+            line,
+            re.IGNORECASE,
+        )
+        if not mapping_match:
+            continue
+        target_host, target_port = _parse_socket_endpoint(mapping_match.group(3))
+        destination_match = re.search(r"\b(?:ip|ip6)\s+daddr\s+([^\s]+)", line)
+        candidate = {
+            "proto": mapping_match.group(1).lower(),
+            "host": destination_match.group(1) if destination_match else "",
+            "public_port": int(mapping_match.group(2)),
+            "target_host": target_host,
+            "container_port": target_port,
+            "source": "nft-dnat",
+        }
+        key = (candidate["proto"], candidate["host"], candidate["public_port"], candidate["target_host"], candidate["container_port"])
+        if key not in existing_nat_keys:
+            nat_mappings.append(candidate)
+            existing_nat_keys.add(key)
     entries = []
     for line in lines:
         parsed = _parse_conntrack_line(line)
@@ -6839,6 +6851,7 @@ def _incus_network_exposure(item: Dict[str, object]) -> List[Dict[str, str]]:
                 "device": str(device_name),
                 "listen": str(raw_device.get("listen") or ""),
                 "target": str(raw_device.get("connect") or ""),
+                "protocol": str(raw_device.get("protocol") or "tcp").lower(),
                 "nat": str(raw_device.get("nat") or "false"),
             }
         )
@@ -6882,6 +6895,7 @@ def _host_dnat_network_exposure(
         seen.add(key)
         exposures.append({
             "source": "host-dnat",
+            "mapping_source": str(mapping.get("source") or "host-nat"),
             "listen": f"tcp:{bind_host}:{public_port}",
             "target": f"tcp:{target_host}:{target_port}",
             "nat": "true",

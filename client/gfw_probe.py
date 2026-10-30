@@ -33,7 +33,7 @@ def _digest(value):
 def _safe_ip(value):
     try:
         address = ipaddress.ip_address(value)
-        return address.version == 4 and address.is_global and not address.is_multicast
+        return address.is_global and not address.is_multicast
     except (TypeError, ValueError):
         return False
 
@@ -107,13 +107,16 @@ def _failure_report(job, host_id, node_id, failure_code):
 
 def _probe(target):
     attempts, latencies, last_error = 0, [], "timeout"
+    address = ipaddress.ip_address(target["ip"])
+    family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+    socket_address = (str(address), target["port"], 0, 0) if address.version == 6 else (str(address), target["port"])
     for _ in range(2):
         attempts += 1
         start = time.perf_counter()
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            with socket.socket(family, socket.SOCK_STREAM) as sock:
                 sock.settimeout(2.0)
-                sock.connect((target["ip"], target["port"]))
+                sock.connect(socket_address)
             latencies.append((time.perf_counter() - start) * 1000)
             break
         except TimeoutError:

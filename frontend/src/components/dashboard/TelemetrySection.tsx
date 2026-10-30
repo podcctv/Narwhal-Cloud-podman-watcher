@@ -277,7 +277,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           : gfwStatus === 'investigating' ? 'warning'
           : gfwStatus === 'normal' || gfwStatus === 'recovered' ? 'normal' : 'unknown';
         const gfwLabels: Record<string, string> = {
-          blocked: hasDailyGfwSample ? 'GFW Blocked · 抽测端点国内异常' : 'GFW Blocked · 国内探测异常',
+          blocked: hasDailyGfwSample ? '疑似 GFW Blocked · 抽测端点国内异常' : '疑似 GFW Blocked · 国内探测异常',
           investigating: gfw.last_known_state === 'blocked' ? '状态待复核' : '疑似受阻 · 连续确认中',
           normal: hasDailyGfwSample ? '抽测端点国内外可达' : '国内外可达',
           recovered: hasDailyGfwSample ? '抽测端点已恢复' : '已恢复', stale: '数据过期',
@@ -290,7 +290,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             : targetReadiness.status === 'awaiting_scheduler' ? '等待自动调度'
             : targetReadiness.status === 'ready' ? '等待首轮探测' : '探测条件不足',
         };
-        const gfwLastState = gfw.last_known_state === 'blocked' ? 'GFW Blocked' : gfw.last_known_state === 'recovered' ? '已恢复' : gfw.last_known_state === 'normal' ? '国内外可达' : '未评估';
+        const gfwLastState = gfw.last_known_state === 'blocked' ? '疑似 GFW Blocked' : gfw.last_known_state === 'recovered' ? '已恢复' : gfw.last_known_state === 'normal' ? '国内外可达' : '未评估';
         const gfwDuration = gfwStatus === 'blocked' ? `持续 ${durationDays(gfw.duration_seconds)}`
           : gfwStatus === 'recovered' ? `恢复 ${durationDays(gfw.duration_seconds)}`
           : gfwStatus === 'normal' ? `${hasDailyGfwSample ? '抽样正常' : '正常'} ${durationDays(gfw.duration_seconds)}`
@@ -353,7 +353,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <p className="text-sm font-semibold">{gfwLabels[gfwStatus] || '待评估'}</p>
               <p className="text-sm font-bold">{gfwDuration}</p>
               {hasDailyGfwSample && <p>UTC {gfwSample.date_utc || '—'}：今日抽测 {fmtNumber(gfwSample.sampled_containers, 0)}/{fmtNumber(gfwSample.eligible_containers, 0)} 个容器、{fmtNumber(gfwSample.sampled_endpoints, 0)} 个现有 TCP 端点；{gfwSample.follow_up_blocked_endpoint ? '包含已确认受阻端口的恢复复测；' : ''}未抽中的对象未验证。</p>}
-              {gfw.blocked_count ? <p>累计确认阻断 {fmtNumber(gfw.blocked_count, 0)} 次</p> : null}
+              {gfw.blocked_count ? <p>累计疑似阻断 {fmtNumber(gfw.blocked_count, 0)} 次</p> : null}
+              <p>已识别探测网段：国内 {fmtNumber(gfw.verified_mainland_networks || 0, 0)}/2 · 海外 {fmtNumber(gfw.verified_overseas_networks || 0, 0)}/1</p>
               {gfw.last_sample_at ? <p>最近采样 {auditTime(gfw.last_sample_at)}</p> : null}
               {gfwSample.containers && gfwSample.containers.length > 0 && <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
                 <p className="mb-1 font-semibold text-slate-200">今日抽测容器</p>
@@ -366,11 +367,13 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                 <p>{targetReadiness.reason || '已发现可探测端点，等待调度器与独立探针完成首轮采样。'}</p>
                 {Number(targetReadiness.eligible_endpoints || 0) > 0 && <p>可确认端点 {fmtNumber(targetReadiness.eligible_endpoints, 0)} 个 · 今日抽测 {fmtNumber(targetReadiness.sampled_containers, 0)}/{fmtNumber(targetReadiness.eligible_containers, 0)} 个容器</p>}
                 {Number(targetReadiness.ambiguous_endpoints || 0) > 0 && <p>映射不唯一 {fmtNumber(targetReadiness.ambiguous_endpoints, 0)} 个；这些端点不会用于判定。</p>}
+                {targetReadiness.discovery && <p>发现来源：直连 {fmtNumber(targetReadiness.discovery.direct_public_listener || 0, 0)} · Podman {fmtNumber(targetReadiness.discovery.podman_publish || 0, 0)} · Incus {fmtNumber((targetReadiness.discovery.incus_proxy || 0) + (targetReadiness.discovery.incus_forward || 0), 0)} · DNAT {fmtNumber(targetReadiness.discovery.host_dnat || 0, 0)}；目标无监听 {fmtNumber(targetReadiness.discovery.mapping_target_not_listening || 0, 0)} · 监听地址待核实 {fmtNumber((targetReadiness.discovery.direct_listener_address_unverified || 0) + (targetReadiness.discovery.mapping_listener_address_unverified || 0), 0)} · 未匹配公网地址 {fmtNumber(targetReadiness.discovery.mapping_without_host_public_ip || 0, 0)}</p>}
                 {targetReadiness.next_step && <p className="text-slate-300">处理：{targetReadiness.next_step}</p>}
               </div>}
               {comparedEndpoint ? <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
                 {comparedEndpoint.container_name && <span className="break-all text-slate-200">{comparedEndpoint.runtime || '容器'}{comparedEndpoint.project ? `/${comparedEndpoint.project}` : ''}/{comparedEndpoint.container_name}</span>}
                 <span className="font-mono text-slate-200">{comparedEndpoint.ip}:{comparedEndpoint.port}</span>
+                {comparedEndpoint.mapping_sources?.length ? <span>来源 {comparedEndpoint.mapping_sources.map(source => source === 'direct-public-listener' ? '容器公网直连' : source === 'podman-publish' ? 'Podman 发布' : source === 'incus-proxy' ? 'Incus Proxy' : source === 'incus-forward' ? 'Incus Forward' : source === 'host-dnat' ? '宿主机 DNAT' : source).join(' / ')}</span> : null}
                 <span>国内成功 {comparedEndpoint.mainland?.success || 0}/{comparedEndpoint.mainland?.total || 0}</span>
                 <span>海外成功 {comparedEndpoint.overseas?.success || 0}/{comparedEndpoint.overseas?.total || 0}</span>
               </div> : null}
@@ -381,7 +384,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                     const succeeded = probe.success === true;
                     const failed = probe.success === false;
                     const stateClass = succeeded ? 'text-emerald-300' : failed ? 'text-amber-300' : 'text-slate-400';
-                    const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}` : failed ? `TCP 连接失败${probe.error ? ` · ${probe.error}` : ''}` : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
+                    const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}` : failed ? probe.error === 'timeout' ? '连接超时' : probe.error === 'refused' ? '端口拒绝连接 · 不计为 GFW 阻断' : `探针网络错误 · 不计为 GFW 阻断${probe.error ? ` · ${probe.error}` : ''}` : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
                     return <div key={`${probe.role}-${probe.source_host_id}-${index}`} className="min-w-0 rounded-md border border-slate-800 px-2 py-1">
                       <p className="break-all text-xs text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}{probe.source_region ? ` · ${probe.source_region}` : ''}{probe.source_carrier ? ` · ${probe.source_carrier}` : ''}{!probe.source_region && !probe.source_carrier ? ' · 地区/运营商待标注' : ''}</p>
                       <p className={`break-words text-xs ${stateClass}`}>{stateText}</p>
@@ -397,7 +400,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                 <summary className="cursor-pointer font-semibold">阻断 / 恢复历史（{gfw.history.length} 条）</summary>
                 <div className="mt-2 space-y-2">
                   {gfw.history.slice(0, 6).map((event, index) => <div key={`${event.event_type}-${event.at}-${index}`} className="min-w-0 rounded-md border border-slate-700/70 p-2">
-                    <p className="font-semibold">{event.event_type === 'blocked' ? '开始阻断' : '确认恢复'} · {auditTime(event.at)}</p>
+                    <p className="font-semibold">{event.event_type === 'blocked' ? '开始疑似阻断' : '确认恢复'} · {auditTime(event.at)}</p>
                     {event.event_type === 'recovered' && <p>本次阻断持续 {durationDays(event.duration_seconds)}</p>}
                     {event.event_type === 'blocked' && Number(event.normal_duration_seconds || 0) > 0 && <p>此前正常 {durationDays(event.normal_duration_seconds)}</p>}
                   </div>)}
