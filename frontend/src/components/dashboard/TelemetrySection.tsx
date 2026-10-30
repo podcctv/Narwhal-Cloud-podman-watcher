@@ -10,6 +10,7 @@ interface TelemetrySectionProps {
 }
 
 type Level = 'normal' | 'warning' | 'critical' | 'unknown';
+type GfwFamilyCoverage = NonNullable<NonNullable<SecurityStatusItem['gfw_reachability']>['probe_family_coverage']>;
 const tones: Record<Level, string> = {
   normal: 'border-emerald-700 bg-emerald-950/30 text-emerald-300',
   warning: 'border-amber-700 bg-amber-950/30 text-amber-300',
@@ -286,10 +287,12 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           recovered: hasDailyGfwSample ? '抽测端点已恢复' : '已恢复', stale: '数据过期',
           unassessed: targetReadiness.status === 'host_offline' ? '母鸡离线'
             : targetReadiness.status === 'probe_coverage_missing' ? '探针覆盖不足'
+            : targetReadiness.status === 'ready_partial' ? '部分探针已采样'
             : targetReadiness.status === 'interface_inventory_unavailable' ? '网卡清单不可用'
             : targetReadiness.status === 'public_address_missing' ? '未发现公网地址'
             : targetReadiness.status === 'ambiguous_container_mapping' ? '端口归属不唯一'
             : targetReadiness.status === 'public_tcp_endpoint_missing' ? '缺少可测端口'
+            : targetReadiness.status === 'probe_family_coverage_missing' ? '探针 IP 版本覆盖不足'
             : targetReadiness.status === 'awaiting_scheduler' ? '等待自动调度'
             : targetReadiness.status === 'ready' ? '等待首轮探测' : '等待诊断原因',
         };
@@ -334,6 +337,16 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           || (gfwStatus === 'normal' && gfwLatestEvent.event_type === 'blocked');
         const gfwEvidence = gfw.evidence || [];
         const comparedEndpoint = gfwEvidence.find(item => item.status === 'blocked') || gfwEvidence.find(item => item.status === 'normal') || gfwEvidence[0];
+        const familyCoverage: Partial<GfwFamilyCoverage> = gfw.probe_family_coverage || targetReadiness.family_coverage || gfwSample.probe_family_coverage || {};
+        const familyCoverageText = (family: 'ipv4' | 'ipv6') => {
+          const coverage = familyCoverage[family];
+          if (!coverage) return '';
+          const label = family === 'ipv4' ? 'IPv4' : 'IPv6';
+          const mainland = coverage.mainland || {};
+          const overseas = coverage.overseas || {};
+          const describeRole = (role: typeof mainland, required: number) => `${role.verified_networks || 0}/${role.required_networks || required} 个独立网段 · 默认路由存在 ${role.route_present_sources || 0} / 未发现 ${role.route_missing_sources || 0} / 未上报 ${role.route_unknown_sources || 0}`;
+          return `${label}：国内 ${describeRole(mainland, 2)} · 海外 ${describeRole(overseas, 1)}（路由状态仅是内核提示，最终以实际 TCP 探测回执为准）`;
+        };
 
         return <article key={t.host_id} className="min-w-0 rounded-xl border border-slate-700 bg-slate-900/60 p-3 sm:p-4">
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
@@ -409,7 +422,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                       const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}`
                         : failed && probe.error === 'timeout' ? '连接超时 · 单点结果不单独证明阻断'
                         : failed && probe.error === 'refused' ? '端口拒绝连接 · 不计为 GFW 阻断'
-                        : failed ? `探针网络错误 · 不计为 GFW 阻断${probe.error ? ` · ${probe.error}` : ''}`
+                        : failed ? `探针路径异常 · 不计为 GFW 阻断${probe.error ? ` · ${{ family_unsupported: '系统不支持该 IP 版本', no_route: '缺少到目标的路由', host_unreachable: '网络报告目标不可达', local_policy_block: '本机策略拒绝连接', network_error: '未分类网络错误' }[probe.error] || probe.error}` : ''}`
                         : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
                       return <div key={`${probe.role}-${probe.source_host_id}-${index}`} className={`min-w-0 rounded-md border px-2 py-1.5 ${probeTone}`}>
                         <p className="break-all text-[10px] text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}{probe.source_region ? ` · ${probe.source_region}` : ''}{probe.source_carrier ? ` · ${probe.source_carrier}` : ''}</p>
@@ -480,7 +493,10 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <summary className="cursor-pointer text-[11px] font-semibold text-slate-300">探测覆盖与端点发现细节</summary>
               <div className="mt-2 space-y-1.5 text-[11px] leading-5 text-slate-400">
                 <p>已识别独立探测网段：国内 {fmtNumber(gfw.verified_mainland_networks || 0, 0)}/2 · 海外 {fmtNumber(gfw.verified_overseas_networks || 0, 0)}/1{gfw.last_sample_at ? ` · 最近采样 ${auditTime(gfw.last_sample_at)}` : ''}</p>
+                {familyCoverage.ipv4 && <p>{familyCoverageText('ipv4')}</p>}
+                {familyCoverage.ipv6 && <p>{familyCoverageText('ipv6')}</p>}
                 {hasDailyGfwSample && <p>UTC {gfwSample.date_utc || '—'}：今日抽测 {fmtNumber(gfwSample.sampled_containers, 0)}/{fmtNumber(gfwSample.eligible_containers, 0)} 个容器、{fmtNumber(gfwSample.sampled_endpoints, 0)} 个现有 TCP 端点；未抽中的对象未验证。</p>}
+                {hasDailyGfwSample && (Number(gfwSample.unprobeable_endpoints_by_family?.ipv4 || 0) + Number(gfwSample.unprobeable_endpoints_by_family?.ipv6 || 0) > 0) && <p>另有 IPv4/IPv6 端点因对应探针覆盖不足而未抽测；这些端点状态保持未知。</p>}
                 {targetReadiness.status && <>
                   <p>自动探测条件：{targetReadiness.reason || gfwLabels[gfwStatus] || '等待自动发现与调度'}{targetReadiness.next_step ? ` · 下一步：${targetReadiness.next_step}` : ''}</p>
                   {Number(targetReadiness.eligible_endpoints || 0) > 0 && <p>可确认端点 {fmtNumber(targetReadiness.eligible_endpoints, 0)} 个 · 今日抽测 {fmtNumber(targetReadiness.sampled_containers, 0)}/{fmtNumber(targetReadiness.eligible_containers, 0)} 个容器</p>}

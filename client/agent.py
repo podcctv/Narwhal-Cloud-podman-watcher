@@ -10913,7 +10913,11 @@ def process_security_actions(
     bridge_inventory: List[Dict[str, object]] | None = None,
 ) -> bool:
     _schedule_abuse_guard(server, secret, host_id, node_id)
-    response = signed_post_json(server, secret, "/api/v1/actions/poll", {"host_id": host_id, "node_id": node_id})
+    response = signed_post_json(server, secret, "/api/v1/actions/poll", {
+        "host_id": host_id,
+        "node_id": node_id,
+        "gfw_probe_capabilities": gfw_probe.route_capabilities(),
+    })
     node_operations.configure(response.get("operations"))
     operations_payload = response.get("operations") if isinstance(response.get("operations"), dict) else {}
     try:

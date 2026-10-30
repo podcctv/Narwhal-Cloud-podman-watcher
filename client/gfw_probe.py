@@ -1,4 +1,5 @@
 """Small, bounded TCP reachability worker for signed GFW correlation jobs."""
+import errno
 import hashlib
 import ipaddress
 import json
@@ -13,7 +14,6 @@ from pathlib import Path
 _lock = threading.Lock()
 _JOB_ID = re.compile(r"[0-9a-f-]{36}")
 _LEASE = re.compile(r"[A-Za-z0-9_-]{32,64}")
-_ERRORS = {"", "timeout", "refused", "network_error"}
 _FAILURE_CODES = {
     "probe_source_identity_mismatch", "invalid_probe_identity", "invalid_probe_lease",
     "invalid_probe_deadline", "invalid_target_count", "invalid_target_fields",
@@ -52,6 +52,54 @@ def _safe_identity_text(value, limit):
 
 def available():
     return os.name == "posix" and Path("/proc/self/ns/net").exists() and not Path("/.dockerenv").exists() and not Path("/run/.containerenv").exists()
+
+
+def route_capabilities():
+    """Report kernel default-route availability by address family.
+
+    This is a scheduling hint, not proof of end-to-end Internet reachability.
+    Missing/unreadable proc files stay unknown so older or unusual systems are
+    not falsely declared incapable.
+    """
+    result = {"ipv4_default_route": None, "ipv6_default_route": None}
+    try:
+        with open("/proc/net/route", "r", encoding="ascii", errors="ignore") as stream:
+            lines = stream.read().splitlines()[1:]
+        result["ipv4_default_route"] = any(
+            len(fields) >= 8
+            and fields[1] == "00000000"
+            and fields[7] == "00000000"
+            and (int(fields[3], 16) & 1) != 0
+            for fields in (line.split() for line in lines)
+        )
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open("/proc/net/ipv6_route", "r", encoding="ascii", errors="ignore") as stream:
+            lines = stream.read().splitlines()
+        result["ipv6_default_route"] = any(
+            len(fields) >= 10
+            and fields[0] == "0" * 32
+            and fields[1] == "00"
+            and (int(fields[8], 16) & 1) != 0
+            for fields in (line.split() for line in lines)
+        )
+    except (OSError, ValueError, IndexError):
+        pass
+    return result
+
+
+def _network_error_code(exc):
+    code = getattr(exc, "errno", None)
+    if code in {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT}:
+        return "family_unsupported"
+    if code in {errno.ENETUNREACH, errno.ENETDOWN, errno.EADDRNOTAVAIL, errno.ENODEV}:
+        return "no_route"
+    if code in {errno.EHOSTUNREACH, getattr(errno, "EHOSTDOWN", -1)}:
+        return "host_unreachable"
+    if code in {errno.EACCES, errno.EPERM}:
+        return "local_policy_block"
+    return "network_error"
 
 
 def _validate(job, host_id, node_id):
@@ -123,8 +171,8 @@ def _probe(target):
             last_error = "timeout"
         except ConnectionRefusedError:
             last_error = "refused"
-        except OSError:
-            last_error = "network_error"
+        except OSError as exc:
+            last_error = _network_error_code(exc)
         if attempts < 2:
             time.sleep(.1)
     success = bool(latencies)

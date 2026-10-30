@@ -6097,6 +6097,7 @@ async def poll_security_actions(
         raise HTTPException(status_code=400, detail="invalid JSON body")
     host_id = str(payload.get("host_id") or "")[:200]
     node_id = str(payload.get("node_id") or "")[:128]
+    gfw_probe_capabilities = payload.get("gfw_probe_capabilities")
     if not host_id:
         raise HTTPException(status_code=400, detail="host_id is required")
     now = int(time.time())
@@ -6178,7 +6179,7 @@ async def poll_security_actions(
         try:
             conn.execute("BEGIN IMMEDIATE")
             tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
-            gfw_probe = gfw_monitor.lease_job(conn, host_id, node_id, now)
+            gfw_probe = gfw_monitor.lease_job(conn, host_id, node_id, now, gfw_probe_capabilities)
             conn.commit()
         except Exception:
             conn.rollback()

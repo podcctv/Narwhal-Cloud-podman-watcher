@@ -20,7 +20,8 @@ STALE_SECONDS = 900
 SOURCE_NETWORK_STALE_SECONDS = 7 * 86400
 JOB_SECONDS = 600
 MAX_ACTIVE_CYCLES = 30
-SUCCESSFUL_PROBE_ERRORS = {"", "timeout", "refused", "network_error"}
+PROBE_RESULT_ERROR_CODES = {"", "timeout", "refused", "network_error", "family_unsupported", "no_route", "host_unreachable", "local_policy_block"}
+PROBE_CAPABILITY_STALE_SECONDS = 900
 PROBE_FAILURE_CODES = {
     "probe_source_identity_mismatch", "invalid_probe_identity", "invalid_probe_lease",
     "invalid_probe_deadline", "invalid_target_count", "invalid_target_fields",
@@ -200,9 +201,18 @@ def _fresh_source_network(row, now):
     return network_id[:64], updated_at
 
 
+def _fresh_route_capability(row, column, now):
+    updated_at = int(row["route_capabilities_updated_at"] or 0)
+    if not 0 < updated_at <= now or now - updated_at > PROBE_CAPABILITY_STALE_SECONDS:
+        return None
+    value = row[column]
+    return bool(value) if value in (0, 1) else None
+
+
 def _probe_health_snapshot(conn, now):
     rows = conn.execute(
-        "SELECT r.host_id,r.node_id,r.role,r.region,r.carrier,r.source_network_id,r.source_network_updated_at,h.last_seen,o.payload "
+        "SELECT r.host_id,r.node_id,r.role,r.region,r.carrier,r.source_network_id,r.source_network_updated_at,"
+        "r.ipv4_default_route,r.ipv6_default_route,r.route_capabilities_updated_at,h.last_seen,o.payload "
         "FROM gfw_probe_roles r LEFT JOIN hosts h ON h.node_id=r.node_id "
         "LEFT JOIN ops_hosts o ON o.node=h.node_id ORDER BY r.role,r.host_id"
     ).fetchall()
@@ -223,6 +233,8 @@ def _probe_health_snapshot(conn, now):
         region = str(row["region"] or "").strip()
         carrier = str(row["carrier"] or "").strip()
         network_id, network_updated_at = _fresh_source_network(row, now)
+        ipv4_route = _fresh_route_capability(row, "ipv4_default_route", now)
+        ipv6_route = _fresh_route_capability(row, "ipv6_default_route", now)
         stats = counts[role]
         stats["configured"] += 1
         stats["online" if online else "offline"] += 1
@@ -236,11 +248,27 @@ def _probe_health_snapshot(conn, now):
                 stats["online_missing_carrier"] += 1
         if online and not network_id:
             stats["online_missing_network_identity"] += 1
+        for family, route in (("ipv4", ipv4_route), ("ipv6", ipv6_route)):
+            supported_key = f"online_{family}_default_route"
+            unknown_key = f"online_{family}_route_unknown"
+            missing_key = f"online_{family}_no_default_route"
+            stats.setdefault(supported_key, 0)
+            stats.setdefault(unknown_key, 0)
+            stats.setdefault(missing_key, 0)
+            if online and route is True:
+                stats[supported_key] += 1
+            elif online and route is None:
+                stats[unknown_key] += 1
+            elif online:
+                stats[missing_key] += 1
         sources.append({
             "host_id": str(row["host_id"] or ""), "node_id": str(row["node_id"] or ""),
             "role": role, "region": region, "carrier": carrier,
             "network_id": network_id,
             "network_identity_updated_at": network_updated_at if network_id else 0,
+            "ipv4_default_route": ipv4_route,
+            "ipv6_default_route": ipv6_route,
+            "route_capabilities_updated_at": int(row["route_capabilities_updated_at"] or 0),
             "last_seen": last_seen,
             "last_seen_age_seconds": max(0, now - last_seen) if last_seen else None,
             "online": online,
@@ -455,9 +483,12 @@ def _listener_reaches_targets(bindings, port, target_addresses):
     return False
 
 
-def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, daily_selection=None):
+def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, daily_selection=None,
+                      probe_families=None, family_coverage=None):
     pinned_endpoint_keys = set(pinned_endpoint_keys or ())
     daily_selection = daily_selection if isinstance(daily_selection, dict) else {}
+    family_coverage = family_coverage if isinstance(family_coverage, dict) else {}
+    supported_families = set(probe_families) if probe_families is not None else {"ipv4", "ipv6"}
     host_sample = conn.execute(
         "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1", (host_id,)
     ).fetchone()
@@ -630,7 +661,29 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
         "ambiguous_endpoints": sum(1 for owners in socket_owners.values() if len(owners) > 1),
         "discovery": discovery,
         "containers": [],
+        "probe_family_coverage": family_coverage,
     }
+    family_endpoint_counts = {"ipv4": 0, "ipv6": 0}
+    probeable_containers = {}
+    unprobeable_by_family = {"ipv4": 0, "ipv6": 0}
+    for container_key, group in containers.items():
+        usable_targets = []
+        for target in group["targets"]:
+            family = "ipv6" if ipaddress.ip_address(target["ip"]).version == 6 else "ipv4"
+            family_endpoint_counts[family] += 1
+            if family in supported_families:
+                usable_targets.append(target)
+            else:
+                unprobeable_by_family[family] += 1
+        if usable_targets:
+            probeable_containers[container_key] = {**group, "targets": usable_targets}
+    sample["endpoints_by_family"] = family_endpoint_counts
+    sample["unprobeable_endpoints_by_family"] = unprobeable_by_family
+    sample["probeable_containers"] = len(probeable_containers)
+    sample["probeable_endpoints"] = sum(len(group["targets"]) for group in probeable_containers.values())
+    containers = probeable_containers
+    required_families = {family for family, count in family_endpoint_counts.items() if count > 0}
+    family_reason = _family_coverage_reason(family_coverage, required_families)
     targets = []
     endpoint_containers = {}
     if containers:
@@ -719,9 +772,19 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
         sample["follow_up_blocked_endpoint"] = any(key in pinned_by_container for key in selected_keys)
     sample_metadata = {"sample": sample, "endpoint_containers": endpoint_containers}
     if targets:
-        sample_metadata.update({"readiness": "ready", "reason": "", "next_step": "探测任务会按约 5 分钟周期运行"})
+        partial = any(unprobeable_by_family.values()) or bool(family_reason)
+        sample_metadata.update({
+            "readiness": "ready_partial" if partial else "ready",
+            "reason": family_reason if partial else "",
+            "family_coverage_reason": family_reason,
+            "next_step": "补足对应地址族探针路由；已覆盖端点继续自动抽测" if partial else "探测任务会按约 5 分钟周期运行",
+        })
         return targets, "", sample_metadata
-    if not addresses and not has_public_container_ip:
+    if sample["eligible_endpoints"] and not sample["probeable_endpoints"]:
+        reason = family_reason or "已发现公网 TCP 端点，但当前探针缺少对应 IP 地址族的独立网络覆盖"
+        readiness = "probe_family_coverage_missing"
+        next_step = "国内探针需具备目标地址族的可用默认路由，并来自足够的独立网段；Agent 会自动上报，服务端随后自动重试"
+    elif not addresses and not has_public_container_ip:
         if inventory_reason:
             reason = inventory_reason
             readiness = "interface_inventory_unavailable"
@@ -794,6 +857,12 @@ def initialize(conn):
         conn.execute("ALTER TABLE gfw_probe_roles ADD COLUMN source_network_id TEXT NOT NULL DEFAULT ''")
     if "source_network_updated_at" not in columns:
         conn.execute("ALTER TABLE gfw_probe_roles ADD COLUMN source_network_updated_at INTEGER NOT NULL DEFAULT 0")
+    if "ipv4_default_route" not in columns:
+        conn.execute("ALTER TABLE gfw_probe_roles ADD COLUMN ipv4_default_route INTEGER")
+    if "ipv6_default_route" not in columns:
+        conn.execute("ALTER TABLE gfw_probe_roles ADD COLUMN ipv6_default_route INTEGER")
+    if "route_capabilities_updated_at" not in columns:
+        conn.execute("ALTER TABLE gfw_probe_roles ADD COLUMN route_capabilities_updated_at INTEGER NOT NULL DEFAULT 0")
     job_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(gfw_probe_jobs)")}
     if "source_region" not in job_columns:
         conn.execute("ALTER TABLE gfw_probe_jobs ADD COLUMN source_region TEXT NOT NULL DEFAULT ''")
@@ -812,7 +881,9 @@ def _role_counts(conn, now):
 
 
 def _active_roles(conn, now):
-    rows = conn.execute("SELECT r.host_id,r.node_id,r.role,r.region,r.carrier,r.source_network_id,r.source_network_updated_at,h.last_seen,o.payload FROM gfw_probe_roles r JOIN hosts h ON h.node_id=r.node_id LEFT JOIN ops_hosts o ON o.node=h.node_id ORDER BY r.role,r.host_id").fetchall()
+    rows = conn.execute("SELECT r.host_id,r.node_id,r.role,r.region,r.carrier,r.source_network_id,r.source_network_updated_at,"
+                        "r.ipv4_default_route,r.ipv6_default_route,r.route_capabilities_updated_at,h.last_seen,o.payload "
+                        "FROM gfw_probe_roles r JOIN hosts h ON h.node_id=r.node_id LEFT JOIN ops_hosts o ON o.node=h.node_id ORDER BY r.role,r.host_id").fetchall()
     result = {"mainland": [], "overseas": []}
     for row in rows:
         if _probe_online(row["last_seen"], row["payload"], now):
@@ -821,7 +892,9 @@ def _active_roles(conn, now):
                                          "region": str(row["region"] or "")[:80],
                                          "carrier": str(row["carrier"] or "")[:100],
                                          "network_id": network_id,
-                                         "network_identity_updated_at": network_updated_at})
+                                         "network_identity_updated_at": network_updated_at,
+                                         "ipv4_default_route": _fresh_route_capability(row, "ipv4_default_route", now),
+                                         "ipv6_default_route": _fresh_route_capability(row, "ipv6_default_route", now)})
     return result
 
 
@@ -883,10 +956,80 @@ def _select_probe_sources(sources, required):
     return selected
 
 
+def _family_probe_plan(roles):
+    """Choose independent networks per family, preferring reported default routes.
+
+    A missing default route is only a routing-table hint: policy or host routes
+    can still reach a particular public endpoint. Therefore every online source
+    remains eligible for a bounded target-specific TCP attempt. The connect
+    result is authoritative, and route errors never count as a block timeout.
+    """
+    source_plan = {"ipv4": {"mainland": [], "overseas": []}, "ipv6": {"mainland": [], "overseas": []}}
+    coverage = {}
+    required_by_role = {"mainland": MIN_MAINLAND, "overseas": MIN_OVERSEAS}
+    for family, column in (("ipv4", "ipv4_default_route"), ("ipv6", "ipv6_default_route")):
+        family_ready = True
+        family_info = {}
+        for role, required in required_by_role.items():
+            candidates = sorted(
+                roles.get(role, []),
+                key=lambda source: (0 if source.get(column) is True else 1 if source.get(column) is None else 2,
+                                    str(source.get("host_id") or "")),
+            )
+            selected = _select_probe_sources(candidates, required)
+            networks = {str(item.get("network_id") or "") for item in selected if item.get("network_id")}
+            ready = len(networks) >= required
+            route_present_sources = sum(1 for item in candidates if item.get(column) is True)
+            route_missing_sources = sum(1 for source in roles.get(role, []) if source.get(column) is False)
+            route_unknown_sources = sum(1 for source in roles.get(role, []) if source.get(column) is None)
+            if ready:
+                selected = [item for item in selected if item.get("network_id")][:required]
+            else:
+                family_ready = False
+            # Retain partial source selections so real connectivity results are
+            # visible while the network threshold is incomplete. Aggregation
+            # still stays unknown until all independent-network thresholds pass.
+            source_plan[family][role] = selected
+            family_info[role] = {
+                "required_networks": required,
+                "eligible_sources": len(candidates),
+                "route_capable_sources": route_present_sources,
+                "route_present_sources": route_present_sources,
+                "route_missing_sources": route_missing_sources,
+                "route_unknown_sources": route_unknown_sources,
+                "verified_networks": len(networks),
+                "ready": ready,
+                "probeable": bool(selected),
+            }
+        coverage[family] = {"ready": family_ready, "probeable": any(item["probeable"] for item in family_info.values()), **family_info}
+    return source_plan, coverage
+
+
+def _family_coverage_reason(coverage, required_families=None):
+    missing = []
+    required_families = set(required_families) if required_families is not None else {"ipv4", "ipv6"}
+    for family, label in (("ipv4", "IPv4"), ("ipv6", "IPv6")):
+        if family not in required_families:
+            continue
+        info = coverage.get(family, {}) if isinstance(coverage, dict) else {}
+        if not info or info.get("ready"):
+            continue
+        role_labels = (("mainland", "国内", MIN_MAINLAND), ("overseas", "海外", MIN_OVERSEAS))
+        details = []
+        for role, role_label, required in role_labels:
+            role_info = info.get(role, {}) if isinstance(info.get(role), dict) else {}
+            if role_info.get("ready"):
+                continue
+            details.append(f"{role_label} {int(role_info.get('verified_networks') or 0)}/{required} 个独立网段")
+        if details:
+            missing.append(f"{label}探针覆盖不足（{'、'.join(details)}）")
+    if not missing:
+        return ""
+    return "目标端点的地址族缺少足够探针：" + "；".join(missing)
+
+
 def _schedule(conn, now):
     roles = _active_roles(conn, now)
-    if len(roles["mainland"]) < MIN_MAINLAND or len(roles["overseas"]) < MIN_OVERSEAS:
-        return
     hosts = conn.execute("SELECT host_id,node_id,last_seen FROM hosts WHERE node_id<>'' AND last_seen>=? ORDER BY COALESCE((SELECT last_cycle_at FROM gfw_states s WHERE s.host_id=hosts.host_id),0),host_id LIMIT 300", (now - STALE_SECONDS,)).fetchall()
     for host in hosts:
         active_cycles = int(conn.execute("SELECT COUNT(*) FROM gfw_cycles WHERE status IN ('queued','running')").fetchone()[0])
@@ -899,10 +1042,8 @@ def _schedule(conn, now):
         if conn.execute("SELECT 1 FROM gfw_cycles WHERE host_id=? AND status IN ('queued','running') LIMIT 1", (host["host_id"],)).fetchone():
             continue
         host_roles, coverage_reason = _source_coverage_for_host(roles, host["node_id"])
-        host_roles = {
-            "mainland": _select_probe_sources(host_roles["mainland"], MIN_MAINLAND),
-            "overseas": _select_probe_sources(host_roles["overseas"], MIN_OVERSEAS),
-        }
+        family_source_plan, family_coverage = _family_probe_plan(host_roles)
+        probe_families = {family for family, details in family_coverage.items() if details.get("probeable")}
         pinned_endpoint_keys = set()
         if state and state["state"] == "blocked":
             pinned_endpoint_keys = _blocked_endpoint_keys(state["evidence_json"])
@@ -910,6 +1051,7 @@ def _schedule(conn, now):
         targets, _reason, sample_metadata = _targets_for_host(
             conn, host["host_id"], host["node_id"], now,
             pinned_endpoint_keys=pinned_endpoint_keys, daily_selection=daily_selection,
+            probe_families=probe_families, family_coverage=family_coverage,
         )
         if not targets:
             preserved_blocked_endpoints = sorted([list(key) for key in pinned_endpoint_keys])
@@ -917,27 +1059,13 @@ def _schedule(conn, now):
                 "status": sample_metadata.get("readiness", "public_tcp_endpoint_missing"),
                 "reason": sample_metadata.get("reason") or _reason,
                 "next_step": sample_metadata.get("next_step", ""),
+                "family_coverage": family_coverage,
             }
             conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
                          (host["host_id"], host["node_id"], now, _json({"reason": _reason, "targets": [], "sample": sample_metadata["sample"], "target_readiness": target_readiness, "blocked_endpoint_keys": preserved_blocked_endpoints})))
             continue
-        if coverage_reason:
-            reason = coverage_reason + "；需增加不同主机上的在线探针"
-            target_readiness = {
-                "status": "probe_coverage_missing",
-                "reason": reason,
-                "next_step": "恢复离线探针或补足不同主机上的国内/海外探针；探针不会自测",
-            }
-            conn.execute(
-                "INSERT INTO gfw_states(host_id,node_id,last_cycle_at,last_classification,evidence_json) VALUES(?,?,?,'unknown',?) "
-                "ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,last_classification='unknown',evidence_json=excluded.evidence_json",
-                (host["host_id"], host["node_id"], now, _json({
-                    "reason": reason, "targets": [], "sample": sample_metadata["sample"],
-                    "target_readiness": target_readiness,
-                    "blocked_endpoint_keys": sorted([list(key) for key in pinned_endpoint_keys]),
-                })),
-            )
-            continue  # Never use a node to probe its own public endpoint.
+        # Collect bounded partial samples even when the full network threshold is
+        # missing. Their results remain unknown and cannot confirm block/recovery.
         cycle_id = str(uuid.uuid4())
         targets_json = _json(targets)
         conn.execute("INSERT INTO gfw_cycles(id,host_id,node_id,targets_json,status,created_at,deadline_at,result_json) VALUES(?,?,?,?,'queued',?,?,?)",
@@ -952,15 +1080,29 @@ def _schedule(conn, now):
             pending_evidence["reason"] = ""
         pending_evidence.update({
             "sample": sample_metadata.get("sample", {}),
-            "target_readiness": {"status": "ready", "reason": "", "next_step": "探针任务已排队；等待探测结果回传"},
+            "target_readiness": {
+                "status": "ready_partial" if coverage_reason or sample_metadata.get("readiness") == "ready_partial" else sample_metadata.get("readiness", "ready"),
+                "reason": "；".join(value for value in (sample_metadata.get("reason", ""), coverage_reason) if value),
+                "next_step": "补足不同网络的探针；当前部分结果仅供排查，不用于确认阻断或恢复" if coverage_reason else sample_metadata.get("next_step", "探针任务已排队；等待探测结果回传"),
+                "family_coverage": family_coverage,
+            },
         })
         conn.execute("INSERT INTO gfw_states(host_id,node_id,last_cycle_at,evidence_json) VALUES(?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,last_cycle_at=excluded.last_cycle_at,evidence_json=excluded.evidence_json",
                      (host["host_id"], host["node_id"], now, _json(pending_evidence)))
-        for role in ("mainland", "overseas"):
-            for source in host_roles[role]:
-                job_id = str(uuid.uuid4())
-                conn.execute("INSERT INTO gfw_probe_jobs(id,cycle_id,source_host_id,source_node_id,role,targets_json,targets_hash,lease,status,created_at,deadline_at,source_region,source_carrier,source_network_id) VALUES(?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?)",
-                             (job_id, cycle_id, source["host_id"], source["node_id"], role, targets_json, _digest(targets), secrets.token_urlsafe(32), now, now + JOB_SECONDS, source.get("region", ""), source.get("carrier", ""), source.get("network_id", "")))
+        targets_by_source = {}
+        for target in targets:
+            family = "ipv6" if ipaddress.ip_address(target["ip"]).version == 6 else "ipv4"
+            for role in ("mainland", "overseas"):
+                for source in family_source_plan[family][role]:
+                    key = (role, source["node_id"])
+                    targets_by_source.setdefault(key, {"source": source, "targets": []})["targets"].append(target)
+        for (role, _source_node_id), assignment in targets_by_source.items():
+            source = assignment["source"]
+            source_targets = assignment["targets"]
+            source_targets_json = _json(source_targets)
+            job_id = str(uuid.uuid4())
+            conn.execute("INSERT INTO gfw_probe_jobs(id,cycle_id,source_host_id,source_node_id,role,targets_json,targets_hash,lease,status,created_at,deadline_at,source_region,source_carrier,source_network_id) VALUES(?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?)",
+                         (job_id, cycle_id, source["host_id"], source["node_id"], role, source_targets_json, _digest(source_targets), secrets.token_urlsafe(32), now, now + JOB_SECONDS, source.get("region", ""), source.get("carrier", ""), source.get("network_id", "")))
 
 
 def _apply_cycle(conn, cycle, now):
@@ -978,15 +1120,22 @@ def _apply_cycle(conn, cycle, now):
         sample_metadata = {}
     if not isinstance(endpoint_containers, dict):
         endpoint_containers = {}
+    job_target_ids = {}
+    for job in jobs:
+        try:
+            job_targets = json.loads(job["targets_json"] or "[]")
+            job_target_ids[job["id"]] = {str(item.get("id") or "") for item in job_targets if isinstance(item, dict)}
+        except (TypeError, ValueError):
+            job_target_ids[job["id"]] = set()
     evidence = []
-    successful_cycle = False
-    blocked_cycle = False
     for target in targets:
         by_role = {"mainland": {"success": 0, "failed": 0, "timeout": 0, "total": 0, "independent_networks": 0, "network_success": 0, "network_timeout": 0},
                    "overseas": {"success": 0, "failed": 0, "timeout": 0, "total": 0, "independent_networks": 0, "network_success": 0, "network_timeout": 0}}
         network_outcomes = {"mainland": {}, "overseas": {}}
         probe_sources = []
         for job in jobs:
+            if target["id"] not in job_target_ids.get(job["id"], set()):
+                continue
             result = conn.execute("SELECT success,error,latency_ms FROM gfw_probe_results WHERE job_id=? AND target_id=?", (job["id"], target["id"])).fetchone()
             probe_sources.append({
                 "source_host_id": str(job["source_host_id"] or "")[:200],
@@ -1023,8 +1172,6 @@ def _apply_cycle(conn, cycle, now):
         # agents on one egress network are one source, not separate evidence.
         is_blocked = main["network_timeout"] >= MIN_MAINLAND and over["network_success"] >= MIN_OVERSEAS
         is_normal = main["network_success"] >= MIN_MAINLAND and over["network_success"] >= MIN_OVERSEAS
-        blocked_cycle = blocked_cycle or is_blocked
-        successful_cycle = successful_cycle or is_normal
         if is_blocked:
             status = "blocked"
         elif is_normal:
@@ -1041,6 +1188,8 @@ def _apply_cycle(conn, cycle, now):
                              "mapping_sources": [str(value)[:40] for value in owner.get("sources", [])[:8]] if isinstance(owner.get("sources"), list) else [],
                              "container_ports": [int(value) for value in owner.get("container_ports", [])[:8] if str(value).isdigit()] if isinstance(owner.get("container_ports"), list) else []})
         evidence.append(endpoint)
+    blocked_cycle = any(item.get("status") == "blocked" for item in evidence)
+    successful_cycle = bool(evidence) and len(evidence) == len(targets) and all(item.get("status") == "normal" for item in evidence)
     classification = "blocked" if blocked_cycle else "normal" if successful_cycle else "unknown"
     prior = conn.execute("SELECT * FROM gfw_states WHERE host_id=?", (cycle["host_id"],)).fetchone()
     state = dict(prior) if prior else {"host_id": cycle["host_id"], "node_id": cycle["node_id"], "state": "unassessed",
@@ -1087,7 +1236,30 @@ def _apply_cycle(conn, cycle, now):
                 for (role, label), count in sorted(failures.items())
             ) + "；本轮不用于确认阻断或恢复"
         else:
-            reason = "国内或海外探测样本不足/结果不一致；本轮不用于确认阻断或恢复"
+            error_labels = {
+                "family_unsupported": "探针系统不支持该 IP 地址族",
+                "no_route": "探针缺少到目标的路由",
+                "host_unreachable": "探针网络报告目标不可达",
+                "local_policy_block": "探针本机策略拒绝连接",
+                "network_error": "探针网络错误（内核未提供细分原因）",
+            }
+            observed_errors = {}
+            for endpoint in evidence:
+                family = "IPv6" if ipaddress.ip_address(endpoint["ip"]).version == 6 else "IPv4"
+                for probe in endpoint.get("probes", []):
+                    code = str(probe.get("error") or "")
+                    if probe.get("success") is False and code in error_labels:
+                        role_label = "国内" if probe.get("role") == "mainland" else "海外"
+                        key = (role_label, family, error_labels[code])
+                        observed_errors[key] = observed_errors.get(key, 0) + 1
+            if observed_errors:
+                reason = "探针连接路径未通过核验：" + "；".join(
+                    f"{role}{family}{label} {count} 项"
+                    for (role, family, label), count in sorted(observed_errors.items())[:5]
+                ) + "；本轮不用于确认阻断或恢复"
+            else:
+                family_reason = str(sample_metadata.get("family_coverage_reason") or "")
+                reason = (family_reason + "；" if family_reason else "") + "国内或海外探测样本不足/结果不一致；本轮不用于确认阻断或恢复"
     event = None
     if classification == "blocked":
         if state["state"] != "blocked":
@@ -1167,10 +1339,26 @@ def _apply_cycle(conn, cycle, now):
     return True
 
 
-def lease_job(conn, host_id, node_id, now):
+def _store_route_capabilities(conn, node_id, now, capabilities):
+    if not node_id or not isinstance(capabilities, dict):
+        return
+    ipv4 = capabilities.get("ipv4_default_route")
+    ipv6 = capabilities.get("ipv6_default_route")
+    if type(ipv4) is not bool and type(ipv6) is not bool:
+        return
+    conn.execute(
+        "UPDATE gfw_probe_roles SET ipv4_default_route=?,ipv6_default_route=?,route_capabilities_updated_at=? WHERE node_id=?",
+        (int(ipv4) if type(ipv4) is bool else None,
+         int(ipv6) if type(ipv6) is bool else None,
+         now, node_id),
+    )
+
+
+def lease_job(conn, host_id, node_id, now, capabilities=None):
     conn.execute("DELETE FROM gfw_probe_results WHERE job_id IN (SELECT id FROM gfw_probe_jobs WHERE created_at<? AND status<>'running')", (now - 90 * 86400,))
     conn.execute("DELETE FROM gfw_probe_jobs WHERE created_at<? AND status<>'running'", (now - 90 * 86400,))
     conn.execute("DELETE FROM gfw_cycles WHERE created_at<? AND status NOT IN ('queued','running')", (now - 90 * 86400,))
+    _store_route_capabilities(conn, node_id, now, capabilities)
     _schedule(conn, now)
     conn.execute("UPDATE gfw_probe_jobs SET status='expired',finished_at=?,error='probe deadline elapsed' WHERE status IN ('queued','running') AND deadline_at<=?", (now, now))
     cycles = conn.execute("SELECT * FROM gfw_cycles WHERE status IN ('queued','running') AND deadline_at<=? LIMIT 100", (now,)).fetchall()
@@ -1228,7 +1416,7 @@ def report(conn, payload, now, source_network_id=""):
         target_id = result["target_id"]
         if target_id not in allowed or target_id in seen or type(result["success"]) is not bool or type(result["attempts"]) is not int or not 1 <= result["attempts"] <= 2:
             raise HTTPException(400, "invalid GFW result")
-        if result["error"] not in SUCCESSFUL_PROBE_ERRORS:
+        if result["error"] not in PROBE_RESULT_ERROR_CODES:
             raise HTTPException(400, "invalid GFW result error")
         latency = result["latency_ms"]
         if latency is not None and (type(latency) not in (int, float) or not 0 <= latency <= 10000):
@@ -1304,6 +1492,7 @@ def status_map(conn, now):
         }
         host_sources, source_reason = _source_coverage_for_host(active_roles, host["node_id"])
         source_reason = source_reason or _source_network_coverage_reason(host_sources)
+        _family_source_plan, host_family_coverage = _family_probe_plan(host_sources)
         source_counts = {role: len(sources) for role, sources in host_sources.items()}
         host_last_seen = int(host["last_seen"] or 0)
         host_online = host_last_seen > 0 and now - host_last_seen <= STALE_SECONDS
@@ -1318,6 +1507,11 @@ def status_map(conn, now):
         if isinstance(cached_sample, dict):
             for key in ("eligible_containers", "sampled_containers", "eligible_endpoints", "sampled_endpoints", "ambiguous_endpoints"):
                 target_readiness.setdefault(key, int(cached_sample.get(key) or 0))
+            for key in ("endpoints_by_family", "unprobeable_endpoints_by_family", "probe_family_coverage"):
+                if isinstance(cached_sample.get(key), dict):
+                    target_readiness.setdefault(key, cached_sample[key])
+            if isinstance(cached_sample.get("family_coverage_reason"), str):
+                target_readiness.setdefault("family_coverage_reason", cached_sample["family_coverage_reason"])
             cached_discovery = cached_sample.get("discovery", {})
             if isinstance(cached_discovery, dict):
                 target_readiness.setdefault("discovery", cached_discovery)
@@ -1325,7 +1519,7 @@ def status_map(conn, now):
             target_readiness.update({"status": "host_offline", "reason": "母鸡 Agent 心跳已过期，当前不会为该主机调度探测", "next_step": "先恢复 Agent 上报；恢复后系统会自动发现端点并安排探测"})
         elif target_readiness.get("status") in {
             "public_tcp_endpoint_missing", "public_address_missing",
-            "interface_inventory_unavailable", "ambiguous_container_mapping",
+            "interface_inventory_unavailable", "ambiguous_container_mapping", "probe_family_coverage_missing",
         }:
             # A concrete endpoint-discovery diagnosis is more actionable than
             # probe coverage, so preserve it even when both conditions exist.
@@ -1383,7 +1577,16 @@ def status_map(conn, now):
             else:
                 since = int(state_row["normal_since"] or 0)
             duration = max(0, now - since) if since else 0
-            if coverage_insufficient:
+            readiness_reason = str(target_readiness.get("reason") or "")
+            readiness_status = str(target_readiness.get("status") or "")
+            concrete_readiness = readiness_status in {
+                "host_offline", "interface_inventory_unavailable", "public_address_missing",
+                "public_tcp_endpoint_missing", "ambiguous_container_mapping",
+                "probe_family_coverage_missing", "probe_coverage_missing", "ready_partial",
+            }
+            if concrete_readiness and readiness_reason:
+                reason = readiness_reason
+            elif coverage_insufficient:
                 reason = source_reason + "；本机不会作为自己的探测来源"
                 if stale:
                     reason = "探测数据已过期；" + reason
@@ -1400,6 +1603,7 @@ def status_map(conn, now):
                 "available_mainland_sources": source_counts["mainland"], "available_overseas_sources": source_counts["overseas"],
                 "verified_mainland_networks": verified_network_counts["mainland"],
                 "verified_overseas_networks": verified_network_counts["overseas"],
+                "probe_family_coverage": host_family_coverage,
                 "evidence": evidence.get("targets", []) if isinstance(evidence, dict) else [], "sample": sample,
                 "reason": reason or ("探测数据已过期" if stale else ""), "target_readiness": target_readiness, "history": history,
                 "history_30d": history_summary}
@@ -1420,6 +1624,7 @@ def status_map(conn, now):
                 "available_mainland_sources": source_counts["mainland"], "available_overseas_sources": source_counts["overseas"],
                 "verified_mainland_networks": verified_network_counts["mainland"],
                 "verified_overseas_networks": verified_network_counts["overseas"],
+                "probe_family_coverage": host_family_coverage,
                 "reason": reason, "target_readiness": target_readiness, "history": history,
                 "history_30d": history_summary}
     return result
@@ -1443,6 +1648,7 @@ def attach(app, db, verify_signature, signed_response):
             online_hosts = [item for item in candidates if now - int(item.get("last_seen") or 0) <= STALE_SECONDS]
             target_hosts = 0
             ready_hosts = 0
+            partial_probe_hosts = 0
             independent_probe_hosts = 0
             target_endpoints = 0
             eligible_endpoints = 0
@@ -1458,6 +1664,7 @@ def attach(app, db, verify_signature, signed_response):
             }
             missing_reasons = {}
             probe_missing_reasons = {}
+            family_missing_reasons = {}
             probe_job_counts = {"complete": 0, "failed": 0, "expired": 0, "queued": 0, "running": 0, "cancelled": 0}
             probe_jobs_since = now - 86400
             for job in conn.execute("SELECT status,COUNT(*) AS count FROM gfw_probe_jobs WHERE created_at>=? GROUP BY status", (probe_jobs_since,)):
@@ -1469,6 +1676,7 @@ def attach(app, db, verify_signature, signed_response):
                 _source_candidates, source_reason = _source_coverage_for_host(active_roles, item["node_id"])
                 network_reason = _source_network_coverage_reason(_source_candidates)
                 effective_source_reason = source_reason or network_reason
+                _family_source_plan, family_coverage = _family_probe_plan(_source_candidates)
                 if not effective_source_reason:
                     independent_probe_hosts += 1
                 else:
@@ -1480,6 +1688,8 @@ def attach(app, db, verify_signature, signed_response):
                 targets, reason, sample_metadata = _targets_for_host(
                     conn, item["host_id"], item["node_id"], now,
                     pinned_endpoint_keys=pinned_endpoint_keys, daily_selection=daily_selection,
+                    probe_families={family for family, details in family_coverage.items() if details.get("probeable")},
+                    family_coverage=family_coverage,
                 )
                 sample = sample_metadata.get("sample", {})
                 if isinstance(sample, dict):
@@ -1490,11 +1700,25 @@ def attach(app, db, verify_signature, signed_response):
                     if isinstance(discovery, dict):
                         for key in discovery_totals:
                             discovery_totals[key] += int(discovery.get(key) or 0)
+                    endpoint_families = {
+                        family for family, count in (sample.get("endpoints_by_family") or {}).items()
+                        if family in {"ipv4", "ipv6"} and int(count or 0) > 0
+                    }
+                else:
+                    endpoint_families = set()
+                family_reason = _family_coverage_reason(family_coverage, endpoint_families)
+                if family_reason:
+                    family_missing_reasons[family_reason] = family_missing_reasons.get(family_reason, 0) + 1
                 if targets:
                     target_hosts += 1
                     target_endpoints += len(targets)
-                    if not effective_source_reason:
+                    full_family_coverage = bool(endpoint_families) and all(
+                        bool(family_coverage.get(family, {}).get("ready")) for family in endpoint_families
+                    )
+                    if not effective_source_reason and full_family_coverage:
                         ready_hosts += 1
+                    else:
+                        partial_probe_hosts += 1
                 else:
                     label = reason or "未发现可验证的公网 TCP 端点"
                     missing_reasons[label] = missing_reasons.get(label, 0) + 1
@@ -1522,6 +1746,9 @@ def attach(app, db, verify_signature, signed_response):
             if online_hosts and target_hosts < len(online_hosts):
                 top_target_reason = sorted(missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[0][0] if missing_reasons else "未发现公网 TCP 端点"
                 recommendations.append(f"{len(online_hosts) - target_hosts} 台在线母鸡没有可探测端点；最常见原因：{top_target_reason}。")
+            if family_missing_reasons:
+                top_family_reason, family_host_count = sorted(family_missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[0]
+                recommendations.append(f"{family_host_count} 台母鸡的目标端点探针网段未达判定门槛；{top_family_reason}。系统会继续采集部分连通性回执，但不会据此确认阻断或恢复。")
             if ready_hosts and not probe_job_counts["complete"] and not probe_job_counts["queued"] and not probe_job_counts["running"]:
                 if probe_job_counts["failed"] or probe_job_counts["expired"]:
                     recommendations.append("存在可探测主机但近 24 小时没有成功回传；检查探针 Agent 的 GFW TCP 探测能力与出站连接。")
@@ -1542,6 +1769,7 @@ def attach(app, db, verify_signature, signed_response):
                         "hosts_with_targets": target_hosts,
                         "hosts_with_independent_probes": independent_probe_hosts,
                         "hosts_ready_for_probe": ready_hosts,
+                        "hosts_with_partial_probe_coverage": partial_probe_hosts,
                         "target_endpoints": target_endpoints,
                         "eligible_endpoints": eligible_endpoints,
                         "eligible_containers": eligible_containers,
@@ -1552,6 +1780,7 @@ def attach(app, db, verify_signature, signed_response):
                         "discovery": discovery_totals,
                         "missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
                         "probe_missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(probe_missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
+                        "family_missing_reasons": [{"reason": reason, "hosts": count} for reason, count in sorted(family_missing_reasons.items(), key=lambda entry: (-entry[1], entry[0]))[:5]],
                     },
                     "probe_health": {"window_seconds": 86400, "jobs": probe_job_counts,
                                      "last_finished_at": int(last_probe_job[0] or 0) if last_probe_job else 0,
@@ -1565,6 +1794,9 @@ def attach(app, db, verify_signature, signed_response):
                                     "carrier": role_rows.get(item["node_id"], {}).get("carrier", ""),
                                     "network_id": probe_by_node.get(item["node_id"], {}).get("network_id", ""),
                                     "network_identity_updated_at": probe_by_node.get(item["node_id"], {}).get("network_identity_updated_at", 0),
+                                    "ipv4_default_route": probe_by_node.get(item["node_id"], {}).get("ipv4_default_route"),
+                                    "ipv6_default_route": probe_by_node.get(item["node_id"], {}).get("ipv6_default_route"),
+                                    "route_capabilities_updated_at": probe_by_node.get(item["node_id"], {}).get("route_capabilities_updated_at", 0),
                                     "probe_online": probe_by_node.get(item["node_id"], {}).get("online", False) if item["node_id"] in probe_by_node else now - int(item.get("last_seen") or 0) <= STALE_SECONDS,
                                     "last_seen_age_seconds": max(0, now - int(item.get("last_seen") or 0)) if item.get("last_seen") else None}
                                    for item in candidates]}

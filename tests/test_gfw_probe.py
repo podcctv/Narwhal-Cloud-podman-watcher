@@ -1,4 +1,6 @@
 import json
+import errno
+import io
 import sqlite3
 import time
 import unittest
@@ -52,6 +54,44 @@ class GfwProbeWorkerTests(unittest.TestCase):
         self.assertEqual(posts[0][0], "/api/v1/gfw-probe/failure")
         self.assertEqual(posts[0][1]["failure_code"], "probe_runtime_unavailable")
         self.assertNotIn("targets", posts[0][1])
+
+    def test_network_errors_keep_the_kernel_reason(self):
+        cases = {
+            errno.EAFNOSUPPORT: "family_unsupported",
+            errno.ENETUNREACH: "no_route",
+            errno.EHOSTUNREACH: "host_unreachable",
+            errno.EACCES: "local_policy_block",
+            errno.EIO: "network_error",
+        }
+        for error_number, expected in cases.items():
+            with self.subTest(error_number=error_number):
+                self.assertEqual(gfw_probe._network_error_code(OSError(error_number, "test")), expected)
+
+    def test_route_capabilities_detect_default_routes_per_family(self):
+        ipv4 = io.StringIO(
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+            "ens3 00000000 0101A8C0 0003 0 0 100 00000000 0 0 0\n"
+        )
+        ipv6 = io.StringIO(
+            "0" * 32 + " 00 " + "0" * 32 + " 00 " + "0" * 32
+            + " 00000000 00000000 00000000 00000001 ens3\n"
+        )
+        with mock.patch("builtins.open", side_effect=[ipv4, ipv6]):
+            self.assertEqual(gfw_probe.route_capabilities(), {
+                "ipv4_default_route": True,
+                "ipv6_default_route": True,
+            })
+
+    def test_route_capabilities_report_ipv4_only_probe(self):
+        ipv4 = io.StringIO(
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+            "ens3 00000000 0101A8C0 0003 0 0 100 00000000 0 0 0\n"
+        )
+        with mock.patch("builtins.open", side_effect=[ipv4, io.StringIO("")]):
+            self.assertEqual(gfw_probe.route_capabilities(), {
+                "ipv4_default_route": True,
+                "ipv6_default_route": False,
+            })
 
 
 class GfwProbeFailurePersistenceTests(unittest.TestCase):
@@ -204,6 +244,129 @@ class GfwCoverageDiagnosticTests(unittest.TestCase):
         status = gfw_monitor.status_map(self.conn, self.now)[self.target_host]
         self.assertEqual(status["target_readiness"]["status"], "host_offline")
         self.assertIn("心跳已过期", status["reason"])
+
+    def test_scheduler_records_endpoint_diagnosis_even_when_probe_roles_are_missing(self):
+        self.conn.execute("DELETE FROM gfw_probe_roles")
+        self.conn.execute(
+            "INSERT INTO host_security(host_id,ts,payload_json) VALUES(?,?,?)",
+            (self.target_host, self.now, json.dumps({"host_firewall": {"interface_inventory": {
+                "status": "ready", "interfaces": [{"name": "ens3", "addresses": ["8.8.8.8/24"]}],
+            }}})),
+        )
+        self.conn.execute(
+            "INSERT INTO reports(host_id,container_name,runtime,project,ts,payload_json) VALUES(?,?,?,?,?,?)",
+            (self.target_host, "container-a", "incus", "default", self.now,
+             json.dumps({"id": "container-id", "network_addresses": ["10.0.0.2"],
+                         "security": {"listening_ports": [], "network_exposure": []}})),
+        )
+        self.conn.commit()
+        gfw_monitor._schedule(self.conn, self.now)
+        self.conn.commit()
+        stored = self.conn.execute("SELECT evidence_json FROM gfw_states WHERE host_id=?", (self.target_host,)).fetchone()
+        self.assertIsNotNone(stored)
+        readiness = json.loads(stored["evidence_json"])["target_readiness"]
+        self.assertEqual(readiness["status"], "public_tcp_endpoint_missing")
+        self.assertIn("实际监听端口", readiness["reason"])
+
+    def test_partial_probe_results_are_visible_but_never_confirm_a_state(self):
+        self.conn.execute("DELETE FROM gfw_probe_roles")
+        source_node = "probe-cn-a"
+        self.conn.execute(
+            "INSERT INTO gfw_probe_roles(node_id,host_id,role,updated_at,source_network_id,source_network_updated_at) VALUES(?,?,?,?,?,?)",
+            (source_node, "mainland-a", "mainland", self.now, "cn-net-a", self.now),
+        )
+        self.conn.execute(
+            "INSERT INTO host_security(host_id,ts,payload_json) VALUES(?,?,?)",
+            (self.target_host, self.now, json.dumps({"host_firewall": {"interface_inventory": {
+                "status": "ready", "interfaces": [],
+            }}})),
+        )
+        self.conn.execute(
+            "INSERT INTO reports(host_id,container_name,runtime,project,ts,payload_json) VALUES(?,?,?,?,?,?)",
+            (self.target_host, "container-a", "incus", "default", self.now,
+             json.dumps({"id": "container-id", "network_addresses": ["8.8.8.8"],
+                         "security": {"listening_ports": [443], "listening_endpoints": ["0.0.0.0:443"], "network_exposure": []}})),
+        )
+        self.conn.commit()
+
+        gfw_monitor._schedule(self.conn, self.now)
+        cycle = self.conn.execute("SELECT * FROM gfw_cycles WHERE host_id=?", (self.target_host,)).fetchone()
+        self.assertIsNotNone(cycle)
+        jobs = self.conn.execute("SELECT * FROM gfw_probe_jobs WHERE cycle_id=?", (cycle["id"],)).fetchall()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["role"], "mainland")
+        self.assertEqual(jobs[0]["source_node_id"], source_node)
+
+        targets = json.loads(jobs[0]["targets_json"])
+        self.conn.execute("UPDATE gfw_probe_jobs SET status='complete',finished_at=? WHERE id=?", (self.now + 1, jobs[0]["id"]))
+        self.conn.execute(
+            "INSERT INTO gfw_probe_results(job_id,target_id,success,latency_ms,error,attempts) VALUES(?,?,?,?,?,?)",
+            (jobs[0]["id"], targets[0]["id"], 1, 10.0, "", 1),
+        )
+        self.assertTrue(gfw_monitor._apply_cycle(
+            self.conn,
+            self.conn.execute("SELECT * FROM gfw_cycles WHERE id=?", (cycle["id"],)).fetchone(),
+            self.now + 1,
+        ))
+        state = self.conn.execute("SELECT state,last_classification,evidence_json FROM gfw_states WHERE host_id=?", (self.target_host,)).fetchone()
+        self.assertEqual(state["state"], "unassessed")
+        self.assertEqual(state["last_classification"], "unknown")
+        evidence = json.loads(state["evidence_json"])
+        self.assertEqual(evidence["targets"][0]["mainland"]["success"], 1)
+        self.assertTrue(evidence["reason"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM gfw_events WHERE host_id=?", (self.target_host,)).fetchone()[0], 0)
+
+
+class GfwFamilyProbePlanTests(unittest.TestCase):
+    @staticmethod
+    def source(node_id, role, network_id, ipv4, ipv6):
+        return {
+            "node_id": node_id,
+            "role": role,
+            "network_id": network_id,
+            "ipv4_default_route": ipv4,
+            "ipv6_default_route": ipv6,
+        }
+
+    def test_sources_are_selected_per_target_family_and_independent_network(self):
+        roles = {
+            "mainland": [
+                self.source("cn-v4-a", "mainland", "cn-net-a", True, False),
+                self.source("cn-v4-b", "mainland", "cn-net-b", True, False),
+                self.source("cn-v6-a", "mainland", "cn-net-c", False, True),
+                self.source("cn-v6-b", "mainland", "cn-net-d", False, True),
+            ],
+            "overseas": [
+                self.source("overseas-v4", "overseas", "us-net-a", True, False),
+                self.source("overseas-v6", "overseas", "us-net-b", False, True),
+            ],
+        }
+        plan, coverage = gfw_monitor._family_probe_plan(roles)
+        self.assertTrue(coverage["ipv4"]["ready"])
+        self.assertTrue(coverage["ipv6"]["ready"])
+        self.assertEqual({source["node_id"] for source in plan["ipv4"]["mainland"]}, {"cn-v4-a", "cn-v4-b"})
+        self.assertEqual({source["node_id"] for source in plan["ipv6"]["mainland"]}, {"cn-v6-a", "cn-v6-b"})
+        self.assertEqual(plan["ipv4"]["overseas"][0]["node_id"], "overseas-v4")
+        self.assertEqual(plan["ipv6"]["overseas"][0]["node_id"], "overseas-v6")
+
+    def test_missing_default_route_does_not_hide_target_specific_ipv6_routes(self):
+        roles = {
+            "mainland": [
+                self.source("cn-a", "mainland", "cn-net-a", True, None),
+                self.source("cn-b", "mainland", "cn-net-b", True, False),
+            ],
+            "overseas": [self.source("overseas-a", "overseas", "us-net-a", True, None)],
+        }
+        plan, coverage = gfw_monitor._family_probe_plan(roles)
+        self.assertTrue(coverage["ipv4"]["ready"])
+        self.assertTrue(coverage["ipv6"]["ready"])
+        self.assertEqual(gfw_monitor._family_coverage_reason(coverage, {"ipv4"}), "")
+        self.assertEqual(gfw_monitor._family_coverage_reason(coverage, {"ipv6"}), "")
+        self.assertEqual(len(plan["ipv6"]["mainland"]), 2)
+        self.assertEqual(len(plan["ipv6"]["overseas"]), 1)
+        self.assertEqual(coverage["ipv6"]["mainland"]["route_present_sources"], 0)
+        self.assertEqual(coverage["ipv6"]["mainland"]["route_missing_sources"], 1)
+        self.assertEqual(coverage["ipv6"]["mainland"]["route_unknown_sources"], 1)
 
 
 if __name__ == "__main__":

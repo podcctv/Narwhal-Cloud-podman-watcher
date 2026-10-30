@@ -439,10 +439,16 @@ export interface SecurityStatusItem {
     available_overseas_sources?: number;
     verified_mainland_networks?: number;
     verified_overseas_networks?: number;
+    probe_family_coverage?: Record<'ipv4' | 'ipv6', {
+      ready?: boolean;
+      probeable?: boolean;
+      mainland?: { required_networks?: number; eligible_sources?: number; route_capable_sources?: number; route_present_sources?: number; route_missing_sources?: number; route_unknown_sources?: number; verified_networks?: number; ready?: boolean; probeable?: boolean };
+      overseas?: { required_networks?: number; eligible_sources?: number; route_capable_sources?: number; route_present_sources?: number; route_missing_sources?: number; route_unknown_sources?: number; verified_networks?: number; ready?: boolean; probeable?: boolean };
+    }>;
     reason?: string;
     host_last_seen?: number;
     target_readiness?: {
-      status?: 'ready' | 'host_offline' | 'interface_inventory_unavailable' | 'public_address_missing' | 'public_tcp_endpoint_missing' | 'ambiguous_container_mapping' | string;
+      status?: 'ready' | 'ready_partial' | 'host_offline' | 'interface_inventory_unavailable' | 'public_address_missing' | 'public_tcp_endpoint_missing' | 'ambiguous_container_mapping' | 'probe_family_coverage_missing' | string;
       reason?: string;
       next_step?: string;
       eligible_containers?: number;
@@ -451,6 +457,12 @@ export interface SecurityStatusItem {
       sampled_endpoints?: number;
       ambiguous_endpoints?: number;
       discovery?: Record<string, number>;
+      family_coverage?: Record<'ipv4' | 'ipv6', {
+        ready?: boolean;
+        probeable?: boolean;
+        mainland?: { required_networks?: number; eligible_sources?: number; route_capable_sources?: number; route_present_sources?: number; route_missing_sources?: number; route_unknown_sources?: number; verified_networks?: number; ready?: boolean; probeable?: boolean };
+        overseas?: { required_networks?: number; eligible_sources?: number; route_capable_sources?: number; route_present_sources?: number; route_missing_sources?: number; route_unknown_sources?: number; verified_networks?: number; ready?: boolean; probeable?: boolean };
+      }>;
     };
     sample?: {
       policy?: string;
@@ -461,6 +473,14 @@ export interface SecurityStatusItem {
       sampled_endpoints?: number;
       follow_up_blocked_endpoint?: boolean;
       discovery?: Record<string, number>;
+      endpoints_by_family?: { ipv4?: number; ipv6?: number };
+      unprobeable_endpoints_by_family?: { ipv4?: number; ipv6?: number };
+      probe_family_coverage?: Record<'ipv4' | 'ipv6', {
+        ready?: boolean;
+        probeable?: boolean;
+        mainland?: { required_networks?: number; eligible_sources?: number; route_capable_sources?: number; route_present_sources?: number; route_missing_sources?: number; route_unknown_sources?: number; verified_networks?: number; ready?: boolean; probeable?: boolean };
+        overseas?: { required_networks?: number; eligible_sources?: number; route_capable_sources?: number; route_present_sources?: number; route_missing_sources?: number; route_unknown_sources?: number; verified_networks?: number; ready?: boolean; probeable?: boolean };
+      }>;
       containers?: Array<{ runtime?: string; project?: string; name?: string; endpoints?: Array<{ ip?: string; port?: number }> }>;
     };
     evidence?: Array<{ ip?: string; port?: number; interface?: string; runtime?: string; project?: string; container_name?: string; mapping_sources?: string[]; container_ports?: number[]; status?: string; mainland?: { success?: number; failed?: number; timeout?: number; independent_networks?: number; network_success?: number; network_timeout?: number; total?: number }; overseas?: { success?: number; failed?: number; timeout?: number; independent_networks?: number; network_success?: number; network_timeout?: number; total?: number }; probes?: Array<{ source_host_id?: string; source_region?: string; source_carrier?: string; source_network_id?: string; role?: 'mainland' | 'overseas' | string; job_status?: string; success?: boolean | null; latency_ms?: number | null; error?: string }> }>;
