@@ -465,6 +465,7 @@ export interface SecurityStatusItem {
     };
     evidence?: Array<{ ip?: string; port?: number; interface?: string; runtime?: string; project?: string; container_name?: string; mapping_sources?: string[]; container_ports?: number[]; status?: string; mainland?: { success?: number; failed?: number; timeout?: number; independent_networks?: number; network_success?: number; network_timeout?: number; total?: number }; overseas?: { success?: number; failed?: number; timeout?: number; independent_networks?: number; network_success?: number; network_timeout?: number; total?: number }; probes?: Array<{ source_host_id?: string; source_region?: string; source_carrier?: string; source_network_id?: string; role?: 'mainland' | 'overseas' | string; job_status?: string; success?: boolean | null; latency_ms?: number | null; error?: string }> }>;
     history?: Array<{ event_type?: 'blocked' | 'recovered' | string; at?: number; duration_seconds?: number; normal_duration_seconds?: number }>;
+    history_30d?: { window_days?: number; blocked_count?: number; recovered_count?: number };
   };
   enabled?: boolean;
   stale?: boolean;

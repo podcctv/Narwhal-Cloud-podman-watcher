@@ -72,6 +72,9 @@ const hostAuditLevel = (t: SecurityStatusItem): Level => {
 const auditTime = (value?: number) => value
   ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
   : '尚无完整扫描记录';
+const shortAuditTime = (value?: number) => value
+  ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+  : '尚无完整采样';
 const durationDays = (seconds?: number) => {
   const value = Math.max(0, Number(seconds || 0));
   return value < 86400 ? '不足 1 天' : `${(value / 86400).toFixed(1)} 天`;
@@ -299,6 +302,36 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
           : gfwStatus === 'investigating' ? '连通性证据待复核'
           : gfwStatus === 'stale' ? `上次状态：${gfwLastState}`
           : gfw.reason || targetReadiness.reason || '探针会自动采集可验证的公网容器 TCP 端口';
+        const gfwHistory = [...(gfw.history || [])].filter(event => Number(event.at || 0) > 0).sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
+        const gfwLatestEvent = gfwHistory[gfwHistory.length - 1];
+        const gfwHistory30d = gfw.history_30d || {};
+        const gfwTileDetail = ['investigating', 'stale', 'unassessed'].includes(gfwStatus) && gfwLatestEvent
+          ? `${gfwLatestEvent.event_type === 'recovered' ? '上次连通恢复' : '上次疑似阻断'} ${shortAuditTime(gfwLatestEvent.at)}`
+          : gfwDuration;
+        const gfwCurrentNeedsReview = ['investigating', 'stale', 'unassessed'].includes(gfwStatus);
+        const gfwPendingRounds = Number(gfw.pending_block_rounds || 0);
+        const gfwCurrentStatusDetail = gfwStatus === 'investigating' && gfwPendingRounds > 0
+          ? `阻断迹象确认中 ${gfwPendingRounds}/3`
+          : gfwCurrentNeedsReview ? '证据不足，保持未知' : gfwDuration;
+        const gfwCurrentTimelineLabel = gfwStatus === 'blocked' ? '当前疑似阻断'
+          : gfwStatus === 'recovered' ? '当前已恢复'
+          : gfwStatus === 'normal' ? '当前国内外可达'
+          : gfwStatus === 'stale' ? '数据过期 · 当前未知'
+          : gfwStatus === 'unassessed' ? `${gfwLabels[gfwStatus] || '尚未评估'} · 当前未知`
+          : Number(gfw.pending_block_rounds || 0) > 0 ? `阻断迹象确认中 ${gfw.pending_block_rounds}/3`
+          : '当前待复核';
+        const gfwCurrentTimelineReason = gfwStatus === 'blocked' ? '连续多点探测符合疑似阻断判定；TCP 连通性差异不能单独证明具体封锁机制。'
+          : gfwStatus === 'recovered' ? '连续复测符合连通恢复判定。'
+          : gfwStatus === 'normal' ? '最近一次同端点探测符合正常判定；未抽测的端点仍未验证。'
+          : gfw.reason || targetReadiness.reason || (gfwStatus === 'stale'
+            ? '探测数据已过期；不据此推断仍阻断或已经恢复。'
+            : gfwStatus === 'unassessed' ? '等待可验证的公网 TCP 端点和独立探针样本。'
+            : '本轮证据不足；不确认阻断或恢复。');
+        const gfwRecentTransitions = gfwHistory.slice(-4);
+        const gfwNeedsCurrentTimelineItem = gfwCurrentNeedsReview || !gfwLatestEvent
+          || (gfwStatus === 'blocked' && gfwLatestEvent.event_type !== 'blocked')
+          || (gfwStatus === 'recovered' && gfwLatestEvent.event_type !== 'recovered')
+          || (gfwStatus === 'normal' && gfwLatestEvent.event_type === 'blocked');
         const gfwEvidence = gfw.evidence || [];
         const comparedEndpoint = gfwEvidence.find(item => item.status === 'blocked') || gfwEvidence.find(item => item.status === 'normal') || gfwEvidence[0];
 
@@ -314,7 +347,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-red-400">删除</button>
             </div>
           </div>
-          <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-6" aria-label="主机状态摘要">
+            <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5" aria-label="主机状态摘要">
             <SummaryTile title="网络峰值" level={peakLevel} status={labels[peakLevel]}>
               最高连接 {fmtNumber(connPeak, 0)} · 入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}
             </SummaryTile>
@@ -328,18 +361,140 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               {events.length ? '展开查看本周期详情' : '本周期采样正常'}
             </SummaryTile>
             <SummaryTile title="国内连通性" level={gfwLevel} status={gfwLabels[gfwStatus] || '待评估'}>
-              {gfwDuration}{gfw.blocked_count ? ` · 累计阻断 ${gfw.blocked_count} 次` : ''}
-            </SummaryTile>
-            <SummaryTile title="采集完整性" level={collectionLevel} status={collectionStatusLabel}>
-              {collectionHealth.issues?.length ? `${collectionHealth.issues[0].component || '数据项'}：${collectionHealth.issues[0].reason || '采样不完整'}` : 'Agent 与安全采样正常'}
+              {gfwTileDetail}
             </SummaryTile>
           </div>
           <details className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
             <summary className="cursor-pointer text-xs font-semibold text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-400">展开网络信号、主机安全证据与修复建议</summary>
             <div className="mt-3 space-y-3">
+          <section className="min-w-0 rounded-xl border border-slate-800 bg-slate-950/30 p-3" aria-label="GFW 状态历史">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="font-semibold text-slate-100">GFW 状态历史</h4>
+                <p className="mt-0.5 text-[11px] text-slate-400">按同一公网 TCP 端点、多地独立探针的连续结果综合判断</p>
+              </div>
+              <a href="/tcping/manage" className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-700 bg-sky-950/50 px-3 py-1.5 text-xs font-medium text-sky-200 transition-colors hover:bg-sky-900/60 focus:outline-hidden focus:ring-2 focus:ring-sky-400">
+                <Activity aria-hidden="true" size={14} />查看探针覆盖
+              </a>
+            </div>
+
+            <div className="grid min-w-0 gap-2 lg:grid-cols-[minmax(190px,0.9fr)_minmax(0,1.8fr)_minmax(210px,1fr)]">
+              <div className={`min-w-0 rounded-lg border p-3 ${tones[gfwLevel]}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] font-medium">当前状态</p>
+                  <span className="rounded-full border border-current/30 px-2 py-0.5 text-[10px] font-semibold">{gfwLabels[gfwStatus] || '待评估'}</span>
+                </div>
+                <p className="mt-2 break-words text-sm font-semibold">{gfwCurrentStatusDetail}</p>
+                <p className="mt-1 text-[11px] leading-5 opacity-90">{gfw.last_sample_at ? `最近采样 ${shortAuditTime(gfw.last_sample_at)}` : '尚无有效探测样本'}</p>
+                {gfwCurrentNeedsReview && <p className="mt-1 text-[11px] leading-5">待复核时不累计阻断或恢复时长。</p>}
+              </div>
+
+              <div className="min-w-0 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] font-semibold text-slate-200">当前证据（最近一次探测）</p>
+                  {comparedEndpoint && <span className="font-mono text-[11px] text-sky-200">TCP {comparedEndpoint.ip || '未知 IP'}:{comparedEndpoint.port || '—'}</span>}
+                </div>
+                {comparedEndpoint ? <>
+                  <p className="mt-1 break-all text-[11px] text-slate-400">
+                    {comparedEndpoint.runtime || '容器'}{comparedEndpoint.project ? `/${comparedEndpoint.project}` : ''}/{comparedEndpoint.container_name || '未知容器'}
+                    {comparedEndpoint.mapping_sources?.length ? ` · ${comparedEndpoint.mapping_sources.map(source => source === 'direct-public-listener' ? '容器公网直连' : source === 'podman-publish' ? 'Podman 发布' : source === 'incus-proxy' ? 'Incus Proxy' : source === 'incus-forward' ? 'Incus Forward' : source === 'host-dnat' ? '宿主机 DNAT' : source).join(' / ')}` : ''}
+                  </p>
+                  <div className="mt-2 grid min-w-0 gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+                    {(comparedEndpoint.probes || []).map((probe, index) => {
+                      const succeeded = probe.success === true;
+                      const failed = probe.success === false;
+                      const probeTone = succeeded ? 'border-emerald-800/70 bg-emerald-950/20 text-emerald-300'
+                        : failed && probe.error === 'timeout' ? 'border-amber-800/70 bg-amber-950/20 text-amber-300'
+                        : 'border-slate-800 bg-slate-950/30 text-slate-300';
+                      const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}`
+                        : failed && probe.error === 'timeout' ? '连接超时 · 单点结果不单独证明阻断'
+                        : failed && probe.error === 'refused' ? '端口拒绝连接 · 不计为 GFW 阻断'
+                        : failed ? `探针网络错误 · 不计为 GFW 阻断${probe.error ? ` · ${probe.error}` : ''}`
+                        : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
+                      return <div key={`${probe.role}-${probe.source_host_id}-${index}`} className={`min-w-0 rounded-md border px-2 py-1.5 ${probeTone}`}>
+                        <p className="break-all text-[10px] text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}{probe.source_region ? ` · ${probe.source_region}` : ''}{probe.source_carrier ? ` · ${probe.source_carrier}` : ''}</p>
+                        <p className="mt-0.5 break-words text-[11px] font-semibold">{stateText}</p>
+                      </div>;
+                    })}
+                    {(!comparedEndpoint.probes || comparedEndpoint.probes.length === 0) && <p className="text-[11px] text-slate-400">此端点尚无探针回报。</p>}
+                  </div>
+                  <p className="mt-2 text-[10px] text-slate-400">同端点国内成功 {fmtNumber(comparedEndpoint.mainland?.success || 0, 0)}/{fmtNumber(comparedEndpoint.mainland?.total || 0, 0)} · 海外成功 {fmtNumber(comparedEndpoint.overseas?.success || 0, 0)}/{fmtNumber(comparedEndpoint.overseas?.total || 0, 0)}</p>
+                </> : <p className="mt-2 text-xs leading-5 text-slate-400">{targetReadiness.reason || '尚无可对照的公网 TCP 端点样本。'}</p>}
+              </div>
+
+              <div className="min-w-0 rounded-lg border border-sky-900/70 bg-sky-950/20 p-3">
+                <p className="text-[11px] font-semibold text-sky-200">判定说明</p>
+                <p className="mt-2 text-[11px] leading-5 text-slate-200">{gfwCurrentTimelineReason}</p>
+                <p className="mt-2 border-t border-sky-900/60 pt-2 text-[10px] leading-5 text-slate-400">ICMP 失败、端口拒绝、单个探针超时或探针网段未核验，都不会单独认定为 GFW 阻断。</p>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/25 p-3">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <h5 className="text-xs font-semibold text-slate-100">状态时间线</h5>
+                  <span className="text-[10px] text-slate-400">证据不足时保持未知，不累计阻断天数</span>
+                </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400" aria-label="时间线图例">
+                  <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-emerald-400" />可达 / 恢复</span>
+                  <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-amber-400" />疑似阻断</span>
+                  <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full border border-slate-400 bg-slate-900" />未知 / 待复核</span>
+                </div>
+              </div>
+              <div className="relative grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="pointer-events-none absolute left-[8%] right-[8%] top-[18px] hidden h-px bg-slate-700 xl:block" />
+                {gfwRecentTransitions.map((event, index) => {
+                  const blockedEvent = event.event_type === 'blocked';
+                  const eventTone = blockedEvent ? 'border-amber-800/70 bg-amber-950/15' : 'border-emerald-800/70 bg-emerald-950/15';
+                  const dotTone = blockedEvent ? 'border-amber-300 bg-amber-400' : 'border-emerald-300 bg-emerald-400';
+                  const eventTitle = blockedEvent ? '疑似阻断' : '国内连通恢复';
+                  return <div key={`${event.event_type}-${event.at}-${index}`} className={`relative min-w-0 rounded-lg border p-2.5 ${eventTone}`}>
+                    <div className="relative z-10 mb-1.5 flex items-center gap-2">
+                      <span className={`h-3 w-3 shrink-0 rounded-full border-2 ${dotTone}`} />
+                      <span className="text-[10px] tabular-nums text-slate-300">{shortAuditTime(event.at)}</span>
+                    </div>
+                    <p className={`text-xs font-semibold ${blockedEvent ? 'text-amber-300' : 'text-emerald-300'}`}>{eventTitle}</p>
+                    <p className="mt-1 text-[10px] leading-4 text-slate-400">{blockedEvent ? '连续多点探测出现国内异常；记录不单独证明封锁机制。' : '连续复测符合连通恢复判定。'}</p>
+                  </div>;
+                })}
+                {gfwNeedsCurrentTimelineItem && <div className={`relative min-w-0 rounded-lg border p-2.5 ${gfwCurrentNeedsReview ? 'border-slate-700 bg-slate-900/60' : `border-slate-700 ${tones[gfwLevel].split(' ').find(value => value.startsWith('bg-')) || 'bg-slate-900/60'}`}`}>
+                  <div className="relative z-10 mb-1.5 flex items-center gap-2">
+                    <span className={`h-3 w-3 shrink-0 rounded-full border-2 ${gfwCurrentNeedsReview ? 'border-slate-300 bg-slate-900' : gfwLevel === 'normal' ? 'border-emerald-300 bg-emerald-400' : gfwLevel === 'critical' ? 'border-red-300 bg-red-400' : 'border-amber-300 bg-amber-400'}`} />
+                    <span className="text-[10px] tabular-nums text-slate-300">{gfw.last_sample_at ? shortAuditTime(gfw.last_sample_at) : '尚无有效采样'}</span>
+                  </div>
+                  <p className={`text-xs font-semibold ${gfwCurrentNeedsReview ? 'text-slate-200' : tones[gfwLevel].split(' ').find(value => value.startsWith('text-')) || 'text-slate-200'}`}>{gfwCurrentTimelineLabel}</p>
+                  <p className="mt-1 text-[10px] leading-4 text-slate-400">{gfwCurrentTimelineReason}</p>
+                </div>}
+                {gfwRecentTransitions.length === 0 && !gfwNeedsCurrentTimelineItem && <div className="col-span-full rounded-lg border border-dashed border-slate-700 p-3 text-xs text-slate-400">暂无可展示的状态变化记录。</div>}
+              </div>
+            </div>
+
+            <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2.5 text-xs">
+              <span className="font-semibold text-slate-200">近 {gfwHistory30d.window_days || 30} 天</span>
+              <span className="text-amber-300"><b className="tabular-nums">{gfw.history_30d ? fmtNumber(gfwHistory30d.blocked_count || 0, 0) : '—'}</b> 次疑似阻断</span>
+              <span className="text-emerald-300"><b className="tabular-nums">{gfw.history_30d ? fmtNumber(gfwHistory30d.recovered_count || 0, 0) : '—'}</b> 次连通恢复</span>
+              <span className="ml-auto text-[10px] text-slate-400">统计状态变化记录；未知样本不计作阻断或恢复。</span>
+            </div>
+
+            <details className="mt-2 rounded-lg border border-slate-800 bg-slate-950/20 px-3 py-2">
+              <summary className="cursor-pointer text-[11px] font-semibold text-slate-300">探测覆盖与端点发现细节</summary>
+              <div className="mt-2 space-y-1.5 text-[11px] leading-5 text-slate-400">
+                <p>已识别独立探测网段：国内 {fmtNumber(gfw.verified_mainland_networks || 0, 0)}/2 · 海外 {fmtNumber(gfw.verified_overseas_networks || 0, 0)}/1{gfw.last_sample_at ? ` · 最近采样 ${auditTime(gfw.last_sample_at)}` : ''}</p>
+                {hasDailyGfwSample && <p>UTC {gfwSample.date_utc || '—'}：今日抽测 {fmtNumber(gfwSample.sampled_containers, 0)}/{fmtNumber(gfwSample.eligible_containers, 0)} 个容器、{fmtNumber(gfwSample.sampled_endpoints, 0)} 个现有 TCP 端点；未抽中的对象未验证。</p>}
+                {targetReadiness.status && <>
+                  <p>自动探测条件：{targetReadiness.reason || gfwLabels[gfwStatus] || '等待自动发现与调度'}{targetReadiness.next_step ? ` · 下一步：${targetReadiness.next_step}` : ''}</p>
+                  {Number(targetReadiness.eligible_endpoints || 0) > 0 && <p>可确认端点 {fmtNumber(targetReadiness.eligible_endpoints, 0)} 个 · 今日抽测 {fmtNumber(targetReadiness.sampled_containers, 0)}/{fmtNumber(targetReadiness.eligible_containers, 0)} 个容器</p>}
+                  {Number(targetReadiness.ambiguous_endpoints || 0) > 0 && <p>映射不唯一 {fmtNumber(targetReadiness.ambiguous_endpoints, 0)} 个；这些端点不会用于判定。</p>}
+                  {targetReadiness.discovery && <p>发现来源：直连 {fmtNumber(targetReadiness.discovery.direct_public_listener || 0, 0)} · Podman {fmtNumber(targetReadiness.discovery.podman_publish || 0, 0)} · Incus {fmtNumber((targetReadiness.discovery.incus_proxy || 0) + (targetReadiness.discovery.incus_forward || 0), 0)} · DNAT {fmtNumber(targetReadiness.discovery.host_dnat || 0, 0)}；目标无监听 {fmtNumber(targetReadiness.discovery.mapping_target_not_listening || 0, 0)} · 监听地址待核实 {fmtNumber((targetReadiness.discovery.direct_listener_address_unverified || 0) + (targetReadiness.discovery.mapping_listener_address_unverified || 0), 0)} · 未匹配公网地址 {fmtNumber(targetReadiness.discovery.mapping_without_host_public_ip || 0, 0)}</p>}
+                </>}
+                {gfwSample.containers?.length ? <p>今日抽测容器：{gfwSample.containers.map(container => `${container.runtime || '容器'}${container.project ? `/${container.project}` : ''}/${container.name || '未知'}${container.endpoints?.length ? ` (${container.endpoints.map(endpoint => `${endpoint.ip}:${endpoint.port}`).join(', ')})` : ''}`).join(' · ')}</p> : null}
+                <p>TCP 探测只说明不同网络来源的连通性差异；ICMP 失败、端口拒绝连接或探针网络错误均不能单独证明 GFW 封锁。</p>
+              </div>
+            </details>
+          </section>
           <div className="grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
             <Signal title="采集完整性与修复提示" level={collectionLevel}>
-              <p>Agent {collectionHealth.agent_version || t.agent_version || '未知'} · 最后心跳 {t.last_seen_utc8 || '—'}</p>
+              <p>Agent {collectionHealth.agent_version || t.agent_version || '未知'} · 最后心跳 {t.last_seen_utc8 || '—'} · 采集状态 {collectionStatusLabel}</p>
               <p>最后安全采样 {collectionHealth.last_report_at ? auditTime(collectionHealth.last_report_at) : '暂无安全采样'}</p>
               {Number(collectionHealth.samples_24h || 0) > 0 && <p className="tabular-nums">近24小时采集完整率 {collectionHealth.healthy_rate_percent_24h ?? 0}% · 完整 {fmtNumber(collectionHealth.healthy_samples_24h || 0, 0)} / {fmtNumber(collectionHealth.samples_24h || 0, 0)} 次 · 缺项 {fmtNumber(collectionHealth.failed_samples_24h || 0, 0)} 次</p>}
               {collectionHealth.capabilities?.length ? <div className="flex flex-wrap gap-1">{collectionHealth.capabilities.map(capability => <span key={capability} className="rounded border border-slate-700 px-1.5 py-0.5 text-[11px] text-slate-300">{capability}</span>)}</div> : <p>Agent 能力清单尚未上报。</p>}
@@ -348,64 +503,6 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
                 <p>{item.reason || '采样不完整'}</p>
                 <p className="text-slate-300">处理：{item.guidance || '检查 Agent 采集状态后等待新样本。'}</p>
               </div>) : <p>当前没有已知采集缺口。</p>}
-            </Signal>
-            <Signal title="国内连通性 / GFW 状态" level={gfwLevel}>
-              <p className="text-sm font-semibold">{gfwLabels[gfwStatus] || '待评估'}</p>
-              <p className="text-sm font-bold">{gfwDuration}</p>
-              {hasDailyGfwSample && <p>UTC {gfwSample.date_utc || '—'}：今日抽测 {fmtNumber(gfwSample.sampled_containers, 0)}/{fmtNumber(gfwSample.eligible_containers, 0)} 个容器、{fmtNumber(gfwSample.sampled_endpoints, 0)} 个现有 TCP 端点；{gfwSample.follow_up_blocked_endpoint ? '包含已确认受阻端口的恢复复测；' : ''}未抽中的对象未验证。</p>}
-              {gfw.blocked_count ? <p>累计疑似阻断 {fmtNumber(gfw.blocked_count, 0)} 次</p> : null}
-              <p>已识别探测网段：国内 {fmtNumber(gfw.verified_mainland_networks || 0, 0)}/2 · 海外 {fmtNumber(gfw.verified_overseas_networks || 0, 0)}/1</p>
-              {gfw.last_sample_at ? <p>最近采样 {auditTime(gfw.last_sample_at)}</p> : null}
-              {gfwSample.containers && gfwSample.containers.length > 0 && <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
-                <p className="mb-1 font-semibold text-slate-200">今日抽测容器</p>
-                {gfwSample.containers.map((container, index) => <p key={`${container.runtime}-${container.project}-${container.name}-${index}`} className="break-all">
-                  {container.runtime || '容器'}{container.project ? `/${container.project}` : ''}/{container.name || '未知'}{container.endpoints?.length ? ` · ${container.endpoints.map(endpoint => `${endpoint.ip}:${endpoint.port}`).join(', ')}` : ''}
-                </p>)}
-              </div>}
-              {targetReadiness.status && <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
-                <p className="font-semibold text-slate-200">自动探测条件：{gfwLabels[gfwStatus] || '待核实'}</p>
-                <p>{targetReadiness.reason || '已发现可探测端点，等待调度器与独立探针完成首轮采样。'}</p>
-                {Number(targetReadiness.eligible_endpoints || 0) > 0 && <p>可确认端点 {fmtNumber(targetReadiness.eligible_endpoints, 0)} 个 · 今日抽测 {fmtNumber(targetReadiness.sampled_containers, 0)}/{fmtNumber(targetReadiness.eligible_containers, 0)} 个容器</p>}
-                {Number(targetReadiness.ambiguous_endpoints || 0) > 0 && <p>映射不唯一 {fmtNumber(targetReadiness.ambiguous_endpoints, 0)} 个；这些端点不会用于判定。</p>}
-                {targetReadiness.discovery && <p>发现来源：直连 {fmtNumber(targetReadiness.discovery.direct_public_listener || 0, 0)} · Podman {fmtNumber(targetReadiness.discovery.podman_publish || 0, 0)} · Incus {fmtNumber((targetReadiness.discovery.incus_proxy || 0) + (targetReadiness.discovery.incus_forward || 0), 0)} · DNAT {fmtNumber(targetReadiness.discovery.host_dnat || 0, 0)}；目标无监听 {fmtNumber(targetReadiness.discovery.mapping_target_not_listening || 0, 0)} · 监听地址待核实 {fmtNumber((targetReadiness.discovery.direct_listener_address_unverified || 0) + (targetReadiness.discovery.mapping_listener_address_unverified || 0), 0)} · 未匹配公网地址 {fmtNumber(targetReadiness.discovery.mapping_without_host_public_ip || 0, 0)}</p>}
-                {targetReadiness.next_step && <p className="text-slate-300">处理：{targetReadiness.next_step}</p>}
-              </div>}
-              {comparedEndpoint ? <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5">
-                {comparedEndpoint.container_name && <span className="break-all text-slate-200">{comparedEndpoint.runtime || '容器'}{comparedEndpoint.project ? `/${comparedEndpoint.project}` : ''}/{comparedEndpoint.container_name}</span>}
-                <span className="font-mono text-slate-200">{comparedEndpoint.ip}:{comparedEndpoint.port}</span>
-                {comparedEndpoint.mapping_sources?.length ? <span>来源 {comparedEndpoint.mapping_sources.map(source => source === 'direct-public-listener' ? '容器公网直连' : source === 'podman-publish' ? 'Podman 发布' : source === 'incus-proxy' ? 'Incus Proxy' : source === 'incus-forward' ? 'Incus Forward' : source === 'host-dnat' ? '宿主机 DNAT' : source).join(' / ')}</span> : null}
-                <span>国内成功 {comparedEndpoint.mainland?.success || 0}/{comparedEndpoint.mainland?.total || 0}</span>
-                <span>海外成功 {comparedEndpoint.overseas?.success || 0}/{comparedEndpoint.overseas?.total || 0}</span>
-              </div> : null}
-              {comparedEndpoint?.probes && comparedEndpoint.probes.length > 0 && <div className="mt-2 rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
-                <p className="mb-1 font-semibold text-slate-200">同一端点的探针结果</p>
-                <div className="grid min-w-0 gap-1 sm:grid-cols-2">
-                  {comparedEndpoint.probes.map((probe, index) => {
-                    const succeeded = probe.success === true;
-                    const failed = probe.success === false;
-                    const stateClass = succeeded ? 'text-emerald-300' : failed ? 'text-amber-300' : 'text-slate-400';
-                    const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}` : failed ? probe.error === 'timeout' ? '连接超时' : probe.error === 'refused' ? '端口拒绝连接 · 不计为 GFW 阻断' : `探针网络错误 · 不计为 GFW 阻断${probe.error ? ` · ${probe.error}` : ''}` : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
-                    return <div key={`${probe.role}-${probe.source_host_id}-${index}`} className="min-w-0 rounded-md border border-slate-800 px-2 py-1">
-                      <p className="break-all text-xs text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}{probe.source_region ? ` · ${probe.source_region}` : ''}{probe.source_carrier ? ` · ${probe.source_carrier}` : ''}{!probe.source_region && !probe.source_carrier ? ' · 地区/运营商待标注' : ''}</p>
-                      <p className={`break-words text-xs ${stateClass}`}>{stateText}</p>
-                    </div>;
-                  })}
-                </div>
-              </div>}
-              {gfwStatus === 'blocked' && Number(gfw.last_normal_duration_seconds || 0) > 0 && <p>上次恢复后正常 {durationDays(gfw.last_normal_duration_seconds)}，之后再次出现国内不可达。</p>}
-              {(gfwStatus === 'stale' || gfwStatus === 'investigating') && <p className="text-slate-300">{gfw.reason || (gfwStatus === 'stale' ? '探测数据已过期；不把离线或缺少样本算作恢复。' : '本轮证据不足；不确认阻断或恢复，也不把未知样本计入持续时间。')}</p>}
-              {gfwStatus === 'unassessed' && <p className="text-slate-300">{gfw.reason || '需要至少 2 个国内、1 个海外探测点，并发现明确的公网 TCP 端口映射。'}</p>}
-              <p className="text-slate-300">比较同一公网 TCP 端点；ICMP ping 失败不能单独证明 GFW，TCP 探测也只说明不同网络来源的连通差异，不单独证明封锁来源。</p>
-              {gfw.history && gfw.history.length > 0 && <details className="mt-1 rounded-lg border border-slate-700/70 bg-slate-950/20 px-2 py-1.5">
-                <summary className="cursor-pointer font-semibold">阻断 / 恢复历史（{gfw.history.length} 条）</summary>
-                <div className="mt-2 space-y-2">
-                  {gfw.history.slice(0, 6).map((event, index) => <div key={`${event.event_type}-${event.at}-${index}`} className="min-w-0 rounded-md border border-slate-700/70 p-2">
-                    <p className="font-semibold">{event.event_type === 'blocked' ? '开始疑似阻断' : '确认恢复'} · {auditTime(event.at)}</p>
-                    {event.event_type === 'recovered' && <p>本次阻断持续 {durationDays(event.duration_seconds)}</p>}
-                    {event.event_type === 'blocked' && Number(event.normal_duration_seconds || 0) > 0 && <p>此前正常 {durationDays(event.normal_duration_seconds)}</p>}
-                  </div>)}
-                </div>
-              </details>}
             </Signal>
             <Signal title="规则执行与内核读回" level={reconciliationLevel}>
               <p>{reconciliation.status === 'verified' ? '已有活动规则均有读回证据' : reconciliation.status === 'attention' ? `发现 ${fmtNumber(reconciliation.issue_count || 0, 0)} 项状态需核查` : '尚无已配置的托管规则'}</p>

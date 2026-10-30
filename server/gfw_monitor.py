@@ -1212,6 +1212,14 @@ def report_failure(conn, payload, now):
 def status_map(conn, now):
     counts = _role_counts(conn, now)
     active_roles = _active_roles(conn, now)
+    history_30d = {}
+    for row in conn.execute(
+        "SELECT host_id,event_type,COUNT(*) AS event_count FROM gfw_events WHERE at>=? GROUP BY host_id,event_type",
+        (now - 30 * 86400,),
+    ):
+        host_history = history_30d.setdefault(row["host_id"], {"blocked": 0, "recovered": 0})
+        if row["event_type"] in host_history:
+            host_history[row["event_type"]] = int(row["event_count"] or 0)
     verified_network_counts = {
         role: len({str(source.get("network_id") or "") for source in active_roles.get(role, []) if source.get("network_id")})
         for role in ("mainland", "overseas")
@@ -1221,6 +1229,12 @@ def status_map(conn, now):
     for host in rows:
         state_row = conn.execute("SELECT * FROM gfw_states WHERE host_id=? AND node_id=?", (host["host_id"], host["node_id"])).fetchone()
         history = [dict(event) for event in conn.execute("SELECT event_type,at,duration_seconds,normal_duration_seconds FROM gfw_events WHERE host_id=? ORDER BY at DESC,id DESC LIMIT 6", (host["host_id"],))]
+        recent_history = history_30d.get(host["host_id"], {"blocked": 0, "recovered": 0})
+        history_summary = {
+            "window_days": 30,
+            "blocked_count": int(recent_history.get("blocked", 0)),
+            "recovered_count": int(recent_history.get("recovered", 0)),
+        }
         host_sources, source_reason = _source_coverage_for_host(active_roles, host["node_id"])
         source_reason = source_reason or _source_network_coverage_reason(host_sources)
         source_counts = {role: len(sources) for role, sources in host_sources.items()}
@@ -1320,7 +1334,8 @@ def status_map(conn, now):
                 "verified_mainland_networks": verified_network_counts["mainland"],
                 "verified_overseas_networks": verified_network_counts["overseas"],
                 "evidence": evidence.get("targets", []) if isinstance(evidence, dict) else [], "sample": sample,
-                "reason": reason or ("探测数据已过期" if stale else ""), "target_readiness": target_readiness, "history": history}
+                "reason": reason or ("探测数据已过期" if stale else ""), "target_readiness": target_readiness, "history": history,
+                "history_30d": history_summary}
         else:
             if not host_online:
                 reason = "母鸡 Agent 心跳已过期，探测任务暂不调度"
@@ -1338,7 +1353,8 @@ def status_map(conn, now):
                 "available_mainland_sources": source_counts["mainland"], "available_overseas_sources": source_counts["overseas"],
                 "verified_mainland_networks": verified_network_counts["mainland"],
                 "verified_overseas_networks": verified_network_counts["overseas"],
-                "reason": reason, "target_readiness": target_readiness, "history": history}
+                "reason": reason, "target_readiness": target_readiness, "history": history,
+                "history_30d": history_summary}
     return result
 
 
