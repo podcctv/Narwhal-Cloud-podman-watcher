@@ -1,6 +1,10 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.170**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.171**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+### v1.7.171：修复 TCPing 来源主机列表挤压
+
+- 来源列表在固定高度的侧栏中独立滚动，主机卡片保持完整高度；主机数量较多时不再被 Flex 布局压成细条。
 
 ### v1.7.170：修复容器资源保护采样与限额归属
 
