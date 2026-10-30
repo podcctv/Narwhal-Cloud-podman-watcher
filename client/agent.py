@@ -2113,9 +2113,35 @@ def _collect_host_conntrack_snapshot() -> Dict[str, object]:
                 if _is_trackable_ip(value):
                     host_addresses.add(value)
     nat_mappings: List[Dict[str, object]] = []
-    for save_command, mapping_source in (("iptables-save", "iptables-dnat"), ("ip6tables-save", "ip6tables-dnat")):
-        nat_output = run(["sh", "-lc", f"{save_command} -t nat 2>/dev/null || true"])
-        for line in nat_output.splitlines():
+    # Collect all firewall backends in one bounded shell call. This avoids
+    # spawning three processes per security sample and keeps old single-call
+    # collectors compatible while still reading iptables, ip6tables and nft.
+    nft_output = run(
+        [
+            "sh",
+            "-lc",
+            "for command in iptables-save ip6tables-save; do "
+            "if command -v \"$command\" >/dev/null 2>&1; then "
+            "if [ \"$command\" = iptables-save ]; then source=iptables-dnat; "
+            "else source=ip6tables-dnat; fi; "
+            "printf '__NARWHAL_NAT_SOURCE__ %s\\n' \"$source\"; "
+            "\"$command\" -t nat 2>/dev/null || true; fi; done; "
+            "if command -v nft >/dev/null 2>&1; then "
+            "printf '__NARWHAL_NAT_SOURCE__ nft-dnat\\n'; "
+            "nft list ruleset 2>/dev/null | grep -E '(^|[[:space:]])dnat[[:space:]]+to[[:space:]]' | sed -n '1,2000p'; fi",
+        ]
+    )
+    mapping_source = "iptables-dnat"
+    existing_nat_keys = {
+        (str(item.get("proto") or ""), str(item.get("host") or ""), int(item.get("public_port") or 0),
+         str(item.get("target_host") or ""), int(item.get("container_port") or 0))
+        for item in nat_mappings
+    }
+    for line in nft_output.splitlines():
+        if line.startswith("__NARWHAL_NAT_SOURCE__ "):
+            mapping_source = line.partition(" ")[2].strip() or "iptables-dnat"
+            continue
+        if mapping_source in {"iptables-dnat", "ip6tables-dnat"}:
             proto_match = re.search(r"(?:^|\s)-p\s+(tcp|udp)\b", line, re.IGNORECASE)
             port_match = re.search(r"(?:^|\s)--dport\s+(\d+)\b", line)
             target_match = re.search(r"(?:^|\s)--to-destination\s+([^\s]+)", line)
@@ -2123,34 +2149,22 @@ def _collect_host_conntrack_snapshot() -> Dict[str, object]:
                 continue
             target_host, target_port = _parse_socket_endpoint(target_match.group(1))
             destination_match = re.search(r"(?:^|\s)-d\s+([^\s/]+)(?:/\d+)?", line)
-            nat_mappings.append(
-                {
-                    "proto": proto_match.group(1).lower() if proto_match else "",
-                    "host": destination_match.group(1) if destination_match else "",
-                    "public_port": int(port_match.group(1)),
-                    "target_host": target_host,
-                    "container_port": target_port,
-                    "source": mapping_source,
-                }
-            )
-    # Hosts may run both compatibility NAT rules and native nftables rules.
-    # Read both inventories instead of treating any iptables output (including
-    # unrelated or UDP-only entries) as proof that nftables has no TCP DNAT.
-    nft_output = run(
-        [
-            "sh",
-            "-lc",
-            "if command -v nft >/dev/null 2>&1; then "
-            "nft list ruleset 2>/dev/null | grep -E '(^|[[:space:]])dnat[[:space:]]+to[[:space:]]' | "
-            "sed -n '1,2000p'; fi",
-        ]
-    )
-    existing_nat_keys = {
-        (str(item.get("proto") or ""), str(item.get("host") or ""), int(item.get("public_port") or 0),
-         str(item.get("target_host") or ""), int(item.get("container_port") or 0))
-        for item in nat_mappings
-    }
-    for line in nft_output.splitlines():
+            candidate = {
+                "proto": proto_match.group(1).lower() if proto_match else "",
+                "host": destination_match.group(1) if destination_match else "",
+                "public_port": int(port_match.group(1)),
+                "target_host": target_host,
+                "container_port": target_port,
+                "source": mapping_source,
+            }
+            key = (candidate["proto"], candidate["host"], candidate["public_port"], candidate["target_host"], candidate["container_port"])
+            if key not in existing_nat_keys:
+                nat_mappings.append(candidate)
+                existing_nat_keys.add(key)
+            continue
+        # Hosts may run both compatibility NAT rules and native nftables rules.
+        # Read both inventories instead of treating any iptables output
+        # (including unrelated or UDP-only entries) as proof of no TCP DNAT.
         mapping_match = re.search(
             r"\b(tcp|udp)\s+dport\s+(\d+).*?\bdnat\s+to\s+([^\s]+)",
             line,
@@ -2166,7 +2180,7 @@ def _collect_host_conntrack_snapshot() -> Dict[str, object]:
             "public_port": int(mapping_match.group(2)),
             "target_host": target_host,
             "container_port": target_port,
-            "source": "nft-dnat",
+            "source": mapping_source,
         }
         key = (candidate["proto"], candidate["host"], candidate["public_port"], candidate["target_host"], candidate["container_port"])
         if key not in existing_nat_keys:
