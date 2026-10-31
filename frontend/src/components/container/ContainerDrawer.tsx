@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   Box,
@@ -20,7 +20,7 @@ import {
   Mail,
   Save,
 } from 'lucide-react';
-import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData, SecurityAlert } from '../../api/types';
+import { ContainerItem, ContainerIdentity, HistoryPoint, DiagnosticData, ProtocolGuardSummary, SecurityAlert } from '../../api/types';
 import { api, fmtBytes, fmtNumber, fmtMbps } from '../../api/client';
 import { StatusBadge } from '../common/StatusBadge';
 import { ResourceChart } from './ResourceChart';
@@ -29,6 +29,8 @@ import { DiagnosticPanel } from './DiagnosticPanel';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { AdmissionStatus } from './AdmissionStatus';
 import { ConnectionEvidenceTimeline } from './ConnectionEvidenceTimeline';
+import { hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard } from '../dashboard/ContainerStateBadges';
+import { evaluateContainerRisk } from '../dashboard/HostContainerList';
 
 interface ContainerDrawerProps {
   identity: ContainerIdentity | null;
@@ -93,24 +95,121 @@ const psiPercent = (source: any, resource: 'cpu' | 'memory' | 'io') => {
 };
 
 const formatIoRate = (value?: string | number) => {
-  if (value === 'max' || value === undefined || value === null || value === '') return '不限';
+  if (value === 'max') return '不限';
+  if (value === undefined || value === null || value === '') return '未知';
   const parsed = Number(value);
   return Number.isFinite(parsed) ? `${fmtBytes(parsed)}/秒` : '未知';
 };
 
+const formatIoCount = (value?: string | number) => {
+  if (value === 'max') return '不限';
+  if (value === undefined || value === null || value === '') return '未知';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? `${parsed} 次/秒` : '未知';
+};
+
 const formatIoLimit = (value?: Record<string, string>) => {
   if (!value) return '暂无读回数据';
-  return `读 ${formatIoRate(value.rbps)} · 写 ${formatIoRate(value.wbps)} · 读 IOPS ${value.riops || '不限'} · 写 IOPS ${value.wiops || '不限'}`;
+  return `读 ${formatIoRate(value.rbps)} · 写 ${formatIoRate(value.wbps)} · 读 IOPS ${formatIoCount(value.riops)} · 写 IOPS ${formatIoCount(value.wiops)}`;
 };
 
 const formatMemoryHigh = (value?: string | number | null) => {
-  if (value === 'max' || value === undefined || value === null || value === '') return '不限';
+  if (value === 'max') return '不限';
+  if (value === undefined || value === null || value === '') return '未知';
   const parsed = Number(value);
   return Number.isFinite(parsed) ? fmtBytes(parsed) : '未知';
 };
 
+const formatMetricPercent = (value?: number | null) =>
+  value == null || !Number.isFinite(value) ? '—' : `${fmtNumber(value, 1)}%`;
+
+const formatMetricBytes = (value?: number | null) =>
+  value == null || !Number.isFinite(value) ? '—' : fmtBytes(value);
+
+const formatAlertValue = (value: unknown) => {
+  const formatted = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+  return formatted.length > 240 ? `${formatted.slice(0, 237)}…` : formatted;
+};
+
+const protocolGuardState = (summary?: ProtocolGuardSummary) => {
+  if (!summary) return { label: '未上报管控状态', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
+  switch (summary.state) {
+    case 'blocked': return { label: '阻断已核验', tone: 'border-emerald-500/30 bg-emerald-950/20 text-emerald-200' };
+    case 'partial': return { label: '部分阻断', tone: 'border-rose-500/40 bg-rose-950/30 text-rose-200' };
+    case 'unverified': return { label: '阻断待核验', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' };
+    case 'release_pending': return { label: '放行待核验', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' };
+    case 'not_detected': return summary.detected
+      ? { label: '检测状态冲突', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' }
+      : { label: '未检测到目标协议', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
+    default: return { label: summary.state ? '状态待核实' : '未上报管控状态', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
+  }
+};
+
+const formatProtocolEndpoint = (endpoint: { proto?: string; port?: number; pid?: number; process?: string }) => {
+  const protocol = endpoint.proto ? `${endpoint.proto.toUpperCase()}/` : '';
+  const port = endpoint.port == null ? '端口未知' : `${endpoint.port}`;
+  const process = endpoint.process ? ` · ${endpoint.process}` : '';
+  const pid = endpoint.pid ? ` (PID ${endpoint.pid})` : '';
+  return `${protocol}${port}${process}${pid}`;
+};
+
+const ProtocolGuardCard: React.FC<{ label: 'VMess' | 'Trojan'; summary?: ProtocolGuardSummary }> = ({ label, summary }) => {
+  const state = protocolGuardState(summary);
+  const configured = summary?.configured_endpoints;
+  const blocked = summary?.blocked_endpoints;
+  const pending = summary?.pending_endpoints;
+  const evidence = summary?.evidence_chain;
+  const evidenceItems: Array<[string, string]> = [];
+  if (evidence?.configuration) evidenceItems.push(['配置', evidence.configuration]);
+  if (evidence?.process_owner_and_listener) evidenceItems.push(['进程与监听', evidence.process_owner_and_listener]);
+  if (evidence?.public_exposure) evidenceItems.push(['公网暴露', evidence.public_exposure]);
+  if (evidence?.firewall_readback) evidenceItems.push(['防火墙读回', evidence.firewall_readback]);
+  if (evidence?.listener_inventory_source) evidenceItems.push(['监听清单来源', evidence.listener_inventory_source]);
+  if (evidence?.listener_inventory_reason) evidenceItems.push(['监听清单说明', evidence.listener_inventory_reason]);
+  if (evidence?.pending_endpoint_count != null) evidenceItems.push(['待核验端点数', String(evidence.pending_endpoint_count)]);
+  const endpoints = [
+    ...(blocked || []).map((endpoint) => ({ ...endpoint, status: '已阻断' })),
+    ...(pending || []).map((endpoint) => ({ ...endpoint, status: '待核验' })),
+  ];
+
+  return (
+    <article className="min-w-0 rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-xs font-semibold text-slate-100">{label}</h4>
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] ${state.tone}`}>{state.label}</span>
+      </div>
+      <p className="text-[11px] text-slate-400">
+        配置端点 {configured?.length ?? '—'} · 已阻断 {blocked?.length ?? '—'} · 待核验 {pending?.length ?? '—'}
+      </p>
+      {summary?.reason && <p className="text-[11px] leading-relaxed text-slate-300">{summary.reason}</p>}
+      {endpoints.length > 0 && (
+        <ul className="space-y-1 border-t border-slate-800 pt-2 text-[10px] text-slate-300">
+          {endpoints.map((endpoint, index) => (
+            <li key={`${endpoint.status}-${endpoint.proto || ''}-${endpoint.port || 0}-${endpoint.pid || 0}-${index}`} className="flex min-w-0 items-start justify-between gap-2">
+              <span className="min-w-0 break-all font-mono">{formatProtocolEndpoint(endpoint)}</span>
+              <span className={endpoint.status === '已阻断' ? 'shrink-0 text-emerald-300' : 'shrink-0 text-amber-300'}>{endpoint.status}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {evidenceItems.length > 0 && (
+        <dl className="grid gap-1 border-t border-slate-800 pt-2 text-[10px] sm:grid-cols-2">
+          {evidenceItems.map(([name, value]) => (
+            <div key={name} className="min-w-0">
+              <dt className="text-slate-500">{name}</dt>
+              <dd className="break-words text-slate-300">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {!summary && <p className="text-[10px] text-slate-500">当前容器数据未提供此协议的管控结果，不能据此判断为已阻断或未检测到。</p>}
+    </article>
+  );
+};
+
 const formatMinutes = (seconds?: number) => {
-  if (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return '0 分钟';
+  if (seconds == null || !Number.isFinite(Number(seconds))) return '未知';
+  if (Number(seconds) <= 0) return '0 分钟';
   const minutes = Math.max(1, Math.round(Number(seconds) / 60));
   return `${minutes} 分钟`;
 };
@@ -131,6 +230,64 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const [userEmail, setUserEmail] = useState('');
   const [userNote, setUserNote] = useState('');
   const [isSavingUserNote, setIsSavingUserNote] = useState(false);
+  const drawerPanelRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  const pendingDecisionRef = useRef(pendingDecision);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    pendingDecisionRef.current = pendingDecision;
+  }, [pendingDecision]);
+
+  useEffect(() => {
+    if (!identity) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    closeButtonRef.current?.focus();
+
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      // A nested confirmation owns Escape and Tab while it is open.
+      if (pendingDecisionRef.current) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const panel = drawerPanelRef.current;
+      if (!panel) return;
+      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter((element) => element.getClientRects().length > 0);
+      if (!focusable.length) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleDialogKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [identity?.host_id, identity?.runtime, identity?.project, identity?.container_name]);
 
   useEffect(() => {
     setUserEmail(container?.user_email || '');
@@ -261,10 +418,11 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
   if (!identity) return null;
 
+  const isGuardRuntime = identity.runtime === 'incus' || identity.runtime === 'podman';
   const sec = container?.security || {};
-  const inIps = sec.inbound_unique_ips || 0;
+  const inIps = sec.inbound_unique_ips == null || !Number.isFinite(sec.inbound_unique_ips) ? null : sec.inbound_unique_ips;
   const inThresh = sec.inbound_unique_ip_threshold || 10;
-  const inIpAlert = inIps > inThresh;
+  const inIpAlert = inIps !== null && inIps > inThresh;
 
   const agentVersion = container?.agent_version || 'unknown';
   const isVersionMatch =
@@ -278,6 +436,56 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const ioGuard = sec.io_guard;
   const memoryGuard = sec.memory_guard;
   const resourcePressure = sec.resource_pressure;
+  const containerAlerts = activeAlerts.filter((alert) =>
+    alert.host_id === identity.host_id &&
+    alert.runtime === identity.runtime &&
+    (alert.project || '') === (identity.project || '') &&
+    alert.container_name === identity.container_name &&
+    alert.status === 'active'
+  );
+  const protocolGuardSummaries = [sec.vmess_guard, sec.trojan_guard];
+  const protocolGuardNeedsReview = protocolGuardSummaries.some((guard) =>
+    ['partial', 'unverified', 'release_pending'].includes(guard?.state || '') ||
+    Boolean(guard?.detected && guard.state !== 'blocked')
+  );
+  const failedGuardStates = ['limit_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'limit_readback_unavailable', 'orphaned_cgroup', 'apply_unverified'];
+  const resourceGuardFailed = [cpuGuard, memoryGuard, ioGuard].some((guard) => failedGuardStates.includes(guard?.state || ''));
+  const drawerRisk = container && isGuardRuntime ? evaluateContainerRisk(container, activeAlerts) : null;
+  const hasConfigurationRisk = (sec.configuration_risks?.length ?? 0) > 0;
+  const hasOperationalFinding = Boolean(
+    container?.alerts?.cpu || container?.alerts?.memory || container?.alerts?.disk
+  );
+  const drawerIsStale = Boolean(container?.alerts?.stale || container?.alerts?.host_stale);
+  const drawerHasCriticalFinding = Boolean(drawerRisk?.isCritical || resourceGuardFailed);
+  const drawerHasWarningFinding = Boolean(drawerRisk?.hasRisk || hasConfigurationRisk || hasOperationalFinding || protocolGuardNeedsReview || resourceGuardFailed);
+  const drawerHasProtectionState = container
+    ? hasContainerResourceOrProtectionActivity(container, activeAlerts) || hasContainerProtocolGuard(container)
+    : false;
+  const drawerStatus = (() => {
+    if (!container) return 'info';
+    if (!isGuardRuntime) return container.alerts?.stale ? 'stale' : 'healthy';
+    if (drawerIsStale) return 'stale';
+    if (drawerHasCriticalFinding) return 'critical';
+    if (drawerHasWarningFinding) return 'warning';
+    return drawerHasProtectionState ? 'info' : 'healthy';
+  })();
+  const drawerStatusLabel = !container
+    ? '加载中'
+    : isGuardRuntime && drawerStatus === 'info'
+    ? '存在管控状态'
+    : undefined;
+  const cpuGuardCurrent = cpuGuard?.container_cpu_percent ?? cpuGuard?.current_cpu_percent ?? container?.cpu_percent;
+  const hy2Confidence = sec.hy2_protocol?.confidence ?? container?.alerts?.hy2_confidence;
+  const hy2ConfidenceLabel = hy2Confidence === 'confirmed'
+    ? '已确认'
+    : hy2Confidence === 'suspected'
+    ? '疑似'
+    : hy2Confidence === 'none'
+    ? '未分级'
+    : '置信度未知';
+  const udpThrottleRate = container?.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps;
+  const udpThrottleRemaining = container?.alerts?.udp_throttle_remaining_seconds ?? sec.udp_throttle?.remaining_seconds;
+  const udpThrottleCount = container?.alerts?.udp_throttle_violation_count ?? sec.udp_throttle?.violation_count;
   const activeActionableAlert = activeAlerts.find((alert) => {
     if (
       alert.host_id !== identity.host_id ||
@@ -311,12 +519,13 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
       {/* Backdrop */}
       <div
         onClick={onClose}
+        aria-hidden="true"
         className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs transition-opacity animate-in fade-in duration-200"
       />
 
       {/* Slide-over Drawer Panel */}
       <div className="absolute inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10">
-        <div className="min-w-0 w-screen max-w-2xl transform bg-slate-900 border-l border-slate-800 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
+        <div ref={drawerPanelRef} tabIndex={-1} className="min-w-0 w-screen max-w-2xl transform bg-slate-900 border-l border-slate-800 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
           {/* Drawer Header */}
           <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/80 px-6 py-4">
             <div className="flex items-center gap-3 min-w-0">
@@ -329,9 +538,10 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     {identity.container_name}
                   </h2>
                   <StatusBadge
-                    status={container?.alerts?.stale ? 'stale' : 'healthy'}
+                    status={drawerStatus}
+                    label={drawerStatusLabel}
                     size="sm"
-                    pulse={!container?.alerts?.stale}
+                    pulse={drawerStatus === 'healthy'}
                   />
                   <span
                     className={`rounded-full border px-2 py-0.2 text-[10px] font-mono font-medium ${
@@ -355,6 +565,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
             <div className="flex items-center gap-2">
               <button
+                ref={closeButtonRef}
                 type="button"
                 onClick={onClose}
                 aria-label="关闭容器详情"
@@ -433,7 +644,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <Cpu className="h-3.5 w-3.5 text-sky-400" /> CPU 占用
                 </span>
                 <span className="text-lg font-bold text-slate-100 tabular-nums">
-                  {fmtNumber(container?.cpu_percent)}%
+                  {formatMetricPercent(container?.cpu_percent)}
                 </span>
               </div>
 
@@ -442,10 +653,10 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <HardDrive className="h-3.5 w-3.5 text-emerald-400" /> 内存使用
                 </span>
                 <span className="text-lg font-bold text-slate-100 tabular-nums">
-                  {fmtNumber(container?.mem_percent)}%
+                  {formatMetricPercent(container?.mem_percent)}
                 </span>
                 <span className="text-[10px] text-slate-500 block truncate">
-                  {fmtBytes(container?.mem_bytes)} / {fmtBytes(container?.mem_limit_bytes)}
+                  {formatMetricBytes(container?.mem_bytes)} / {formatMetricBytes(container?.mem_limit_bytes)}
                 </span>
               </div>
 
@@ -460,13 +671,55 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <Network className="h-3.5 w-3.5 text-amber-400" /> 入站去重 IP
                 </span>
                 <span className={`text-lg font-bold tabular-nums ${inIpAlert ? 'text-rose-400' : 'text-slate-100'}`}>
-                  {inIps}
+                  {inIps ?? (sec.communication_detail_available === false ? '不可用' : '—')}
                 </span>
                 <span className="text-[10px] text-slate-500 block">
                   阈值：{inThresh} IPs
                 </span>
               </div>
             </div>
+
+            {container && isGuardRuntime && (
+              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3" aria-label="容器活动告警与保护信号">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                      <Shield className="h-4 w-4 text-amber-300" />
+                      告警与保护信号
+                    </h3>
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      {drawerIsStale ? '数据已过期，以下为最近一次匹配记录。' : '展示服务端当前匹配到的活动告警；保护信号不等于违规认定。'}
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] tabular-nums text-slate-300">{containerAlerts.length} 项</span>
+                </div>
+                {containerAlerts.length === 0 ? (
+                  <p className="rounded-lg border border-dashed border-slate-800 px-3 py-3 text-xs text-slate-400">暂无匹配的活动告警。资源保护与协议阻断状态请查看下方卡片。</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {containerAlerts.map((alert) => (
+                      <li key={alert.id} className={`rounded-lg border p-3 ${alert.protection_only ? 'border-sky-800/70 bg-sky-950/20' : alert.severity === 'critical' ? 'border-rose-800/70 bg-rose-950/20' : 'border-amber-800/60 bg-amber-950/15'}`}>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] ${alert.protection_only ? 'border-sky-700 bg-sky-950/70 text-sky-200' : alert.severity === 'critical' ? 'border-rose-700 bg-rose-950/70 text-rose-200' : 'border-amber-700 bg-amber-950/70 text-amber-200'}`}>
+                            {alert.protection_only ? '保护信号' : alert.severity === 'critical' ? '严重告警' : alert.severity === 'info' ? '提示' : '安全告警'}
+                          </span>
+                          <span className="text-[10px] text-slate-500">{alert.type}</span>
+                        </div>
+                        <h4 className="mt-2 text-xs font-semibold text-slate-100">{alert.title || alert.type}</h4>
+                        <p className="mt-1 break-words text-[11px] leading-relaxed text-slate-300">{alert.message}</p>
+                        {(alert.value != null || alert.threshold != null) && (
+                          <p className="mt-1 text-[10px] tabular-nums text-slate-400">
+                            {alert.value != null ? `当前值：${formatAlertValue(alert.value)}` : ''}
+                            {alert.value != null && alert.threshold != null ? ' · ' : ''}
+                            {alert.threshold != null ? `阈值：${formatAlertValue(alert.threshold)}` : ''}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            )}
 
             {(identity.runtime === 'incus' || identity.runtime === 'podman') && (
               <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3">
@@ -488,20 +741,20 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(cpuGuard?.state)}</span>
                     </div>
                     <p className="text-[11px] leading-relaxed text-slate-300">
-                      当前 {cpuGuard?.container_cpu_percent ?? cpuGuard?.current_cpu_percent ?? container?.cpu_percent ?? 0}%
+                      当前 {formatMetricPercent(cpuGuardCurrent)}
                       {cpuGuard?.effective_cpus ? ` · 配额容量 ${fmtNumber(cpuGuard.effective_cpus, 2)} 核` : ''}
                       {cpuGuard?.host_busy_percent !== undefined && cpuGuard.host_busy_percent !== null ? ` · 母鸡忙碌 ${fmtNumber(cpuGuard.host_busy_percent, 1)}%` : ''}
                       {cpuGuard?.host_cpu_psi_some_avg10 != null ? ` · 母鸡 CPU PSI ${fmtNumber(cpuGuard.host_cpu_psi_some_avg10, 2)}%` : cpuGuard?.host_pressure_basis === 'host_busy_psi_unavailable_fallback' ? ' · PSI 不可用，按母鸡忙碌率兼容判断' : ''}
                     </p>
                     {cpuGuard?.state === 'watching' && (
-                      <p className="text-[11px] text-amber-200">持续高占用 {cpuGuard.high_samples ?? 0}/{cpuGuard.required_samples ?? 0} 次，已观察 {formatMinutes(cpuGuard.confirmed_duration_seconds)}。</p>
+                      <p className="text-[11px] text-amber-200">持续高占用 {cpuGuard.high_samples ?? '—'}/{cpuGuard.required_samples ?? '—'} 次，已观察 {formatMinutes(cpuGuard.confirmed_duration_seconds)}。</p>
                     )}
                     {['limited', 'limit_unverified', 'limited_unverified', 'limit_failed', 'restore_failed', 'escalating', 'restoring'].includes(cpuGuard?.state || '') && (
                       <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
                         <p>原限额：<span className="font-mono text-slate-100">{cpuGuard?.original_limit || '未记录'}</span></p>
                         <p>策略目标：<span className="font-mono text-slate-100">{cpuGuard?.expected_limit || cpuGuard?.active_limit || '等待读回'}</span>{cpuGuard?.tier ? ` · 第 ${cpuGuard.tier} 阶（约原容量 ${cpuGuard.tier_percent_of_original ?? '-'}%）` : ''}</p>
                         <p>内核当前读回：<span className="font-mono text-slate-100">{cpuGuard?.actual_limit || '暂不可读'}</span> · {cpuGuard?.readback_confirmed ? `已核实${cpuGuard.readback_confirmed_at ? ` · ${new Date(cpuGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}` : '尚未确认目标值'}</p>
-                        <p>恢复条件：低占用连续 {cpuGuard?.recovery_samples ?? 0}/{cpuGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(cpuGuard?.recovery_duration_seconds)}。</p>
+                        <p>恢复条件：低占用连续 {cpuGuard?.recovery_samples ?? '—'}/{cpuGuard?.recovery_samples_required ?? '—'} 次，观察窗口 {formatMinutes(cpuGuard?.recovery_duration_seconds)}。</p>
                       </div>
                     )}
                     {cpuGuard?.top_process?.process && (
@@ -526,13 +779,13 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       {' · '}容器 {memoryGuard?.container_psi_some_avg10 != null ? `${fmtNumber(memoryGuard.container_psi_some_avg10, 1)}%` : '不可用'}
                     </p>
                     {memoryGuard?.state === 'watching' && (
-                      <p className="text-[11px] text-amber-200">高内存与 PSI 持续 {memoryGuard.high_samples ?? 0}/{memoryGuard.required_samples ?? 0} 次，已观察 {formatMinutes(memoryGuard.confirmed_duration_seconds)}。</p>
+                      <p className="text-[11px] text-amber-200">高内存与 PSI 持续 {memoryGuard.high_samples ?? '—'}/{memoryGuard.required_samples ?? '—'} 次，已观察 {formatMinutes(memoryGuard.confirmed_duration_seconds)}。</p>
                     )}
                     {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'apply_unverified'].includes(memoryGuard?.state || '') && (
                       <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
                         <p>原 memory.high：<span className="font-mono text-slate-100">{formatMemoryHigh(memoryGuard?.original_limit)}</span></p>
                         <p>当前 memory.high：<span className="font-mono text-slate-100">{formatMemoryHigh(memoryGuard?.active_limit)}</span>{memoryGuard?.tier ? ` · 第 ${memoryGuard.tier} 阶（约 memory.max 的 ${memoryGuard.tier_percent_of_max ?? '-'}%）` : ''}</p>
-                        <p>恢复条件：低 PSI 连续 {memoryGuard?.recovery_samples ?? 0}/{memoryGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(memoryGuard?.recovery_duration_seconds)}。</p>
+                        <p>恢复条件：低 PSI 连续 {memoryGuard?.recovery_samples ?? '—'}/{memoryGuard?.recovery_samples_required ?? '—'} 次，观察窗口 {formatMinutes(memoryGuard?.recovery_duration_seconds)}。</p>
                       </div>
                     )}
                     {memoryGuard?.state === 'cooldown' && memoryGuard.retry_after_seconds ? (
@@ -553,14 +806,14 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       {ioGuard?.dominant_share_percent !== undefined ? ` · 容器占比 ${fmtNumber(ioGuard.dominant_share_percent, 1)}%` : ''}
                     </p>
                     {ioGuard?.state === 'watching' && (
-                      <p className="text-[11px] text-amber-200">持续压力 {ioGuard.sample_count ?? 0}/{ioGuard.required_samples ?? 0} 次，已观察 {formatMinutes(ioGuard.confirmed_duration_seconds)}。</p>
+                      <p className="text-[11px] text-amber-200">持续压力 {ioGuard.sample_count ?? '—'}/{ioGuard.required_samples ?? '—'} 次，已观察 {formatMinutes(ioGuard.confirmed_duration_seconds)}。</p>
                     )}
                     {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'retry_wait'].includes(ioGuard?.state || '') && (
                       <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
                         <p>原 I/O 限额：<span className="font-mono text-slate-100">{formatIoLimit(ioGuard?.original_limit)}</span></p>
                         <p>策略目标：<span className="font-mono text-slate-100">{formatIoLimit(ioGuard?.expected_limit || ioGuard?.active_limit)}</span>{ioGuard?.tier ? ` · 第 ${ioGuard.tier} 阶（约基线 ${ioGuard.tier_percent_of_baseline ?? '-'}%）` : ''}</p>
                         <p>内核当前读回：<span className="font-mono text-slate-100">{ioGuard?.actual_limit ? formatIoLimit(ioGuard.actual_limit) : '暂不可读'}</span> · {ioGuard?.readback_confirmed ? `已核实${ioGuard.readback_confirmed_at ? ` · ${new Date(ioGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}` : '尚未确认目标值'}</p>
-                        <p>恢复条件：低压力连续 {ioGuard?.recovery_samples ?? 0}/{ioGuard?.recovery_samples_required ?? 0} 次，观察窗口 {formatMinutes(ioGuard?.recovery_duration_seconds)}。</p>
+                        <p>恢复条件：低压力连续 {ioGuard?.recovery_samples ?? '—'}/{ioGuard?.recovery_samples_required ?? '—'} 次，观察窗口 {formatMinutes(ioGuard?.recovery_duration_seconds)}。</p>
                         {ioGuard?.retry_after_seconds ? <p className="text-amber-200">约 {formatMinutes(ioGuard.retry_after_seconds)} 后自动重试。</p> : null}
                       </div>
                     )}
@@ -577,6 +830,22 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <p>容器 CPU / 内存 / 磁盘 I/O：{psiPercent(resourcePressure?.container, 'cpu')} · {psiPercent(resourcePressure?.container, 'memory')} · {psiPercent(resourcePressure?.container, 'io')}</p>
                   <p className="mt-1 text-sky-200">{resourcePressure?.explanation || resourcePressure?.container?.reason || '等待新版 Agent 上报 PSI；部分旧内核或 cgroup 配置不提供该指标。'}</p>
                   <p className="mt-1 text-slate-500">PSI 表示任务因资源压力而等待的时间比例；它辅助区分持续计算与资源争用，不用于认定用户行为。</p>
+                </div>
+              </section>
+            )}
+
+            {container && isGuardRuntime && (
+              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3" aria-label="VMess 与 Trojan 协议管控">
+                <div>
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                    <Shield className="h-4 w-4 text-violet-300" />
+                    VMess / Trojan 阻断状态
+                  </h3>
+                  <p className="mt-1 text-[11px] text-slate-400">区分已读回阻断、部分阻断和待核验端点；缺少 Agent 状态时不会显示为已阻断。</p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <ProtocolGuardCard label="VMess" summary={sec.vmess_guard} />
+                  <ProtocolGuardCard label="Trojan" summary={sec.trojan_guard} />
                 </div>
               </section>
             )}
@@ -628,11 +897,11 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <div className="flex items-center justify-between text-slate-200">
                     <span className="flex items-center text-emerald-400" title="TCP 入栈速率">
                       <ArrowDownLeft className="h-3.5 w-3.5 mr-0.5" />
-                      {fmtMbps(container?.tcp_rx_bps)} Mbps
+                      {container?.tcp_rx_bps == null ? '—' : `${fmtMbps(container.tcp_rx_bps)} Mbps`}
                     </span>
                     <span className="flex items-center text-sky-400" title="TCP 出栈速率">
                       <ArrowUpRight className="h-3.5 w-3.5 mr-0.5" />
-                      {fmtMbps(container?.tcp_tx_bps)} Mbps
+                      {container?.tcp_tx_bps == null ? '—' : `${fmtMbps(container.tcp_tx_bps)} Mbps`}
                     </span>
                   </div>
                 </div>
@@ -645,11 +914,11 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                   <div className="flex items-center justify-between text-slate-200">
                     <span className="flex items-center text-emerald-400" title="UDP 入栈速率">
                       <ArrowDownLeft className="h-3.5 w-3.5 mr-0.5" />
-                      {fmtMbps(container?.udp_rx_bps)} Mbps
+                      {container?.udp_rx_bps == null ? '—' : `${fmtMbps(container.udp_rx_bps)} Mbps`}
                     </span>
                     <span className="flex items-center text-sky-400" title="UDP 出栈速率">
                       <ArrowUpRight className="h-3.5 w-3.5 mr-0.5" />
-                      {fmtMbps(container?.udp_tx_bps)} Mbps
+                      {container?.udp_tx_bps == null ? '—' : `${fmtMbps(container.udp_tx_bps)} Mbps`}
                     </span>
                   </div>
                 </div>
@@ -667,14 +936,14 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     </span>
                     {(container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
                       <span className="text-[10px] font-bold bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 rounded-sm text-violet-200">
-                        {container?.security?.hy2_protocol?.confidence === 'confirmed' ? '已确认' : '疑似'}
+                        {hy2ConfidenceLabel}
                       </span>
                     )}
                   </div>
                   <div className="text-[11px] mt-1">
                     {container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected ? (
                       <div>
-                        <span>UDP 并发：{container?.security?.hy2_protocol?.udp_concurrency ?? container?.alerts?.hy2_concurrency ?? 0}</span>
+                        <span>UDP 并发：{container?.security?.hy2_protocol?.udp_concurrency ?? container?.alerts?.hy2_concurrency ?? '—'}</span>
                         {container?.security?.hy2_protocol?.process && (
                           <span className="text-slate-400 ml-1.5">({container.security.hy2_protocol.process})</span>
                         )}
@@ -701,7 +970,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       </span>
                       {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
                         <span className="text-[10px] font-bold bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 rounded-sm text-rose-300 animate-pulse">
-                          限速生效中: {container?.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10} Mbps
+                          {udpThrottleRate == null ? '限速生效中（速率未知）' : `限速生效中: ${udpThrottleRate} Mbps`}
                         </span>
                       ) : (
                         <span className="text-[10px] font-medium bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-sm text-emerald-400">
@@ -715,8 +984,8 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                           {sec.udp_throttle?.reason || '因持续 3 分钟上下行严重失衡且高 UDP 并发触发靶向限速。已保护 TCP 与 SSH 保持千兆线速。'}
                         </p>
                         <div className="flex items-center justify-between pt-1 border-t border-rose-500/20 text-[10px] text-rose-300/70 font-mono">
-                          <span>剩余冷却时间：约 {Math.ceil((container?.alerts?.udp_throttle_remaining_seconds ?? sec.udp_throttle?.remaining_seconds ?? 0) / 60)} 分钟</span>
-                          <span>24h内违规：第 {container?.alerts?.udp_throttle_violation_count ?? sec.udp_throttle?.violation_count ?? 1} 次</span>
+                          <span>剩余冷却时间：{udpThrottleRemaining == null ? '未知' : `约 ${Math.ceil(udpThrottleRemaining / 60)} 分钟`}</span>
+                          <span>24h 限速触发：{udpThrottleCount == null ? '未知' : `${udpThrottleCount} 次`}</span>
                         </div>
                         <div className="pt-1">
                           <button
@@ -732,7 +1001,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       </div>
                     ) : (
                       <div className="text-[11px] text-slate-400 mt-1">
-                        双向流量均衡或低并发的正常 HY2 用户享有 100% 自动豁免保护，不限制 UDP 速率。
+                        当前未触发 UDP 限速，限速状态以 Agent 回报为准。
                       </div>
                     )}
                   </div>

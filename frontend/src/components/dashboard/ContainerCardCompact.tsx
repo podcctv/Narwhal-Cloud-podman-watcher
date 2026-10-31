@@ -15,10 +15,11 @@ import {
   Gauge,
   Network,
 } from 'lucide-react';
-import { ContainerItem, ContainerIdentity } from '../../api/types';
+import { ContainerItem, ContainerIdentity, SecurityAlert } from '../../api/types';
 import { fmtBytes, fmtMbps } from '../../api/client';
 import { ContainerRiskInfo } from './HostContainerList';
 import { AdmissionStatus } from '../container/AdmissionStatus';
+import { ContainerStateBadges, hasContainerResourceAlert, hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard, hasContainerResourceGuardFailure, hasContainerProtocolGuardNeedsReview } from './ContainerStateBadges';
 
 const PROXY_SOFTWARE_LABELS: Record<string, string> = {
   xray: 'Xray-core',
@@ -62,6 +63,7 @@ const APP_PROTOCOL_LABELS: Record<string, string> = {
 interface ContainerCardCompactProps {
   container: ContainerItem;
   risk: ContainerRiskInfo;
+  activeAlerts?: SecurityAlert[];
   onSelect: (id: ContainerIdentity) => void;
   onQuickDisposition?: (target: ContainerIdentity, decision: 'deny' | 'allow_silent') => void;
   isSubmitting?: boolean;
@@ -70,18 +72,25 @@ interface ContainerCardCompactProps {
 export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
   container: c,
   risk,
+  activeAlerts = [],
   onSelect,
   onQuickDisposition,
   isSubmitting = false,
 }) => {
   const isStale = Boolean(c.alerts?.stale);
-  const cpu = c.cpu_percent || 0;
-  const mem = c.mem_percent || 0;
-  const memUsed = fmtBytes(c.mem_bytes);
-  const memLimit = fmtBytes(c.mem_limit_bytes);
-  const rxMbps = fmtMbps(c.net_rx_bps);
-  const txMbps = fmtMbps(c.net_tx_bps);
+  const hasResourceAlert = hasContainerResourceAlert(c);
+  const hasResourceGuardFailure = hasContainerResourceGuardFailure(c);
+  const hasProtocolGuardNeedsReview = hasContainerProtocolGuardNeedsReview(c);
+  const hasProtectionState = hasContainerResourceOrProtectionActivity(c, activeAlerts) || hasContainerProtocolGuard(c);
+  const cpu = typeof c.cpu_percent === 'number' && Number.isFinite(c.cpu_percent) ? c.cpu_percent : null;
+  const mem = typeof c.mem_percent === 'number' && Number.isFinite(c.mem_percent) ? c.mem_percent : null;
+  const memUsed = typeof c.mem_bytes === 'number' && Number.isFinite(c.mem_bytes) ? fmtBytes(c.mem_bytes) : '—';
+  const memLimit = typeof c.mem_limit_bytes === 'number' && Number.isFinite(c.mem_limit_bytes) ? fmtBytes(c.mem_limit_bytes) : '—';
+  const rxMbps = typeof c.net_rx_bps === 'number' && Number.isFinite(c.net_rx_bps) ? fmtMbps(c.net_rx_bps) : null;
+  const txMbps = typeof c.net_tx_bps === 'number' && Number.isFinite(c.net_tx_bps) ? fmtMbps(c.net_tx_bps) : null;
   const sec = c.security || {};
+  const udpThrottleRate = c.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps;
+  const udpThrottleRemaining = c.alerts?.udp_throttle_remaining_seconds ?? sec.udp_throttle?.remaining_seconds;
   const [servicesExpanded, setServicesExpanded] = useState(false);
   const serviceListeners = useMemo(() => {
     const seen = new Set<string>();
@@ -170,30 +179,24 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
   let cardBorder = 'border-slate-800/90 bg-slate-900/90 hover:border-sky-500/60 shadow-xs';
   let accentBar = 'bg-slate-700';
 
-  if (risk.isCritical) {
+  if (risk.isCritical || hasResourceGuardFailure) {
     cardBorder =
       'border-rose-500/60 bg-linear-to-b from-rose-950/30 via-slate-900/95 to-slate-900 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
     accentBar = 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.6)]';
-  } else if (risk.isWarning) {
+  } else if (!isStale && (risk.isWarning || hasResourceAlert || hasProtocolGuardNeedsReview)) {
     cardBorder =
       'border-amber-500/50 bg-linear-to-b from-amber-950/20 via-slate-900/95 to-slate-900 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
     accentBar = 'bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.5)]';
+  } else if (!isStale && hasProtectionState) {
+    cardBorder = 'border-sky-500/40 bg-linear-to-b from-sky-950/20 via-slate-900/95 to-slate-900 hover:border-sky-400';
+    accentBar = 'bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.45)]';
   } else if (!isStale) {
     accentBar = 'bg-emerald-500/80';
   }
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onSelect(identity)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          onSelect(identity);
-        }
-      }}
-      className={`group relative flex flex-col justify-between rounded-xl border p-3 transition-all cursor-pointer select-none overflow-hidden focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${cardBorder}`}
+    <article
+      className={`group relative flex flex-col justify-between rounded-xl border p-3 transition-all overflow-hidden ${cardBorder}`}
     >
       {/* Top Left Accent Health Pill */}
       <div className={`absolute left-0 top-0 bottom-0 w-1 ${accentBar} transition-colors`} />
@@ -205,22 +208,30 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           <div className="flex items-center gap-1.5 min-w-0 flex-1">
             <Box
               className={`h-3.5 w-3.5 shrink-0 ${
-                risk.isCritical
+                risk.isCritical || hasResourceGuardFailure
                   ? 'text-rose-400'
-                  : risk.isWarning
+                  : risk.isWarning || hasResourceAlert || hasProtocolGuardNeedsReview
                   ? 'text-amber-400'
                   : 'text-sky-400'
               }`}
             />
-            <h4
-              className={`font-mono text-xs font-bold truncate transition-colors ${
+            <h4 className="min-w-0 flex-1">
+              <button
+                type="button"
+                aria-label={`打开容器 ${c.container_name} 详情`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect(identity);
+                }}
+                className={`block w-full truncate text-left font-mono text-xs font-bold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 risk.isCritical
                   ? 'text-rose-200 group-hover:text-rose-100'
                   : 'text-slate-100 group-hover:text-sky-300'
-              }`}
-              title={`${c.container_name} (${c.runtime}${c.project ? `/${c.project}` : ''})`}
-            >
-              {c.container_name}
+                }`}
+                title={`${c.container_name} (${c.runtime}${c.project ? `/${c.project}` : ''})`}
+              >
+                {c.container_name}
+              </button>
             </h4>
             <span className="shrink-0 rounded-sm bg-slate-800/90 px-1 py-0.2 font-mono text-[9px] text-slate-400 border border-slate-700/50">
               {c.runtime}
@@ -233,7 +244,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             {(c.alerts?.hy2_detected || sec.hy2_protocol?.detected) && (
               <span
                 className="flex items-center gap-0.5 rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 text-[9px] font-bold text-violet-300 font-mono shadow-xs"
-                title={`检测到 Hysteria 2 协议 (UDP并发: ${c.alerts?.hy2_concurrency ?? sec.hy2_protocol?.udp_concurrency ?? 0})`}
+                title={`检测到 Hysteria 2 协议 (UDP并发: ${c.alerts?.hy2_concurrency ?? sec.hy2_protocol?.udp_concurrency ?? '未知'})`}
               >
                 <Radio className="h-2.5 w-2.5 text-violet-400" />
                 <span>HY2</span>
@@ -244,10 +255,10 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             {(c.alerts?.udp_throttled || sec.udp_throttle?.throttled) && (
               <span
                 className="flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/60 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 font-mono shadow-xs animate-pulse"
-                title={`UDP 靶向限速生效中: ${c.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10}Mbps (剩余约 ${Math.ceil((c.alerts?.udp_throttle_remaining_seconds ?? sec.udp_throttle?.remaining_seconds ?? 0) / 60)} 分钟)`}
+                title={`UDP 靶向限速生效中: ${udpThrottleRate == null ? '速率未知' : `${udpThrottleRate} Mbps`} (${udpThrottleRemaining == null ? '剩余时间未知' : `剩余约 ${Math.ceil(udpThrottleRemaining / 60)} 分钟`})`}
               >
                 <Gauge className="h-2.5 w-2.5 text-rose-400" />
-                <span>限速 {c.alerts?.udp_throttle_rate_mbps ?? sec.udp_throttle?.rate_mbps ?? 10}M</span>
+                <span>{udpThrottleRate == null ? 'UDP 限速' : `限速 ${udpThrottleRate}M`}</span>
               </span>
             )}
 
@@ -271,7 +282,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
                 title={risk.reasons.join(' · ')}
               >
                 <AlertTriangle className="h-2.5 w-2.5 text-rose-400 animate-pulse" />
-                <span>异常</span>
+                <span>异常 {risk.reasons.length}</span>
               </span>
             ) : risk.isWarning ? (
               <span
@@ -279,7 +290,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
                 title={risk.reasons.join(' · ')}
               >
                 <AlertCircle className="h-2.5 w-2.5 text-amber-400" />
-                <span>预警</span>
+                <span>预警 {risk.reasons.length}</span>
               </span>
             ) : isStale ? (
               <span className="rounded-full bg-slate-800 border border-slate-700 px-1.5 py-0.2 text-[9px] font-medium text-slate-400">
@@ -288,6 +299,13 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             ) : null}
           </div>
         </div>
+
+      <ContainerStateBadges container={c} activeAlerts={activeAlerts} maxVisible={4} className="mb-2 pl-1" />
+      {risk.reasons.length > 0 && (
+        <p className="mb-2 truncate pl-1 text-[10px] text-slate-300" title={risk.reasons.join(' · ')}>
+          {risk.reasons.slice(0, 2).join(' · ')}{risk.reasons.length > 2 ? ` · +${risk.reasons.length - 2} 项` : ''}
+        </p>
+      )}
 
         {/* Section 2: Dual CPU & Memory Meter */}
         <div className="mt-2.5 grid grid-cols-2 gap-2 text-[10px] font-mono">
@@ -299,18 +317,18 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
               </span>
               <span
                 className={`font-bold tabular-nums ${
-                  cpu > 80 ? 'text-rose-400' : 'text-slate-200'
+                  cpu !== null && cpu > 80 ? 'text-rose-400' : 'text-slate-200'
                 }`}
               >
-                {cpu.toFixed(1)}%
+                {cpu === null ? '—' : `${cpu.toFixed(1)}%`}
               </span>
             </div>
             <div className="h-1 w-full rounded-full bg-slate-800/80 overflow-hidden">
               <div
                 className={`h-full transition-all duration-300 ${
-                  cpu > 80 ? 'bg-rose-500' : 'bg-sky-400'
+                  cpu === null ? 'bg-slate-700' : cpu > 80 ? 'bg-rose-500' : 'bg-sky-400'
                 }`}
-                style={{ width: `${Math.min(100, Math.max(0, cpu))}%` }}
+                style={{ width: `${Math.min(100, Math.max(0, cpu ?? 0))}%` }}
               />
             </div>
           </div>
@@ -323,19 +341,19 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
               </span>
               <span
                 className={`font-bold tabular-nums ${
-                  mem > 90 ? 'text-amber-400' : 'text-slate-200'
+                  mem !== null && mem > 90 ? 'text-amber-400' : 'text-slate-200'
                 }`}
                 title={`${memUsed} / ${memLimit}`}
               >
-                {mem.toFixed(1)}%
+                {mem === null ? '—' : `${mem.toFixed(1)}%`}
               </span>
             </div>
             <div className="h-1 w-full rounded-full bg-slate-800/80 overflow-hidden">
               <div
                 className={`h-full transition-all duration-300 ${
-                  mem > 90 ? 'bg-amber-400' : 'bg-emerald-400'
+                  mem === null ? 'bg-slate-700' : mem > 90 ? 'bg-amber-400' : 'bg-emerald-400'
                 }`}
-                style={{ width: `${Math.min(100, Math.max(0, mem))}%` }}
+                style={{ width: `${Math.min(100, Math.max(0, mem ?? 0))}%` }}
               />
             </div>
           </div>
@@ -347,34 +365,34 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             {/* Download RX */}
             <span
               className="flex items-center text-emerald-400 font-semibold"
-              title={`入栈总速率 (RX): ${rxMbps} Mbps`}
+              title={`入栈总速率 (RX): ${rxMbps === null ? '不可用' : `${rxMbps} Mbps`}`}
             >
               <ArrowDownLeft className="h-3 w-3 mr-0.5 text-emerald-400/80 shrink-0" />
-              {rxMbps}M
+              {rxMbps === null ? '—' : `${rxMbps}M`}
             </span>
 
             {/* Upload TX */}
             <span
               className="flex items-center text-sky-400 font-semibold"
-              title={`出栈总速率 (TX): ${txMbps} Mbps`}
+              title={`出栈总速率 (TX): ${txMbps === null ? '不可用' : `${txMbps} Mbps`}`}
             >
               <ArrowUpRight className="h-3 w-3 mr-0.5 text-sky-400/80 shrink-0" />
-              {txMbps}M
+              {txMbps === null ? '—' : `${txMbps}M`}
             </span>
 
             {/* Conns */}
-            <span className="text-slate-400 text-[9px] tabular-nums" title={`外部连接数: ${c.conn_count || 0}`}>
-              {c.conn_count || 0}c
+            <span className="text-slate-400 text-[9px] tabular-nums" title={`外部连接数: ${c.conn_count ?? '不可用'}`}>
+              {c.conn_count ?? '—'}c
             </span>
           </div>
 
           {/* Protocol Split Sub-row */}
           <div className="flex items-center justify-between text-[9px] text-slate-400/90 border-t border-slate-800/60 pt-0.5 mt-0.5 font-mono">
-            <span title={`TCP 流量: ↓ ${fmtMbps(c.tcp_rx_bps)}M / ↑ ${fmtMbps(c.tcp_tx_bps)}M`}>
-              <span className="text-blue-400/90">T:</span> {fmtMbps(c.tcp_rx_bps)}/{fmtMbps(c.tcp_tx_bps)}M
+            <span title={`TCP 流量: ↓ ${c.tcp_rx_bps == null ? '不可用' : `${fmtMbps(c.tcp_rx_bps)}M`} / ↑ ${c.tcp_tx_bps == null ? '不可用' : `${fmtMbps(c.tcp_tx_bps)}M`}`}>
+              <span className="text-blue-400/90">T:</span> {c.tcp_rx_bps == null ? '—' : fmtMbps(c.tcp_rx_bps)}/{c.tcp_tx_bps == null ? '—' : fmtMbps(c.tcp_tx_bps)}M
             </span>
-            <span title={`UDP 流量: ↓ ${fmtMbps(c.udp_rx_bps)}M / ↑ ${fmtMbps(c.udp_tx_bps)}M`}>
-              <span className="text-violet-400/90">U:</span> {fmtMbps(c.udp_rx_bps)}/{fmtMbps(c.udp_tx_bps)}M
+            <span title={`UDP 流量: ↓ ${c.udp_rx_bps == null ? '不可用' : `${fmtMbps(c.udp_rx_bps)}M`} / ↑ ${c.udp_tx_bps == null ? '不可用' : `${fmtMbps(c.udp_tx_bps)}M`}`}>
+              <span className="text-violet-400/90">U:</span> {c.udp_rx_bps == null ? '—' : fmtMbps(c.udp_rx_bps)}/{c.udp_tx_bps == null ? '—' : fmtMbps(c.udp_tx_bps)}M
             </span>
           </div>
         </div>
@@ -485,9 +503,21 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             >
               {risk.reasons[0]}
             </span>
+          ) : hasResourceGuardFailure ? (
+            <span className="block truncate font-medium text-rose-300" title="自动资源保护未通过核验">自动保护核验失败</span>
+          ) : hasProtocolGuardNeedsReview ? (
+            <span className="block truncate font-medium text-amber-300" title="VMess / Trojan 阻断状态仍需核验">协议阻断待核验</span>
+          ) : hasResourceAlert ? (
+            <span className="block truncate font-medium text-amber-300" title={[
+              c.alerts?.cpu ? 'CPU 高负载' : '',
+              c.alerts?.memory ? '内存压力' : '',
+              c.alerts?.disk ? '磁盘压力' : '',
+            ].filter(Boolean).join(' · ')}>
+              {[c.alerts?.cpu ? 'CPU 高负载' : '', c.alerts?.memory ? '内存压力' : '', c.alerts?.disk ? '磁盘压力' : ''].filter(Boolean).join(' · ')}
+            </span>
           ) : (
             <span className="font-mono text-slate-400 text-[9px]">
-              {c.timestamp_iso_utc8?.split(' ')[1] || '实时'} · {sec.process_count || 0}p
+              {c.timestamp_iso_utc8?.split(' ')[1] || '时间未知'} · {sec.process_count ?? '—'}p
             </span>
           )}
         </div>
@@ -518,6 +548,6 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </article>
   );
 };
