@@ -50,7 +50,7 @@ const path = require('node:path');
     await page.route('**/api/v1/security/quarantines', route => route.fulfill({ json: {
       items: actual.items.map(item => ({ ...item, host_last_seen: 1, updated_at: 1 })) } }));
     await panel.getByRole('button', { name: '刷新隔离状态' }).click();
-    await panel.getByText('节点或隔离采样已过期 · 当前状态待确认', { exact: true }).waitFor();
+    await panel.getByText('主机心跳过期 · 暂不可操作', { exact: true }).waitFor();
     assert.equal(await panel.getByRole('button', { name: '等待网络恢复回执', exact: true }).isDisabled(), true);
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, viewports: [320, 375, 768, 1440],
