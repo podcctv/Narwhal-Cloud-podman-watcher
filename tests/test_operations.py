@@ -298,7 +298,7 @@ class OperationsTests(unittest.TestCase):
         self.ingest(self.now,data)
         self.assertEqual(self.conn.execute("SELECT status FROM security_actions WHERE id=9").fetchone()[0],"succeeded")
 
-    def test_canary_requires_core_collection_and_service_health(self):
+    def test_canary_failure_does_not_resume_on_later_healthy_report(self):
         self.conn.execute("INSERT INTO ops_upgrades VALUES(1,'1.7.0',?,'canary',?,'{}')",("a"*40,self.now))
         self.conn.execute("INSERT INTO ops_upgrade_nodes VALUES(1,'h',9,'dispatched','1.6.74')")
         self.conn.execute("INSERT INTO security_actions(id,alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) VALUES(9,0,'h','host','','__host__','managed_upgrade','{}','running','test',?,?)",(self.now,self.now))
@@ -311,7 +311,7 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrades WHERE id=1").fetchone()[0],"paused")
         data["operations"]["health"][0]["status"]="healthy"
         self.ingest(self.now+300,data)
-        self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"verified")
+        self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrade_nodes").fetchone()[0],"failed")
         self.assertEqual(self.conn.execute("SELECT status FROM ops_upgrades WHERE id=1").fetchone()[0],"paused")
 
     def test_probe_only_agent_with_explicit_empty_runtime_scope_can_verify_upgrade(self):

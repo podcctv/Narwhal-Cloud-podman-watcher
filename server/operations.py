@@ -629,6 +629,7 @@ def ingest(conn, host_id, node_id, ts, data):
     if isinstance(result,dict) and result.get("action_id"):
         action = conn.execute("SELECT action_type,params_json,status FROM security_actions WHERE id=? AND host_id=?", (result["action_id"],host_id)).fetchone()
         if action and action[0] in {"managed_upgrade","managed_rollback"} and action[2] in {"running","dispatched"} and loads(action[1]).get("expected_node_id")==node_id:
+            params = loads(action[1])
             if result.get("status")=="failed":
                 failure = str(result.get("message") or result.get("error") or "托管升级任务失败；请检查节点升级日志")
                 failure = ''.join(ch for ch in failure if ch >= ' ' or ch == '\t')[:400]
@@ -640,12 +641,10 @@ def ingest(conn, host_id, node_id, ts, data):
                             conn, result["action_id"], host_id, ts, failure, "install_failure"
                         )
                 else:
-                    params = loads(action[1])
                     if params.get("campaign_id"):
                         conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=? AND status='rollback_queued'", (params["campaign_id"], host_id))
             elif action[0]=="managed_rollback" and result.get("status")=="installed" and result.get("version")==data.get("agent_version"):
                 conn.execute("UPDATE security_actions SET status='succeeded',result_message='rollback version reported',updated_at=? WHERE id=?",(ts,result["action_id"]))
-                params = loads(action[1])
                 if params.get("campaign_id"):
                     conn.execute("UPDATE ops_upgrade_nodes SET status='rolled_back' WHERE campaign=? AND host_id=? AND status IN ('failed','verified','rollback_queued')", (params["campaign_id"], host_id))
     for campaign in conn.execute("SELECT id FROM ops_upgrades WHERE status IN ('canary','rollout','paused')").fetchall():
