@@ -170,7 +170,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               }`}
             >
               <Clock3 className="h-3 w-3" />
-              <span>数据过期</span>
+              <span>离线 / 采样过期</span>
               <span className="rounded-full bg-slate-800 px-1.5 py-0.2 font-mono text-[10px] tabular-nums">{counts.stale}</span>
             </button>
 

@@ -54,6 +54,15 @@ export interface ContainerRiskInfo {
 
 const HOSTS_PER_PAGE = 10;
 
+const formatSnapshotAge = (seconds: number | null | undefined) => {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '时长未知';
+  if (seconds < 5) return '刚刚';
+  if (seconds < 60) return `${Math.floor(seconds)} 秒前`;
+  if (seconds < 3600) return `约 ${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `约 ${Math.floor(seconds / 3600)} 小时前`;
+  return `约 ${Math.floor(seconds / 86400)} 天前`;
+};
+
 const matchesContainerFilters = (
   container: ContainerItem,
   filterState: FilterState,
@@ -987,31 +996,33 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
             </div>
           );
         })}
-        {matchingHostIds.length === 0 && visibleOfflineHostIds.length === 0 && <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-sm text-slate-500">{filterState === 'stale' ? '当前没有数据过期的容器。' : '当前搜索或筛选条件下没有匹配的在线主机。'}</div>}
+        {matchingHostIds.length === 0 && visibleOfflineHostIds.length === 0 && <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-sm text-slate-500">{filterState === 'stale' ? '当前没有离线主机或过期容器采样。' : '当前搜索或筛选条件下没有匹配的在线主机。'}</div>}
       </div>
 
       {visibleOfflineHostIds.length > 0 && (
-        <section className="space-y-3" aria-label="离线主机与数据过期容器">
+        <section className="space-y-3" aria-label="离线主机与过期容器快照">
           <div className="flex flex-wrap items-end justify-between gap-2 border-b border-slate-800 pb-2">
             <div>
-              <h2 className="text-sm font-semibold text-slate-200">离线与数据过期</h2>
-              <p className="mt-1 text-xs text-slate-500">以下展示最后一次上报的容器状态，不代表当前运行状态；数据恢复前不会将其计入正常容器。</p>
+              <h2 className="text-sm font-semibold text-slate-200">离线主机与过期容器快照</h2>
+              <p className="mt-1 text-xs text-slate-500">主机心跳和容器采样分别计时。主机在线但采样过期时，仅表示容器当前状态未知，不代表主机离线。</p>
             </div>
-            <span className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-1 text-xs text-amber-300">{visibleOfflineHostIds.length} 组待恢复数据</span>
+            <span className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-1 text-xs text-amber-300">{visibleOfflineHostIds.length} 组需核验</span>
           </div>
           {visibleOfflineHostIds.map((hostId) => {
             const items = offlineHostMap[hostId].slice().sort((a, b) => a.container_name.localeCompare(b.container_name));
-            const latest = items.reduce((result, item) => Number(item.host_last_seen || item.timestamp || 0) > Number(result.host_last_seen || result.timestamp || 0) ? item : result, items[0]);
-            const offlineAgeSamples = items
-              .map((item) => Number(item.host_offline_seconds ?? item.offline_seconds))
-              .filter((seconds) => Number.isFinite(seconds) && seconds > 0);
-            const offlineSeconds = offlineAgeSamples.length ? Math.max(...offlineAgeSamples) : null;
-            const offlineLabel = offlineSeconds === null
-              ? '时长未知'
-              : offlineSeconds < 3600
-              ? `约 ${Math.max(1, Math.floor(offlineSeconds / 60))} 分钟`
-              : `约 ${Math.floor(offlineSeconds / 3600)} 小时`;
-            const hostIsOffline = items.every((item) => item.alerts?.host_stale);
+            const latestHeartbeat = items.reduce((result, item) => Number(item.host_last_seen || 0) > Number(result.host_last_seen || 0) ? item : result, items[0]);
+            const latestSample = items.reduce((result, item) => Number(item.timestamp || 0) > Number(result.timestamp || 0) ? item : result, items[0]);
+            const hostIsOffline = items.length > 0 && items.every((item) => item.alerts?.host_stale === true);
+            const hostIsOnline = items.some((item) => item.alerts?.host_stale === false);
+            const sampleIsStale = items.some((item) => item.alerts?.stale === true);
+            const hostStateLabel = hostIsOffline ? '主机离线' : hostIsOnline ? '主机在线' : '主机心跳未知';
+            const hostStateColor = hostIsOnline
+              ? 'border-emerald-700/70 bg-emerald-950/40 text-emerald-300'
+              : hostIsOffline
+              ? 'border-rose-700/70 bg-rose-950/40 text-rose-300'
+              : 'border-slate-600 bg-slate-800 text-slate-300';
+            const hostHeartbeatAge = Number(latestHeartbeat.host_offline_seconds);
+            const containerSampleAge = Number(latestSample.offline_seconds);
             const isExpanded = Boolean(expandedOfflineHosts[hostId]);
             return (
               <article key={`offline-${hostId}`} className="overflow-hidden rounded-xl border border-amber-900/60 bg-slate-900/70">
@@ -1025,13 +1036,14 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                   <span className="flex min-w-0 flex-wrap items-center gap-2">
                     <Server className="h-4 w-4 shrink-0 text-amber-400" />
                     <strong className="break-all text-sm text-slate-100">{hostId}</strong>
-                    <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">{hostIsOffline ? '主机离线' : '容器数据过期'}</span>
-                    <span className="font-mono text-[11px] text-slate-400">v{latest.agent_version || '未知'}</span>
+                    <span className={`rounded-full border px-2 py-0.5 text-[11px] ${hostStateColor}`}>{hostStateLabel}</span>
+                    <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">{sampleIsStale ? '容器采样过期' : '保留最后容器快照'}</span>
+                    <span className="font-mono text-[11px] text-slate-400">v{latestHeartbeat.agent_version || '未知'}</span>
                   </span>
                   <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
-                    <span>最后上报：{latest.host_last_seen_iso_utc8 || latest.timestamp_iso_utc8 || '未知'}</span>
-                    <span>约 {offlineLabel}</span>
-                    <span>{items.length} 台状态不可用</span>
+                    <span>主机心跳：{latestHeartbeat.host_last_seen_iso_utc8 || '未知'} · {formatSnapshotAge(hostHeartbeatAge)}</span>
+                    <span>容器采样：{latestSample.timestamp_iso_utc8 || '未知'} · {formatSnapshotAge(containerSampleAge)}</span>
+                    <span>{items.length} 个容器快照 · 当前状态待确认</span>
                     <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                   </span>
                 </button>
