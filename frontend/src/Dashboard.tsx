@@ -114,7 +114,7 @@ export const Dashboard: React.FC = () => {
             container.runtime === alert.runtime &&
             (container.project || '') === (alert.project || '') &&
             container.container_name === alert.container_name;
-          if (!sameContainer || container.alerts?.stale || container.alerts?.host_stale) return false;
+          if (!(sameContainer && !container.alerts?.stale && !container.alerts?.host_stale)) return false;
           const alertInstance = String(alert.details?.instance_id || '').toLowerCase();
           const currentInstance = String(container.container_instance_id || '').toLowerCase();
           if (alert.type === 'prohibited_activity' && alertInstance && currentInstance) {

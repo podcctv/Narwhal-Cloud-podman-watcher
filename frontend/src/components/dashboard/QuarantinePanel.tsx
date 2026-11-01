@@ -129,7 +129,7 @@ export const QuarantinePanel: React.FC<{
             <article key={`${item.alert_id}:${item.instance_id}`} className="space-y-3 p-5">
               <div className="flex flex-wrap items-center gap-2">
                 <span className={`rounded-md border px-2 py-1 text-xs font-semibold ${item.status === 'isolated' ? 'border-rose-500/50 bg-rose-950 text-rose-200' : 'border-amber-500/50 bg-amber-950 text-amber-200'}`}>
-                  {item.status === 'isolated' ? '隔离记录：双向验证通过' : item.status === 'release_failed' ? '解除隔离未验证成功' : '隔离未能完整验证'}
+                  {item.status === 'isolated' ? '已双向隔离' : item.status === 'release_failed' ? '解除隔离未验证成功' : '隔离未能完整验证'}
                 </span>
                 <span className={`rounded-md border px-2 py-1 text-xs ${hostStale ? 'border-slate-600 bg-slate-800 text-slate-300' : 'border-emerald-700 bg-emerald-950/50 text-emerald-200'}`}>
                   {hostStale ? '主机心跳过期 · 暂不可操作' : '主机在线'}
