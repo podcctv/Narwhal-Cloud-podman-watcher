@@ -820,11 +820,25 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 item["target_version"] = str(item.get("version") or "unknown")
                 item["actual_version"] = str(current["agent_version"] or "unknown") if current else "unknown"
                 item["node_last_seen"] = int(current["last_seen"] or 0) if current else 0
+                item["node_online"] = bool(current and 0 <= now - int(current["last_seen"] or 0) <= 900)
                 item["version_matches_target"] = item["actual_version"] == item["target_version"]
                 action = conn.execute("SELECT action_type,status,result_message,updated_at,attempts FROM security_actions WHERE id=?", (item.get("action_id"),)).fetchone() if item.get("action_id") else None
                 item["action"] = dict(action) if action else None
                 metadata = ops.loads(item.pop("campaign_payload", "{}"))
-                item["manual_attempts"] = int((metadata.get("attempts") or {}).get(item["host_id"], 0))
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                attempts = metadata.get("attempts") if isinstance(metadata.get("attempts"), dict) else {}
+                observations = metadata.get("version_observations") if isinstance(metadata.get("version_observations"), dict) else {}
+                verifications = metadata.get("verification_sources") if isinstance(metadata.get("verification_sources"), dict) else {}
+                item["manual_attempts"] = int(attempts.get(item["host_id"], 0))
+                observation = observations.get(item["host_id"], {})
+                verification = verifications.get(item["host_id"], {})
+                observation = observation if isinstance(observation, dict) else {}
+                verification = verification if isinstance(verification, dict) else {}
+                item["version_observation_since"] = int(observation.get("first_seen") or 0)
+                item["version_observation_elapsed_seconds"] = max(0, now - item["version_observation_since"]) if item["version_observation_since"] else 0
+                item["verified_by_observation"] = verification.get("method") == "healthy_version_observation"
+                item["verification_source"] = str(verification.get("method") or "")
                 item.pop("campaign_status", None)
             return {"automatic":fleet_updates.settings(conn),"nodes":nodes,"campaigns":unpack(rows(conn,"SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 50")),"progress":progress,"server_version":version()}
         finally:

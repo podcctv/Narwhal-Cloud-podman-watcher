@@ -238,6 +238,11 @@ export const api = {
       method: 'POST', body: JSON.stringify({ decision: 'stop_reviewed_socks', review_token: reviewToken }),
     }),
 
+  confirmReplacedQuarantine: (alertId: number) =>
+    request<{ queued: boolean; action_id: number }>(`/api/v1/security/alerts/${alertId}/confirm-container-replaced`, {
+      method: 'POST', body: JSON.stringify({ confirmed: true }),
+    }),
+
   previewUserNotice: (alertId: number) => request<{
     subject: string; message: string; preview_token: string; can_submit: boolean;
     audience: string; telegram: string; telegram_note: string; banner: string; banner_note: string;

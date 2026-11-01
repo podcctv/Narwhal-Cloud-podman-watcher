@@ -156,6 +156,28 @@ class IncusIsolation:
             raise QuarantineError('passthrough devices require manual isolation')
         return item, etag
 
+    def prove_replaced(self):
+        """Prove the named instance is new and the quarantined UUID is gone."""
+        current, _ = self.api.request('GET', self.path)
+        current_id = str(current.get('config', {}).get('volatile.uuid') or '')
+        if not re.fullmatch(r'[A-Za-z0-9-]{12,100}', current_id) or current_id == self.instance_id:
+            raise QuarantineError('Incus replacement identity could not be verified')
+        instances, _ = self.api.request('GET', '/1.0/instances?recursion=2')
+        if not isinstance(instances, list):
+            raise QuarantineError('Incus instance inventory could not be verified')
+        found_current = False
+        for instance in instances:
+            if not isinstance(instance, dict):
+                raise QuarantineError('Incus instance inventory was invalid')
+            identity = str((instance.get('config') or {}).get('volatile.uuid') or '')
+            if identity == self.instance_id:
+                raise QuarantineError('old Incus instance still exists')
+            if instance.get('name') == self.name and identity == current_id:
+                found_current = True
+        if not found_current:
+            raise QuarantineError('replacement was not present in the Incus project inventory')
+        return current_id
+
     def snapshot(self):
         item, _ = self.inspect()
         expanded = item.get('expanded_devices', {})
@@ -323,6 +345,27 @@ class PodmanIsolation:
             raise QuarantineError('privileged/device-passthrough container requires manual isolation')
         return item
 
+    def prove_replaced(self):
+        """Prove the name points to a different ID and the old ID is absent."""
+        try:
+            current = json.loads(self.command(podman_inspect_args(self.name)))[0]
+        except (ValueError, IndexError, TypeError):
+            raise QuarantineError('invalid Podman replacement inspection') from None
+        current_id = str(current.get('Id') or current.get('ID') or '')
+        if not re.fullmatch(r'[0-9a-fA-F]{12,64}', current_id):
+            raise QuarantineError('Podman replacement identity could not be verified')
+        if current_id.lower().startswith(self.instance_id.lower()) or self.instance_id.lower().startswith(current_id.lower()):
+            raise QuarantineError('Podman container identity did not change')
+        ok, output = self.run([self.binary, 'inspect', '--type', 'container', '--format', '{{.Id}}', self.instance_id])
+        if ok:
+            old_ids = [line.strip().lower() for line in str(output or '').splitlines() if line.strip()]
+            if not old_ids or any(old_id == self.instance_id.lower() or old_id.startswith(self.instance_id.lower()) or self.instance_id.lower().startswith(old_id) for old_id in old_ids):
+                raise QuarantineError('old Podman container still exists')
+            raise QuarantineError('Podman returned an unexpected old-container identity')
+        if not re.search(r'(?i)(no such object|no such container|no container with name or id|not found)', str(output or '')):
+            raise QuarantineError('Podman could not prove the old container absent')
+        return current_id
+
     def snapshot(self):
         item = self.inspect()
         networks = item.get('NetworkSettings', {}).get('Networks')
@@ -418,6 +461,16 @@ def release(journal, key, driver):
         entries.pop(key)
         journal.write(entries)
         return {'status': 'released', 'data_preserved': True}
+
+
+def retire_replaced(journal, key, driver):
+    """Archive only the old journal after runtime identity absence is proven."""
+    with _LOCK:
+        entries = journal.read()
+        current_id = driver.prove_replaced()
+        entries.pop(key, None)
+        journal.write(entries)
+        return current_id
 
 
 def safe_evidence(evidence):

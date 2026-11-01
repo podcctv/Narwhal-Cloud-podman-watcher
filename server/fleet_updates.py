@@ -17,6 +17,28 @@ ROLLOUT_BATCH_SIZE = 3
 ROLLOUT_SOAK_SECONDS = 120
 
 
+def observed_healthy_version(meta, host, node_id, version, now):
+    """Accept stable authenticated version/health reports without inventing an action receipt."""
+    sources = meta.get('verification_sources') if isinstance(meta, dict) else None
+    source = sources.get(host) if isinstance(sources, dict) else None
+    if not isinstance(source, dict):
+        return False
+    try:
+        first_seen = int(source.get('first_seen') or 0)
+        verified_at = int(source.get('verified_at') or 0)
+        last_healthy_at = int(source.get('last_healthy_at') or verified_at)
+    except (TypeError, ValueError):
+        return False
+    return (
+        source.get('method') == 'healthy_version_observation'
+        and source.get('version') == version
+        and source.get('node_id') == node_id
+        and first_seen > 0
+        and verified_at - first_seen >= ROLLOUT_SOAK_SECONDS
+        and 0 <= now - last_healthy_at <= 900
+    )
+
+
 def settings(conn):
     row = conn.execute("SELECT payload FROM ops_settings WHERE key='fleet_updates'").fetchone()
     return {'enabled': True, 'holds': [], **(json.loads(row[0]) if row else {})}
@@ -249,17 +271,20 @@ def reconcile(conn, version, revision, now=None):
         'SELECT status,updated_at,params_json FROM security_actions WHERE id=?',
         (canary['action_id'] if canary else None,),
     ).fetchone()
-    promote = bool(
-        automatic
-        and canary
-        and canary['status'] == 'verified'
-        and canary_action
-        and canary_action['status'] == 'succeeded'
-        and h
+    canary_node_id = meta.get('nodes', {}).get(canary_host, h['node_id'] if h else None)
+    canary_action_healthy = bool(
+        canary_action and canary_action['status'] == 'succeeded' and h
         and upgrade_health.post_upgrade_observation(
-            conn, canary_host, meta.get('nodes', {}).get(canary_host, h['node_id']),
-            version, canary_action['updated_at'], now, ROLLOUT_SOAK_SECONDS,
+            conn, canary_host, canary_node_id, version,
+            canary_action['updated_at'], now, ROLLOUT_SOAK_SECONDS,
         )[0]
+    )
+    canary_observation_healthy = bool(
+        h and observed_healthy_version(meta, canary_host, canary_node_id, version, now)
+    )
+    promote = bool(
+        automatic and canary and canary['status'] == 'verified' and h
+        and (canary_action_healthy or canary_observation_healthy)
     )
     if promote:
         conn.execute("UPDATE ops_upgrades SET status='rollout' WHERE id=?", (ident,))
@@ -289,11 +314,13 @@ def reconcile(conn, version, revision, now=None):
                     'SELECT status,updated_at,params_json FROM security_actions WHERE id=?',
                     (node['action_id'],),
                 ).fetchone() if node['action_id'] else None
-                expected = json.loads(action['params_json'] or '{}').get('expected_node_id') if action else None
+                expected = json.loads(action['params_json'] or '{}').get('expected_node_id') if action else meta.get('nodes', {}).get(host)
+                observed = observed_healthy_version(meta, host, expected, version, now)
                 healthy, _ = upgrade_health.post_upgrade_observation(
-                    conn, host, expected, version, action['updated_at'] if action else 0,
-                    now, ROLLOUT_SOAK_SECONDS,
-                ) if action and action['status'] == 'succeeded' else (False, ['升级回执未成功确认'])
+                    conn, host, expected, version, action['updated_at'], now,
+                    ROLLOUT_SOAK_SECONDS,
+                ) if action and action['status'] == 'succeeded' else (False, ['升级动作回执未成功确认'])
+                healthy = healthy or observed
                 if not healthy:
                     wave_healthy = False
                     break

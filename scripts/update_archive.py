@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -36,6 +37,7 @@ MAX_TREE_BYTES = 8 * 1024 * 1024
 MAX_CLIENT_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_CLIENT_FILES = 2000
 MAX_CLIENT_FILE_BYTES = 16 * 1024 * 1024
+ARCHIVE_DOWNLOAD_ATTEMPTS = 3
 CLIENT_REQUIRED_FILES = (
     "VERSION",
     "client/agent.py",
@@ -123,18 +125,50 @@ def download_archive(reference: str, destination: Path) -> None:
     os.close(fd)
     archive_path = Path(archive_name)
     try:
-        total_downloaded = 0
-        with urlopen(request, timeout=120) as response, archive_path.open("wb") as output:
-            if response.status != 200:
-                raise RuntimeError(f"source archive returned HTTP {response.status}")
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
+        last_error: Exception | None = None
+        for attempt in range(ARCHIVE_DOWNLOAD_ATTEMPTS):
+            archive_path.unlink(missing_ok=True)
+            try:
+                response = urlopen(request, timeout=120)
+            except HTTPError as exc:
+                if exc.code not in {408, 425, 429, 500, 502, 503, 504}:
+                    exc.close()
+                    raise RuntimeError(f"source archive returned HTTP {exc.code}") from None
+                last_error = exc
+                exc.close()
+            except (OSError, URLError, http.client.HTTPException) as exc:
+                last_error = exc
+            else:
+                try:
+                    with response, archive_path.open("wb") as output:
+                        if response.status != 200:
+                            raise RuntimeError(f"source archive returned HTTP {response.status}")
+                        total_downloaded = 0
+                        while True:
+                            try:
+                                chunk = response.read(1024 * 1024)
+                            except (OSError, URLError, http.client.HTTPException) as exc:
+                                raise RuntimeError(f"transient archive transport failure: {type(exc).__name__}: {exc}") from None
+                            if not chunk:
+                                break
+                            total_downloaded += len(chunk)
+                            if total_downloaded > MAX_ARCHIVE_BYTES:
+                                raise RuntimeError("source archive exceeded the download size limit")
+                            output.write(chunk)
+                    last_error = None
                     break
-                total_downloaded += len(chunk)
-                if total_downloaded > MAX_ARCHIVE_BYTES:
-                    raise RuntimeError("source archive exceeded the download size limit")
-                output.write(chunk)
+                except RuntimeError as exc:
+                    if not str(exc).startswith('transient archive transport failure:'):
+                        raise
+                    last_error = exc
+
+            if attempt + 1 < ARCHIVE_DOWNLOAD_ATTEMPTS:
+                time.sleep(min(4, 2 ** attempt))
+        if last_error:
+            raise RuntimeError(
+                f"transient archive transport failure after {ARCHIVE_DOWNLOAD_ATTEMPTS} attempts: "
+                f"{type(last_error).__name__}: {last_error}"
+            ) from None
 
         _extract_safe(archive_path, destination, reference)
         required = (

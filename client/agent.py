@@ -10631,6 +10631,30 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             return True, 'Network quarantine released; data preserved; fresh prohibited activity will be isolated again'
         except (network_quarantine.QuarantineError, OSError, ValueError):
             return False, 'Network restore could not be verified; inspect the recovery journal; no data deleted'
+    if action_type == 'confirm_replaced_network_quarantine':
+        params = action.get('params') if isinstance(action.get('params'), dict) else {}
+        target = {'runtime': str(action.get('runtime') or ''), 'project': str(action.get('project') or ''),
+                  'name': str(action.get('container_name') or ''), 'id': str(params.get('instance_id') or '')}
+        try:
+            runtime = target['runtime']
+            identity = target['id']
+            key = network_quarantine.target(runtime, target['project'], target['name'], identity)
+            if runtime == 'incus':
+                driver = network_quarantine.IncusIsolation(network_quarantine.IncusAPI(target['project']), target['name'], identity)
+            elif runtime == 'podman':
+                binary = get_runtime_bins().get('podman', '')
+                if not binary:
+                    raise network_quarantine.QuarantineError('Podman unavailable')
+                driver = network_quarantine.PodmanIsolation(_run_action_command, binary, target['name'], identity)
+            else:
+                raise network_quarantine.QuarantineError('unsupported runtime')
+            guard = abuse_guard.engine()
+            with guard.lock:
+                replacement_id = network_quarantine.retire_replaced(guard.journal, key, driver)
+                guard.forget_replaced(target, identity)
+            return True, f'replacement_verified current_instance_id={replacement_id} old_instance_absent=true old_journal_cleared=true'
+        except (network_quarantine.QuarantineError, OSError, ValueError):
+            return False, 'Container replacement could not be verified; old quarantine remains pending; no replacement network changed'
     if action_type == "release_socks_auth":
         runtime_kind = str(action.get("runtime") or "").strip().lower()
         project = str(action.get("project") or "").strip()

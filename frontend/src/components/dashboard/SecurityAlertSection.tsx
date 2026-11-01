@@ -84,6 +84,16 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
     }
   };
 
+  const openQuarantineReview = () => {
+    const panel = document.getElementById('quarantine-review');
+    if (!panel) {
+      onToast('error', '当前页面未加载到隔离复核记录；刷新后重试。');
+      return;
+    }
+    panel.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    panel.focus({ preventScroll: true });
+  };
+
   const confirmationCopy = pendingDecision?.decision === 'deny'
     ? { title: '确认执行定向处置？', description: '仅处理本告警已识别的进程、服务或配置；不会停止整个容器。节点将在下一轮上报时执行并回传结果。', confirmLabel: '确认定向处置', tone: 'danger' as const }
     : pendingDecision?.decision === 'apply_container_connlimit'
@@ -162,6 +172,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
         {alerts.map((alert) => {
           const isProcessing = submittingId === alert.id;
           const protectionOnly = isProtectionOnlySignal(alert);
+          const prohibitedActivity = alert.type === 'prohibited_activity';
           const admissionUnverified = alert.type === 'admission_unverified';
           const deepEvidence = alert.deep_evidence;
           const attribution = deepEvidence?.connection_attribution;
@@ -269,13 +280,15 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
                       <div className="font-semibold text-rose-300">
-                        前次定向处置未成功：
+                        {prohibitedActivity ? '隔离恢复未验证：' : '前次定向处置未成功：'}
                       </div>
                       <div className="text-slate-300 font-mono text-[11px] mt-0.5 break-all">
                         {alert.latest_action?.result_message || '节点未返回具体失败原因'}
                       </div>
                       <div className="text-[11px] text-slate-400 mt-1">
-                        请根据回执检查节点版本、权限及残留守护进程后重试。标记已解决只归档告警，不会清理程序；风险仍存在时会再次告警。
+                        {prohibitedActivity
+                          ? '请到上方隔离复核区选择恢复原实例网络，或在容器已重装时核验旧实例身份。此类告警不能通过放行、忽略或普通标记解决。'
+                          : '请根据回执检查节点版本、权限及残留守护进程后重试。标记已解决只归档告警，不会清理程序；风险仍存在时会再次告警。'}
                       </div>
                     </div>
                   </div>
@@ -300,8 +313,20 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     <span>查看容器</span>
                   </button>
                 )}
+                {prohibitedActivity && (
+                  <button
+                    type="button"
+                    onClick={openQuarantineReview}
+                    className="flex min-h-11 items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-900/70 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400"
+                    aria-controls="quarantine-review"
+                    title="前往管理员隔离复核流程"
+                  >
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                    <span>前往隔离复核</span>
+                  </button>
+                )}
                 {!protectionOnly && <UserNoticeAction alertId={alert.id} onToast={onToast} />}
-                {canUseConnlimit && (connlimitActive ? (
+                {canUseConnlimit && !prohibitedActivity && (connlimitActive ? (
                   <button
                     type="button"
                     disabled={isProcessing || connlimitPending}
@@ -324,7 +349,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     <span>{connlimitPending ? 'TCP 限额处理中...' : '临时 TCP 限额'}</span>
                   </button>
                 ))}
-                {canRemediate && <button
+                {canRemediate && !prohibitedActivity && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'deny' })}
@@ -341,7 +366,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   </span>
                 </button>}
 
-                {!protectionOnly && <button
+                {!protectionOnly && !prohibitedActivity && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'allow_silent' })}
@@ -352,7 +377,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   <span>放行策略</span>
                 </button>}
 
-                {isActionFailed && (
+                {isActionFailed && !prohibitedActivity && (
                   <button
                     type="button"
                     disabled={isProcessing}
@@ -365,7 +390,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   </button>
                 )}
 
-                {!protectionOnly && <button
+                {!protectionOnly && !prohibitedActivity && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'dismiss_once' })}

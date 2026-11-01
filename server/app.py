@@ -673,12 +673,12 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
                 ("reports", "ts < ?", (raw_cutoff,)),
                 ("host_security", "ts < ?", (raw_cutoff,)),
                 ("host_collection_health_hourly", "bucket_start < ?", (now - 30 * 86400,)),
-                ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status<>'released')", (cutoff,)),
+                ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status NOT IN ('released','replaced'))", (cutoff,)),
                 ("security_actions", "status IN ('succeeded','failed','cancelled') AND updated_at < ?", (cutoff,)),
                 ("security_alert_decisions", "created_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
                 ("security_alert_evidence", "captured_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
                 ("telegram_alert_messages", "NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", ()),
-                ("network_quarantines", "status='released' AND updated_at < ?", (cutoff,)),
+                ("network_quarantines", "status IN ('released','replaced') AND updated_at < ?", (cutoff,)),
                 ("connection_overloads", "last_seen < ?", (now - OFFLINE_HOST_PURGE_SECONDS,)),
             ]
             for table, predicate, params in jobs:
@@ -694,7 +694,7 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
                     same = " AND ".join(f"newer.{column}={table}.{column}" for column in identity)
                     progress += prune(table, f"id < ? AND EXISTS (SELECT 1 FROM {table} newer WHERE {same} AND newer.id > {table}.id)", (boundary[0],))
             # Drain offline hosts in batches before removing their identity.
-            offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.host_id=hosts.host_id AND q.status<>'released') LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
+            offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.host_id=hosts.host_id AND q.status NOT IN ('released','replaced')) LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
             for host in offline:
                 for table in ("reports", "host_security", "host_collection_health_hourly", "security_actions", "security_alerts", "connection_overloads", "host_firewall_readbacks"):
                     progress += prune(table, "host_id=?", (host[0],))
@@ -1009,7 +1009,7 @@ def process_security_alerts(
             (host_id, *preserve_types),
         ).fetchall()
         active_fingerprints.extend(str(row["fingerprint"]) for row in preserved)
-    pending_network_review = "NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status<>'released')"
+    pending_network_review = "NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status NOT IN ('released','replaced'))"
     if active_fingerprints:
         placeholders = ",".join("?" for _ in active_fingerprints)
         conn.execute(
@@ -2137,7 +2137,7 @@ def invalidate_security_status_cache() -> None:
 
 
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
-    if conn.execute("SELECT 1 FROM network_quarantines WHERE host_id=? AND status<>'released' LIMIT 1", (host_id,)).fetchone():
+    if conn.execute("SELECT 1 FROM network_quarantines WHERE host_id=? AND status NOT IN ('released','replaced') LIMIT 1", (host_id,)).fetchone():
         raise HTTPException(409, '存在待复核的网络隔离；请先核实并解除隔离，避免丢失恢复入口。')
     invalidate_security_status_cache()
     operations.purge_host(conn,host_id)
@@ -4115,6 +4115,7 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "host_id": r["host_id"],
             "agent_version": str(payload.get("_agent_version") or "unknown"),
             "container_id": payload.get("id", ""),
+            "container_instance_id": str(payload.get("stable_id") or ""),
             "user_email": manual_email or upstream_email,
             "user_email_source": "manual" if manual_email else "upstream" if upstream_email else "unmatched" if mapping_issue else "",
             "user_email_status": mapping_issue if not (manual_email or upstream_email) else "",
@@ -4906,7 +4907,7 @@ def _queue_security_action_row(
     existing = conn.execute(
         """
         SELECT * FROM security_actions
-        WHERE alert_id=? AND action_type=? AND status IN ('queued','dispatched')
+        WHERE alert_id=? AND action_type=? AND status IN ('queued','dispatched','running')
         ORDER BY id DESC LIMIT 1
         """,
         (alert["id"], action_type),
@@ -6124,7 +6125,7 @@ async def poll_security_actions(
         actions = []
         for row in rows:
             stored = json.loads(row["params_json"] or "{}")
-            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
+            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'confirm_replaced_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
                 continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
@@ -6221,7 +6222,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback", "release_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback", "release_network_quarantine", "confirm_replaced_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if row["action_type"] in ("remediate_panel_pairing", "remediate_malicious_process") and status in {"succeeded", "failed"}:
             if _remediation_changed(message):
@@ -6246,7 +6247,8 @@ async def security_action_result(
                 "UPDATE security_actions SET status=?, result_message=?, updated_at=? WHERE id=?",
                 (status, message, now, action_id),
             )
-            if row["action_type"] == "managed_upgrade" and status == "failed":
+            if (row["action_type"] == "managed_upgrade" and status == "failed"
+                    and not operations.retry_transient_upgrade_failure(conn, params, message)):
                 operations.pause_upgrade_campaign_for_failure(
                     conn, action_id, host_id, now, message, "install_failure"
                 )
@@ -6269,10 +6271,11 @@ async def security_action_result(
             if row['alert_id'] is not None:
                 investigation.sync_states(conn, host_id, now, alert_id=row['alert_id'])
             abuse_api.record_release_result(conn, row, params, status, now)
+            abuse_api.record_replacement_result(conn, row, params, status, now, message)
             conn.commit()
     finally:
         conn.close()
-    if row['action_type'] == 'release_network_quarantine' and status in {'succeeded', 'failed'}:
+    if row['action_type'] in {'release_network_quarantine', 'confirm_replaced_network_quarantine'} and status in {'succeeded', 'failed'}:
         # A resolved release result may not appear in the next live sample;
         # update the existing Telegram card now, never leave "isolated" forever.
         sync_configured_bot_alert_messages(host_id, alert_id=row['alert_id'])

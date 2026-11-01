@@ -95,14 +95,14 @@ def initialize(conn):
     """)
 
 
-def pause_upgrade_campaign_for_failure(conn, action_id, host_id, ts, reason, kind="install_failure"):
+def pause_upgrade_campaign_for_failure(conn, action_id, host_id, ts, reason, kind="install_failure", campaign_id=None):
     """Pause the owning rollout immediately and cancel work not yet dispatched."""
     action = conn.execute(
         "SELECT params_json FROM security_actions WHERE id=? AND host_id=?",
         (action_id, host_id),
-    ).fetchone()
+    ).fetchone() if action_id is not None else None
     params = loads(action["params_json"] if action else "{}", {})
-    campaign_id = params.get("campaign_id")
+    campaign_id = campaign_id or params.get("campaign_id")
     if not campaign_id:
         owner = conn.execute(
             "SELECT campaign FROM ops_upgrade_nodes WHERE action_id=? AND host_id=?",
@@ -137,8 +137,8 @@ def pause_upgrade_campaign_for_failure(conn, action_id, host_id, ts, reason, kin
     queued = conn.execute(
         "SELECT a.id,a.host_id FROM security_actions a "
         "JOIN ops_upgrade_nodes n ON n.action_id=a.id "
-        "WHERE n.campaign=? AND a.action_type='managed_upgrade' AND a.status='queued' AND a.id<>?",
-        (campaign_id, action_id),
+        "WHERE n.campaign=? AND a.action_type='managed_upgrade' AND a.status='queued' AND (? IS NULL OR a.id<>?)",
+        (campaign_id, action_id, action_id),
     ).fetchall()
     for pending in queued:
         conn.execute(
@@ -159,6 +159,32 @@ def pause_upgrade_campaign_for_failure(conn, action_id, host_id, ts, reason, kin
             (json.dumps(metadata, ensure_ascii=False), campaign_id),
         )
     return True
+
+
+def is_transient_upgrade_download_failure(reason):
+    """Let the existing bounded fleet retry handle transport-only download errors."""
+    value = str(reason or '').lower()
+    return any(marker in value for marker in (
+        'transient archive transport failure', 'incompleteread', 'tls handshake timeout',
+        'timed out', 'timeout', 'connection reset', 'connection aborted',
+        'temporarily unavailable', 'temporary failure', 'network is unreachable',
+        'http error 429', 'http error 500', 'http error 502', 'http error 503', 'http error 504',
+    ))
+
+
+def retry_transient_upgrade_failure(conn, params, reason):
+    """Retry download transport failures only for automatic fleet campaigns."""
+    if not is_transient_upgrade_download_failure(reason) or not isinstance(params, dict):
+        return False
+    try:
+        campaign_id = int(params.get('campaign_id') or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if campaign_id <= 0:
+        return False
+    campaign = conn.execute('SELECT payload FROM ops_upgrades WHERE id=?', (campaign_id,)).fetchone()
+    metadata = loads(campaign['payload'], {}) if campaign else {}
+    return isinstance(metadata, dict) and metadata.get('automatic') is True
 
 
 def loads(value, fallback=None):
@@ -473,14 +499,66 @@ def ingest(conn, host_id, node_id, ts, data):
         if service:
             conn.execute("INSERT INTO ops_service_results VALUES(?,?,?) ON CONFLICT(service_id) DO UPDATE SET ts=excluded.ts,payload=excluded.payload", (service[0], ts, json.dumps(result)))
             event(conn, identity(node), f"service:{service[0]}", ts, {**result,"severity":"critical" if result.get("status")=="failed" else "warning"}, result.get("status") != "healthy")
-    for upgrade in conn.execute("SELECT n.*,u.version FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign WHERE n.host_id=? AND n.status IN ('dispatched','failed')", (host_id,)).fetchall():
+    for upgrade in conn.execute("SELECT n.*,u.version,u.status AS campaign_status,u.payload AS campaign_payload FROM ops_upgrade_nodes n JOIN ops_upgrades u ON u.id=n.campaign WHERE n.host_id=? AND n.status IN ('pending','dispatched','failed','verified') AND u.status IN ('canary','rollout','paused')", (host_id,)).fetchall():
         healthy_scan, failed_sources = upgrade_health.check(operations, data)
-        action=conn.execute('SELECT params_json,created_at FROM security_actions WHERE id=?',(upgrade['action_id'],)).fetchone()
-        bound=action and loads(action['params_json']).get('expected_node_id')==node_id and ts>=action['created_at']
-        if bound and data.get("agent_version") == upgrade["version"]:
+        action=conn.execute('SELECT params_json,created_at,status,result_message FROM security_actions WHERE id=?',(upgrade['action_id'],)).fetchone() if upgrade['action_id'] else None
+        action_params = loads(action['params_json']) if action else {}
+        bound=action and action_params.get('expected_node_id')==node_id and ts>=action['created_at']
+        node_status = upgrade['status']
+        if node_status == 'dispatched' and action and action['status'] == 'failed':
+            node_status = 'failed'
+            conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (upgrade['campaign'], host_id))
+            failure = str(action['result_message'] or '托管升级动作失败')
+            if upgrade['campaign_status'] != 'paused' and not retry_transient_upgrade_failure(conn, action_params, failure):
+                pause_upgrade_campaign_for_failure(conn, upgrade['action_id'], host_id, ts, failure, 'install_failure')
+        reported_target = data.get('agent_version') == upgrade['version']
+        if node_status == 'verified':
+            campaign_meta = loads(upgrade['campaign_payload'], {})
+            if isinstance(campaign_meta, dict):
+                verification_sources = campaign_meta.get('verification_sources')
+                source = verification_sources.get(host_id) if isinstance(verification_sources, dict) else None
+                if isinstance(source, dict) and source.get('method') == 'healthy_version_observation':
+                    enrolled_nodes = campaign_meta.get('nodes')
+                    expected_node = enrolled_nodes.get(host_id) if isinstance(enrolled_nodes, dict) else None
+                    if reported_target and healthy_scan and source.get('node_id') == node_id and expected_node == node_id:
+                        source['last_healthy_at'] = ts
+                        conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(campaign_meta, ensure_ascii=False), upgrade['campaign']))
+                    else:
+                        verification_sources.pop(host_id, None)
+                        observations = campaign_meta.get('version_observations')
+                        if isinstance(observations, dict):
+                            observations.pop(host_id, None)
+                        conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (upgrade['campaign'], host_id))
+                        reason = '已验证版本的持续健康观察失效：' + ('、'.join(dict.fromkeys(failed_sources)) if failed_sources else '节点身份或目标版本已变化')
+                        pause_upgrade_campaign_for_failure(
+                            conn, upgrade['action_id'], host_id, ts, reason[:400], 'health_check',
+                            campaign_id=upgrade['campaign'],
+                        )
+                        campaign_meta = loads(conn.execute('SELECT payload FROM ops_upgrades WHERE id=?', (upgrade['campaign'],)).fetchone()[0], {})
+                        if isinstance(campaign_meta, dict):
+                            verification_sources = campaign_meta.get('verification_sources')
+                            if isinstance(verification_sources, dict):
+                                verification_sources.pop(host_id, None)
+                            observations = campaign_meta.get('version_observations')
+                            if isinstance(observations, dict):
+                                observations.pop(host_id, None)
+                            conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(campaign_meta, ensure_ascii=False), upgrade['campaign']))
+            continue
+        if reported_target and bound and node_status == 'dispatched' and action['status'] in {'queued','dispatched','running'}:
             if healthy_scan:
                 conn.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
                 conn.execute("UPDATE security_actions SET status='succeeded',result_message='target version reported with healthy checks',updated_at=? WHERE id=?", (ts, upgrade["action_id"]))
+                campaign_meta = loads(upgrade['campaign_payload'], {})
+                if not isinstance(campaign_meta, dict):
+                    campaign_meta = {}
+                verification_sources = campaign_meta.get('verification_sources')
+                if not isinstance(verification_sources, dict):
+                    verification_sources = {}
+                    campaign_meta['verification_sources'] = verification_sources
+                verification_sources[host_id] = {
+                    'method': 'action_report', 'node_id': node_id, 'version': upgrade['version'], 'verified_at': ts,
+                }
+                conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(campaign_meta, ensure_ascii=False), upgrade['campaign']))
             else:
                 reason = "升级后健康检查未通过：" + "、".join(dict.fromkeys(failed_sources))
                 conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (upgrade["campaign"], host_id))
@@ -488,6 +566,57 @@ def ingest(conn, host_id, node_id, ts, data):
                 pause_upgrade_campaign_for_failure(
                     conn, upgrade["action_id"], host_id, ts, reason, "health_check"
                 )
+        elif node_status == 'pending' and action is None:
+            campaign_meta = loads(upgrade['campaign_payload'], {})
+            if not isinstance(campaign_meta, dict):
+                continue
+            enrolled_nodes = campaign_meta.get('nodes')
+            if not isinstance(enrolled_nodes, dict):
+                enrolled_nodes = {}
+                campaign_meta['nodes'] = enrolled_nodes
+            expected_node = enrolled_nodes.get(host_id)
+            if expected_node and expected_node != node_id:
+                continue
+            observations = campaign_meta.get('version_observations')
+            if not isinstance(observations, dict):
+                observations = {}
+                campaign_meta['version_observations'] = observations
+            previous = observations.get(host_id) if isinstance(observations.get(host_id), dict) else {}
+            if not reported_target or not healthy_scan:
+                if host_id in observations:
+                    observations.pop(host_id, None)
+                    conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(campaign_meta, ensure_ascii=False), upgrade['campaign']))
+                continue
+            if expected_node is None:
+                enrolled_nodes[host_id] = node_id
+            try:
+                previous_last_seen = int(previous.get('last_seen') or 0)
+                previous_first_seen = int(previous.get('first_seen') or 0)
+            except (TypeError, ValueError):
+                previous_last_seen, previous_first_seen = 0, 0
+            continuous = (
+                previous.get('node_id') == node_id
+                and previous.get('version') == upgrade['version']
+                and ts >= previous_last_seen
+                and ts - previous_last_seen <= 900
+            )
+            first_seen = previous_first_seen if continuous else ts
+            observations[host_id] = {
+                'node_id': node_id, 'version': upgrade['version'],
+                'first_seen': first_seen, 'last_seen': ts,
+            }
+            if ts - first_seen >= 120:
+                conn.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE campaign=? AND host_id=?", (upgrade['campaign'], host_id))
+                verification_sources = campaign_meta.get('verification_sources')
+                if not isinstance(verification_sources, dict):
+                    verification_sources = {}
+                    campaign_meta['verification_sources'] = verification_sources
+                verification_sources[host_id] = {
+                    'method': 'healthy_version_observation', 'node_id': node_id,
+                    'version': upgrade['version'], 'first_seen': first_seen,
+                    'verified_at': ts, 'last_healthy_at': ts,
+                }
+            conn.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(campaign_meta, ensure_ascii=False), upgrade['campaign']))
     result = operations.get("upgrade_result",{})
     # The previous Client may predate operations-v1, so its signed version report
     # (not a new operations payload) must be sufficient to confirm a rollback.
@@ -506,9 +635,10 @@ def ingest(conn, host_id, node_id, ts, data):
                 conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?",(failure,ts,result["action_id"]))
                 if action[0] == "managed_upgrade":
                     conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE action_id=?",(result["action_id"],))
-                    pause_upgrade_campaign_for_failure(
-                        conn, result["action_id"], host_id, ts, failure, "install_failure"
-                    )
+                    if not retry_transient_upgrade_failure(conn, params, failure):
+                        pause_upgrade_campaign_for_failure(
+                            conn, result["action_id"], host_id, ts, failure, "install_failure"
+                        )
                 else:
                     params = loads(action[1])
                     if params.get("campaign_id"):
@@ -518,7 +648,7 @@ def ingest(conn, host_id, node_id, ts, data):
                 params = loads(action[1])
                 if params.get("campaign_id"):
                     conn.execute("UPDATE ops_upgrade_nodes SET status='rolled_back' WHERE campaign=? AND host_id=? AND status IN ('failed','verified','rollback_queued')", (params["campaign_id"], host_id))
-    for campaign in conn.execute("SELECT id FROM ops_upgrades WHERE status IN ('canary','rollout')").fetchall():
+    for campaign in conn.execute("SELECT id FROM ops_upgrades WHERE status IN ('canary','rollout','paused')").fetchall():
         states=[r[0] for r in conn.execute("SELECT status FROM ops_upgrade_nodes WHERE campaign=?",(campaign[0],))]
         if states and all(s=="verified" for s in states):
             conn.execute("UPDATE ops_upgrades SET status='verified' WHERE id=?",(campaign[0],))

@@ -109,14 +109,23 @@ export const Dashboard: React.FC = () => {
           const host = securityByHost.get(alert.host_id);
           return Boolean(host && !host.stale);
         }
-        return liveContainers.some((container) =>
-          container.host_id === alert.host_id &&
-          container.runtime === alert.runtime &&
-          (container.project || '') === (alert.project || '') &&
-          container.container_name === alert.container_name &&
-          !container.alerts?.stale &&
-          !container.alerts?.host_stale
-        );
+        return liveContainers.some((container) => {
+          const sameContainer = container.host_id === alert.host_id &&
+            container.runtime === alert.runtime &&
+            (container.project || '') === (alert.project || '') &&
+            container.container_name === alert.container_name;
+          if (!sameContainer || container.alerts?.stale || container.alerts?.host_stale) return false;
+          const alertInstance = String(alert.details?.instance_id || '').toLowerCase();
+          const currentInstance = String(container.container_instance_id || '').toLowerCase();
+          if (alert.type === 'prohibited_activity' && alertInstance && currentInstance) {
+            const sameInstance = alert.runtime === 'podman'
+              ? alertInstance.length >= 12 && currentInstance.length >= 12 &&
+                (alertInstance.startsWith(currentInstance) || currentInstance.startsWith(alertInstance))
+              : alertInstance === currentInstance;
+            if (!sameInstance) return false;
+          }
+          return true;
+        });
       }));
       setSecurityStatus(liveSecurityStatus);
 

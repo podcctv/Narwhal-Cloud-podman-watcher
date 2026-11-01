@@ -7,6 +7,15 @@ from fastapi.responses import JSONResponse
 
 
 KINDS = {'outbound_scan', 'authentication_bruteforce', 'credential_stuffing', 'identity_enumeration'}
+REPLACEMENT_REVIEW_VERSION = (1, 7, 188)
+
+
+def supports_replacement_review(version):
+    try:
+        parsed = tuple(int(part) for part in str(version or '').split('.'))
+        return len(parsed) == 3 and parsed >= REPLACEMENT_REVIEW_VERSION
+    except (TypeError, ValueError):
+        return False
 
 
 def initialize(conn):
@@ -72,12 +81,40 @@ def queue_release(conn, alert_id, requested_by, queue, now=None):
     details = json.loads(alert['details_json'] or '{}')
     identity = str(details.get('instance_id') or '')
     record = conn.execute('SELECT status FROM network_quarantines WHERE alert_id=? AND instance_id=?', (alert_id, identity)).fetchone()
-    if not record or record['status'] == 'released':
+    if not record or record['status'] in {'released', 'replaced'}:
         raise HTTPException(409, 'no pending quarantine review')
+    if conn.execute("SELECT 1 FROM security_actions WHERE alert_id=? AND action_type='confirm_replaced_network_quarantine' AND status IN ('queued','dispatched','running') LIMIT 1", (alert_id,)).fetchone():
+        raise HTTPException(409, 'container replacement review is already in progress')
     host = conn.execute('SELECT node_id,last_seen FROM hosts WHERE host_id=?', (alert['host_id'],)).fetchone()
-    if not host or not host['node_id'] or now-host['last_seen'] > 900:
+    if not host or not host['node_id'] or not 0 <= now-int(host['last_seen'] or 0) <= 900:
         raise HTTPException(409, 'node is stale; cannot safely restore connectivity')
     return queue(conn, alert, 'release_network_quarantine', {'instance_id': identity, 'expected_node_id': host['node_id']}, requested_by)
+
+
+def queue_replacement_review(conn, alert_id, requested_by, queue, now=None):
+    """Queue a node-side proof that the quarantined identity was replaced."""
+    now = int(time.time()) if now is None else now
+    alert = conn.execute('SELECT * FROM security_alerts WHERE id=?', (alert_id,)).fetchone()
+    if not alert or alert['alert_type'] != 'prohibited_activity':
+        raise HTTPException(404, 'quarantine alert not found')
+    details = json.loads(alert['details_json'] or '{}')
+    identity = str(details.get('instance_id') or '')
+    record = conn.execute(
+        'SELECT status FROM network_quarantines WHERE alert_id=? AND instance_id=?',
+        (alert_id, identity),
+    ).fetchone()
+    if not record or record['status'] in {'released', 'replaced'}:
+        raise HTTPException(409, 'no pending quarantine replacement review')
+    if conn.execute("SELECT 1 FROM security_actions WHERE alert_id=? AND action_type='release_network_quarantine' AND status IN ('queued','dispatched','running') LIMIT 1", (alert_id,)).fetchone():
+        raise HTTPException(409, 'network release review is already in progress')
+    host = conn.execute('SELECT node_id,last_seen,agent_version FROM hosts WHERE host_id=?', (alert['host_id'],)).fetchone()
+    if not host or not host['node_id'] or not 0 <= now-int(host['last_seen'] or 0) <= 900:
+        raise HTTPException(409, 'node is stale; replacement cannot be verified')
+    if not supports_replacement_review(host['agent_version']):
+        raise HTTPException(409, 'Client 1.7.188 or newer is required for replacement identity review')
+    return queue(conn, alert, 'confirm_replaced_network_quarantine', {
+        'instance_id': identity, 'expected_node_id': host['node_id'],
+    }, requested_by)
 
 
 def record_release_result(conn, row, params, status, now):
@@ -94,6 +131,64 @@ def record_release_result(conn, row, params, status, now):
                    if status == 'succeeded' else '解除隔离未能完整验证，需要人工检查；未删除容器或数据。')
         conn.execute('UPDATE security_alerts SET details_json=?,message=?,status=? WHERE id=?',
                      (json.dumps(details, ensure_ascii=False), message, 'resolved' if status == 'succeeded' else 'active', row['alert_id']))
+
+
+def record_replacement_result(conn, row, params, status, now, message=''):
+    if row['action_type'] != 'confirm_replaced_network_quarantine' or status not in {'succeeded', 'failed'}:
+        return
+    old_identity = str(params.get('instance_id') or '')
+    quarantine = conn.execute(
+        'SELECT status FROM network_quarantines WHERE alert_id=? AND instance_id=?',
+        (row['alert_id'], old_identity),
+    ).fetchone()
+    proof = re.fullmatch(
+        r'replacement_verified current_instance_id=([A-Za-z0-9-]{12,100}) '
+        r'old_instance_absent=true old_journal_cleared=true',
+        str(message or '').strip(),
+    )
+    new_identity = proof.group(1) if proof else ''
+    if status == 'succeeded' and (
+        not quarantine or quarantine['status'] in {'released', 'replaced'}
+        or not new_identity or new_identity == old_identity
+    ):
+        status = 'failed'
+        conn.execute(
+            "UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=?",
+            ('replacement proof missing or invalid; quarantine remains pending', now, row['id']),
+        )
+    old = conn.execute('SELECT details_json FROM security_alerts WHERE id=?', (row['alert_id'],)).fetchone()
+    if status == 'succeeded':
+        conn.execute(
+            "UPDATE network_quarantines SET status='replaced',updated_at=? WHERE alert_id=? AND instance_id=?",
+            (now, row['alert_id'], old_identity),
+        )
+        if old:
+            details = json.loads(old[0] or '{}')
+            details.setdefault('network_quarantine', {}).update(
+                status='replaced', ingress_blocked=False, egress_blocked=False,
+                replaced_instance_id=new_identity, replacement_verified_at=now,
+            )
+            result_message = (
+                f'管理员复核确认旧实例 {old_identity} 已不存在；新实例 {new_identity} 未被改动。'
+                '旧隔离记录已归档；新实例仍会按当前身份持续监测。'
+            )
+            conn.execute(
+                "UPDATE security_alerts SET details_json=?,message=?,status='resolved' WHERE id=?",
+                (json.dumps(details, ensure_ascii=False), result_message, row['alert_id']),
+            )
+    else:
+        conn.execute(
+            "UPDATE network_quarantines SET updated_at=? WHERE alert_id=? AND instance_id=? AND status NOT IN ('released','replaced')",
+            (now, row['alert_id'], old_identity),
+        )
+        if old:
+            details = json.loads(old[0] or '{}')
+            details.setdefault('network_quarantine', {}).update(replacement_review='unverified')
+            conn.execute(
+                "UPDATE security_alerts SET details_json=?,message=?,status='active' WHERE id=?",
+                (json.dumps(details, ensure_ascii=False),
+                 '未能验证旧容器身份已被替换；隔离记录仍待管理员复核，未改动任何容器网络。', row['alert_id']),
+            )
 
 
 def telegram_delivery(conn, alert_id):
@@ -158,14 +253,21 @@ def attach(app, db, verify_signature, signed_response, process_alerts, sync_bots
     def quarantines():
         conn = db()
         try:
-            rows = conn.execute('''SELECT q.*,a.title,a.message,a.details_json,h.last_seen host_last_seen,
+            rows = conn.execute('''SELECT q.*,a.title,a.message,a.details_json,h.last_seen host_last_seen,h.agent_version host_agent_version,
                 (SELECT s.status FROM security_actions s WHERE s.alert_id=q.alert_id
-                 AND s.action_type='release_network_quarantine' ORDER BY s.id DESC LIMIT 1) release_action_status
+                 AND s.action_type='release_network_quarantine' ORDER BY s.id DESC LIMIT 1) release_action_status,
+                (SELECT s.status FROM security_actions s WHERE s.alert_id=q.alert_id
+                 AND s.action_type='confirm_replaced_network_quarantine' ORDER BY s.id DESC LIMIT 1) replacement_action_status
                 FROM network_quarantines q JOIN security_alerts a ON a.id=q.alert_id
-                LEFT JOIN hosts h ON h.host_id=q.host_id WHERE q.status<>'released'
+                LEFT JOIN hosts h ON h.host_id=q.host_id WHERE q.status NOT IN ('released','replaced')
                 ORDER BY q.updated_at DESC LIMIT 200''').fetchall()
-            return {'items': [{**{k: r[k] for k in r.keys() if k != 'details_json'},
-                               'details':json.loads(r['details_json'] or '{}')} for r in rows]}
+            items = []
+            for row in rows:
+                item = {**{key: row[key] for key in row.keys() if key != 'details_json'},
+                        'details': json.loads(row['details_json'] or '{}')}
+                item['replacement_review_supported'] = supports_replacement_review(item.get('host_agent_version'))
+                items.append(item)
+            return {'items': items}
         finally:
             conn.close()
 
@@ -180,6 +282,24 @@ def attach(app, db, verify_signature, signed_response, process_alerts, sync_bots
         try:
             conn.execute('BEGIN IMMEDIATE')
             action, queued = queue_release(conn, alert_id, str(getattr(request.state, 'dashboard_user', 'admin')), queue)
+            conn.commit()
+            return JSONResponse({'ok': True, 'queued': queued, 'action_id': action['id']}, status_code=202 if queued else 200)
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/security/alerts/{alert_id}/confirm-container-replaced')
+    async def confirm_container_replaced(alert_id: int, request: Request):
+        if getattr(request.state, 'dashboard_role', 'viewer') != 'admin':
+            raise HTTPException(403, 'administrator review required')
+        payload = await request.json()
+        if not isinstance(payload, dict) or payload.get('confirmed') is not True:
+            raise HTTPException(400, 'explicit replacement review confirmation required')
+        conn = db()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            action, queued = queue_replacement_review(
+                conn, alert_id, str(getattr(request.state, 'dashboard_user', 'admin')), queue,
+            )
             conn.commit()
             return JSONResponse({'ok': True, 'queued': queued, 'action_id': action['id']}, status_code=202 if queued else 200)
         finally:

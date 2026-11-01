@@ -197,6 +197,18 @@ class Engine:
             if token[0] == key:
                 self.candidates.pop(token, None)
 
+    def forget_replaced(self, container, old_instance_id):
+        """Forget only the retired identity; preserve any result for its replacement."""
+        key = isolation.target(container['runtime'], container.get('project') or '', container['name'], old_instance_id)
+        identity_key = (container['runtime'], container.get('project') or '', container['name'])
+        result = self.results.get(identity_key)
+        if isinstance(result, dict) and str(result.get('instance_id') or '') == old_instance_id:
+            self.results.pop(identity_key, None)
+        self.notified.pop((*identity_key, old_instance_id), None)
+        for token in list(self.candidates):
+            if token[0] == key:
+                self.candidates.pop(token, None)
+
 
 _engine = None
 

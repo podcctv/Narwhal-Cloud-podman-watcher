@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { LockKeyhole, UnlockKeyhole, AlertTriangle, RefreshCw } from 'lucide-react';
-import { request } from '../../api/client';
+import { LockKeyhole, UnlockKeyhole, AlertTriangle, RefreshCw, Archive } from 'lucide-react';
+import { api, request } from '../../api/client';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 
 interface Quarantine {
@@ -15,7 +15,10 @@ interface Quarantine {
   message: string;
   updated_at: number;
   host_last_seen: number | null;
+  host_agent_version: string | null;
+  replacement_review_supported: boolean;
   release_action_status: string | null;
+  replacement_action_status: string | null;
   details: { abuse_evidence?: Array<{ kind: string; pid: number; source_sha256?: string; tool?: string;
     pending_attempts?: number; vertical_ports?: number; horizontal_targets?: number;
     pending_ratio?: number; failed_ratio?: number;
@@ -32,7 +35,10 @@ export const QuarantinePanel: React.FC<{
 }> = ({ onToast }) => {
   const [items, setItems] = useState<Quarantine[]>([]);
   const [error, setError] = useState('');
+  const [role, setRole] = useState<'unknown' | 'viewer' | 'operator' | 'admin'>('unknown');
+  const [roleUnavailable, setRoleUnavailable] = useState(false);
   const [selected, setSelected] = useState<Quarantine | null>(null);
+  const [selectedAction, setSelectedAction] = useState<'release' | 'replace' | null>(null);
   const [busy, setBusy] = useState(false);
   const [queued, setQueued] = useState<Set<number>>(new Set());
 
@@ -40,8 +46,10 @@ export const QuarantinePanel: React.FC<{
     try {
       const result = await request<{ items: Quarantine[] }>('/api/v1/security/quarantines', { signal });
       setItems(result.items);
+      const activeStatuses = ['queued', 'dispatched', 'running'];
       setQueued(previous => new Set([...previous].filter(id => result.items.some(item =>
-        item.alert_id === id && ['queued', 'dispatched'].includes(item.release_action_status || '')))));
+        item.alert_id === id && (activeStatuses.includes(item.release_action_status || '') ||
+          activeStatuses.includes(item.replacement_action_status || ''))))));
       setError('');
     } catch (err: any) {
       if (err.name !== 'AbortError') setError('隔离状态暂时无法读取；不能据此认为网络已恢复。');
@@ -57,19 +65,37 @@ export const QuarantinePanel: React.FC<{
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [refresh]);
 
-  const release = async () => {
+  useEffect(() => {
+    const controller = new AbortController();
+    void request<{ role: string }>('/api/v1/ops/session', { signal: controller.signal })
+      .then(session => {
+        setRoleUnavailable(false);
+        setRole(session.role === 'admin' ? 'admin' : session.role === 'operator' ? 'operator' : 'viewer');
+      })
+      .catch(() => { if (!controller.signal.aborted) setRoleUnavailable(true); });
+    return () => controller.abort();
+  }, []);
+
+  const submitReview = async () => {
     if (!selected) return;
     setBusy(true);
     try {
-      const result = await request<{ queued: boolean }>(`/api/v1/security/alerts/${selected.alert_id}/release-quarantine`, {
-        method: 'POST', body: JSON.stringify({ confirmed: true }),
-      });
+      const result = selectedAction === 'replace'
+        ? await api.confirmReplacedQuarantine(selected.alert_id)
+        : await request<{ queued: boolean }>(`/api/v1/security/alerts/${selected.alert_id}/release-quarantine`, {
+          method: 'POST', body: JSON.stringify({ confirmed: true }),
+        });
       setQueued(previous => new Set(previous).add(selected.alert_id));
-      onToast('info', result.queued ? '解除隔离指令已排队，等待节点验证恢复；不等于风险已消除。' : '已有解除隔离指令正在执行，请等待节点回执。');
+      const message = selectedAction === 'replace'
+        ? '容器身份核验已排队；只有旧实例确认不存在后才会归档，不会改动新容器网络。'
+        : '解除隔离指令已排队，等待节点验证恢复；不等于风险已消除。';
+      onToast('info', result.queued ? message : '已有复核指令正在执行，请等待节点回执。');
       setSelected(null);
+      setSelectedAction(null);
       await refresh();
     } catch (err: any) {
-      onToast('error', err.status === 403 ? '仅管理员可以复核解除隔离。' : `解除隔离失败：${err.message || err}`);
+      const actionLabel = selectedAction === 'replace' ? '容器重装核验' : '解除隔离复核';
+      onToast('error', err.status === 403 ? '仅管理员可以复核隔离事件。' : `${actionLabel}失败：${err.message || err}`);
     } finally {
       setBusy(false);
     }
@@ -77,7 +103,7 @@ export const QuarantinePanel: React.FC<{
 
   if (!items.length && !error) return null;
   return (
-    <section className="mb-6 overflow-hidden rounded-2xl border border-rose-500/40 bg-slate-900" aria-labelledby="quarantine-title">
+    <section id="quarantine-review" tabIndex={-1} className="mb-6 overflow-hidden rounded-2xl border border-rose-500/40 bg-slate-900 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-rose-400" aria-labelledby="quarantine-title">
       <div className="flex items-center justify-between gap-3 border-b border-slate-700 px-5 py-4">
         <div className="flex items-center gap-3">
           <LockKeyhole className="h-5 w-5 shrink-0 text-rose-300" aria-hidden="true" />
@@ -93,19 +119,28 @@ export const QuarantinePanel: React.FC<{
       {error && <p role="alert" className="px-5 py-3 text-sm text-amber-300">{error}</p>}
       <div className="divide-y divide-slate-700">
         {items.map(item => {
-          const stale = !item.host_last_seen || Date.now()/1000-item.host_last_seen > 900 || Date.now()/1000-item.updated_at > 900;
-          const isolated = item.status === 'isolated' && !stale;
-          const pending = queued.has(item.alert_id) || ['queued', 'dispatched'].includes(item.release_action_status || '');
+          const hostAge = item.host_last_seen ? Date.now()/1000-item.host_last_seen : Number.POSITIVE_INFINITY;
+          const hostStale = hostAge < 0 || hostAge > 900;
+          const recordOld = Date.now()/1000-item.updated_at > 900;
+          const activeStatuses = ['queued', 'dispatched', 'running'];
+          const pending = queued.has(item.alert_id) || activeStatuses.includes(item.release_action_status || '') ||
+            activeStatuses.includes(item.replacement_action_status || '');
           return (
             <article key={`${item.alert_id}:${item.instance_id}`} className="space-y-3 p-5">
               <div className="flex flex-wrap items-center gap-2">
-                <span className={`rounded-md border px-2 py-1 text-xs font-semibold ${isolated ? 'border-rose-500/50 bg-rose-950 text-rose-200' : 'border-amber-500/50 bg-amber-950 text-amber-200'}`}>
-                  {stale ? '节点或隔离采样已过期 · 当前状态待确认' : item.status === 'isolated' ? '已双向隔离' : item.status === 'release_failed' ? '解除隔离未验证成功' : '隔离未能完整验证'}
+                <span className={`rounded-md border px-2 py-1 text-xs font-semibold ${item.status === 'isolated' ? 'border-rose-500/50 bg-rose-950 text-rose-200' : 'border-amber-500/50 bg-amber-950 text-amber-200'}`}>
+                  {item.status === 'isolated' ? '隔离记录：双向验证通过' : item.status === 'release_failed' ? '解除隔离未验证成功' : '隔离未能完整验证'}
                 </span>
+                <span className={`rounded-md border px-2 py-1 text-xs ${hostStale ? 'border-slate-600 bg-slate-800 text-slate-300' : 'border-emerald-700 bg-emerald-950/50 text-emerald-200'}`}>
+                  {hostStale ? '主机心跳过期 · 暂不可操作' : '主机在线'}
+                </span>
+                {recordOld && <span className="text-xs text-slate-400">隔离记录较旧 · {new Date(item.updated_at * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}</span>}
                 <span className="text-sm font-semibold text-slate-100">{item.title}</span>
               </div>
               <p className="break-all font-mono text-xs text-slate-300">{item.host_id} · {item.runtime}/{item.project || '-'} · {item.container_name}</p>
-              <p className="text-sm leading-6 text-slate-200">{stale ? '以下为最近一次隔离记录，不表示当前网络状态已验证。' : item.message}</p>
+              <p className="text-sm leading-6 text-slate-200">{item.message}</p>
+              <p className="break-all font-mono text-[11px] text-slate-400">隔离记录绑定的旧实例 ID：{item.instance_id}</p>
+              {recordOld && !hostStale && <p className="text-xs text-sky-200">记录时间较旧不代表主机离线；操作资格按最近心跳判断，实例身份仍由节点复核。</p>}
               <ul className="space-y-1 rounded-lg border border-slate-700 bg-slate-950/70 p-3 text-xs leading-6 text-slate-300">
                 {(item.details.abuse_evidence || []).slice(0, 5).map((proof, index) => (
                   <li key={index} className="break-all tabular-nums">
@@ -121,16 +156,25 @@ export const QuarantinePanel: React.FC<{
                 ))}
               </ul>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />隔离会阻断 SSH；请通过宿主机控制台排查。解除不代表风险已恢复。</p>
-                <button type="button" disabled={stale || busy || pending} onClick={() => setSelected(item)} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-500/60 bg-sky-950 px-4 text-xs font-semibold text-sky-100 hover:bg-sky-900 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
-                  <UnlockKeyhole className="h-4 w-4" aria-hidden="true" />{pending ? '等待解除隔离回执' : '管理员复核后解除隔离'}
-                </button>
+                <p className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />解除隔离只恢复原实例网络；容器已重装时请走身份核验，不会改动新实例网络。</p>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" disabled={hostStale || busy || pending || role !== 'admin'} onClick={() => { setSelectedAction('release'); setSelected(item); }} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-500/60 bg-sky-950 px-4 text-xs font-semibold text-sky-100 hover:bg-sky-900 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50" title={role !== 'admin' ? '仅管理员可复核隔离事件' : undefined}>
+                    <UnlockKeyhole className="h-4 w-4" aria-hidden="true" />{pending ? '等待复核回执' : '复核并恢复原实例网络'}
+                  </button>
+                  <button type="button" disabled={hostStale || busy || pending || role !== 'admin' || !item.replacement_review_supported} onClick={() => { setSelectedAction('replace'); setSelected(item); }} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-500/60 bg-amber-950/60 px-4 text-xs font-semibold text-amber-100 hover:bg-amber-900/70 focus:outline-hidden focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50" title={role !== 'admin' ? '仅管理员可复核隔离事件' : !item.replacement_review_supported ? `需要 Client 1.7.188 或更新版本；当前 ${item.host_agent_version || '未知'}` : '核验当前实例 ID 与隔离记录不同，且旧实例已不存在'}>
+                    <Archive className="h-4 w-4" aria-hidden="true" />{pending ? '等待复核回执' : '容器已重装：核验并归档旧隔离'}
+                  </button>
+                </div>
               </div>
+              {!item.replacement_review_supported && <p className="text-xs text-slate-400">节点 Client {item.host_agent_version || '版本未知'} 尚不支持重装身份核验；升级至 1.7.188 后可用。</p>}
+              {role !== 'admin' && <p className="text-xs text-slate-400">{roleUnavailable ? '未能确认当前账号权限；为安全起见操作已禁用，请刷新页面或重新登录。' : role === 'unknown' ? '正在确认当前账号权限…' : '当前账号为只读/运维角色；隔离复核仅对管理员开放。'}</p>}
             </article>
           );
         })}
       </div>
-      <ConfirmDialog open={!!selected} title="确认已完成排查并解除隔离？" description="将恢复该实例隔离前的受管网络连接，可能重新开放公网服务。容器与磁盘不会删除。请先通过宿主机控制台处置违规程序；若再次命中确凿特征，会重新隔离并告警。解除操作不等于风险已复查通过。" confirmLabel="确认复核并恢复网络" tone="danger" isSubmitting={busy} onConfirm={() => void release()} onCancel={() => { if (!busy) setSelected(null); }} />
+      <ConfirmDialog open={!!selected} title={selectedAction === 'replace' ? '确认容器已重装并核验旧实例？' : '确认已完成排查并解除隔离？'} description={selectedAction === 'replace'
+        ? '节点将核对当前容器 ID 与旧隔离 ID，只有当前 ID 不同且旧实例已从运行时消失时才归档旧隔离。此操作不恢复、不修改新容器网络；验证失败时告警继续保留。'
+        : '将恢复该实例隔离前的受管网络连接，可能重新开放公网服务。容器与磁盘不会删除。请先通过宿主机控制台处置违规程序；若再次命中确凿特征，会重新隔离并告警。解除操作不等于风险已复查通过。'} confirmLabel={selectedAction === 'replace' ? '确认核验并归档旧隔离' : '确认复核并恢复网络'} tone="danger" isSubmitting={busy} onConfirm={() => void submitReview()} onCancel={() => { if (!busy) { setSelected(null); setSelectedAction(null); } }} />
     </section>
   );
 };

@@ -4,6 +4,8 @@ export interface ContainerItem {
   project?: string;
   container_name: string;
   container_id?: string;
+  /** Runtime-stable identity, distinct from the display name for Incus. */
+  container_instance_id?: string;
   user_email?: string;
   user_email_source?: 'manual' | 'upstream' | 'unmatched' | string;
   user_email_status?: string;
