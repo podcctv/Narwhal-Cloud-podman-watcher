@@ -40,16 +40,19 @@ export const QuarantinePanel: React.FC<{
   const [selected, setSelected] = useState<Quarantine | null>(null);
   const [selectedAction, setSelectedAction] = useState<'release' | 'replace' | null>(null);
   const [busy, setBusy] = useState(false);
-  const [queued, setQueued] = useState<Set<number>>(new Set());
+  const [queuedActionByAlert, setQueuedActionByAlert] = useState<Map<number, 'release' | 'replace'>>(new Map());
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
       const result = await request<{ items: Quarantine[] }>('/api/v1/security/quarantines', { signal });
       setItems(result.items);
       const activeStatuses = ['queued', 'dispatched', 'running'];
-      setQueued(previous => new Set([...previous].filter(id => result.items.some(item =>
-        item.alert_id === id && (activeStatuses.includes(item.release_action_status || '') ||
-          activeStatuses.includes(item.replacement_action_status || ''))))));
+      setQueuedActionByAlert(previous => new Map([...previous].filter(([id, action]) => {
+        const item = result.items.find(candidate => candidate.alert_id === id);
+        if (!item) return false;
+        const status = action === 'replace' ? item.replacement_action_status : item.release_action_status;
+        return activeStatuses.includes(status || '');
+      })));
       setError('');
     } catch (err: any) {
       if (err.name !== 'AbortError') setError('隔离状态暂时无法读取；不能据此认为网络已恢复。');
@@ -85,7 +88,7 @@ export const QuarantinePanel: React.FC<{
         : await request<{ queued: boolean }>(`/api/v1/security/alerts/${selected.alert_id}/release-quarantine`, {
           method: 'POST', body: JSON.stringify({ confirmed: true }),
         });
-      setQueued(previous => new Set(previous).add(selected.alert_id));
+      setQueuedActionByAlert(previous => new Map(previous).set(selected.alert_id, selectedAction || 'release'));
       const message = selectedAction === 'replace'
         ? '容器身份核验已排队；只有旧实例确认不存在后才会归档，不会改动新容器网络。'
         : '解除隔离指令已排队，等待节点验证恢复；不等于风险已消除。';
@@ -123,8 +126,11 @@ export const QuarantinePanel: React.FC<{
           const hostStale = hostAge < 0 || hostAge > 900;
           const recordOld = Date.now()/1000-item.updated_at > 900;
           const activeStatuses = ['queued', 'dispatched', 'running'];
-          const pending = queued.has(item.alert_id) || activeStatuses.includes(item.release_action_status || '') ||
+          const releasePending = queuedActionByAlert.get(item.alert_id) === 'release' ||
+            activeStatuses.includes(item.release_action_status || '');
+          const replacementPending = queuedActionByAlert.get(item.alert_id) === 'replace' ||
             activeStatuses.includes(item.replacement_action_status || '');
+          const pending = releasePending || replacementPending;
           return (
             <article key={`${item.alert_id}:${item.instance_id}`} className="space-y-3 p-5">
               <div className="flex flex-wrap items-center gap-2">
@@ -159,10 +165,10 @@ export const QuarantinePanel: React.FC<{
                 <p className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />解除隔离只恢复原实例网络；容器已重装时请走身份核验，不会改动新实例网络。</p>
                 <div className="flex flex-wrap gap-2">
                   <button type="button" disabled={hostStale || busy || pending || role !== 'admin'} onClick={() => { setSelectedAction('release'); setSelected(item); }} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-500/60 bg-sky-950 px-4 text-xs font-semibold text-sky-100 hover:bg-sky-900 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50" title={role !== 'admin' ? '仅管理员可复核隔离事件' : undefined}>
-                    <UnlockKeyhole className="h-4 w-4" aria-hidden="true" />{pending ? '等待复核回执' : '复核并恢复原实例网络'}
+                    <UnlockKeyhole className="h-4 w-4" aria-hidden="true" />{releasePending ? '等待网络恢复回执' : '复核并恢复原实例网络'}
                   </button>
                   <button type="button" disabled={hostStale || busy || pending || role !== 'admin' || !item.replacement_review_supported} onClick={() => { setSelectedAction('replace'); setSelected(item); }} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-500/60 bg-amber-950/60 px-4 text-xs font-semibold text-amber-100 hover:bg-amber-900/70 focus:outline-hidden focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50" title={role !== 'admin' ? '仅管理员可复核隔离事件' : !item.replacement_review_supported ? `需要 Client 1.7.188 或更新版本；当前 ${item.host_agent_version || '未知'}` : '核验当前实例 ID 与隔离记录不同，且旧实例已不存在'}>
-                    <Archive className="h-4 w-4" aria-hidden="true" />{pending ? '等待复核回执' : '容器已重装：核验并归档旧隔离'}
+                    <Archive className="h-4 w-4" aria-hidden="true" />{replacementPending ? '等待身份核验回执' : '容器已重装：核验并归档旧隔离'}
                   </button>
                 </div>
               </div>

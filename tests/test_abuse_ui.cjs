@@ -27,7 +27,7 @@ const path = require('node:path');
         .slice(0, 15).map(el => ({ tag: el.tagName, className: el.className, right: el.getBoundingClientRect().right })));
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `overflow ${width}: ${JSON.stringify(overflowing)}`);
     }
-    const restore = panel.getByRole('button', { name: '管理员复核后解除隔离', exact: true });
+    const restore = panel.getByRole('button', { name: '复核并恢复原实例网络', exact: true });
     await restore.click();
     await page.getByRole('alertdialog').waitFor();
     assert.equal(await page.getByRole('button', { name: '取消', exact: true }).evaluate(el => el === document.activeElement), true);
@@ -36,8 +36,8 @@ const path = require('node:path');
     await page.getByRole('alertdialog').waitFor({ state: 'detached' });
     await restore.click();
     await page.getByRole('button', { name: '确认复核并恢复网络', exact: true }).click();
-    await panel.getByRole('button', { name: '等待解除隔离回执', exact: true }).waitFor();
-    assert.equal(await panel.getByRole('button', { name: '等待解除隔离回执', exact: true }).isDisabled(), true);
+    await panel.getByRole('button', { name: '等待网络恢复回执', exact: true }).waitFor();
+    assert.equal(await panel.getByRole('button', { name: '等待网络恢复回执', exact: true }).isDisabled(), true);
     // Real authenticated endpoint queued an action; no node is contacted.
     const actual = await (await page.request.get('http://127.0.0.1:8787/api/v1/security/quarantines')).json();
     assert.equal(actual.items[0].release_action_status, 'queued');
@@ -51,7 +51,7 @@ const path = require('node:path');
       items: actual.items.map(item => ({ ...item, host_last_seen: 1, updated_at: 1 })) } }));
     await panel.getByRole('button', { name: '刷新隔离状态' }).click();
     await panel.getByText('节点或隔离采样已过期 · 当前状态待确认', { exact: true }).waitFor();
-    assert.equal(await panel.getByRole('button', { name: '等待解除隔离回执', exact: true }).isDisabled(), true);
+    assert.equal(await panel.getByRole('button', { name: '等待网络恢复回执', exact: true }).isDisabled(), true);
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, viewports: [320, 375, 768, 1440],
       checks: 'real login, quarantine proof, no overflow, confirmation focus/Escape, real queue ACK, failed retry, stale refusal', output }));
