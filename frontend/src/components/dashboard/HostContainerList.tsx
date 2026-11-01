@@ -32,9 +32,11 @@ import { HostDiskPressure, hostDiskPressure } from './HostDiskPressure';
 import { AdmissionStatus } from '../container/AdmissionStatus';
 import { HostBandwidthPanel } from './HostBandwidthPanel';
 import { ContainerStateBadges, hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard, hasContainerResourceAlert, hasContainerResourceGuardFailure, hasContainerProtocolGuardNeedsReview } from './ContainerStateBadges';
+import { isCurrentContainerInventoryItem } from '../../utils/containerFreshness';
 
 interface HostContainerListProps {
   containers: ContainerItem[];
+  staleSnapshots: ContainerItem[];
   serverVersion: string;
   activeAlerts?: SecurityAlert[];
   onSelectContainer: (id: ContainerIdentity) => void;
@@ -219,6 +221,7 @@ export function evaluateContainerRisk(
 
 export const HostContainerList: React.FC<HostContainerListProps> = ({
   containers,
+  staleSnapshots,
   serverVersion,
   activeAlerts = [],
   onSelectContainer,
@@ -273,12 +276,20 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
   // Group by host_id
   const liveContainers = useMemo(
-    () => containers.filter((c) => !c.alerts?.stale && !c.alerts?.host_stale),
+    () => containers.filter((c) => !c.alerts?.stale && !c.alerts?.host_stale)
+      .filter(isCurrentContainerInventoryItem),
     [containers]
   );
   const staleContainers = useMemo(
-    () => containers.filter((c) => c.alerts?.stale || c.alerts?.host_stale),
-    [containers]
+    () => staleSnapshots,
+    [staleSnapshots]
+  );
+  const currentHostIds = useMemo(() => new Set(liveContainers.map((container) => container.host_id)), [liveContainers]);
+  const hostsNeedingFreshnessReview = useMemo(
+    () => new Set(staleContainers
+      .filter((container) => container.alerts?.host_stale || !currentHostIds.has(container.host_id))
+      .map((container) => container.host_id)),
+    [currentHostIds, staleContainers]
   );
 
   // Global counts for filter pills
@@ -302,16 +313,16 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     });
 
     return {
-      all: liveContainers.length + staleContainers.length,
+      all: liveContainers.length,
       risk,
       protection,
       protocol,
       hy2,
       imbalance,
-      stale: staleContainers.length,
+      stale: hostsNeedingFreshnessReview.size,
       healthy,
     };
-  }, [liveContainers, staleContainers, activeAlerts]);
+  }, [liveContainers, hostsNeedingFreshnessReview, activeAlerts]);
 
   const hostMap = useMemo(() => {
     const map: Record<string, ContainerItem[]> = {};
@@ -325,11 +336,12 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   const offlineHostMap = useMemo(() => {
     const map: Record<string, ContainerItem[]> = {};
     staleContainers.forEach((container) => {
+      if (!hostsNeedingFreshnessReview.has(container.host_id)) return;
       if (!map[container.host_id]) map[container.host_id] = [];
       map[container.host_id].push(container);
     });
     return map;
-  }, [staleContainers]);
+  }, [hostsNeedingFreshnessReview, staleContainers]);
 
   // Sort hosts: hosts with higher risk come first
   const hostIds = useMemo(() => {
@@ -361,22 +373,13 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     if (filterState !== 'all' && filterState !== 'stale') return [];
     const query = searchQuery.trim().toLowerCase();
     if (!query) return offlineHostIds;
-    return offlineHostIds.filter((hostId) =>
-      hostId.toLowerCase().includes(query) || offlineHostMap[hostId].some((item) =>
-        item.container_name.toLowerCase().includes(query)
-        || item.runtime.toLowerCase().includes(query)
-        || (item.project || '').toLowerCase().includes(query)
-        || (item.user_email || '').toLowerCase().includes(query)
-        || (item.user_note || '').toLowerCase().includes(query)
-      )
-    );
+    return offlineHostIds.filter((hostId) => hostId.toLowerCase().includes(query));
   }, [filterState, searchQuery, offlineHostIds, offlineHostMap]);
 
   // Keep fleet lists compact; expand only hosts with an active finding by default.
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>(() => {
     return {};
   });
-  const [expandedOfflineHosts, setExpandedOfflineHosts] = useState<Record<string, boolean>>({});
   const [bandwidthOpenHosts, setBandwidthOpenHosts] = useState<Record<string, boolean>>({});
   const [hostPage, setHostPage] = useState(0);
   const hostPageCount = Math.max(1, Math.ceil(matchingHostIds.length / HOSTS_PER_PAGE));
@@ -441,9 +444,9 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     return (
       <section className="rounded-2xl border border-dashed border-slate-800 p-12 text-center bg-slate-950/40">
         <Server className="mx-auto h-10 w-10 text-slate-600 mb-3" />
-        <h3 className="text-sm font-semibold text-slate-300">暂无已注册的主机与容器</h3>
+        <h3 className="text-sm font-semibold text-slate-300">暂无新鲜容器采样</h3>
         <p className="mt-1 text-xs text-slate-500">
-          请检查客户端守护进程是否已启动并成功上报指标至 `/api/v1/report`。
+          当前列表只显示主机最新上报中的容器；过期快照已隐藏并保留在历史数据中。
         </p>
       </section>
     );
@@ -459,8 +462,8 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
         onFilterStateChange={setFilterState}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        totalHosts={matchingHostIds.length}
-        totalContainers={liveContainers.length + staleContainers.length}
+        totalHosts={matchingHostIds.length + visibleOfflineHostIds.length}
+        totalContainers={liveContainers.length}
         counts={counts}
         allExpanded={allExpanded}
         onToggleAllHosts={handleToggleAll}
@@ -996,15 +999,15 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
             </div>
           );
         })}
-        {matchingHostIds.length === 0 && visibleOfflineHostIds.length === 0 && <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-sm text-slate-500">{filterState === 'stale' ? '当前没有离线主机或过期容器采样。' : '当前搜索或筛选条件下没有匹配的在线主机。'}</div>}
+        {matchingHostIds.length === 0 && visibleOfflineHostIds.length === 0 && <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-sm text-slate-500">{filterState === 'stale' ? '当前没有离线主机或旧容器快照。' : '当前没有新鲜容器采样；过期快照已隐藏并保留在历史数据中。'}</div>}
       </div>
 
       {visibleOfflineHostIds.length > 0 && (
-        <section className="space-y-3" aria-label="离线主机与过期容器快照">
+        <section className="space-y-3" aria-label="离线主机与旧容器快照摘要">
           <div className="flex flex-wrap items-end justify-between gap-2 border-b border-slate-800 pb-2">
             <div>
-              <h2 className="text-sm font-semibold text-slate-200">离线主机与过期容器快照</h2>
-              <p className="mt-1 text-xs text-slate-500">主机心跳和容器采样分别计时。主机在线但采样过期时，仅表示容器当前状态未知，不代表主机离线。</p>
+              <h2 className="text-sm font-semibold text-slate-200">没有新鲜容器数据的主机</h2>
+              <p className="mt-1 text-xs text-slate-500">当前容器列表只显示主机最新上报中的容器。旧容器明细已隐藏，历史采样仍可查询。</p>
             </div>
             <span className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-1 text-xs text-amber-300">{visibleOfflineHostIds.length} 组需核验</span>
           </div>
@@ -1015,6 +1018,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
             const hostIsOffline = items.length > 0 && items.every((item) => item.alerts?.host_stale === true);
             const hostIsOnline = items.some((item) => item.alerts?.host_stale === false);
             const sampleIsStale = items.some((item) => item.alerts?.stale === true);
+            const newerHostReportExists = Number(latestHeartbeat.host_last_seen || 0) > Number(latestSample.timestamp || 0);
             const hostStateLabel = hostIsOffline ? '主机离线' : hostIsOnline ? '主机在线' : '主机心跳未知';
             const hostStateColor = hostIsOnline
               ? 'border-emerald-700/70 bg-emerald-950/40 text-emerald-300'
@@ -1023,43 +1027,27 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
               : 'border-slate-600 bg-slate-800 text-slate-300';
             const hostHeartbeatAge = Number(latestHeartbeat.host_offline_seconds);
             const containerSampleAge = Number(latestSample.offline_seconds);
-            const isExpanded = Boolean(expandedOfflineHosts[hostId]);
+            const sampleStateLabel = newerHostReportExists
+              ? '旧快照未出现在最新清单'
+              : sampleIsStale
+                ? '仅保留过期历史快照'
+                : '仅保留最后容器快照';
             return (
               <article key={`offline-${hostId}`} className="overflow-hidden rounded-xl border border-amber-900/60 bg-slate-900/70">
-                <button
-                  type="button"
-                  onClick={() => setExpandedOfflineHosts((current) => ({ ...current, [hostId]: !current[hostId] }))}
-                  aria-expanded={isExpanded}
-                  aria-controls={`offline-host-${hostId}`}
-                  className="flex min-h-14 w-full flex-wrap items-center justify-between gap-3 p-3 text-left hover:bg-slate-800/50 focus:outline-hidden focus:ring-2 focus:ring-inset focus:ring-amber-400"
-                >
+                <div className="flex min-h-14 flex-wrap items-center justify-between gap-3 p-3">
                   <span className="flex min-w-0 flex-wrap items-center gap-2">
                     <Server className="h-4 w-4 shrink-0 text-amber-400" />
                     <strong className="break-all text-sm text-slate-100">{hostId}</strong>
                     <span className={`rounded-full border px-2 py-0.5 text-[11px] ${hostStateColor}`}>{hostStateLabel}</span>
-                    <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">{sampleIsStale ? '容器采样过期' : '保留最后容器快照'}</span>
+                    <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">{sampleStateLabel}</span>
                     <span className="font-mono text-[11px] text-slate-400">v{latestHeartbeat.agent_version || '未知'}</span>
                   </span>
                   <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
                     <span>主机心跳：{latestHeartbeat.host_last_seen_iso_utc8 || '未知'} · {formatSnapshotAge(hostHeartbeatAge)}</span>
                     <span>容器采样：{latestSample.timestamp_iso_utc8 || '未知'} · {formatSnapshotAge(containerSampleAge)}</span>
-                    <span>{items.length} 个容器快照 · 当前状态待确认</span>
-                    <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                    <span>{items.length} 条旧快照已隐藏</span>
                   </span>
-                </button>
-                {isExpanded && (
-                  <div id={`offline-host-${hostId}`} className="border-t border-amber-900/40 bg-slate-950/50 p-3">
-                    <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                      {items.map((item) => (
-                        <li key={`${item.runtime}-${item.project || ''}-${item.container_name}`} className="min-w-0 rounded-lg border border-slate-800 bg-slate-900/70 p-3">
-                          <p className="break-all text-sm font-medium text-slate-200">{item.container_name}</p>
-                          <p className="mt-1 break-all text-xs text-slate-500">{item.runtime}{item.project ? ` / ${item.project}` : ''} · 最后采样 {item.timestamp_iso_utc8 || '未知'}</p>
-                          <ContainerStateBadges container={item} activeAlerts={activeAlerts} maxVisible={5} className="mt-2" />
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                </div>
               </article>
             );
           })}

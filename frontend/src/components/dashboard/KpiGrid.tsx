@@ -1,11 +1,11 @@
 import React from 'react';
-import { Server, Box, AlertTriangle, PowerOff, ArrowUpRight } from 'lucide-react';
+import { Server, Box, AlertTriangle, Clock3, ArrowUpRight } from 'lucide-react';
 
 interface KpiGridProps {
   onlineHosts: number;
   totalContainers: number;
   activeAlerts: number;
-  staleContainers: number;
+  hiddenStaleSnapshots: number;
   onFilterAlerts?: () => void;
 }
 
@@ -13,7 +13,7 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
   onlineHosts,
   totalContainers,
   activeAlerts,
-  staleContainers,
+  hiddenStaleSnapshots,
   onFilterAlerts,
 }) => {
   return (
@@ -100,23 +100,23 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
         </div>
       </div>
 
-      {/* KPI 4: 离线/过期 */}
+      {/* KPI 4: hidden stale snapshots */}
       <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-xs hover:border-slate-700 transition-colors">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-slate-400">离线或过期容器</span>
+          <span className="text-xs font-medium text-slate-400">已隐藏旧快照</span>
           <div className="rounded-lg bg-slate-800/80 p-2 text-slate-400 border border-slate-700/50">
-            <PowerOff className="h-4 w-4" />
+            <Clock3 className="h-4 w-4" />
           </div>
         </div>
         <div className="mt-2 flex items-baseline gap-2">
           <span
             className={`font-mono text-2xl font-extrabold tracking-tight tabular-nums ${
-              staleContainers > 0 ? 'text-amber-400' : 'text-slate-100'
+              hiddenStaleSnapshots > 0 ? 'text-amber-400' : 'text-slate-100'
             }`}
           >
-            {staleContainers}
+            {hiddenStaleSnapshots}
           </span>
-          <span className="text-xs text-slate-500">Offline/Stale</span>
+          <span className="text-xs text-slate-500">保留在历史数据</span>
         </div>
       </div>
     </section>

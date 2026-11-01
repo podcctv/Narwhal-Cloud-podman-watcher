@@ -15,6 +15,7 @@ import { HostContainerList } from './components/dashboard/HostContainerList';
 import { CommandPalette } from './components/common/CommandPalette';
 import { ToastContainer, ToastMessage } from './components/common/Toast';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { isCurrentContainerInventoryItem } from './utils/containerFreshness';
 
 const ContainerDrawer = lazy(() => import('./components/container/ContainerDrawer').then(module => ({ default: module.ContainerDrawer })));
 const AlertHistoryView = lazy(() => import('./components/alerts/AlertHistoryView').then(module => ({ default: module.AlertHistoryView })));
@@ -64,6 +65,7 @@ export const Dashboard: React.FC = () => {
 
   // Polling data
   const [containers, setContainers] = useState<ContainerItem[]>([]);
+  const [hiddenStaleSnapshotCount, setHiddenStaleSnapshotCount] = useState(0);
   const [activeAlerts, setActiveAlerts] = useState<SecurityAlert[]>([]);
   const [securityStatus, setSecurityStatus] = useState<SecurityStatusItem[]>([]);
   const [serverVersion, setServerVersion] = useState<string>('dev');
@@ -86,16 +88,17 @@ export const Dashboard: React.FC = () => {
     setIsRefreshing(true);
     try {
       const [latestRes, alertsRes, secStatusRes] = await Promise.all([
-        // Include the short offline-retention window so operators can still
-        // find a host and inspect its last known containers. Offline samples
-        // are separated from live metrics and cannot trigger live actions.
+        // Retained snapshots support host-level freshness summaries. Only
+        // current-inventory items are shown as containers below.
         api.getLatest(true),
         api.getActiveAlerts(),
         api.getSecurityStatus(),
       ]);
 
-      const liveContainers = latestRes.items || [];
-      setContainers(liveContainers);
+      const containerSnapshots = latestRes.items || [];
+      const currentContainers = containerSnapshots.filter(isCurrentContainerInventoryItem);
+      setContainers(containerSnapshots);
+      setHiddenStaleSnapshotCount(containerSnapshots.length - currentContainers.length);
       setServerVersion(latestRes.server_version || 'dev');
       const alertItems = alertsRes.items || alertsRes.alerts || [];
       const liveSecurityStatus = secStatusRes.items || [];
@@ -109,7 +112,7 @@ export const Dashboard: React.FC = () => {
           const host = securityByHost.get(alert.host_id);
           return Boolean(host && !host.stale);
         }
-        return liveContainers.some((container) => {
+        return currentContainers.some((container) => {
           const sameContainer = container.host_id === alert.host_id &&
             container.runtime === alert.runtime &&
             (container.project || '') === (alert.project || '') &&
@@ -147,6 +150,7 @@ export const Dashboard: React.FC = () => {
 
   const openAlertContainer = useCallback((identity: ContainerIdentity) => {
     const target = containers.find((container) =>
+      isCurrentContainerInventoryItem(container) &&
       container.host_id === identity.host_id &&
       container.runtime === identity.runtime &&
       (container.project || '') === (identity.project || '') &&
@@ -165,6 +169,18 @@ export const Dashboard: React.FC = () => {
       container_id: target.container_id,
     });
   }, [addToast, containers]);
+
+  useEffect(() => {
+    if (!selectedContainer) return;
+    const selectionIsCurrent = containers.some((container) =>
+      isCurrentContainerInventoryItem(container) &&
+      container.host_id === selectedContainer.host_id &&
+      container.runtime === selectedContainer.runtime &&
+      (container.project || '') === (selectedContainer.project || '') &&
+      container.container_name === selectedContainer.container_name
+    );
+    if (!selectionIsCurrent) setSelectedContainer(null);
+  }, [containers, selectedContainer]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -224,12 +240,14 @@ export const Dashboard: React.FC = () => {
   }, [isSearchOpen, selectedContainer]);
 
   // KPI computations
-  const currentHostContainers = containers.filter((c) => !c.alerts?.host_stale);
-  const actionableContainers = currentHostContainers.filter((c) => !c.alerts?.stale);
-  const onlineHostsCount = new Set(currentHostContainers.map((c) => c.host_id)).size;
-  const totalContainersCount = currentHostContainers.length;
+  const currentContainers = containers.filter(isCurrentContainerInventoryItem);
+  const staleSnapshots = containers.filter((container) => !isCurrentContainerInventoryItem(container));
+  const onlineHostsCount = new Set([
+    ...currentContainers.map((container) => container.host_id),
+    ...securityStatus.filter((host) => !host.stale).map((host) => host.host_id),
+  ]).size;
+  const totalContainersCount = currentContainers.length;
   const activeAlertsCount = activeAlerts.length;
-  const staleContainersCount = currentHostContainers.filter((c) => c.alerts?.stale).length;
 
   return (
     <div className="min-h-screen bg-dark text-slate-100 flex flex-col selection:bg-sky-500/30">
@@ -262,7 +280,7 @@ export const Dashboard: React.FC = () => {
                 onlineHosts={onlineHostsCount}
                 totalContainers={totalContainersCount}
                 activeAlerts={activeAlertsCount}
-                staleContainers={staleContainersCount}
+                hiddenStaleSnapshots={hiddenStaleSnapshotCount}
                 onFilterAlerts={() => setActiveTab('alerts')}
               />
 
@@ -282,6 +300,7 @@ export const Dashboard: React.FC = () => {
               {/* Host Topologies and Container Cards */}
               <HostContainerList
                 containers={containers}
+                staleSnapshots={staleSnapshots}
                 serverVersion={serverVersion}
                 activeAlerts={activeAlerts}
                 onSelectContainer={setSelectedContainer}
@@ -300,7 +319,7 @@ export const Dashboard: React.FC = () => {
 
           {activeTab === 'investigation' && <UserInvestigationView />}
           {activeTab === 'commerce' && <CommerceView />}
-          {activeTab === 'firewall' && <FirewallView containers={actionableContainers} telemetry={securityStatus} onToast={addToast} />}
+          {activeTab === 'firewall' && <FirewallView containers={currentContainers} telemetry={securityStatus} onToast={addToast} />}
 
           {activeTab === 'stats' && (
             <StatsAnalyticsView
@@ -329,7 +348,7 @@ export const Dashboard: React.FC = () => {
       <CommandPalette
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
-        containers={containers}
+        containers={currentContainers}
         onSelectContainer={setSelectedContainer}
         onSelectTab={setActiveTab}
       />
