@@ -320,6 +320,8 @@ def parse_inbound_protocols(raw, process):
                 networks = []
             if networks and all(item in {'tcp', 'udp'} for item in networks):
                 endpoint['transports'] = sorted(set(networks))
+            elif not networks and process == 'sing-box' and protocol.lower() in {'trojan', 'vmess'}:
+                endpoint['transports'] = ['tcp']
         result['endpoints'].append(endpoint)
     return result
 
@@ -343,14 +345,25 @@ def process_configs(output):
         unparsed_config_path = False
         for index, token in enumerate(tokens):
             value = ''
-            if token in {'-confdir', '--config-dir'} and index + 1 < len(tokens):
+            directory = ''
+            if (token in {'-confdir', '--config-dir', '--config-directory'}
+                    or (process == 'sing-box' and token == '-C')) and index + 1 < len(tokens):
                 directory = tokens[index + 1]
+            elif token.startswith(('--config-dir=', '--config-directory=', '-confdir=')):
+                directory = token.split('=', 1)[1]
+
+            if directory:
                 if (re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}', directory)
                         and '..' not in directory.split('/')):
                     config_dirs.append(directory.rstrip('/') or '/')
                 else:
                     unparsed_config_path = True
-            if token in {'-c', '-C', '-f', '-config', '--config', '-conf', '--config-file'} and index + 1 < len(tokens):
+                continue
+
+            file_tokens = {'-c', '-f', '-config', '--config', '-conf', '--config-file'}
+            if process != 'sing-box':
+                file_tokens.add('-C')
+            if token in file_tokens and index + 1 < len(tokens):
                 value = tokens[index + 1]
             elif token.startswith(('--config=', '-config=', '--config-file=')):
                 value = token.split('=', 1)[1]
@@ -363,7 +376,7 @@ def process_configs(output):
                     unparsed_config_path = True
         if process == '3proxy':
             paths += [t for t in tokens[1:] if re.fullmatch(r'/[A-Za-z0-9_./-]{1,240}\.cfg', t) and '..' not in t.split('/')]
-        if not paths and not config_dirs and not any(t.startswith(('-c', '-C', '-f', '--config', '-config', '-confdir')) for t in tokens):
+        if not paths and not config_dirs and not any(t.startswith(('-c', '-C', '-f', '--config', '-config', '-confdir', '--config-dir', '--config-directory')) for t in tokens):
             paths = {'danted': ['/etc/danted.conf'], 'sockd': ['/etc/sockd.conf'],
                      '3proxy': ['/etc/3proxy/3proxy.cfg'], 'gost': ['/etc/gost/config.json', '/etc/gost/config.yaml']}.get(process, [f'/etc/{process}/config.json'])
         elif not paths and not config_dirs:

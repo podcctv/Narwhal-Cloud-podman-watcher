@@ -1,8 +1,15 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.194**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.195**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
+
+### v1.7.195：增强 Trojan/VMess 阻断召回与面板端点级诊断原因展示
+
+- **面板端点级原因透出**：容器详情抽屉（ContainerDrawer）的 Trojan / VMess 管控卡片为待核验端点直接标注具体原因（如 `共用监听端口 (防误杀)`、`实时监听未匹配`、`配置在进程启动后更新` 等），结合现有“按需触发一次性深度采样”功能，可在面板上完整定性与诊断容器状态，消除黑盒。
+- **宿主机时钟代次回退补全**：在容器内 `/proc/{pid}/stat` 由于权限或命名空间限制无法读取时，采纳宿主机已核验的 `host_start_ticks` 与进程代次稳定性证据，修复假性 `process_start_generation_unavailable` 导致的阻断阻碍。
+- **sing-box 目录与传输层兼容**：`socks_detector` 支持识别 sing-box 的 `-C` 及 `--config-directory` 命令行配置目录参数，遍历其内部配置文件并避免被当成非法单文件导致整轮扫描放弃；并在 sing-box 省略 `network` 声明时默认将 Trojan 与 VMess 映射至 TCP 传输层，改善有效召回率。
+- **Trojan 告警原因对齐**：Trojan 待核验安全告警接入具体进程扫描失败原因解析，透出具体端口与阻塞瓶颈。
 
 ### v1.7.194：CPU 保护告警透出底层错误与 CI 隔离修复
 

@@ -4,12 +4,17 @@
 
 ## 代码基线
 
-- 当前工作区已同步 `origin/main`（`1324206`），GitHub Actions 工作流 [`41410608515`](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41410608515) 已全部成功通过（包括 Python 全量测试、Playwright 浏览器回归、amd64/arm64 镜像构建与冒烟测试）。
-- 本次根目录 `VERSION` 更新为 `1.7.194`。
-- 本次工作仅涉及 CPU 保护底层错误信息透出、单测环境隔离修复与交接文档同步，未修改生产主机。
+- 当前工作区基于 GitHub `main`（`721696e`）完成 Trojan/VMess 阻断有效召回兼容优化与面板端点级诊断原因透出。
+- 本次根目录 `VERSION` 更新为 `1.7.195`。
+- 本次工作涵盖 Agent 协议解析识别、宿主机 proc 时钟回退机制闭环、前端详情抽屉端点级未核实原因透出及对应自动化回归单测。
 
 ## 最近完成的工作
 
+- v1.7.195：增强 Trojan/VMess 阻断有效召回率与面板端点级诊断原因透出：
+  1. 前端 `ContainerDrawer` 的 `ProtocolGuardCard` 为每个待核验端点显式标注具体阻断障碍原因（如 `共用监听端口 (防误杀)`、`实时监听未匹配`、`配置在进程启动后更新` 等），结合现有“按需触发一次性深度采样”功能，在面板上提供完整的可观测诊断视图。
+  2. 修复 `client/agent.py` 中容器 procfs 不可读时的宿主机时钟代次回退闭环，当容器内 `/proc/{pid}/stat` 缺失但宿主机已核验进程稳定性时，采纳宿主机代次时钟，消除假性 `process_start_generation_unavailable`。
+  3. `client/socks_detector.py` 增加对 sing-box 命令行配置目录参数（`-C`、`--config-directory`）识别，遍历内部配置并避免被当成非法文件导致整轮扫描放弃；并在 sing-box 省略 `network` 时默认将 Trojan/VMess 映射至 TCP 传输层。
+  4. 对齐 Trojan 待核验告警的原因解析链路，精准透出进程与端口级瓶颈。
 - v1.7.194：CPU 保护告警标题为“持续高 CPU，保护需要检查”时，告警摘要及 `cpu_guard` 详情中透出底层实际错误原因（`last_error`），消除排查黑盒；修复 CI 单测偶发受 Runner 宿主机 `/proc/123/net/tcp` 干扰与升级测试整秒跳变问题。
 - v1.7.193：升级 `.agents/skills/narwhal-ui-design` v2.0 技能并结合 `modern-web-guidance`，统一全局设计 Token（`.ui-surface-card`、`.ui-btn-*`、`.ui-input`、`.ui-select`、`.ui-table-wrap`），重构顶栏、命令面板、登录页、总览、容器详情抽屉、告警历史、用户排查、统计分析、经营账本、运维中心、母机防火墙与系统设置视图，实现桌面端与手机端（`320px–1920px`）自适应及表格键盘无障碍滚动。
 - v1.7.192：在线容器列表和 KPI 排除过期快照；保留的快照单独用于离线/过期核查，不能当作当前容器操作目标。

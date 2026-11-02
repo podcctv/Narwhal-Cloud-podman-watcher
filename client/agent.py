@@ -4296,12 +4296,13 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "previous_guard_rule_preserved": "当前证据不足，旧的 Trojan 端口保护规则仍保留",
                 }
                 labels = pending_labels or [str(item.get("port")) for item in pending if isinstance(item, dict) and item.get("port")]
-                reason = reason_labels.get(str(trojan.get("reason") or ""), "端口归属或规则生效状态未能确认")
+                socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
+                scan_states = socks_proxy.get("protocol_process_scan_states") if isinstance(socks_proxy.get("protocol_process_scan_states"), list) else []
+                reason_key = _vmess_unverified_reason_key(trojan, scan_states, pending)
+                reason = reason_labels.get(reason_key, "端口归属或规则生效状态未能确认")
                 detail = f"已在进程配置中发现 Trojan 入站，但尚未安全确认对应端口保护：{reason}。未停止进程或容器。"
                 if labels:
                     detail += f"待核实端口：{'、'.join(labels)}。"
-                socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
-                scan_states = socks_proxy.get("protocol_process_scan_states") if isinstance(socks_proxy.get("protocol_process_scan_states"), list) else []
                 for item in [item for item in scan_states if isinstance(item, dict) and item.get("state") != "complete"][:3]:
                     process = str(item.get("process") or "未知进程")[:40]
                     pid = int(item.get("pid") or 0) if str(item.get("pid") or "").isdigit() else 0
@@ -6334,14 +6335,22 @@ def _collect_socks_config_evidence(
                 int(host_clock_evidence.get("host_pid") or 0), host_start_ticks,
             )
         )
-        start_ticks = (
-            (host_start_ticks if host_start_ticks else start_ticks_before)
-            if start_ticks_before.isdigit()
+        if (
+            start_ticks_before.isdigit()
             and start_ticks_after == start_ticks_before
             and (not host_start_ticks or host_start_ticks == start_ticks_before)
             and host_generation_stable
-            else ''
-        )
+        ):
+            start_ticks = host_start_ticks if host_start_ticks else start_ticks_before
+        elif (
+            not start_ticks_before
+            and not start_ticks_after
+            and host_start_ticks.isdigit()
+            and host_generation_stable
+        ):
+            start_ticks = host_start_ticks
+        else:
+            start_ticks = ''
         if is_protocol_process:
             protocol_process_start_ticks[(int(proc['pid']), str(proc['process']))] = start_ticks
             if not start_ticks:
@@ -6352,7 +6361,7 @@ def _collect_socks_config_evidence(
                 # config. Exact PID/name/transport/port listener matching and
                 # shared-port checks still gate protocol blocking. If either
                 # clock read existed but changed/disappeared, it is a scan race.
-                if start_ticks_before.isdigit() or start_ticks_after.isdigit():
+                if start_ticks_before.isdigit() or start_ticks_after.isdigit() or host_start_ticks.isdigit():
                     process_port_config_complete = False
                     process_scan_reason = process_scan_reason or 'process_changed_during_config_scan'
                 else:

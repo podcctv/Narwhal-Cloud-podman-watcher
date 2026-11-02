@@ -84,6 +84,20 @@ class DirectionTests(unittest.TestCase):
             {'protocol': 'hysteria2', 'port': 443, 'listen': '0.0.0.0'},
         ])
 
+    def test_sing_box_trojan_and_vmess_default_to_tcp_transports(self):
+        result = detector.parse_inbound_protocols(json.dumps({
+            'inbounds': [
+                {'type': 'trojan', 'listen': '0.0.0.0', 'listen_port': 443},
+                {'type': 'vmess', 'listen': '::', 'listen_port': 8443},
+                {'type': 'socks', 'listen': '127.0.0.1', 'listen_port': 1080},
+            ],
+        }), 'sing-box')
+        self.assertEqual(result['endpoints'], [
+            {'protocol': 'trojan', 'port': 443, 'listen': '0.0.0.0', 'transports': ['tcp']},
+            {'protocol': 'vmess', 'port': 8443, 'listen': '::', 'transports': ['tcp']},
+            {'protocol': 'socks', 'port': 1080, 'listen': '127.0.0.1'},
+        ])
+
     def test_xray_stream_methods_map_to_socket_layer_protocols(self):
         methods = {
             'raw': 'tcp', 'xhttp': 'tcp', 'grpc': 'tcp',
@@ -192,6 +206,18 @@ class DirectionTests(unittest.TestCase):
         result = detector.process_configs(output)[0]
         self.assertEqual(result['config_dirs'], ['/etc/xray/conf.d'])
         self.assertFalse(result['additional_configs'])
+
+    def test_sing_box_config_directory_flag_is_supported(self):
+        output = '12 S sing-box /usr/bin/sing-box run -C /etc/sing-box'
+        result = detector.process_configs(output)[0]
+        self.assertEqual(result['config_dirs'], ['/etc/sing-box'])
+        self.assertEqual(result['paths'], [])
+        self.assertFalse(result['additional_configs'])
+
+        output_long = '15 S sing-box /usr/bin/sing-box run --config-directory=/etc/sing-box/conf.d'
+        result_long = detector.process_configs(output_long)[0]
+        self.assertEqual(result_long['config_dirs'], ['/etc/sing-box/conf.d'])
+        self.assertFalse(result_long['additional_configs'])
 
     def test_unreadable_or_truncated_config_paths_make_inventory_incomplete(self):
         toml = detector.process_configs('12 S xray /usr/bin/xray run -c /etc/xray/config.toml')[0]

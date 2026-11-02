@@ -420,6 +420,43 @@ class VmessPlanTests(unittest.TestCase):
         }])
         self.assertNotIn(8443, [item['port'] for item in planned['blocked_endpoints']])
 
+    def test_host_proc_fallback_succeeds_when_container_proc_unreadable(self):
+        metadata = '1:2:120:stable|1793139000|1793139000'
+        host_snapshot = ({'scope_complete': True}, [{
+            'host_pid': 777, 'pid': 120, 'process': 'xray', 'start_ticks': '90000',
+        }])
+        host_clock = {
+            'host_pid': 777, 'start_ticks': '90000',
+            'epoch_lower_bound': 1793140000.0, 'reason': '',
+        }
+        with mock.patch.object(agent, '_protocol_process_start_epoch_lower_bound', return_value=None), \
+                mock.patch.object(agent, '_collect_host_proc_process_snapshot', return_value=host_snapshot), \
+                mock.patch.object(agent, '_host_proc_protocol_process_start_epoch_lower_bound', return_value=host_clock), \
+                mock.patch.object(agent, '_host_proc_protocol_process_matches', return_value=True), \
+                mock.patch.object(agent, 'run', side_effect=[
+                    '', metadata,
+                    '{"inbounds":[{"protocol":"vmess","port":443}]}',
+                    metadata, '',
+                ]):
+            evidence = agent._collect_socks_config_evidence(
+                'incus', 'fixture', 'default', False,
+                '120 S xray /usr/bin/xray -config /etc/xray/config.json\n',
+                init_pid=100,
+            )
+
+        self.assertEqual(evidence['protocol_inventory_state'], 'complete')
+        self.assertEqual(evidence['protocol_process_scan_states'][0]['clock_sample_source'], 'host_proc')
+        self.assertEqual(evidence['protocol_process_scan_states'][0]['start_ticks'], '90000')
+        planned = vmess_guard.plan(
+            'incus', evidence['configured_inbound_protocols'], [self.listener], [],
+            evidence['protocol_inventory_state'],
+            process_scan_states=evidence['protocol_process_scan_states'],
+            listener_inventory_complete=True,
+        )
+        self.assertEqual(planned['blocked_endpoints'], [{
+            'proto': 'tcp', 'port': 443, 'pid': 120, 'process': 'xray',
+        }])
+
     def test_incomplete_host_proc_fallback_still_fails_closed(self):
         metadata = '1:2:120:stable|1793139000|1793139000'
         host_snapshot = ({'scope_complete': False}, [])

@@ -145,6 +145,24 @@ const protocolGuardState = (summary?: ProtocolGuardSummary) => {
   }
 };
 
+const endpointReasonLabels: Record<string, string> = {
+  shared_configured_port: '共用配置端口 (防误杀)',
+  shared_live_listener: '共用监听端口 (防误杀)',
+  live_listener_not_confirmed: '实时监听未匹配',
+  listener_protocol_or_owner_ambiguous: '协议或进程归属不明确',
+  process_start_generation_unavailable: '进程代次待核验',
+  process_changed_during_config_scan: '进程在扫描期间变化',
+  config_not_known_before_process_start: '配置在进程启动后更新',
+  configuration_scan_incomplete: '配置扫描不完整',
+  listener_inventory_incomplete: '实时监听清单不完整',
+  container_namespace_unavailable: '网络命名空间不可用',
+  container_namespace_changed: '网络命名空间已变化',
+  previous_guard_rule_preserved: '保留旧阻断规则',
+  firewall_permission_denied: '缺少防火墙权限',
+  firewall_kernel_unsupported: '内核规则不支持',
+  firewall_apply_failed: '规则下发失败',
+};
+
 const formatProtocolEndpoint = (endpoint: { proto?: string; port?: number; pid?: number; process?: string }) => {
   const protocol = endpoint.proto ? `${endpoint.proto.toUpperCase()}/` : '';
   const port = endpoint.port == null ? '端口未知' : `${endpoint.port}`;
@@ -167,7 +185,14 @@ const ProtocolGuardCard: React.FC<{ label: 'VMess' | 'Trojan'; summary?: Protoco
   if (evidence?.listener_inventory_source) evidenceItems.push(['监听清单来源', evidence.listener_inventory_source]);
   if (evidence?.listener_inventory_reason) evidenceItems.push(['监听清单说明', evidence.listener_inventory_reason]);
   if (evidence?.pending_endpoint_count != null) evidenceItems.push(['待核验端点数', String(evidence.pending_endpoint_count)]);
-  const endpoints = [
+  const endpoints: Array<{
+    status: string;
+    proto?: string;
+    port?: number;
+    pid?: number;
+    process?: string;
+    reason?: string;
+  }> = [
     ...(blocked || []).map((endpoint) => ({ ...endpoint, status: '已阻断' })),
     ...(pending || []).map((endpoint) => ({ ...endpoint, status: '待核验' })),
   ];
@@ -184,12 +209,22 @@ const ProtocolGuardCard: React.FC<{ label: 'VMess' | 'Trojan'; summary?: Protoco
       {summary?.reason && <p className="text-[11px] leading-relaxed text-slate-300">{summary.reason}</p>}
       {endpoints.length > 0 && (
         <ul className="space-y-1 border-t border-slate-800 pt-2 text-[10px] text-slate-300">
-          {endpoints.map((endpoint, index) => (
-            <li key={`${endpoint.status}-${endpoint.proto || ''}-${endpoint.port || 0}-${endpoint.pid || 0}-${index}`} className="flex min-w-0 items-start justify-between gap-2">
-              <span className="min-w-0 break-all font-mono">{formatProtocolEndpoint(endpoint)}</span>
-              <span className={endpoint.status === '已阻断' ? 'shrink-0 text-emerald-300' : 'shrink-0 text-amber-300'}>{endpoint.status}</span>
-            </li>
-          ))}
+          {endpoints.map((endpoint, index) => {
+            const reasonText = endpoint.reason ? (endpointReasonLabels[endpoint.reason] || endpoint.reason) : '';
+            return (
+              <li key={`${endpoint.status}-${endpoint.proto || ''}-${endpoint.port || 0}-${endpoint.pid || 0}-${index}`} className="flex min-w-0 items-start justify-between gap-2">
+                <span className="min-w-0 break-all font-mono">
+                  {formatProtocolEndpoint(endpoint)}
+                  {reasonText && (
+                    <span className="ml-1.5 font-sans text-[9px] text-slate-400" title={`待核实原因代号: ${endpoint.reason}`}>
+                      ({reasonText})
+                    </span>
+                  )}
+                </span>
+                <span className={endpoint.status === '已阻断' ? 'shrink-0 text-emerald-300 font-semibold' : 'shrink-0 text-amber-300 font-semibold'}>{endpoint.status}</span>
+              </li>
+            );
+          })}
         </ul>
       )}
       {evidenceItems.length > 0 && (
