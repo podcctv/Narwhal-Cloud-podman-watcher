@@ -4,12 +4,13 @@
 
 ## 代码基线
 
-- 当前工作区已同步 `origin/main`（`9df501e`）并完成前端 UI/UX v2.0 全量重构，根目录 `VERSION` 更新为 `1.7.193`，静态构建产物已写入 `server/static/`。
-- 最新远端 `main` 的 GitHub Actions 已通过：[`ec054cf` 工作流](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41301153943)和[`3d961d1` 工作流](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41269287365)。这证明对应提交通过仓库 CI，不证明任何生产节点已经部署。
-- 本次工作仅涉及前端界面重构、静态资源构建与文档同步，未检查或修改生产主机。
+- 当前工作区已同步 `origin/main`（`1324206`），GitHub Actions 工作流 [`41410608515`](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41410608515) 已全部成功通过（包括 Python 全量测试、Playwright 浏览器回归、amd64/arm64 镜像构建与冒烟测试）。
+- 本次根目录 `VERSION` 更新为 `1.7.194`。
+- 本次工作仅涉及 CPU 保护底层错误信息透出、单测环境隔离修复与交接文档同步，未修改生产主机。
 
 ## 最近完成的工作
 
+- v1.7.194：CPU 保护告警标题为“持续高 CPU，保护需要检查”时，告警摘要及 `cpu_guard` 详情中透出底层实际错误原因（`last_error`），消除排查黑盒；修复 CI 单测偶发受 Runner 宿主机 `/proc/123/net/tcp` 干扰与升级测试整秒跳变问题。
 - v1.7.193：升级 `.agents/skills/narwhal-ui-design` v2.0 技能并结合 `modern-web-guidance`，统一全局设计 Token（`.ui-surface-card`、`.ui-btn-*`、`.ui-input`、`.ui-select`、`.ui-table-wrap`），重构顶栏、命令面板、登录页、总览、容器详情抽屉、告警历史、用户排查、统计分析、经营账本、运维中心、母机防火墙与系统设置视图，实现桌面端与手机端（`320px–1920px`）自适应及表格键盘无障碍滚动。
 - v1.7.192：在线容器列表和 KPI 排除过期快照；保留的快照单独用于离线/过期核查，不能当作当前容器操作目标。
 - v1.7.191：分别展示主机心跳与容器采样时间，避免把容器采样过期误说成主机离线。

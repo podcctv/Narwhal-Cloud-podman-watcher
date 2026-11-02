@@ -65,6 +65,29 @@ class ResourceProtectionPressureTests(unittest.TestCase):
         self.assertEqual(io_guard._psi_avg10(evidence, "host"), 4.2)
         self.assertEqual(io_guard._psi_avg10(evidence, "container"), 9.1)
 
+    def test_cpu_alert_surfaces_action_error_transparently(self):
+        container = {"runtime": "incus", "project": "default", "name": "c1"}
+        host_cpu = {"status": "ready", "busy_percent": 90, "psi": {}}
+        action = {"attempted": True, "succeeded": False, "message": "应用未成功"}
+        alert = cpu_guard._alert(
+            alert_type="cpu_pressure_protection",
+            container=container,
+            host_cpu=host_cpu,
+            cpu_percent=95.0,
+            effective_cpus=2.0,
+            threshold_percent=130.0,
+            high_samples=3,
+            required_samples=3,
+            duration=600,
+            process={"process": "stress"},
+            action=action,
+            instance_id="incus-c1",
+            error="无法读取 Incus 本地 CPU allowance",
+        )
+        self.assertIn("无法读取 Incus 本地 CPU allowance", alert["message"])
+        self.assertEqual(alert["cpu_guard"]["last_error"], "无法读取 Incus 本地 CPU allowance")
+        self.assertEqual(alert["title"], "持续高 CPU，保护需要检查")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -443,8 +443,9 @@ def _alert(
     limited = action.get("succeeded") is True
     restore_failed = action.get("restore_succeeded") is False
     top_process = process if isinstance(process, dict) else {}
-    if error:
-        message = "主机与容器 CPU 指标已连续达到保护条件，但节点未能确认 CPU 限额已生效；没有停止进程或容器。"
+    clean_error = str(error or "").strip()
+    if clean_error:
+        message = f"主机与容器 CPU 指标已连续达到保护条件，但节点未能确认 CPU 限额生效（{clean_error}）；没有停止进程或容器。"
     elif restore_failed:
         message = "容器 CPU 已回落，但原配额未能恢复；临时保护限额仍在生效，需要管理员检查。"
     else:
@@ -490,6 +491,7 @@ def _alert(
             "tier": max(1, min(3, int(tier or 1))),
             "tier_percent_of_original": {1: 50, 2: 25, 3: 10}.get(max(1, min(3, int(tier or 1)))),
             "restore_failed": restore_failed,
+            "last_error": clean_error,
             "reason_is_user_abuse": False,
         },
         "automatic_remediation": action,
@@ -591,7 +593,8 @@ def observe(
                     duration=max(0, timestamp - int(record.get("high_since") or timestamp)),
                     process=record.get("top_process") or {},
                     action=failed_action,
-                    instance_id=instance_id))
+                    instance_id=instance_id,
+                    error=record["last_error"]))
                 continue
 
             if record.get("stage") == "applying":

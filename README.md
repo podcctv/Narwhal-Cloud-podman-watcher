@@ -1,8 +1,14 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.193**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.194**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
+
+### v1.7.194：CPU 保护告警透出底层错误与 CI 隔离修复
+
+- CPU 保护告警标题为“持续高 CPU，保护需要检查”时，告警摘要及 `cpu_guard` 详情中透出底层实际错误原因（如 Incus/Podman 配置读取失败、配额命令报错、读回不一致或状态持久化错误），消除排查黑盒。
+- 修复 `tests/test_agent_runtimes.py` 在 CI Runner 偶发读取宿主机真实 `/proc/123/net/tcp` 连接导致测试失败的缺陷，显式 Mock 宿主机 proc 链路。
+- 修复 `tests/test_managed_upgrade.py` 中升级进程稳定判定因整秒边界跳变偶发超时的缺陷。
 
 ### v1.7.193：前端 UI/UX 设计系统 v2.0 与全端响应式重构
 
@@ -813,7 +819,8 @@ Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progre
 | v1.7.190 | 2026-11-01 | `a17a928` | Bump release version to 1.7.190 |
 | v1.7.191 | 2026-11-01 | `3d961d1` | Clarify host heartbeat and container sample status |
 | v1.7.192 | 2026-11-01 | `ec054cf` | Hide expired container snapshots from live lists |
-| v1.7.193 | 2026-11-02 | `working-tree` | Refactor frontend UI/UX design system v2.0 and responsive layouts |
+| v1.7.193 | 2026-11-02 | `ef64065` | Refactor frontend UI/UX design system v2.0 and responsive layouts |
+| v1.7.194 | 2026-11-02 | `working-tree` | Surface cpu guard last_error in alert messages and isolate CI runner proc |
 
 ## 主要能力
 
