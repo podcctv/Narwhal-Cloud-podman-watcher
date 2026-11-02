@@ -1,0 +1,32 @@
+# 项目概览
+
+更新基线：本次文档提交前，GitHub `main` 的运行时代码提交为 `ec054cf`，根目录 `VERSION` 为 `1.7.192`（2026-11-02）。提交历史与主要功能索引见 [README.md](README.md)。
+
+## 项目目标
+
+Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus 与 Docker 容器及主机状态，并提供告警、调查、受控保护和运维工作流。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
+
+## 组件与入口
+
+| 组件 | 主要入口 | 职责 |
+|---|---|---|
+| Server | `server/app.py`、`server/` | FastAPI API、身份与权限、SQLite 状态、告警/运维/策略/升级协调；由 `server/Dockerfile` 打包运行。 |
+| Client Agent | `client/agent.py`、`client/` | 安装在节点主机上的 Python Agent，采集运行时、资源、安全和网络证据，接收并执行受限动作。安装与升级脚本位于 `scripts/`。 |
+| Web UI | `frontend/src/` | React、TypeScript、Vite 前端。`frontend/vite.config.ts` 将构建产物写入 `server/static/`，Server 镜像使用这些静态文件。 |
+| 发布与检查 | `.github/workflows/`、`tests/` | 构建 GHCR 多架构镜像、前端构建、Python 单元/兼容性测试和浏览器回归。CI 定义以工作流文件为准。 |
+
+Server 与 Client 共用根目录的 `VERSION`。托管升级依赖固定的 Git 提交、版本匹配、Agent 健康报告和分批发布门禁；升级流程入口见 `server/fleet_updates.py`、`server/upgrade_health.py` 与 `docs/operations-runbook.md`。
+
+## 开发时的系统边界
+
+- 缺失、过期或身份不匹配的数据是“未知/待核实”，不能改写成健康、零值或容器当前状态。
+- 安全发现、保护动作、客户通知和处置回执是不同状态。通知成功不证明处置成功，保护信号也不能单独归因为客户滥用。
+- 网络隔离和防火墙操作必须限定到已核实的节点、运行时与规则归属；应用策略后还要核验读回结果。共享网络或无法证明隔离边界的情况应保留待人工处理状态。
+- 数据库恢复演练不得覆盖线上数据库；真实恢复按 `docs/operations-runbook.md` 的停服、备份和读回步骤执行。
+
+## 进一步阅读
+
+- 开发要求：[agent.md](agent.md) 与自动加载入口 [AGENTS.md](AGENTS.md)
+- 当前状态：[progress.md](progress.md)
+- 运维：[docs/operations-runbook.md](docs/operations-runbook.md)、[docs/operations-plan.md](docs/operations-plan.md)、[docs/operations-validation.md](docs/operations-validation.md)
+- 安全边界：[docs/abuse-network-quarantine.md](docs/abuse-network-quarantine.md)、[docs/host-security-audit.md](docs/host-security-audit.md)、[docs/vmess-protection.md](docs/vmess-protection.md)、[docs/user-investigation.md](docs/user-investigation.md)

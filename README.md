@@ -1,6 +1,30 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.186**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.192**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+
+Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
+
+### v1.7.192：在线列表隐藏过期容器快照
+
+- 总览在线列表、KPI 和容器告警定位只使用当前容器清单；过期快照保留在离线/过期核查区，不作为当前容器或动作目标。
+- 选中的容器不再属于当前清单时关闭详情，避免对过期实例继续操作。
+
+### v1.7.191：分别展示主机心跳与容器采样状态
+
+- 离线核查区分别展示主机心跳和容器采样时间/年龄，并区分主机在线、离线、心跳未知与采样过期。
+- 主机在线但容器采样过期时显示容器状态待确认，不再误称主机离线。
+
+### v1.7.189：修复隔离状态标签与过期告警保护
+
+- 修复违规隔离回归中的状态标签和过期安全告警保护，避免将过期状态当作当前结果。
+
+### v1.7.188：修复隔离目标替换复核与 Fleet 升级状态
+
+- 修复隔离目标变更后的复核状态，以及托管 Agent 升级失败结果在运维界面的显示。
+
+### v1.7.187：展示容器保护与违规状态
+
+- 容器总览卡片、表格和详情补充保护与违规状态；新增统一状态徽标组件，改善筛选和状态阅读。
 
 ### v1.7.186：让托管 Agent 更新绕过归档源故障
 
@@ -473,6 +497,316 @@
 - **面板登录保护**：Server 安装时随机生成 Web 用户名和密码，使用独立登录页与最长 12 小时的 HttpOnly 会话保护页面及管理 API；现有多用户与角色权限保持不变。
 - **部署方式**：Server 容器化 + Client 宿主机 Agent，支持一键安装与一键更新。
 - **多运行时发现**：默认 `auto` 自动发现全部已安装运行时，也可显式指定组合。
+
+## 更新历史索引（全版本）
+
+> 本索引逐条对应当前 HEAD 可达历史中全部 286 次根目录 `VERSION` 变更，覆盖 v1.0.0–v1.7.192。为便于直接追溯实现，保留 Git 提交原始标题和短 SHA；需要查看代码差异时可运行 `git show <SHA>`。版本文件建立前的 2026-04-14 初始化阶段简述如下。
+
+### v1.0.0 前：项目初始化（2026-04-14）
+
+- 建立 Server、Client 与宿主机 Agent，完成 Podman/Docker 指标采集、容器总览、统计图表、历史数据和在线排查工具。
+- 增加交互式安装、配置复用更新、卸载、GHCR 镜像构建/拉取，以及 Caddy HTTPS（域名、Cloudflare DNS Challenge、IP 内部证书）部署流程。
+- 持续修复 Podman 版本差异、主机指标回退、日志可见性、安装依赖与资源清理等初期兼容问题。
+
+### 版本阶段速览（便于 Agent 接手）
+
+- **v1.0.0–v1.6.74**：统一 Server/Client 版本与运维界面；扩展 Incus 监测、跨 NAT 入站来源归属、按需诊断、SOCKS 弱认证检测、可恢复处置、告警历史、自动更新和 Telegram/买家通知。
+- **v1.7.0–v1.7.43**：增加运维中心与调查记录、客户登录提示、TCPing 测量和运营商对比、商务视图、安全磁盘清理、可逆网络隔离及主机 RFW 策略。
+- **v1.7.44–v1.7.85**：完善入站准入和速率保护、IP 信誉证据、主机防火墙与审计、VMess 入站核验、容器服务清单、数据库保留/增长监测及恢复工作流。
+- **v1.7.86–v1.7.192**：上方列出这一阶段的重点变更，涵盖 GFW 探针覆盖、Agent 分批升级、PSI/cgroup 资源保护、规则内核读回、运维遥测和数据库备份恢复。
+
+具体设计边界与操作步骤见[运维运行手册](docs/operations-runbook.md)、[运维方案](docs/operations-plan.md)、[运维验证记录](docs/operations-validation.md)、[网络隔离说明](docs/abuse-network-quarantine.md)、[主机安全审计](docs/host-security-audit.md)、[VMess 入站保护](docs/vmess-protection.md)和[用户调查记录](docs/user-investigation.md)。
+
+### 逐版本提交索引
+
+| 版本 | 日期 | 提交 | Git 提交标题（原文） |
+|---|---|---|---|
+| v1.0.0 | 2026-08-25 | `6671e03` | feat: add unified versions and production operations UI |
+| v1.0.1 | 2026-08-25 | `cf6c37d` | fix: isolate metrics by client version |
+| v1.0.2 | 2026-08-25 | `ddd7e70` | fix: remediate Incus uid-map processes and network telemetry |
+| v1.0.3 | 2026-08-25 | `e74bacf` | fix: query Incus state with project parameter |
+| v1.0.4 | 2026-08-25 | `508abcf` | fix: use container shell in Incus namespace cleanup |
+| v1.0.5 | 2026-08-25 | `0c7b833` | feat: alert on inbound IP fanout and attribute sockets |
+| v1.0.6 | 2026-08-25 | `37144a3` | fix: decode proc IPv6 addresses for inbound telemetry |
+| v1.0.7 | 2026-08-25 | `afcd040` | feat: restore inbound sources across container NAT |
+| v1.0.8 | 2026-08-25 | `3bd2ce8` | fix: correlate proxied inbound IPs through DNAT |
+| v1.0.9 | 2026-08-25 | `04a25fb` | feat: attribute Incus network forwards to containers |
+| v1.0.10 | 2026-08-25 | `a6d414d` | feat: correlate user-space proxy sockets safely |
+| v1.0.11 | 2026-08-25 | `96e1313` | fix: normalize mapped IPv4 socket sources |
+| v1.1.0 | 2026-08-25 | `58de02f` | feat: add on-demand container diagnostics |
+| v1.2.0 | 2026-08-25 | `70902c6` | feat: detect weak SOCKS proxy authentication |
+| v1.3.0 | 2026-08-25 | `c998f3a` | feat: guard sustained container connection overloads |
+| v1.4.0 | 2026-08-26 | `a3eb078` | feat: enforce authenticated SOCKS access |
+| v1.5.0 | 2026-08-26 | `86806af` | fix: enforce server-first automatic updates |
+| v1.5.1 | 2026-08-26 | `1d37dee` | fix: allow client bootstrap with legacy servers |
+| v1.5.2 | 2026-08-26 | `5c8222c` | fix: clarify SOCKS enforcement controls |
+| v1.6.0 | 2026-08-26 | `69a47c3` | feat: add automatic abuse remediation and alert history |
+| v1.6.1 | 2026-08-26 | `f5ba747` | fix: make server container updates idempotent |
+| v1.6.2 | 2026-08-26 | `fd6e35b` | fix: replace tls proxy safely during server updates |
+| v1.6.3 | 2026-08-26 | `0b59f08` | fix: report concurrent server update lock waits |
+| v1.6.4 | 2026-08-26 | `1086468` | fix: prevent podman processes from inheriting deploy locks |
+| v1.6.5 | 2026-08-28 | `aff6ca5` | fix: avoid podman default 10.88.0.0/16 subnet conflict with host private NIC |
+| v1.6.6 | 2026-08-28 | `44794cd` | fix: actually remove the managing service on panel-pairing ban |
+| v1.6.7 | 2026-08-28 | `601f23a` | fix: avoid port-in-use race when replacing the Server container |
+| v1.6.8 | 2026-08-28 | `9ca998f` | fix: actively free a stale port-forwarder holding the Server port |
+| v1.6.9 | 2026-08-28 | `964cebf` | fix(install): reuse existing narwhal-monitor-net instead of rebuilding on update |
+| v1.6.10 | 2026-08-28 | `00ff0fa` | fix(install): fall back to a fresh free port when the configured backend port is wedged |
+| v1.6.11 | 2026-08-28 | `a7ac4d6` | fix(install): send resolve_free_server_port warning to stderr |
+| v1.6.12 | 2026-08-28 | `a367b76` | fix(install): keep port variable clean when freeing an occupied port |
+| v1.6.13 | 2026-08-28 | `f815662` | fix(auto-update): do not permanently refuse updates on a dirty working tree |
+| v1.6.14 | 2026-08-28 | `eaad9c8` | fix(install): sanitize backend port and harden auto-update self-recovery |
+| v1.6.15 | 2026-08-28 | `3d88aa2` | fix(install): create dedicated podman network reliably and silence awk warnings |
+| v1.6.16 | 2026-08-28 | `8b4dc74` | fix(install): prevent silent abort when Server container creation fails |
+| v1.6.17 | 2026-08-28 | `7fd6cf6` | fix(install): do not let `set -e` abort when dedicated network create fails |
+| v1.6.18 | 2026-08-28 | `31bb711` | fix(install): explicitly pull Caddy image before starting TLS proxy |
+| v1.6.19 | 2026-08-28 | `c9f8952` | fix(install): make Caddy config validation non-fatal on install |
+| v1.6.20 | 2026-08-28 | `9369208` | fix(install): do not abort install when Server version label mismatches script version |
+| v1.6.21 | 2026-08-28 | `b8556e4` | fix(install): robust Caddy image acquisition and visible TLS-proxy errors |
+| v1.6.22 | 2026-08-28 | `39262e9` | fix(deploy): make server updates transactional |
+| v1.6.23 | 2026-08-28 | `a2164ad` | fix(deploy): bypass proxies in local health checks |
+| v1.6.24 | 2026-08-28 | `a0789ca` | fix(deploy): validate IP TLS through public endpoint |
+| v1.6.25 | 2026-08-29 | `42a31e2` | fix(security): stop OpenRC panel supervisors reliably |
+| v1.6.26 | 2026-08-30 | `baadbb2` | perf(agent): bound security telemetry collection |
+| v1.6.27 | 2026-08-30 | `92bfbae` | fix(updater): isolate server container cgroups |
+| v1.6.28 | 2026-08-30 | `6c97d7d` | perf(server): bound sqlite retention work |
+| v1.6.29 | 2026-08-30 | `bb0e67f` | fix(updater): delegate podman conmon cgroups |
+| v1.6.30 | 2026-08-30 | `41221ec` | fix(updater): launch podman in transient scopes |
+| v1.6.31 | 2026-08-30 | `0e2c828` | fix(remediation): handle respawned panel services |
+| v1.6.32 | 2026-08-30 | `379fbb2` | fix(installer): wire both mode and discover Incus projects |
+| v1.6.33 | 2026-09-04 | `c853061` | chore(release): bump watcher version to 1.6.33 |
+| v1.6.34 | 2026-09-04 | `bec4118` | fix(runtime): restore fresh monitoring state and remediation |
+| v1.6.35 | 2026-09-04 | `1c50b6a` | fix(remediation): avoid matching the action shell |
+| v1.6.36 | 2026-09-06 | `c980c64` | fix(installer): preserve local work during bootstrap update |
+| v1.6.37 | 2026-09-06 | `467c232` | chore(release): bump watcher version to 1.6.37 |
+| v1.6.38 | 2026-09-06 | `1cb4494` | perf(ui): throttle dashboard refresh while hidden |
+| v1.6.39 | 2026-09-06 | `dffae93` | fix(ui): keep telemetry responsive without horizontal scrolling |
+| v1.6.40 | 2026-09-06 | `8787c49` | feat(telemetry): surface CC and DDoS signals |
+| v1.6.41 | 2026-09-08 | `08db94c` | feat: add alert bots and harden remediation |
+| v1.6.42 | 2026-09-08 | `515b3bb` | fix telemetry peak and remediation controls |
+| v1.6.43 | 2026-09-08 | `a7f3cb3` | delay sustained connection auto-stop |
+| v1.6.44 | 2026-09-08 | `fe76425` | fix Telegram notification delivery |
+| v1.6.45 | 2026-09-08 | `6862c89` | fix Telegram outbound connectivity fallback |
+| v1.6.46 | 2026-09-08 | `f40a2bc` | feat: support Telegram SOCKS5 proxy |
+| v1.6.47 | 2026-09-09 | `d3d796c` | fix Podman forwarding alongside Docker |
+| v1.6.48 | 2026-09-09 | `a27829d` | feat: add interactive Telegram alert console |
+| v1.6.49 | 2026-09-09 | `7ec7d6b` | fix: make Telegram refresh idempotent |
+| v1.6.50 | 2026-09-09 | `45cd0e2` | feat: keep Telegram alerts dynamically updated |
+| v1.6.51 | 2026-09-09 | `cde8c24` | feat: capture evidence for high connection alerts |
+| v1.6.52 | 2026-09-09 | `9f74799` | fix: backfill evidence for active connection alerts |
+| v1.6.53 | 2026-09-09 | `638b135` | fix: reject diagnostics for stale containers |
+| v1.6.54 | 2026-09-09 | `ab005a0` | fix: expire removed containers from dashboard |
+| v1.6.55 | 2026-09-09 | `0c1cfd1` | feat: enrich and separate diagnostic IP evidence |
+| v1.6.56 | 2026-09-10 | `7fb0f0f` | feat(telegram): format directional IP evidence by line |
+| v1.6.57 | 2026-09-10 | `c765e67` | feat(ui): standardize responsive security workflows |
+| v1.6.58 | 2026-09-10 | `2002a49` | feat(ui): improve mobile data views and notification controls |
+| v1.6.59 | 2026-09-10 | `9cecb3a` | feat(ui): replace mobile telemetry table with cards |
+| v1.6.60 | 2026-09-10 | `55f2684` | fix(dashboard): suppress stale container risk alerts |
+| v1.6.61 | 2026-09-10 | `730f997` | fix(telegram): notify automatic remediation outcomes |
+| v1.6.62 | 2026-09-10 | `7b77c2c` | fix(telemetry): align responsive cards with log sources and alert thresholds |
+| v1.6.63 | 2026-09-17 | `7c242f6` | fix: bound monitoring retention and automate weak-auth remediation |
+| v1.6.64 | 2026-09-18 | `adad659` | fix(telegram): fix push failures, proxy support, entity fallback, and status sync |
+| v1.6.65 | 2026-09-18 | `70d0413` | fix(ui): optimize interaction design, fix polling side effects and chart lifecycles, and harden cache invalidation (v1.6.65) |
+| v1.6.66 | 2026-09-20 | `a11cd3d` | fix(security): normalize weak SOCKS auth state |
+| v1.6.67 | 2026-09-20 | `d8ea046` | fix(security): fix Incus CC/HTTP access log collection and integrate Jev MCP (v1.6.67) |
+| v1.6.68 | 2026-09-20 | `e6e16a6` | feat(security): inject cyberpunk SSH MOTD alert banner into containers with self-healing (v1.6.68) |
+| v1.6.69 | 2026-09-20 | `28a4170` | feat(security): push critical container alerts to buyers via Narwhal API (v1.6.69) |
+| v1.6.70 | 2026-09-21 | `7df4408` | feat(settings): add unified settings view consolidating Narwhal API push and TG bot config (v1.6.70) |
+| v1.6.71 | 2026-09-21 | `23efce5` | feat(settings): clarify multi-node cluster push workflow and add server-side auto-dispatch (v1.6.71) |
+| v1.6.72 | 2026-09-21 | `903ab6b` | feat(ui): redesign frontend interaction with UI UX PRO standards and multi-density views (v1.6.72) |
+| v1.6.73 | 2026-09-21 | `28ab947` | chore(release): bump version to 1.6.73 |
+| v1.6.74 | 2026-09-23 | `421d268` | fix: integrate upstream 1.6.73 and harden remediation compatibility |
+| v1.7.0 | 2026-10-02 | `b709245` | feat: add bounded operations center with twelve workflows |
+| v1.7.1 | 2026-10-02 | `d6a4940` | feat: harden login banners and durable scoped buyer notifications |
+| v1.7.2 | 2026-10-02 | `7c7c40b` | fix: include security banner in containerized client |
+| v1.7.3 | 2026-10-02 | `7556554` | fix: identify buyer API requests for upstream compatibility |
+| v1.7.4 | 2026-10-02 | `5de478a` | fix(notifications): preserve evidence and alert on sustained bandwidth |
+| v1.7.5 | 2026-10-02 | `1c587cb` | feat(investigation): add bounded per-container alert history and buyer analysis |
+| v1.7.6 | 2026-10-02 | `684883b` | fix(investigation): retain production SOCKS authentication evidence |
+| v1.7.7 | 2026-10-08 | `b55d852` | feat(auth): replace browser prompt with standalone dashboard login |
+| v1.7.8 | 2026-10-09 | `9fda3c8` | feat: install adaptive Flanker login cards for monitored containers |
+| v1.7.9 | 2026-10-09 | `30d56db` | fix: route login banner writes to the exact container runtime |
+| v1.7.10 | 2026-10-09 | `0fd87c7` | fix: exclude notice-only Docker entries from upgrade scan health |
+| v1.7.11 | 2026-10-09 | `e31ad66` | feat: simplify customer banner and retain recovery history for seven days |
+| v1.7.12 | 2026-10-09 | `38e58de` | fix: retain legacy banner history without inventing recovery timestamps |
+| v1.7.13 | 2026-10-09 | `f4c3718` | feat: label recovered banner alerts as history with login-time age |
+| v1.7.14 | 2026-10-12 | `e4ce4a8` | fix: restore Incus remediation fallback and actionable receipts |
+| v1.7.15 | 2026-10-12 | `cd38c00` | fix: avoid killing microsocks with erased authentication arguments |
+| v1.7.16 | 2026-10-13 | `2763675` | feat: add private Narwhal commerce dashboard |
+| v1.7.17 | 2026-10-13 | `1d808f6` | fix: reconcile commerce ledger and clarify saved API key |
+| v1.7.18 | 2026-10-14 | `d5595fe` | feat: add public VPS-origin nationwide TCP measurement lab |
+| v1.7.19 | 2026-10-14 | `8e9735f` | feat: add Taiwan TCP target and synchronized geographic filters |
+| v1.7.20 | 2026-10-14 | `c866f5d` | fix: bound TCP worker allocator arenas on ARM64 |
+| v1.7.21 | 2026-10-14 | `833b535` | release: validate reversible abuse quarantine for v1.7.21 |
+| v1.7.22 | 2026-10-14 | `2dc8cd3` | fix: verify Podman PID1 abuse from kernel without guest tools in v1.7.22 |
+| v1.7.23 | 2026-10-15 | `6214fc1` | feat: add opt-in safe host and container disk cleanup in v1.7.23 |
+| v1.7.24 | 2026-10-15 | `6e577cb` | fix: synchronize TCPing sources after host rename in v1.7.24 |
+| v1.7.25 | 2026-10-15 | `3df1953` | Release v1.7.25 TCPing catalog and map updates |
+| v1.7.26 | 2026-10-15 | `4adb595` | Preserve custom TCPing target during server upgrades |
+| v1.7.27 | 2026-10-15 | `aae605e` | Refresh cached Taiwan target generation safely |
+| v1.7.28 | 2026-10-15 | `d69c66a` | Prefer migrated TCPing directory cache row |
+| v1.7.29 | 2026-10-15 | `a37a365` | feat: opt-in automatic TCPing source discovery in v1.7.29 |
+| v1.7.30 | 2026-10-15 | `b35064c` | fix: keep TCPing management responsive for long host names in v1.7.30 |
+| v1.7.31 | 2026-10-15 | `c873c8e` | feat: customer-friendly banners and responsive dashboard navigation in v1.7.31 |
+| v1.7.32 | 2026-10-15 | `6c5e847` | fix(socks): verify inbound auth and preserve internal proxy dependencies |
+| v1.7.33 | 2026-10-15 | `66aebc7` | fix: retry transient commerce sync failures with bounded backoff in v1.7.33 |
+| v1.7.34 | 2026-10-15 | `677cec8` | fix(socks): reject invalid ports and dynamically mixed process stops |
+| v1.7.35 | 2026-10-15 | `7d74af5` | fix: distinguish spending credit from available escrow in v1.7.35 |
+| v1.7.36 | 2026-10-15 | `40a9daa` | fix: auto-link TCPing stock from verified instance identities in v1.7.36 |
+| v1.7.37 | 2026-10-16 | `5eeffd7` | feat: compare TCPing carriers independently with linked maps in v1.7.37 |
+| v1.7.38 | 2026-10-16 | `85ee147` | fix: verify continuous connection protection and refresh evidence in v1.7.38 |
+| v1.7.39 | 2026-10-16 | `a4ce052` | feat: add private SOCKS password review and explicit user notices in v1.7.39 |
+| v1.7.40 | 2026-10-16 | `926847d` | feat: notify before 2000-connection five-minute shutdown and inventory standalone panels in v1.7.40 |
+| v1.7.41 | 2026-10-16 | `c4be4ea` | fix(protection): stop independently of notification and retain recovery duration |
+| v1.7.42 | 2026-10-17 | `81f2c00` | Add temporary Runman Incus TCP connection limits |
+| v1.7.43 | 2026-10-17 | `e700822` | feat(firewall): add per-host RFW policy management |
+| v1.7.44 | 2026-10-19 | `f7d867f` | feat(security): enforce five-source admission and sustained TCP caps |
+| v1.7.45 | 2026-10-19 | `303ad11` | fix(security): retry and verify admission rules across failures |
+| v1.7.46 | 2026-10-19 | `02cb34b` | fix(security): retain source-block evidence during TCP saturation |
+| v1.7.47 | 2026-10-19 | `e8511da` | fix(updates): resume automatic staged fleet upgrades after managed rollout |
+| v1.7.48 | 2026-10-19 | `0b5d632` | feat(security): improve attribution and abuse controls |
+| v1.7.49 | 2026-10-19 | `75f9279` | fix(fleet): resolve main revision from lightweight git ref |
+| v1.7.50 | 2026-10-19 | `072ebee` | fix(security): explain unverified network protection alerts |
+| v1.7.51 | 2026-10-19 | `39e0a48` | fix(alerts): avoid eager admission message lookup |
+| v1.7.52 | 2026-10-19 | `dee04b0` | feat(firewall): discover host interfaces and simplify controls |
+| v1.7.53 | 2026-10-20 | `c11ce74` | fix(firewall): support slash-containing host IDs |
+| v1.7.54 | 2026-10-20 | `339c24b` | feat(firewall): map container runtimes to discovered host NICs |
+| v1.7.55 | 2026-10-20 | `c3ec6a7` | feat(firewall): simplify node selection and status filters |
+| v1.7.56 | 2026-10-20 | `aed8309` | feat(security): auto-check inbound IP reputation |
+| v1.7.57 | 2026-10-20 | `7f338df` | fix(security): distinguish low-confidence AbuseIPDB reports |
+| v1.7.58 | 2026-10-20 | `f79cb08` | chore(release): bump version to 1.7.58 |
+| v1.7.59 | 2026-10-20 | `5e4718a` | feat(security): assess repeated inbound source behavior |
+| v1.7.60 | 2026-10-20 | `a2c52cc` | fix(server): include inbound assessment in runtime image |
+| v1.7.61 | 2026-10-20 | `aeb1327` | fix(admission): make source IP count observation-only |
+| v1.7.62 | 2026-10-20 | `41a5230` | fix(alerts): separate protection signals from user abuse |
+| v1.7.63 | 2026-10-21 | `4d5c5e2` | fix(ip-reputation): expose provider connectivity diagnostics |
+| v1.7.64 | 2026-10-21 | `b3ebf7b` | fix(security): surface reputation health and gate attribution |
+| v1.7.65 | 2026-10-21 | `9f5a71a` | fix(alerts): distinguish protection-only signals |
+| v1.7.66 | 2026-10-22 | `5cd8c32` | fix(security): remediate agent and frontend dependency advisories in v1.7.66 |
+| v1.7.67 | 2026-10-23 | `4f20748` | feat(firewall): safely delete manual RFW rules |
+| v1.7.68 | 2026-10-23 | `7fdb2a6` | feat(dashboard): show container service inventory |
+| v1.7.69 | 2026-10-23 | `ff2eb9c` | feat(security): limit container audits to SSH checks |
+| v1.7.70 | 2026-10-23 | `9dfe38e` | merge: include latest main RFW deletion support |
+| v1.7.71 | 2026-10-23 | `6aebd1d` | Merge remote-tracking branch 'origin/main' |
+| v1.7.72 | 2026-10-23 | `b2d152c` | fix: keep admission health out of security alerts |
+| v1.7.73 | 2026-10-23 | `98643e3` | feat: block verified VMess container inbounds |
+| v1.7.74 | 2026-10-23 | `8b0306f` | fix(vmess): release port rules after confirmed service removal |
+| v1.7.75 | 2026-10-23 | `f830f69` | fix(security): correlate VMess listeners and preserve RFW telemetry |
+| v1.7.76 | 2026-10-24 | `e803f2f` | fix(vmess): require exact listener evidence and preserve VLESS |
+| v1.7.77 | 2026-10-24 | `214aa70` | fix(vmess): ignore vanished host proc entries during scan |
+| v1.7.78 | 2026-10-24 | `525a831` | fix(vmess): keep inaccessible proc entries fail-closed |
+| v1.7.79 | 2026-10-24 | `ab57c96` | fix(telemetry): preserve host audit data in dashboard |
+| v1.7.80 | 2026-10-24 | `2456bd7` | feat(dashboard): clarify host audit remediation |
+| v1.7.81 | 2026-10-24 | `9465dff` | feat(ops): complete evidence and recovery loops |
+| v1.7.82 | 2026-10-24 | `72c5779` | feat(ops): complete safe recovery and alert workflows |
+| v1.7.83 | 2026-10-26 | `43ae3fa` | feat(ops): add bounded database growth telemetry and CI audits |
+| v1.7.84 | 2026-10-26 | `6b20899` | fix(deps): upgrade vulnerable FastAPI stack |
+| v1.7.85 | 2026-10-26 | `5cfb0c6` | fix(build): include database telemetry in server image |
+| v1.7.86 | 2026-10-26 | `654c171` | chore: release v1.7.86 with updated notes |
+| v1.7.87 | 2026-10-27 | `4189170` | fix: recover stalled fleet rollout and add bandwidth controls |
+| v1.7.88 | 2026-10-27 | `3818c9b` | fix: enqueue managed agent updates asynchronously |
+| v1.7.89 | 2026-10-27 | `7f0f4b4` | fix: reclaim stale fleet upgrade actions |
+| v1.7.90 | 2026-10-27 | `aa77d1f` | fix: show offline hosts and detect runtime bridges |
+| v1.7.91 | 2026-10-27 | `9281a85` | feat(cpu): add reversible sustained-load protection |
+| v1.7.92 | 2026-10-27 | `9df6f97` | fix(cpu): preserve existing security alert contract |
+| v1.7.93 | 2026-10-27 | `0e7bb2f` | fix(client): restore missing Incus metrics module |
+| v1.7.94 | 2026-10-27 | `9fd0e57` | chore(release): bump to 1.7.94 |
+| v1.7.95 | 2026-10-27 | `0764523` | feat(bandwidth): add per-interface graduated container limits |
+| v1.7.96 | 2026-10-27 | `3d04cff` | fix(firewall): clarify scopes and Runman diagnostics |
+| v1.7.97 | 2026-10-27 | `d4315d2` | chore(release): bump version for firewall update |
+| v1.7.98 | 2026-10-27 | `db45440` | fix(bandwidth): avoid tc priority conflicts and show active limits |
+| v1.7.99 | 2026-10-27 | `254113e` | fix(bandwidth): keep saved limiter state JSON safe |
+| v1.7.100 | 2026-10-27 | `29b90fb` | fix(bandwidth): update owned policers safely |
+| v1.7.101 | 2026-10-27 | `30d6021` | fix(security): verify targeted remediation receipts |
+| v1.7.102 | 2026-10-27 | `7c5b9e6` | feat(api): expose exact container owner lookup |
+| v1.7.103 | 2026-10-27 | `da710b5` | fix(forensics): preserve unknown connection evidence |
+| v1.7.104 | 2026-10-27 | `3f31e95` | feat(gfw): track China reachability and proxy ports |
+| v1.7.105 | 2026-10-27 | `aee7b31` | fix(client): preserve managed updater packaging checks |
+| v1.7.106 | 2026-10-27 | `5f3f6b4` | fix(server): include GFW monitor in image |
+| v1.7.107 | 2026-10-27 | `7f2ea4d` | fix(evidence): distinguish missing socket samples from zero |
+| v1.7.108 | 2026-10-27 | `9e056dd` | feat(dashboard): surface GFW and protocol port cards |
+| v1.7.109 | 2026-10-27 | `e9d7a29` | fix(firewall): gate protocols by live RFW capability |
+| v1.7.110 | 2026-10-27 | `6016950` | chore(release): bump to 1.7.110 |
+| v1.7.111 | 2026-10-28 | `5e35b3e` | feat(probes): allow installs without container runtime |
+| v1.7.112 | 2026-10-28 | `5aaf6e7` | fix(agent): redact shared secret from install summary |
+| v1.7.113 | 2026-10-28 | `49afd90` | feat: refine firewall, bandwidth, and VMess evidence |
+| v1.7.114 | 2026-10-28 | `0bd61fd` | fix(firewall): expose RFW readback failure reasons |
+| v1.7.115 | 2026-10-28 | `f1ff16b` | fix(agent): harden isolation and VMess evidence |
+| v1.7.116 | 2026-10-28 | `40c57a5` | feat(agent): add CPU and I/O protection ladders |
+| v1.7.117 | 2026-10-28 | `72268a2` | fix(gfw): restore probe jobs and explain VMess pending states |
+| v1.7.118 | 2026-10-28 | `559a890` | fix(agent): bootstrap managed updates on archive installs |
+| v1.7.119 | 2026-10-28 | `d6227e2` | fix(agent): repair VMess evidence and probe updates |
+| v1.7.120 | 2026-10-28 | `cf354e8` | fix(agent): resolve pending VMess evidence and upgrade health gate |
+| v1.7.121 | 2026-10-28 | `afd5711` | fix(release): package shared upgrade health module |
+| v1.7.122 | 2026-10-28 | `96bfdb9` | fix(vmess): tolerate bounded runtime clock sample latency |
+| v1.7.123 | 2026-10-28 | `206310f` | fix(updates): reclaim stale terminal upgrade slots |
+| v1.7.124 | 2026-10-28 | `2fae28a` | fix(agent): allow slow Incus VMess clock sampling |
+| v1.7.125 | 2026-10-28 | `e33a1fc` | fix(agent): diagnose incomplete VMess clock evidence |
+| v1.7.126 | 2026-10-28 | `dc87e65` | fix(agent): reconcile VMess process time namespaces |
+| v1.7.127 | 2026-10-28 | `55f6227` | fix(agent): use reader clock for VMess verification |
+| v1.7.128 | 2026-10-28 | `c872b8c` | chore(release): bump version to 1.7.128 |
+| v1.7.129 | 2026-10-28 | `c7b0d87` | fix(agent): normalize VMess process clocks across time namespaces |
+| v1.7.130 | 2026-10-29 | `4a8413d` | feat(agent): block confirmed Trojan inbound ports |
+| v1.7.131 | 2026-10-29 | `61216c8` | chore(release): bump version to 1.7.131 |
+| v1.7.132 | 2026-10-29 | `b21c34b` | feat: add scoped speed-test restrictions |
+| v1.7.133 | 2026-10-29 | `9bddc71` | fix: resolve firewall runtime selectors before validation |
+| v1.7.134 | 2026-10-29 | `61ad686` | fix: keep firewall node policy normalized |
+| v1.7.135 | 2026-10-29 | `3fd43cb` | fix(agent): package speedtest guard for managed updates |
+| v1.7.136 | 2026-10-29 | `375ed44` | fix(agent): complete speedtest guard packaging |
+| v1.7.137 | 2026-10-29 | `6fa7dac` | fix: enable default protection selections |
+| v1.7.138 | 2026-10-29 | `7a41b02` | fix: default speedtest protection to container runtimes |
+| v1.7.139 | 2026-10-29 | `f827f58` | fix: publish container runtime scope defaults |
+| v1.7.140 | 2026-10-29 | `ce2419f` | feat: auto-apply speedtest protection to containers |
+| v1.7.142 | 2026-10-29 | `3690ff6` | fix(security): notify on actual speedtest blocks |
+| v1.7.143 | 2026-10-29 | `150a290` | fix(agent): preserve legacy SOCKS evidence shape |
+| v1.7.144 | 2026-10-29 | `b392ee9` | fix(agent): scope port evidence to vmess and trojan |
+| v1.7.145 | 2026-10-29 | `b226b13` | fix(gfw): discover public container tcp targets |
+| v1.7.146 | 2026-10-29 | `790efd7` | feat(gfw): rotate daily container endpoint samples |
+| v1.7.147 | 2026-10-29 | `6440163` | fix(dashboard): hide speedtest events from active alerts |
+| v1.7.148 | 2026-10-29 | `88dfa76` | fix(owner): sync upstream VM emails into monitor |
+| v1.7.149 | 2026-10-29 | `9d9d2fd` | chore(release): bump monitor to 1.7.149 |
+| v1.7.150 | 2026-10-29 | `d1e219f` | fix(owner): explain stale upstream email mappings |
+| v1.7.151 | 2026-10-29 | `2b5c23d` | fix(owner): explain disabled upstream mappings |
+| v1.7.152 | 2026-10-29 | `071fc05` | fix: auto-discover gfw endpoints and protect protocol ports |
+| v1.7.153 | 2026-10-29 | `655933a` | fix: read Podman protocol configs reliably |
+| v1.7.154 | 2026-10-29 | `72c984d` | feat: improve protection evidence and resource guard status |
+| v1.7.155 | 2026-10-29 | `f3e9137` | feat(gfw): expose probe evidence and coverage |
+| v1.7.156 | 2026-10-29 | `0bd1393` | feat: complete six monitoring optimizations v1.7.156 |
+| v1.7.157 | 2026-10-29 | `b131806` | fix: preserve telemetry compatibility v1.7.157 |
+| v1.7.158 | 2026-10-29 | `1bdcbae` | feat: add recoverable memory pressure protection |
+| v1.7.159 | 2026-10-29 | `8039ccb` | feat(updates): gate agent rollout on staged health |
+| v1.7.160 | 2026-10-29 | `2356bf7` | feat(gfw): diagnose probe coverage readiness |
+| v1.7.161 | 2026-10-29 | `cc2a61c` | feat(resources): gate CPU and IO protection on PSI |
+| v1.7.162 | 2026-10-29 | `7b8e686` | feat: improve ops telemetry and delivery visibility |
+| v1.7.163 | 2026-10-30 | `9a15687` | feat: close control reconciliation and operations gaps |
+| v1.7.164 | 2026-10-30 | `7561552` | fix(docker): include control reconciliation module |
+| v1.7.165 | 2026-10-30 | `e220676` | fix: reconcile resource controls and trim map bundle |
+| v1.7.166 | 2026-10-30 | `c217683` | fix: guard backup and restore drills against low disk space |
+| v1.7.167 | 2026-10-30 | `3173ab3` | fix: run backup drills on the data volume |
+| v1.7.168 | 2026-10-30 | `5011d77` | fix: unblock managed agent upgrade rollout |
+| v1.7.169 | 2026-10-30 | `defff29` | feat(tcping): redesign test and results workflow |
+| v1.7.170 | 2026-10-30 | `ab1162b` | fix(resources): resolve container cgroup boundaries |
+| v1.7.171 | 2026-10-30 | `24ecbce` | fix(tcping): preserve source card height |
+| v1.7.172 | 2026-10-30 | `c9f80ff` | fix(release): ship rebuilt frontend assets |
+| v1.7.173 | 2026-10-30 | `15dfe09` | fix(release): stage frontend assets in image |
+| v1.7.174 | 2026-10-30 | `151da74` | fix(release): build frontend into server static assets |
+| v1.7.175 | 2026-10-30 | `0390c54` | fix(tcping): give host list responsive height |
+| v1.7.176 | 2026-10-30 | `50caecc` | fix(tcping): increase host picker height |
+| v1.7.177 | 2026-10-30 | `a674bf1` | fix(tcping): keep host source cards readable |
+| v1.7.178 | 2026-10-30 | `21cbd69` | fix(tcping): improve tablet host list layout |
+| v1.7.179 | 2026-10-30 | `9605cb0` | feat(gfw): auto-discover and verify public TCP endpoints |
+| v1.7.180 | 2026-10-30 | `e4ee871` | chore(release): bump GFW monitoring to 1.7.180 |
+| v1.7.181 | 2026-10-30 | `fe2f38c` | feat(gfw): show host reachability history timeline |
+| v1.7.182 | 2026-10-30 | `5c5749d` | feat(firewall): separate RFW and container protection status |
+| v1.7.183 | 2026-10-30 | `e9f3d48` | fix(gfw): verify proxied probe source identity |
+| v1.7.184 | 2026-10-30 | `a35acb3` | fix(gfw): preserve Cloudflare range boundaries |
+| v1.7.185 | 2026-10-30 | `a76b272` | fix(gfw): diagnose family-specific probe paths |
+| v1.7.186 | 2026-10-31 | `b5140d9` | fix(agent): add verified archive fallback for managed updates |
+| v1.7.187 | 2026-10-31 | `60f329b` | feat(ui): surface container guard and violation states |
+| v1.7.188 | 2026-11-01 | `a6ac61e` | Fix quarantine replacement review and fleet upgrade status |
+| v1.7.189 | 2026-11-01 | `5fa6073` | Fix quarantine regression labels and stale alert guard |
+| v1.7.190 | 2026-11-01 | `a17a928` | Bump release version to 1.7.190 |
+| v1.7.191 | 2026-11-01 | `3d961d1` | Clarify host heartbeat and container sample status |
+| v1.7.192 | 2026-11-01 | `ec054cf` | Hide expired container snapshots from live lists |
 
 ## 主要能力
 
