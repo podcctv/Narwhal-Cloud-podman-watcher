@@ -1309,6 +1309,8 @@ class SecurityTelemetryTests(unittest.TestCase):
              mock.patch.object(agent.time, "sleep"), \
              mock.patch.object(agent, "_collect_deep_process_snapshot", return_value={"available": True, "captured": 2, "items": []}), \
              mock.patch.object(agent, "_collect_socket_process_details", return_value=communication), \
+             mock.patch.object(agent, "_collect_host_proc_process_snapshot", return_value=({"available": False, "captured": 0, "truncated": False, "items": []}, [])), \
+             mock.patch.object(agent, "_collect_host_proc_socket_details", return_value={"communication_detail_available": False, "communication_sockets": [], "communication_processes": []}), \
              mock.patch.object(agent, "_enrich_communication_with_original_sources"), \
              mock.patch.object(agent, "_geoip_detail_map", return_value={
                  "1.1.1.1": {"country": "AU", "city": "Sydney", "isp": "Cloudflare", "asn": "13335"},
@@ -1350,14 +1352,16 @@ class SecurityTelemetryTests(unittest.TestCase):
             "communication_snapshot_truncated": False,
             "communication_processes": [{"pid": 20, "process": "sing-box", "inbound_connections": 1, "outbound_connections": 1}],
             "communication_sockets": [
-                {"remote_ip": "10.91.0.1", "direction": "inbound", "process": "sing-box"},
-                {"remote_ip": "8.8.8.8", "direction": "outbound", "process": "sing-box"},
+                {"remote_ip": "10.91.0.1", "direction": "inbound", "process": "sing-box", "pid": 20},
+                {"remote_ip": "8.8.8.8", "direction": "outbound", "process": "sing-box", "pid": 20},
             ],
         }
         with mock.patch.object(agent, "_read_net_stats_from_pid", return_value=(0, 0, 0, 0)), \
              mock.patch.object(agent.time, "sleep"), \
              mock.patch.object(agent, "_collect_deep_process_snapshot", return_value={"available": True, "captured": 1, "items": []}), \
              mock.patch.object(agent, "_collect_socket_process_details", return_value=communication), \
+             mock.patch.object(agent, "_collect_host_proc_process_snapshot", return_value=({"available": False, "captured": 0, "truncated": False, "items": []}, [])), \
+             mock.patch.object(agent, "_collect_host_proc_socket_details", return_value={"communication_detail_available": False, "communication_sockets": [], "communication_processes": []}), \
              mock.patch.object(agent, "_enrich_communication_with_original_sources"), \
              mock.patch.object(agent, "_geoip_detail_map", return_value={"8.8.8.8": {"country": "US"}}), \
              mock.patch.object(agent, "_geoip_country_batch", return_value=[]):

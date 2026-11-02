@@ -102,7 +102,7 @@ exit 2
             script=root/"worker.sh"
             source=(ROOT/"scripts"/"managed-client-update.sh").read_text(encoding="utf-8")
             source=source.replace("/opt/narwhal-monitor",str(base)).replace("/run/narwhal-monitor-client-auto-update.lock",str(root/"auto-update.lock"))
-            source=source.replace("local timeout_seconds=45 stable_seconds=15","local timeout_seconds=3 stable_seconds=1")
+            source=source.replace("local timeout_seconds=45 stable_seconds=15","local timeout_seconds=6 stable_seconds=1").replace("sleep 2","sleep 1")
             script.write_text(source)
             env={**os.environ,"PATH":str(bins)+os.pathsep+os.environ["PATH"]}
             result=subprocess.run(["bash",str(script),"upgrade","a"*40,"1.7.0","17"],env=env,text=True,capture_output=True,timeout=30)
