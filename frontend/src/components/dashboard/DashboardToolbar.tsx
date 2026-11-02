@@ -92,11 +92,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'all'}
               onClick={() => onFilterStateChange('all')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
-                filterState === 'all'
-                  ? 'border-sky-500/50 bg-sky-500/20 text-sky-200 shadow-xs'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${filterState === 'all'
+                ? 'border-sky-500/50 bg-sky-500/20 text-sky-200 shadow-xs'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
+                }`}
             >
               <span>全部</span>
               <span className="rounded-full bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-300 tabular-nums">
@@ -109,11 +108,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'protection'}
               onClick={() => onFilterStateChange('protection')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
-                filterState === 'protection'
-                  ? 'border-sky-500/50 bg-sky-500/20 text-sky-200 shadow-xs'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-sky-200'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${filterState === 'protection'
+                ? 'border-sky-500/50 bg-sky-500/20 text-sky-200 shadow-xs'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-sky-200'
+                }`}
             >
               <ShieldCheck className="h-3.5 w-3.5" />
               <span>资源与保护</span>
@@ -125,11 +123,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'protocol'}
               onClick={() => onFilterStateChange('protocol')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${
-                filterState === 'protocol'
-                  ? 'border-violet-500/50 bg-violet-500/20 text-violet-200 shadow-xs'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-violet-200'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${filterState === 'protocol'
+                ? 'border-violet-500/50 bg-violet-500/20 text-violet-200 shadow-xs'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-violet-200'
+                }`}
             >
               <ShieldCheck className="h-3.5 w-3.5" />
               <span>协议阻断</span>
@@ -141,18 +138,16 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'risk'}
               onClick={() => onFilterStateChange('risk')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 ${
-                filterState === 'risk'
-                  ? 'border-rose-500/50 bg-rose-500/20 text-rose-200 shadow-xs shadow-rose-950/50'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-rose-300'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 ${filterState === 'risk'
+                ? 'border-rose-500/50 bg-rose-500/20 text-rose-200 shadow-xs shadow-rose-950/50'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-rose-300'
+                }`}
             >
               <AlertTriangle className={`h-3.5 w-3.5 ${counts.risk > 0 ? 'text-rose-400' : 'text-slate-500'}`} />
               <span>异常风险</span>
               <span
-                className={`rounded-full px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${
-                  counts.risk > 0 ? 'bg-rose-900/60 font-bold text-rose-300' : 'bg-slate-800 text-slate-400'
-                }`}
+                className={`rounded-full px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${counts.risk > 0 ? 'bg-rose-900/60 font-bold text-rose-300' : 'bg-slate-800 text-slate-400'
+                  }`}
               >
                 {counts.risk}
               </span>
@@ -163,11 +158,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'stale'}
               onClick={() => onFilterStateChange('stale')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${
-                filterState === 'stale'
-                  ? 'border-amber-500/50 bg-amber-500/20 text-amber-200 shadow-xs'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-amber-200'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${filterState === 'stale'
+                ? 'border-amber-500/50 bg-amber-500/20 text-amber-200 shadow-xs'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-amber-200'
+                }`}
             >
               <Clock3 className="h-3.5 w-3.5" />
               <span>离线主机 / 旧快照</span>
@@ -179,18 +173,16 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'hy2'}
               onClick={() => onFilterStateChange('hy2')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${
-                filterState === 'hy2'
-                  ? 'border-violet-500/50 bg-violet-500/20 text-violet-200 shadow-xs shadow-violet-950/50'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-violet-300'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${filterState === 'hy2'
+                ? 'border-violet-500/50 bg-violet-500/20 text-violet-200 shadow-xs shadow-violet-950/50'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-violet-300'
+                }`}
             >
               <Radio className={`h-3.5 w-3.5 ${counts.hy2 > 0 ? 'text-violet-400' : 'text-slate-500'}`} />
               <span>HY2 代理</span>
               <span
-                className={`rounded-full px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${
-                  counts.hy2 > 0 ? 'bg-violet-900/60 font-bold text-violet-300' : 'bg-slate-800 text-slate-400'
-                }`}
+                className={`rounded-full px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${counts.hy2 > 0 ? 'bg-violet-900/60 font-bold text-violet-300' : 'bg-slate-800 text-slate-400'
+                  }`}
               >
                 {counts.hy2}
               </span>
@@ -201,18 +193,16 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'imbalance'}
               onClick={() => onFilterStateChange('imbalance')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${
-                filterState === 'imbalance'
-                  ? 'border-amber-500/50 bg-amber-500/20 text-amber-200 shadow-xs shadow-amber-950/50'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-amber-300'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${filterState === 'imbalance'
+                ? 'border-amber-500/50 bg-amber-500/20 text-amber-200 shadow-xs shadow-amber-950/50'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-amber-300'
+                }`}
             >
               <ArrowUpDown className={`h-3.5 w-3.5 ${counts.imbalance > 0 ? 'text-amber-400' : 'text-slate-500'}`} />
               <span>流量失衡</span>
               <span
-                className={`rounded-full px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${
-                  counts.imbalance > 0 ? 'bg-amber-900/60 font-bold text-amber-300' : 'bg-slate-800 text-slate-400'
-                }`}
+                className={`rounded-full px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${counts.imbalance > 0 ? 'bg-amber-900/60 font-bold text-amber-300' : 'bg-slate-800 text-slate-400'
+                  }`}
               >
                 {counts.imbalance}
               </span>
@@ -223,11 +213,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'healthy'}
               onClick={() => onFilterStateChange('healthy')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-emerald-400 ${
-                filterState === 'healthy'
-                  ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-200 shadow-xs'
-                  : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-emerald-300'
-              }`}
+              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-emerald-400 ${filterState === 'healthy'
+                ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-200 shadow-xs'
+                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-emerald-300'
+                }`}
             >
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
               <span>正常</span>
@@ -275,11 +264,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={viewMode === 'grid'}
               onClick={() => onViewModeChange('grid')}
-              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
-                viewMode === 'grid'
-                  ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
+              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${viewMode === 'grid'
+                ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
+                : 'text-slate-400 hover:text-slate-200'
+                }`}
               title="高密网格 (Pro Grid · 紧凑卡片)"
             >
               <LayoutGrid className="h-3.5 w-3.5" />
@@ -290,11 +278,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={viewMode === 'table'}
               onClick={() => onViewModeChange('table')}
-              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
-                viewMode === 'table'
-                  ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
+              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${viewMode === 'table'
+                ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
+                : 'text-slate-400 hover:text-slate-200'
+                }`}
               title="数据表格 (Data Table · 超高密度列表)"
             >
               <TableIcon className="h-3.5 w-3.5" />
@@ -305,11 +292,10 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={viewMode === 'detailed'}
               onClick={() => onViewModeChange('detailed')}
-              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
-                viewMode === 'detailed'
-                  ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
+              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${viewMode === 'detailed'
+                ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
+                : 'text-slate-400 hover:text-slate-200'
+                }`}
               title="拓扑卡片 (Detailed · 宽体卡片)"
             >
               <Layers className="h-3.5 w-3.5" />

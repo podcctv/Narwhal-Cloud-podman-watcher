@@ -61,22 +61,20 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
             onFilterAlerts();
           }
         }}
-        className={`relative cursor-pointer overflow-hidden rounded-2xl border p-4 shadow-xs transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${
-          activeAlerts > 0
-            ? 'border-rose-500/45 bg-linear-to-b from-rose-950/35 to-slate-900/90 hover:border-rose-400/80 hover:shadow-glow-rose'
-            : 'ui-surface-card hover:border-slate-600/90'
-        }`}
+        className={`relative cursor-pointer overflow-hidden rounded-2xl border p-4 shadow-xs transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 ${activeAlerts > 0
+          ? 'border-rose-500/45 bg-linear-to-b from-rose-950/35 to-slate-900/90 hover:border-rose-400/80 hover:shadow-glow-rose'
+          : 'ui-surface-card hover:border-slate-600/90'
+          }`}
       >
         <div className="flex items-center justify-between gap-2">
           <span className={`text-xs font-medium ${activeAlerts > 0 ? 'text-rose-200' : 'text-slate-300'}`}>
             活动安全告警
           </span>
           <div
-            className={`rounded-xl border p-2 ${
-              activeAlerts > 0
-                ? 'border-rose-500/35 bg-rose-950/80 text-rose-400'
-                : 'border-slate-700/60 bg-slate-800/80 text-slate-400'
-            }`}
+            className={`rounded-xl border p-2 ${activeAlerts > 0
+              ? 'border-rose-500/35 bg-rose-950/80 text-rose-400'
+              : 'border-slate-700/60 bg-slate-800/80 text-slate-400'
+              }`}
           >
             <AlertTriangle className="h-4 w-4" />
           </div>
@@ -84,9 +82,8 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
         <div className="mt-2.5 flex items-baseline justify-between gap-2">
           <div className="flex items-baseline gap-2">
             <span
-              className={`font-mono text-2xl font-extrabold tracking-tight tabular-nums sm:text-3xl ${
-                activeAlerts > 0 ? 'text-rose-400' : 'text-slate-100'
-              }`}
+              className={`font-mono text-2xl font-extrabold tracking-tight tabular-nums sm:text-3xl ${activeAlerts > 0 ? 'text-rose-400' : 'text-slate-100'
+                }`}
             >
               {activeAlerts}
             </span>
@@ -110,9 +107,8 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
         </div>
         <div className="mt-2.5 flex items-baseline gap-2">
           <span
-            className={`font-mono text-2xl font-extrabold tracking-tight tabular-nums sm:text-3xl ${
-              hiddenStaleSnapshots > 0 ? 'text-amber-400' : 'text-slate-100'
-            }`}
+            className={`font-mono text-2xl font-extrabold tracking-tight tabular-nums sm:text-3xl ${hiddenStaleSnapshots > 0 ? 'text-amber-400' : 'text-slate-100'
+              }`}
           >
             {hiddenStaleSnapshots}
           </span>
