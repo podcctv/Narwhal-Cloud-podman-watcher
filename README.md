@@ -1,8 +1,14 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.192**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.193**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
+
+### v1.7.193：前端 UI/UX 设计系统 v2.0 与全端响应式重构
+
+- 建立 `narwhal-ui-design` v2.0 视觉与交互规范，统一全局表面层级（`.ui-surface-card`、`.ui-surface-subcard`、`.ui-toolbar-bar`）、按钮层级（`.ui-btn-primary` / `secondary` / `neutral` / `danger` / `sm`）与表单输入规范（`.ui-input`、`.ui-select`）。
+- 梳理并重构顶栏导航、登录页、容器总览、详情抽屉、告警历史、用户排查、统计分析（新增 1h/6h/12h/24h/7d 快捷时间窗）、经营账本、运维中心（14 分区响应式导航栅格）、母机防火墙与系统设置视图。
+- 全面兼容桌面端、平板端与手机端（`320px–1920px` 零横向溢出、主操作区 `>=44px` 触控热区、`dvh` 动态视口高度），并为所有数据表格容器补充 `tabIndex={0}` 与 `role="region"` 键盘无障碍横向滚动支持。
 
 ### v1.7.192：在线列表隐藏过期容器快照
 
@@ -807,6 +813,7 @@ Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progre
 | v1.7.190 | 2026-11-01 | `a17a928` | Bump release version to 1.7.190 |
 | v1.7.191 | 2026-11-01 | `3d961d1` | Clarify host heartbeat and container sample status |
 | v1.7.192 | 2026-11-01 | `ec054cf` | Hide expired container snapshots from live lists |
+| v1.7.193 | 2026-11-02 | `working-tree` | Refactor frontend UI/UX design system v2.0 and responsive layouts |
 
 ## 主要能力
 

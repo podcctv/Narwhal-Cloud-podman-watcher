@@ -108,17 +108,17 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
   if (alerts.length === 0) {
     return (
-      <section className="mb-6 rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-5 backdrop-blur-xs">
-        <div className="flex items-center justify-between">
+      <section className="mb-6 rounded-2xl border border-emerald-500/25 bg-emerald-950/20 p-4 backdrop-blur-xs sm:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="rounded-xl bg-emerald-500/10 p-2.5 text-emerald-400 border border-emerald-500/30">
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-emerald-400">
               <ShieldCheck className="h-5 w-5" />
             </div>
             <div>
               <h2 className="text-sm font-bold text-emerald-300">
                 当前没有新的活动安全告警
               </h2>
-              <p className="text-xs text-emerald-400/80">
+              <p className="mt-0.5 text-xs text-emerald-400/80">
                 已隔离事件仍需单独复核；没有告警不代表已覆盖所有加密业务行为。
               </p>
             </div>
@@ -126,7 +126,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           <button
             type="button"
             onClick={onViewAllHistory}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+            className="flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-white"
           >
             <span>查看处置历史</span>
             <ExternalLink className="h-3 w-3" />
@@ -137,20 +137,20 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   }
 
   return (
-    <section className="mb-6 rounded-2xl border border-rose-500/30 bg-slate-900/90 shadow-xl overflow-hidden backdrop-blur-xs">
+    <section className="mb-6 overflow-hidden rounded-2xl border border-rose-500/35 bg-slate-900/92 shadow-xl backdrop-blur-xs">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/60 px-5 py-3.5">
-        <div className="flex items-center gap-2.5">
-          <div className="rounded-lg bg-rose-950/80 p-1.5 text-rose-400 border border-rose-500/40">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/75 px-4 py-3.5 sm:px-5">
+        <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+          <div className="rounded-lg border border-rose-500/40 bg-rose-950/80 p-1.5 text-rose-400">
             <ShieldAlert className="h-4 w-4" />
           </div>
-          <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+          <h2 className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-100">
             <span>安全告警中心</span>
-            <span className="rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/40 px-2 py-0.2 text-[11px] font-mono font-bold">
+            <span className="rounded-full border border-rose-500/40 bg-rose-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-rose-300 tabular-nums">
               {alerts.length} 项安全提醒
             </span>
             {protectionOnlyCount > 0 && (
-              <span className="rounded-full border border-sky-500/30 bg-sky-950/50 px-2 py-0.5 text-[10px] font-medium text-sky-200">
+              <span className="rounded-full border border-sky-500/35 bg-sky-950/55 px-2 py-0.5 text-[10px] font-medium text-sky-200 tabular-nums">
                 {protectionOnlyCount} 项仅保护 · 不计用户滥用
               </span>
             )}
@@ -160,7 +160,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
         <button
           type="button"
           onClick={onViewAllHistory}
-          className="flex items-center gap-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-colors"
+          className="flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-950/35 px-3 py-1.5 text-xs font-semibold text-sky-300 transition-colors hover:border-sky-400/50 hover:bg-sky-950/60 hover:text-sky-200"
         >
           <span>查看全部告警记录</span>
           <ExternalLink className="h-3.5 w-3.5" />
@@ -204,11 +204,11 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           return (
             <div
               key={alert.id}
-              className="p-5 hover:bg-slate-800/30 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4"
+              className="p-5 hover:bg-slate-800/25 transition-colors flex flex-col lg:flex-row lg:items-start justify-between gap-4"
             >
               {/* Alert Content */}
-              <div className="space-y-2 min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
+              <div className="min-w-0 flex-1 space-y-2.5">
+                <div className="flex flex-wrap items-center gap-2">
                   <StatusBadge status={alert.severity} size="sm" />
                   {protectionOnly && (
                     <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 bg-sky-950/50 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
@@ -216,31 +216,31 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                       保护类 · 用户归因未确认
                     </span>
                   )}
-                  <span className="font-semibold text-sm text-slate-100">
+                  <span className="text-sm font-semibold text-slate-100">
                     {alert.title || alert.type}
                   </span>
-                  <span className="rounded-md bg-slate-800 px-2 py-0.5 font-mono text-xs text-slate-400">
+                  <span className="rounded-md border border-slate-700/70 bg-slate-800/90 px-2 py-0.5 font-mono text-xs text-slate-300">
                     {alert.host_id}
                   </span>
-                  <span className="rounded-md bg-slate-800 px-2 py-0.5 font-mono text-xs text-slate-400">
+                  <span className="rounded-md border border-slate-700/70 bg-slate-800/90 px-2 py-0.5 font-mono text-xs text-slate-300">
                     {runtimeText}
                   </span>
                   {alert.container_name && (
-                    <span className="rounded-md bg-sky-950/60 border border-sky-500/30 px-2 py-0.5 font-mono text-xs text-sky-300">
+                    <span className="rounded-md border border-sky-500/35 bg-sky-950/60 px-2 py-0.5 font-mono text-xs text-sky-300">
                       {alert.container_name}
                     </span>
                   )}
-                  <span className="text-xs text-slate-500 tabular-nums">
+                  <span className="text-xs text-slate-400 tabular-nums">
                     出现 {alert.occurrence_count || 1} 次 · 最近 {alert.last_seen_utc8 || '-'}
                   </span>
                 </div>
 
-                <p className="text-xs text-slate-300 leading-relaxed">
+                <p className="text-xs leading-relaxed text-slate-200">
                   {alert.message}
                 </p>
                 <ProtocolGuardEvidence alert={alert} />
                 {protectionOnly && (
-                  <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2.5 text-[11px] leading-relaxed text-slate-300">
+                  <div className="rounded-xl border border-sky-800/70 bg-sky-950/25 px-3.5 py-2.5 text-[11px] leading-relaxed text-slate-300">
                     <div className="flex items-center gap-1.5 font-semibold text-sky-200">
                       <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
                       {admissionUnverified ? '保护状态待核实' : '仅作为主机保护信号'}
@@ -276,16 +276,16 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
                 {/* Remediation Failure Explanation Banner */}
                 {isActionFailed && (
-                  <div className="mt-2 rounded-lg border border-rose-500/40 bg-rose-950/40 p-2.5 text-xs flex items-start gap-2">
-                    <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                    <div className="flex-1 min-w-0">
+                  <div className="mt-2 flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+                    <div className="min-w-0 flex-1">
                       <div className="font-semibold text-rose-300">
                         {prohibitedActivity ? '隔离恢复未验证：' : '前次定向处置未成功：'}
                       </div>
-                      <div className="text-slate-300 font-mono text-[11px] mt-0.5 break-all">
+                      <div className="mt-0.5 break-all font-mono text-[11px] text-slate-300">
                         {alert.latest_action?.result_message || '节点未返回具体失败原因'}
                       </div>
-                      <div className="text-[11px] text-slate-400 mt-1">
+                      <div className="mt-1 text-[11px] text-slate-400">
                         {prohibitedActivity
                           ? '请到上方隔离复核区选择恢复原实例网络，或在容器已重装时核验旧实例身份。此类告警不能通过放行、忽略或普通标记解决。'
                           : '请根据回执检查节点版本、权限及残留守护进程后重试。标记已解决只归档告警，不会清理程序；风险仍存在时会再次告警。'}
@@ -296,7 +296,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
                 {alert.container_name && (
                   <button
                     type="button"
@@ -306,7 +306,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                       project: alert.project || '',
                       container_name: alert.container_name || '',
                     })}
-                    className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/60 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-900/70 transition-colors"
+                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/60 px-3 py-1.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-sky-900/70"
                     title="打开该告警对应的容器详情"
                   >
                     <ArrowUpRight className="h-3.5 w-3.5" />
@@ -331,7 +331,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     type="button"
                     disabled={isProcessing || connlimitPending}
                     onClick={() => setPendingDecision({ id: alert.id, decision: 'release_container_connlimit' })}
-                    className="flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-900/70 transition-all disabled:opacity-50"
+                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 transition-all hover:bg-amber-900/70 disabled:opacity-50"
                     title="移除本系统创建的临时 TCP 限额"
                   >
                     <ShieldAlert className="h-3.5 w-3.5" />
@@ -342,7 +342,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     type="button"
                     disabled={isProcessing || connlimitPending}
                     onClick={() => setPendingDecision({ id: alert.id, decision: 'apply_container_connlimit' })}
-                    className="flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-900/70 transition-all disabled:opacity-50"
+                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 transition-all hover:bg-amber-900/70 disabled:opacity-50"
                     title="每方向临时限制并发 TCP 新连接；不影响 UDP 和既有连接"
                   >
                     <ShieldAlert className="h-3.5 w-3.5" />
@@ -353,7 +353,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'deny' })}
-                  className="flex items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/90 transition-all disabled:opacity-50"
+                  className="flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 transition-all hover:bg-rose-900/90 disabled:opacity-50"
                   title="定向清理恶意进程或停止非合规服务（不停止整个容器）"
                 >
                   <Ban className="h-3.5 w-3.5" />
@@ -370,7 +370,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'allow_silent' })}
-                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
+                  className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition-all hover:bg-slate-700 disabled:opacity-50"
                   title="放行并永久不再提醒此项告警"
                 >
                   <Check className="h-3.5 w-3.5 text-emerald-400" />
@@ -382,7 +382,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                     type="button"
                     disabled={isProcessing}
                     onClick={() => setPendingDecision({ id: alert.id, decision: 'resolve' })}
-                    className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/60 transition-all disabled:opacity-50"
+                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 transition-all hover:bg-emerald-900/60 disabled:opacity-50"
                     title="手动确认问题已处理，直接消除此告警"
                   >
                     <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
@@ -394,7 +394,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'dismiss_once' })}
-                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
+                  className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-all hover:bg-slate-700 disabled:opacity-50"
                   title="本次临时忽略"
                 >
                   <EyeOff className="h-3.5 w-3.5 text-slate-400" />

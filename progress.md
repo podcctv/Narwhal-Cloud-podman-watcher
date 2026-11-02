@@ -4,17 +4,17 @@
 
 ## 代码基线
 
-- 本次文档提交前 GitHub `main` 的运行时代码基线：`ec054cf`；根目录 `VERSION`：`1.7.192`。本次交接只修改文档，不改运行时代码。
-- 最新 `main` 的 GitHub Actions 已通过：[`ec054cf` 工作流](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41301153943)和[`3d961d1` 工作流](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41269287365)。这证明对应提交通过仓库 CI，不证明任何生产节点已经部署。
-- 2026-11-02 检查 GitHub 时没有打开的 Issue 或 Pull Request；这不代表生产环境或用户侧没有尚未上报的问题。
-- 本次交接是文档更新；未检查或修改生产主机。
+- 当前工作区已同步 `origin/main`（`9df501e`）并完成前端 UI/UX v2.0 全量重构，根目录 `VERSION` 更新为 `1.7.193`，静态构建产物已写入 `server/static/`。
+- 最新远端 `main` 的 GitHub Actions 已通过：[`ec054cf` 工作流](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41301153943)和[`3d961d1` 工作流](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41269287365)。这证明对应提交通过仓库 CI，不证明任何生产节点已经部署。
+- 本次工作仅涉及前端界面重构、静态资源构建与文档同步，未检查或修改生产主机。
 
-## 最近已合入的工作
+## 最近完成的工作
 
-- v1.7.187：总览、表格和详情补充容器保护/违规状态展示。
-- v1.7.188–v1.7.189：修正隔离目标替换复核、隔离状态标签、过期告警保护和 Fleet 升级结果显示。
-- v1.7.191：分别展示主机心跳与容器采样时间，避免把容器采样过期误说成主机离线。
+- v1.7.193：升级 `.agents/skills/narwhal-ui-design` v2.0 技能并结合 `modern-web-guidance`，统一全局设计 Token（`.ui-surface-card`、`.ui-btn-*`、`.ui-input`、`.ui-select`、`.ui-table-wrap`），重构顶栏、命令面板、登录页、总览、容器详情抽屉、告警历史、用户排查、统计分析、经营账本、运维中心、母机防火墙与系统设置视图，实现桌面端与手机端（`320px–1920px`）自适应及表格键盘无障碍滚动。
 - v1.7.192：在线容器列表和 KPI 排除过期快照；保留的快照单独用于离线/过期核查，不能当作当前容器操作目标。
+- v1.7.191：分别展示主机心跳与容器采样时间，避免把容器采样过期误说成主机离线。
+- v1.7.188–v1.7.189：修正隔离目标替换复核、隔离状态标签、过期告警保护和 Fleet 升级结果显示。
+- v1.7.187：总览、表格和详情补充容器保护/违规状态展示。
 
 ## 已确认的问题与注意事项
 

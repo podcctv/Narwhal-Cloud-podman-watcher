@@ -16,7 +16,10 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onDismis
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none max-w-sm w-full">
+    <div
+      aria-live="polite"
+      className="pointer-events-none fixed right-3 bottom-4 left-3 z-50 flex flex-col gap-2 sm:right-5 sm:bottom-5 sm:left-auto sm:w-full sm:max-w-sm"
+    >
       {toasts.map((toast) => {
         const isSuccess = toast.type === 'success';
         const isError = toast.type === 'error';
@@ -24,24 +27,25 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onDismis
         return (
           <div
             key={toast.id}
-            className={`pointer-events-auto flex items-start gap-3 rounded-xl border p-3.5 shadow-2xl transition-all animate-in fade-in slide-in-from-bottom-5 duration-200 ${
+            className={`pointer-events-auto flex items-start gap-3 rounded-xl border p-3.5 shadow-2xl backdrop-blur-md transition-all animate-in fade-in slide-in-from-bottom-5 duration-200 ${
               isSuccess
-                ? 'border-emerald-500/40 bg-emerald-950/95 text-emerald-100 shadow-emerald-950/50'
+                ? 'border-emerald-500/45 bg-emerald-950/95 text-emerald-100 shadow-emerald-950/50'
                 : isError
-                ? 'border-rose-500/40 bg-rose-950/95 text-rose-100 shadow-rose-950/50'
-                : 'border-sky-500/40 bg-sky-950/95 text-sky-100 shadow-sky-950/50'
+                ? 'border-rose-500/45 bg-rose-950/95 text-rose-100 shadow-rose-950/50'
+                : 'border-sky-500/45 bg-sky-950/95 text-sky-100 shadow-sky-950/50'
             }`}
           >
-            {isSuccess && <CheckCircle className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />}
-            {isError && <AlertCircle className="h-5 w-5 text-rose-400 shrink-0 mt-0.5" />}
-            {!isSuccess && !isError && <Info className="h-5 w-5 text-sky-400 shrink-0 mt-0.5" />}
+            {isSuccess && <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />}
+            {isError && <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />}
+            {!isSuccess && !isError && <Info className="mt-0.5 h-5 w-5 shrink-0 text-sky-400" />}
 
-            <div className="flex-1 text-sm font-medium">{toast.message}</div>
+            <div className="min-w-0 flex-1 wrap-break-word text-sm font-medium leading-5">{toast.message}</div>
 
             <button
               type="button"
               onClick={() => onDismiss(toast.id)}
-              className="text-slate-400 hover:text-slate-200 p-0.5 rounded-sm transition-colors"
+              aria-label="关闭提示"
+              className="shrink-0 rounded-md p-1 text-slate-400 transition-colors hover:bg-slate-800/60 hover:text-slate-100"
             >
               <X className="h-4 w-4" />
             </button>

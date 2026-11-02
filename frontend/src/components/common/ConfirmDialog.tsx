@@ -58,11 +58,11 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   if (!open) return null;
 
   const confirmClasses = tone === 'danger'
-    ? 'border-rose-500/60 bg-rose-950 text-rose-100 hover:bg-rose-900'
-    : 'border-sky-500/60 bg-sky-950 text-sky-100 hover:bg-sky-900';
+    ? 'border-rose-500/60 bg-rose-950 text-rose-100 hover:bg-rose-900 hover:border-rose-400'
+    : 'border-sky-500/60 bg-sky-950 text-sky-100 hover:bg-sky-900 hover:border-sky-400';
 
   return createPortal(
-    <div className="fixed inset-0 z-200 flex items-end bg-slate-950/80 p-4 backdrop-blur-xs sm:items-center sm:justify-center" role="presentation">
+    <div className="fixed inset-0 z-200 flex items-end bg-slate-950/80 p-3 backdrop-blur-xs sm:items-center sm:justify-center sm:p-4" role="presentation">
       <button
         type="button"
         className="absolute inset-0 cursor-default"
@@ -76,23 +76,34 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-description"
-        className="relative w-full max-w-md max-h-[90dvh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+        className="relative max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-700/90 bg-slate-900 p-5 shadow-2xl"
       >
-        <div className="flex gap-3">
+        <div className="flex gap-3.5">
           <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${tone === 'danger' ? 'border-rose-500/40 bg-rose-950/70 text-rose-300' : 'border-sky-500/40 bg-sky-950/70 text-sky-300'}`}>
             <AlertTriangle className="h-5 w-5" aria-hidden="true" />
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <h2 id="confirm-dialog-title" className="text-base font-semibold text-slate-100">{title}</h2>
-            <p id="confirm-dialog-description" className="mt-2 text-sm leading-6 text-slate-300">{description}</p>
+            <p id="confirm-dialog-description" className="mt-2 wrap-break-word text-sm leading-6 text-slate-300">{description}</p>
           </div>
         </div>
         {children}
-        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button ref={cancelRef} type="button" disabled={isSubmitting} onClick={onCancel} className="min-h-11 rounded-lg border border-slate-700 bg-slate-800 px-4 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
+        <div className="mt-5 flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
+          <button
+            ref={cancelRef}
+            type="button"
+            disabled={isSubmitting}
+            onClick={onCancel}
+            className="min-h-11 rounded-xl border border-slate-700 bg-slate-800/90 px-4 text-sm font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+          >
             取消
           </button>
-          <button type="button" disabled={isSubmitting} onClick={onConfirm} className={`min-h-11 rounded-lg border px-4 text-sm font-semibold transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50 ${confirmClasses}`}>
+          <button
+            type="button"
+            disabled={isSubmitting}
+            onClick={onConfirm}
+            className={`min-h-11 rounded-xl border px-4 text-sm font-semibold transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50 ${confirmClasses}`}
+          >
             {isSubmitting && <LoaderCircle className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" />}
             {isSubmitting ? '处理中…' : confirmLabel}
           </button>

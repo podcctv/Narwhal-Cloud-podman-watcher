@@ -270,7 +270,7 @@ export const Dashboard: React.FC = () => {
       />
 
       {/* Main Body */}
-      <main className={`mx-auto w-full ${activeTab === 'investigation' ? 'max-w-[1536px]' : 'max-w-7xl'} flex-1 px-4 sm:px-6 pb-16`}>
+      <main className="mx-auto w-full max-w-[1536px] flex-1 px-3.5 sm:px-6 pb-16">
         <ErrorBoundary fallbackTitle="主界面视图加载异常">
           <Suspense fallback={<div className="flex min-h-40 items-center justify-center text-sm text-slate-400" role="status">正在载入此页面…</div>}>
           {activeTab === 'dashboard' && (

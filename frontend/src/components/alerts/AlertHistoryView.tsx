@@ -167,16 +167,16 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xs">
+      <div className="ui-surface-card flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 sm:p-5">
         <div className="flex items-center gap-3">
-          <div className="rounded-xl bg-amber-950/80 p-2.5 text-amber-400 border border-amber-500/30">
+          <div className="rounded-xl bg-amber-950/80 p-2.5 text-amber-400 border border-amber-500/30 shrink-0">
             <ShieldAlert className="h-5 w-5" />
           </div>
           <div>
             <h2 className="text-base font-bold text-slate-100">
               安全告警与处置审计历史
             </h2>
-            <p className="text-xs text-slate-400">
+            <p className="mt-0.5 text-xs text-slate-400">
               保留活动、已忽略、已处理及恢复事件；可一键重新执行定向清理或解除策略。
             </p>
           </div>
@@ -185,7 +185,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
         <button
           type="button"
           onClick={onBackToDashboard}
-          className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
+          className="ui-btn ui-btn-neutral ui-btn-sm shrink-0"
         >
           <span>返回总览看板</span>
           <ArrowRight className="h-3.5 w-3.5" />
@@ -193,30 +193,30 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
       </div>
 
       {/* Filter Panel */}
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 space-y-4 shadow-xs">
+      <div className="ui-surface-card p-4 sm:p-5 space-y-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs font-bold text-slate-300">
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-200">
             <Filter className="h-4 w-4 text-sky-400" />
             <span>维度筛选与检索</span>
           </div>
           <button
             type="button"
             onClick={handleReset}
-            className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 text-xs text-slate-400 hover:border-slate-700 hover:text-slate-200 transition-colors"
           >
-            <RotateCcw className="h-3 w-3" />
+            <RotateCcw className="h-3.5 w-3.5" />
             <span>重置筛选</span>
           </button>
         </div>
 
         {/* Form Controls */}
-        <form onSubmit={handleSearchSubmit} className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+        <form onSubmit={handleSearchSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
           <div>
-            <label className="block text-slate-400 mb-1">告警级别</label>
+            <label className="block text-slate-300 font-medium mb-1.5">告警级别</label>
             <select
               value={severity}
               onChange={(e) => setSeverity(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+              className="ui-select ui-select-sm"
             >
               <option value="all">全部级别</option>
               <option value="critical">Critical (高危)</option>
@@ -226,11 +226,11 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-slate-400 mb-1">告警类型</label>
+            <label className="block text-slate-300 font-medium mb-1.5">告警类型</label>
             <select
               value={alertType}
               onChange={(e) => setAlertType(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+              className="ui-select ui-select-sm"
             >
               <option value="all">全部类型</option>
               {typeOptions.map((t) => (
@@ -240,11 +240,11 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-slate-400 mb-1">所属主机</label>
+            <label className="block text-slate-300 font-medium mb-1.5">所属主机</label>
             <select
               value={hostId}
               onChange={(e) => setHostId(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+              className="ui-select ui-select-sm"
             >
               <option value="">全部主机</option>
               {hostOptions.map((h) => (
@@ -254,35 +254,35 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-slate-400 mb-1">关键词搜索</label>
+            <label className="block text-slate-300 font-medium mb-1.5">关键词搜索</label>
             <div className="relative">
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="容器、说明、进程特征..."
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-3 py-2 text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+                className="ui-input ui-input-sm pl-8 pr-3"
               />
-              <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
             </div>
           </div>
         </form>
 
         {/* Status Tabs */}
-        <div className="flex items-center gap-2 pt-2 border-t border-slate-800/80 overflow-x-auto">
+        <div className="flex flex-wrap items-center gap-1.5 pt-3 border-t border-slate-800/80">
           {['all', 'active', 'suppressed', 'dismissed', 'remediated', 'resolved'].map((s) => (
             <button
               key={s}
               type="button"
               onClick={() => setStatusTab(s)}
-              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${
+              className={`flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${
                 statusTab === s
-                  ? 'border-sky-500 bg-sky-950/80 text-sky-300'
-                  : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                  ? 'border-sky-500/60 bg-sky-950/90 text-sky-200 shadow-xs'
+                  : 'border-slate-800 bg-slate-950/70 text-slate-400 hover:text-slate-200 hover:border-slate-700'
               }`}
             >
               <span>{statusLabels[s] || s}</span>
-              <span className="rounded-full bg-slate-800 px-1.5 py-0.2 font-mono text-[10px]">
+              <span className="rounded-full bg-slate-800/90 px-1.5 py-0.2 font-mono text-[10px] tabular-nums">
                 {counts[s] || 0}
               </span>
             </button>

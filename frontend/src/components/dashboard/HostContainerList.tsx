@@ -469,12 +469,12 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
         onToggleAllHosts={handleToggleAll}
       />
 
-      {matchingHostIds.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-400">
+      {matchingHostIds.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-900/60 px-3.5 py-2.5 text-xs text-slate-400">
         <span>显示第 <strong className="tabular-nums text-slate-200">{currentHostPage * HOSTS_PER_PAGE + 1}–{Math.min((currentHostPage + 1) * HOSTS_PER_PAGE, matchingHostIds.length)}</strong> 台，共 <strong className="tabular-nums text-slate-200">{matchingHostIds.length}</strong> 台匹配主机</span>
         <div className="flex items-center gap-2">
-          <button type="button" onClick={() => setHostPage((page) => Math.max(0, page - 1))} disabled={currentHostPage === 0} aria-label="上一页主机" className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" />上一页</button>
-          <span className="tabular-nums">{currentHostPage + 1} / {hostPageCount}</span>
-          <button type="button" onClick={() => setHostPage((page) => Math.min(hostPageCount - 1, page + 1))} disabled={currentHostPage >= hostPageCount - 1} aria-label="下一页主机" className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" /></button>
+          <button type="button" onClick={() => setHostPage((page) => Math.max(0, page - 1))} disabled={currentHostPage === 0} aria-label="上一页主机" className="inline-flex h-9 items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/80 px-2.5 font-medium text-slate-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" />上一页</button>
+          <span className="tabular-nums px-1 font-medium text-slate-300">{currentHostPage + 1} / {hostPageCount}</span>
+          <button type="button" onClick={() => setHostPage((page) => Math.min(hostPageCount - 1, page + 1))} disabled={currentHostPage >= hostPageCount - 1} aria-label="下一页主机" className="inline-flex h-9 items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/80 px-2.5 font-medium text-slate-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" /></button>
         </div>
       </div>}
 
@@ -540,7 +540,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
           return (
             <div
               key={hostId}
-              className={`relative rounded-xl border border-l-4 transition-all overflow-hidden ${hostStatusAccent} ${
+              className={`ui-contain-card relative rounded-xl border border-l-4 transition-all overflow-hidden ${hostStatusAccent} ${
                 hostRiskyCount > 0
                   ? 'border-slate-800 bg-slate-900/95'
                   : 'border-slate-800 bg-slate-900/80 hover:border-slate-700/90'

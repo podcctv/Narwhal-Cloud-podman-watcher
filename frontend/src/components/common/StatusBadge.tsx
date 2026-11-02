@@ -18,24 +18,24 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
 }) => {
   const norm = (status || '').toLowerCase();
 
-  let colors = 'border-slate-700 bg-slate-800/80 text-slate-300';
+  let colors = 'border-slate-700/80 bg-slate-800/85 text-slate-300';
   let Icon = HelpCircle;
   let defaultLabel = status;
 
   if (norm === 'healthy' || norm === 'ok' || norm === 'running' || norm === 'active') {
-    colors = 'border-emerald-500/30 bg-emerald-950/50 text-emerald-400';
+    colors = 'border-emerald-500/35 bg-emerald-950/55 text-emerald-300';
     Icon = CheckCircle2;
     defaultLabel = '正常运行';
   } else if (norm === 'warning' || norm === 'warn' || norm === 'suppressed' || norm === 'dismissed') {
-    colors = 'border-amber-500/30 bg-amber-950/50 text-amber-400';
+    colors = 'border-amber-500/35 bg-amber-950/55 text-amber-300';
     Icon = AlertTriangle;
     defaultLabel = '注意/告警';
   } else if (norm === 'critical' || norm === 'danger' || norm === 'error' || norm === 'bad') {
-    colors = 'border-rose-500/30 bg-rose-950/50 text-rose-400';
+    colors = 'border-rose-500/40 bg-rose-950/55 text-rose-300';
     Icon = AlertOctagon;
     defaultLabel = '高危告警';
   } else if (norm === 'offline' || norm === 'stale') {
-    colors = 'border-slate-700 bg-slate-900/60 text-slate-400';
+    colors = 'border-slate-700 bg-slate-900/75 text-slate-400';
     Icon = PowerOff;
     defaultLabel = norm === 'stale' ? '采样过期' : '已离线';
   }
@@ -44,7 +44,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 font-medium transition-colors ${
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 font-medium whitespace-nowrap transition-colors ${
         isSmall ? 'py-0.5 text-xs' : 'py-1 text-xs'
       } ${colors}`}
     >
@@ -54,7 +54,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
           <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
         </span>
       ) : (
-        <Icon className={isSmall ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+        <Icon className={isSmall ? 'h-3 w-3 shrink-0' : 'h-3.5 w-3.5 shrink-0'} />
       )}
       <span>{label || defaultLabel}</span>
     </span>

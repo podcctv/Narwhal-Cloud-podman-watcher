@@ -23,10 +23,10 @@ function Status({ value }: { value: string }) {
 }
 const bytes = (n: number = 0) => n >= 1073741824 ? `${(n / 1073741824).toFixed(2)} GiB` : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MiB` : `${Math.round(n / 1024)} KiB`;
 const date = (ts?: number) => ts ? new Date(ts * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '尚无报告';
-const field = 'w-full min-w-0 rounded-lg border border-slate-700 bg-slate-950 p-2.5 text-sm text-slate-200';
-const button = 'min-h-11 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm text-sky-200 hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-40';
+const field = 'ui-input';
+const button = 'min-h-11 rounded-xl border border-sky-500/40 bg-sky-500/12 px-3.5 py-2 text-sm font-medium text-sky-200 transition-colors hover:bg-sky-500/22 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40';
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
-  return <section className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/50 p-4"><h3 className="mb-3 text-sm font-semibold text-slate-200">{title}</h3>{children}</section>;
+  return <section className="ui-surface-card min-w-0 p-4 sm:p-5"><h3 className="mb-3 text-sm font-bold text-slate-100">{title}</h3>{children}</section>;
 }
 function Empty({ text = '尚无数据。更新 Client 后等待一次采集报告。' }: { text?: string }) { return <p className="py-6 text-sm text-slate-400">{text}</p>; }
 
@@ -103,8 +103,8 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
   const selectedEntity = form.entity || '';
   const policyPayload = () => ({ entity: selectedEntity, profile: form.profile, rules: { bandwidth_mbps: Number(form.bandwidth_mbps || 0), bandwidth_ratio: .9, bandwidth_duration_seconds: Number(form.bandwidth_minutes || 10) * 60, silent_until: Number(form.silent_hours || 0) > 0 ? Math.floor(Date.now() / 1000 + Number(form.silent_hours) * 3600) : 0, ...(form.connections ? { connections: Number(form.connections) } : {}), ...(form.rx_mbps ? { rx_bps: Number(form.rx_mbps) * 1e6 / 8 } : {}), ...(form.http_rps ? { http_rps: Number(form.http_rps) } : {}) } });
   return <div className="space-y-5 tabular-nums">
-    <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="flex items-center gap-2 text-xl font-bold"><Activity className="h-5 w-5 text-sky-400" />运维中心</h2><p className="mt-1 text-xs text-slate-400">采集 → 判断 → 执行 → 复查 · {session.username || '用户'} / {session.role}</p></div><button className={button} disabled={busy} onClick={() => void act(load, '数据已刷新')}><RefreshCw className="mr-1 inline h-4 w-4" />刷新</button></div>
-    <nav aria-label="运维功能" className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">{sections.map(([key, label]) => <button key={key} onClick={() => setSection(key)} aria-current={section === key ? 'page' : undefined} className={`min-h-11 rounded-lg border p-2 text-left text-sm ${section === key ? 'border-sky-400 bg-sky-500/15 text-sky-200' : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-100'}`}>{label}</button>)}</nav>
+    <div className="ui-surface-card flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5"><div><h2 className="flex items-center gap-2 text-lg sm:text-xl font-bold text-slate-100"><Activity className="h-5 w-5 text-sky-400" />运维中心</h2><p className="mt-1 text-xs text-slate-400">采集 → 判断 → 执行 → 复查 · {session.username || '用户'} / {session.role}</p></div><button className={button} disabled={busy} onClick={() => void act(load, '数据已刷新')}><RefreshCw className="mr-1.5 inline h-4 w-4" />刷新</button></div>
+    <nav aria-label="运维功能" className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-7">{sections.map(([key, label]) => <button key={key} onClick={() => setSection(key)} aria-current={section === key ? 'page' : undefined} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-xs sm:text-sm font-medium transition-all focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${section === key ? 'border-sky-500/60 bg-sky-950/80 text-sky-200 shadow-xs' : 'border-slate-800 bg-slate-900/70 text-slate-400 hover:border-slate-700 hover:text-slate-100'}`}>{label}</button>)}</nav>
     {error && <p role="alert" className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-rose-300">{error}</p>}
     {section === 'storage' && <DiskCleanupPanel admin={session.role === 'admin'} paused={isPaused} onToast={onToast} />}
     {section === 'storage' && <DatabaseGrowthTrend growth={data.growth} />}

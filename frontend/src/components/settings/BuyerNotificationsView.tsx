@@ -13,7 +13,7 @@ const EMPTY: Target = { host_id: '', runtime: '', project: '', container_name: '
 const LABELS: Record<string, string> = { blocked: '暂缓发送', queued: '待发送', retrying: '等待重试', sending: '发送中', succeeded: '成功', failed: '失败', uncertain: '结果不确定', cancelled: '状态变化已取消', expired: '已过期' };
 const stamp = (t: number) => t ? new Date(t * 1000).toLocaleString('zh-CN') : '—';
 const identity = (t: Target) => JSON.stringify([t.host_id, t.runtime, t.project, t.container_name]);
-const field = 'min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-sm text-slate-100';
+const field = 'ui-input mt-1.5';
 
 export function BuyerNotificationsView({ onToast }: { onToast: (type: ToastMessage['type'], message: string) => void }) {
   const [data, setData] = useState<Data>({ items: [], counts: {}, targets: [], hosts: [] });
@@ -54,8 +54,8 @@ export function BuyerNotificationsView({ onToast }: { onToast: (type: ToastMessa
   };
   const change = (value: Partial<Target>) => { setForm(old => ({ ...old, ...value })); setPreview(null); };
   const choose = (t: Target) => { const saved = data.targets.find(s => identity(s) === identity(t)); setForm(saved ? { ...saved, enabled: Boolean(saved.enabled) } : { ...EMPTY, host_id:t.host_id,runtime:t.runtime,project:t.project,container_name:t.container_name }); setPreview(null); };
-  return <section className="min-w-0 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="flex items-center gap-2 font-semibold text-slate-100"><BellRing className="h-5 w-5 text-sky-400" />买家推送记录与收件范围</h3><p className="mt-1 text-xs text-slate-400">仅服务端发送；持久队列、机器级冷却、七天投递期限、九十天记录保留。</p></div><button onClick={load} className="min-h-11 rounded-lg border border-slate-700 px-3"><RefreshCw className="h-4 w-4" /></button></div>
+  return <section className="ui-surface-card min-w-0 p-5 sm:p-6 space-y-5">
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="flex items-center gap-2 font-semibold text-slate-100"><BellRing className="h-5 w-5 text-sky-400" />买家推送记录与收件范围</h3><p className="mt-1 text-xs text-slate-400">仅服务端发送；持久队列、机器级冷却、七天投递期限、九十天记录保留。</p></div><button onClick={load} className="ui-btn ui-btn-neutral min-w-11 px-3" aria-label="刷新买家推送记录"><RefreshCw className="h-4 w-4" /></button></div>
     {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
     <div className="rounded-xl border border-slate-700 bg-slate-950 p-4 space-y-2 text-xs text-slate-300 wrap-break-word">
       <p className={data.mapping_sync?.status === 'error' ? 'text-red-300' : 'text-sky-300'}>{data.mapping_sync?.message || '尚未同步上游收件关联'}</p>

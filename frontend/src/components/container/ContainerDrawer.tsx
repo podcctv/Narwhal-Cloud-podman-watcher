@@ -527,7 +527,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
       <div className="absolute inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10">
         <div ref={drawerPanelRef} tabIndex={-1} className="min-w-0 w-screen max-w-2xl transform bg-slate-900 border-l border-slate-800 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
           {/* Drawer Header */}
-          <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/80 px-6 py-4">
+          <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/90 px-4 py-3.5 sm:px-6 sm:py-4">
             <div className="flex items-center gap-3 min-w-0">
               <div className="rounded-xl bg-sky-950/80 p-2.5 text-sky-400 border border-sky-500/30 shrink-0">
                 <Box className="h-5 w-5" />
@@ -569,7 +569,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                 type="button"
                 onClick={onClose}
                 aria-label="关闭容器详情"
-                className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400"
+                className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-800 bg-slate-900/80 text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400"
                 title="关闭抽屉 (Esc)"
               >
                 <X className="h-5 w-5" />
@@ -578,7 +578,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           </div>
 
           {/* Drawer Scrollable Body */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 sm:space-y-6">
             <AdmissionStatus data={sec.admission} stale={container?.alerts?.stale} />
             {(identity.runtime === 'incus' || identity.runtime === 'podman') && (
               <section className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-4 space-y-3">
@@ -605,7 +605,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     onChange={(event) => setUserEmail(event.target.value)}
                     placeholder="例如 user@example.com"
                     disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
+                    className="ui-input"
                   />
                   {container?.user_email_source === 'unmatched' && container.user_email_status && (
                     <p className="text-[11px] leading-relaxed text-amber-300">{container.user_email_status}。系统不会按容器名称猜邮箱；请核对上游实例 UUID，或手工补充邮箱。</p>
@@ -620,7 +620,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     placeholder="记录订单号、沟通情况或封禁核对信息"
                     rows={2}
                     disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500/40 disabled:opacity-50"
+                    className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950/90 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-hidden focus:ring-2 focus:ring-sky-400/30 disabled:opacity-50"
                   />
                 </label>
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -629,7 +629,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     type="button"
                     onClick={saveUserNote}
                     disabled={isSavingUserNote || !container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-600/20 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-600/30 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="ui-btn ui-btn-secondary ui-btn-sm"
                   >
                     <Save className="h-3.5 w-3.5" />
                     {isSavingUserNote ? '保存中…' : '保存备注'}
@@ -638,7 +638,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               </section>
             )}
             {/* Quick KPI Cards Grid */}
-            <div className="grid grid-cols-3 gap-3 font-mono text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3 font-mono text-xs">
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
                 <span className="text-slate-400 flex items-center gap-1 text-[11px] mb-1">
                   <Cpu className="h-3.5 w-3.5 text-sky-400" /> CPU 占用

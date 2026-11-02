@@ -264,14 +264,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   return (
     <div className="space-y-6">
       {/* Settings Top Overview Banner */}
-      <section className="rounded-2xl border border-slate-800 bg-linear-to-br from-slate-900 via-slate-950 to-slate-900 p-5 sm:p-6 shadow-xl">
+      <section className="ui-surface-card bg-linear-to-br from-slate-900 via-slate-950 to-slate-900 p-5 sm:p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-start gap-3.5">
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-sky-500/30 bg-sky-500/10 shadow-inner">
               <Settings className="h-6 w-6 text-sky-400" />
             </div>
             <div>
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2.5 flex-wrap">
                 <h2 className="text-xl font-bold text-slate-100 tracking-tight">系统设置</h2>
                 <span className="rounded-md border border-slate-700 bg-slate-800/80 px-2 py-0.5 font-mono text-xs text-slate-300">
                   推送与 API 集成
@@ -321,7 +321,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
 
       {/* Grid: Card 1 (Narwhal Cloud Buyer API) & Card 2 (Telegram Bots) */}
       <BuyerNotificationsView onToast={onToast} />
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 sm:p-6 shadow-lg" aria-labelledby="ip-reputation-heading">
+      <section className="ui-surface-card p-5 sm:p-6" aria-labelledby="ip-reputation-heading">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-2xl">
             <div className="flex flex-wrap items-center gap-2">

@@ -10,8 +10,8 @@ type Run = { run_id: string; node_id: string; host_id: string; mode: string; sta
 type Host = { host_id: string; node_id: string; available: boolean; stale: boolean; running: boolean; disk: { used_percent?: number; available_bytes?: number }; policy: Policy };
 type Data = { hosts: Host[]; runs: Run[]; actions: { id: number; host_id: string; status: string; result_message: string; updated_at: number }[] };
 const defaults: Policy = { enabled: false, include_containers: true, retention_days: 14, interval_hours: 24 };
-const field = 'w-full min-w-0 rounded-lg border border-slate-700 bg-slate-950 p-2.5 text-sm text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400';
-const button = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm text-sky-200 hover:bg-sky-500/20 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50';
+const field = 'ui-input';
+const button = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/12 px-3.5 py-2 text-sm font-medium text-sky-200 transition-colors hover:bg-sky-500/22 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50';
 const labels: Record<string, string> = { running: '执行中', scanned: '扫描完成 · 未删除', succeeded: '清理完成', partial: '部分完成 / 有跳过项', failed: '失败', interrupted: '中断 · 未自动重试', skipped: '已跳过', queued: '已排队', dispatched: '已下发' };
 const date = (n: number) => new Date(n * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 

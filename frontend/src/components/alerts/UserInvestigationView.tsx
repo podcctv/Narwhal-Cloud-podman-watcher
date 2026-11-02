@@ -10,8 +10,8 @@ const stateColor = (state: string) => state === 'verified' ? 'text-emerald-300' 
 const categoryName = (kind: string) => ({ security: '安全配置风险', security_attention: '安全待核实', network_signal: '出站网络异常 · 原因待核实', external_signal: '外部攻击信号 · 非违规结论', protection_signal: '网络保护提醒 · 不计用户滥用', operational: '运行异常' }[kind] || '待核实');
 const actionName = (kind: string) => ({ enforce_socks_auth: '关闭不安全代理', remediate_panel_pairing: '清理未授权面板', remediate_malicious_process: '清理恶意进程', stop_container: '停止容器', apply_udp_throttle: '限制 UDP 流量', release_udp_throttle: '解除 UDP 限速', release_socks_auth: '解除代理保护', allow_panel_domains: '放行面板域名', disallow_panel_domains: '取消面板放行' }[kind] || kind);
 const receiptName = (kind: string) => ({ process: '停止进程', stop_service: '停止服务', service: '删除服务', config: '删除配置', binary: '删除程序', startup: '删除自启项' }[kind] || kind);
-const control = 'min-h-11 min-w-0 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100';
-const panel = 'rounded-xl border border-slate-700 bg-slate-900/70';
+const control = 'ui-input';
+const panel = 'ui-surface-card';
 
 export const UserInvestigationView: React.FC = () => {
   const [host, setHost] = useState('');

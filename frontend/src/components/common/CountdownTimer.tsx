@@ -26,7 +26,10 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
   const strokeDashoffset = circumference - progress * circumference;
 
   return (
-    <div className="flex h-12 shrink-0 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/90 px-2 shadow-xs" aria-label="自动刷新控制">
+    <div
+      className="flex h-12 shrink-0 items-center gap-2 rounded-[10px] border border-slate-700/90 bg-slate-900/92 px-2.5 shadow-xs"
+      aria-label="自动刷新控制"
+    >
       {/* Circular Countdown Indicator */}
       <div className="relative flex h-6 w-6 items-center justify-center">
         <svg className="h-6 w-6 -rotate-90 transform" viewBox="0 0 24 24">
@@ -52,13 +55,13 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
             fill="transparent"
           />
         </svg>
-        <span className="absolute font-mono text-[10px] font-bold tabular-nums text-slate-300">
+        <span className="absolute font-mono text-[10px] font-bold tabular-nums text-slate-200">
           {isPaused ? 'P' : Math.ceil(countdown)}
         </span>
       </div>
 
       <div className="hidden flex-col sm:flex">
-        <span className="text-[11px] font-medium text-slate-300">
+        <span className="text-[11px] font-medium text-slate-200">
           {isPaused ? '自动刷新已暂停' : `自动轮询 (${Math.ceil(countdown)}s)`}
         </span>
         {lastRefreshTime && (
@@ -75,7 +78,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
           onClick={onTogglePause}
           title={isPaused ? '恢复自动刷新' : '暂停自动刷新'}
           aria-label={isPaused ? '恢复自动刷新' : '暂停自动刷新'}
-          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-400"
+          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 transition-colors hover:bg-slate-800 hover:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400"
         >
           {isPaused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
         </button>
@@ -85,7 +88,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
           disabled={isRefreshing}
           title="立即手动刷新"
           aria-label="立即手动刷新"
-          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-sky-300 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 transition-colors hover:bg-slate-800 hover:text-sky-300 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
         >
           <RotateCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin text-sky-400' : ''}`} />
         </button>

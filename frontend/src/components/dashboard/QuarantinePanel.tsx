@@ -106,21 +106,23 @@ export const QuarantinePanel: React.FC<{
 
   if (!items.length && !error) return null;
   return (
-    <section id="quarantine-review" tabIndex={-1} className="mb-6 overflow-hidden rounded-2xl border border-rose-500/40 bg-slate-900 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-rose-400" aria-labelledby="quarantine-title">
-      <div className="flex items-center justify-between gap-3 border-b border-slate-700 px-5 py-4">
-        <div className="flex items-center gap-3">
-          <LockKeyhole className="h-5 w-5 shrink-0 text-rose-300" aria-hidden="true" />
-          <div>
+    <section id="quarantine-review" tabIndex={-1} className="mb-6 overflow-hidden rounded-2xl border border-rose-500/40 bg-linear-to-b from-rose-950/20 via-slate-900/95 to-slate-900 shadow-lg focus:outline-hidden focus-visible:ring-2 focus-visible:ring-rose-400" aria-labelledby="quarantine-title">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-rose-950/20 px-4 py-3.5 sm:px-5 sm:py-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="rounded-xl border border-rose-500/35 bg-rose-500/15 p-2 text-rose-300 shrink-0">
+            <LockKeyhole className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div className="min-w-0">
             <h2 id="quarantine-title" className="text-sm font-bold text-slate-100">违规活动隔离 · 待管理员复核</h2>
-            <p className="mt-1 text-xs leading-5 text-slate-300">只处理多次佐证的高置信度行为；隔离全部受管入站和出站，保留容器、磁盘和证据。</p>
+            <p className="mt-0.5 text-xs leading-5 text-slate-300">只处理多次佐证的高置信度行为；隔离全部受管入站和出站，保留容器、磁盘和证据。</p>
           </div>
         </div>
-        <button type="button" onClick={() => void refresh()} className="min-h-11 rounded-lg border border-slate-600 px-3 text-sky-300 hover:bg-slate-800 focus:outline-hidden focus:ring-2 focus:ring-sky-400" aria-label="刷新隔离状态">
+        <button type="button" onClick={() => void refresh()} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-700 bg-slate-900/80 px-3 text-sky-300 transition-colors hover:bg-slate-800 focus:outline-hidden focus:ring-2 focus:ring-sky-400" aria-label="刷新隔离状态">
           <RefreshCw className="h-4 w-4" />
         </button>
       </div>
-      {error && <p role="alert" className="px-5 py-3 text-sm text-amber-300">{error}</p>}
-      <div className="divide-y divide-slate-700">
+      {error && <p role="alert" className="px-4 py-3 text-sm text-amber-300 sm:px-5">{error}</p>}
+      <div className="divide-y divide-slate-800/90">
         {items.map(item => {
           const hostAge = item.host_last_seen ? Date.now()/1000-item.host_last_seen : Number.POSITIVE_INFINITY;
           const hostStale = hostAge < 0 || hostAge > 900;

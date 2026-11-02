@@ -152,23 +152,25 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   const gfwBlockedCount = telemetry.filter(item => item.gfw_reachability?.status === 'blocked' && !item.gfw_reachability.stale).length;
   const auditNeedsAttention = telemetry.filter(item => ['warning', 'critical'].includes(hostAuditLevel(item))).length;
   const auditUnknown = telemetry.filter(item => hostAuditLevel(item) === 'unknown').length;
-  return <section className="mb-6 min-w-0 rounded-2xl border border-slate-800 bg-slate-900/60 shadow-xs">
-    <header className="flex flex-col gap-3 border-b border-slate-800 px-4 py-4 sm:flex-row sm:items-start sm:justify-between">
+  return <section className="ui-surface-card mb-6 min-w-0">
+    <header className="flex flex-col gap-3 border-b border-slate-800/90 px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-5">
       <div className="flex min-w-0 items-start gap-3">
-        <Activity className="mt-0.5 h-5 w-5 shrink-0 text-sky-400" />
+        <div className="mt-0.5 rounded-xl border border-sky-500/30 bg-sky-950/60 p-2 text-sky-400 shrink-0">
+          <Activity className="h-4 w-4" />
+        </div>
         <div className="min-w-0">
           <h2 className="text-sm font-bold text-slate-100">主机网络与安全遥测</h2>
           <p className="mt-1 text-xs leading-5 text-slate-300">主机状态摘要；展开后按名称筛选，每页查看 {pageSize} 台的网络证据与修复建议。</p>
           <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
-            <span className="rounded-full border border-slate-700 px-2 py-1 text-slate-300">主机 {telemetry.length}</span>
-            <span className={`rounded-full border px-2 py-1 ${alertHostCount ? 'border-amber-800 bg-amber-950/30 text-amber-200' : 'border-emerald-800 bg-emerald-950/30 text-emerald-200'}`}>采样告警 {alertHostCount}</span>
-            <span className={`rounded-full border px-2 py-1 ${gfwBlockedCount ? 'border-red-800 bg-red-950/30 text-red-200' : 'border-slate-700 text-slate-300'}`}>GFW 阻断 {gfwBlockedCount}</span>
-            <span className={`rounded-full border px-2 py-1 ${auditNeedsAttention ? 'border-amber-800 bg-amber-950/30 text-amber-200' : 'border-slate-700 text-slate-300'}`}>审计待处理 {auditNeedsAttention}</span>
-            {auditUnknown > 0 && <span className="rounded-full border border-slate-700 px-2 py-1 text-slate-300">审计未评估 {auditUnknown}</span>}
+            <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300 font-medium">主机 {telemetry.length}</span>
+            <span className={`rounded-full border px-2.5 py-1 font-medium ${alertHostCount ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-emerald-800 bg-emerald-950/40 text-emerald-200'}`}>采样告警 {alertHostCount}</span>
+            <span className={`rounded-full border px-2.5 py-1 font-medium ${gfwBlockedCount ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>GFW 阻断 {gfwBlockedCount}</span>
+            <span className={`rounded-full border px-2.5 py-1 font-medium ${auditNeedsAttention ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>审计待处理 {auditNeedsAttention}</span>
+            {auditUnknown > 0 && <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300 font-medium">审计未评估 {auditUnknown}</span>}
           </div>
         </div>
       </div>
-      <button type="button" aria-expanded={expanded} aria-controls="host-telemetry-details" onClick={() => setExpanded(value => !value)} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-800 bg-sky-950/40 px-3 text-xs font-semibold text-sky-200 hover:bg-sky-900/50 focus:outline-hidden focus:ring-2 focus:ring-sky-400">
+      <button type="button" aria-expanded={expanded} aria-controls="host-telemetry-details" onClick={() => setExpanded(value => !value)} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-sky-800/80 bg-sky-950/50 px-3.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-sky-900/60 focus:outline-hidden focus:ring-2 focus:ring-sky-400">
         {expanded ? <ChevronUp className="h-4 w-4" aria-hidden="true" /> : <ChevronDown className="h-4 w-4" aria-hidden="true" />}
         {expanded ? '收起明细' : `查看主机明细（${telemetry.length}）`}
       </button>
@@ -731,7 +733,7 @@ const HostConfigDialog: React.FC<{
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              className="ui-input mt-1.5 font-mono text-xs"
               required
             />
           </label>
@@ -744,7 +746,7 @@ const HostConfigDialog: React.FC<{
               max="3600"
               value={interval}
               onChange={(e) => setIntervalValue(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              className="ui-input mt-1.5 font-mono text-xs"
               required
             />
           </label>
@@ -754,7 +756,7 @@ const HostConfigDialog: React.FC<{
             <input
               value={runtimes}
               onChange={(e) => setRuntimes(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 font-mono text-xs"
+              className="ui-input mt-1.5 font-mono text-xs"
             />
           </label>
 
@@ -763,7 +765,7 @@ const HostConfigDialog: React.FC<{
             <select
               value={docker}
               onChange={(e) => setDocker(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-500 text-xs"
+              className="ui-select mt-1.5 text-xs"
             >
               <option value="notice">仅提示 (notice)</option>
               <option value="full">完整采集 (full)</option>
@@ -776,14 +778,14 @@ const HostConfigDialog: React.FC<{
               type="button"
               onClick={onClose}
               disabled={busy}
-              className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+              className="ui-btn ui-btn-neutral"
             >
               取消
             </button>
             <button
               type="submit"
               disabled={busy}
-              className="rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-500 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50 shadow-xs"
+              className="ui-btn ui-btn-primary"
             >
               {busy ? '下发中…' : '保存并下发'}
             </button>

@@ -831,8 +831,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const blockingRules = rules.filter((rule) => rule.enabled && rule.action === 'block').length;
   const enabledAbuse = ((abuse.service_runtimes || []).length > 0 ? (abuse.services || []).length : 0) + Number(abuse.mining) + Number(abuse.bt);
 
-  return <div className="mx-auto mt-6 max-w-6xl space-y-5 pb-8">
-    <header className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+  return <div className="mx-auto mt-6 w-full space-y-5 pb-8">
+    <header className="ui-surface-card flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
       <div className="flex min-w-0 items-start gap-3">
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-sky-700/60 bg-sky-950/50 text-sky-300"><Shield className="h-5 w-5" aria-hidden="true" /></span>
         <div className="min-w-0">
@@ -841,7 +841,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">8792 是 Agent 面板端口；RFW API 默认仅监听 127.0.0.1:7734（地址可配置）。Watcher 通过 Agent 受限控制通道读回和同步，不需要将 RFW API 暴露到公网。</p>
         </div>
       </div>
-      <button type="button" onClick={() => scope === 'host' ? void loadPolicy(!dirty) : void loadFleetPolicy()} disabled={mutationBusy || (scope === 'host' ? loading || !hostId : fleetLoading)} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-sm text-slate-200 transition-colors hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
+      <button type="button" onClick={() => scope === 'host' ? void loadPolicy(!dirty) : void loadFleetPolicy()} disabled={mutationBusy || (scope === 'host' ? loading || !hostId : fleetLoading)} className="ui-btn ui-btn-neutral shrink-0">
         {(scope === 'host' ? loading : fleetLoading) ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}刷新状态
       </button>
     </header>
@@ -1033,7 +1033,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         {snapshot?.live_readback?.last_success_at ? <span className="text-[10px] text-slate-500">最近成功读回：{new Date(snapshot.live_readback.last_success_at * 1000).toLocaleString()}</span> : null}
       </div>
       {snapshot?.live_readback?.stale && <p className="mx-4 mt-4 rounded-lg border border-amber-900/60 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/80 sm:mx-5">当前没有新鲜的 RFW 读回。以下若有规则，是最近一次成功读回的留存快照，不能视为当前生效状态。</p>}
-      {!snapshot?.live_readback?.snapshot ? <p className="px-5 py-7 text-center text-sm text-slate-400">{readbackStatusLabel[snapshot?.live_readback?.status || 'unknown'] || '等待节点上报'}。请确认 Watcher 与 Runman 已更新且 RFW API 正常。</p> : snapshot.live_readback.snapshot.rules.length ? <div className="overflow-x-auto">
+      {!snapshot?.live_readback?.snapshot ? <p className="px-5 py-7 text-center text-sm text-slate-400">{readbackStatusLabel[snapshot?.live_readback?.status || 'unknown'] || '等待节点上报'}。请确认 Watcher 与 Runman 已更新且 RFW API 正常。</p> : snapshot.live_readback.snapshot.rules.length ? <div tabIndex={0} role="region" aria-label="所选母机的 RFW 实际规则表格" className="overflow-x-auto focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400">
         <table className="w-full min-w-[900px] text-left text-xs">
           <thead className="bg-slate-950/60 text-slate-400"><tr><th className="px-4 py-3 font-medium">来源 / 同步</th><th className="px-4 py-3 font-medium">方向 / 协议</th><th className="px-4 py-3 font-medium">端口</th><th className="px-4 py-3 font-medium">IP 匹配</th><th className="px-4 py-3 font-medium">动作 / 优先级</th><th className="px-4 py-3 font-medium">RFW ID</th><th className="px-4 py-3 text-right font-medium">操作</th></tr></thead>
           <tbody>{snapshot.live_readback.snapshot.rules.map((rule) => <tr key={rule.id} className="border-t border-slate-800 text-slate-200">
@@ -1107,7 +1107,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         <button type="button" onClick={addRule} disabled={rules.length >= 64} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-sky-700 bg-sky-950/60 px-4 text-sm font-semibold text-sky-200 transition-colors hover:bg-sky-900/70 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"><Plus className="h-4 w-4" aria-hidden="true" />加入期望规则</button>
       </div>
       {formError && <p className="px-5 pb-3 text-sm text-rose-300" role="alert">{formError}</p>}
-      <div className="overflow-x-auto border-t border-slate-800">
+      <div tabIndex={0} role="region" aria-label="期望防火墙规则列表" className="overflow-x-auto border-t border-slate-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400">
         {rules.length ? <table className="w-full min-w-[720px] text-left text-xs">
           <thead className="bg-slate-950/60 text-slate-400"><tr><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">方向 / 协议</th><th className="px-4 py-3 font-medium">端口</th><th className="px-4 py-3 font-medium">IP 匹配</th><th className="px-4 py-3 font-medium">动作 / 优先级</th><th className="px-4 py-3 text-right font-medium">操作</th></tr></thead>
           <tbody>{rules.map((rule) => <tr key={rule.key} className="border-t border-slate-800 text-slate-200">

@@ -124,10 +124,15 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
   );
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/70 shadow-inner">
+    <div
+      tabIndex={0}
+      role="region"
+      aria-label="容器状态数据表格"
+      className="ui-table-wrap shadow-inner"
+    >
       <table className="w-full text-left border-collapse text-xs">
         <thead>
-          <tr className="border-b border-slate-800/90 bg-slate-900/90 text-[11px] font-semibold text-slate-400 font-mono">
+          <tr className="border-b border-slate-800/90 bg-slate-900/95 text-[11px] font-semibold text-slate-300 font-mono">
             <th scope="col" className="py-2.5 pl-3 pr-2 w-8">状态</th>
             {renderSortHeader('name', '容器名称 / 运行时')}
             {renderSortHeader('cpu', 'CPU')}
@@ -179,7 +184,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 className={`cursor-pointer group ${rowBg}`}
               >
                 {/* 1. Status Dot */}
-                <td className="py-2 pl-3 pr-2 whitespace-nowrap">
+                <td className="py-2.5 pl-3 pr-2 whitespace-nowrap">
                   <span
                     className={`inline-block h-2 w-2 rounded-full ${
                       risk.isCritical || hasResourceGuardFailure
@@ -211,7 +216,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 2. Container Name & Runtime */}
-                <td className="py-2 px-2 whitespace-nowrap">
+                <td className="py-2.5 px-2 whitespace-nowrap">
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
@@ -229,14 +234,14 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                     >
                       {c.container_name}
                     </button>
-                    <span className="rounded-sm bg-slate-800 px-1 py-0.2 text-[9px] text-slate-400 border border-slate-700/50">
+                    <span className="rounded-sm bg-slate-800 px-1.5 py-0.5 text-[9px] text-slate-300 border border-slate-700/60">
                       {c.runtime}
                     </span>
                   </div>
                 </td>
 
                 {/* 3. CPU */}
-                <td className="py-2 px-2 whitespace-nowrap">
+                <td className="py-2.5 px-2 whitespace-nowrap">
                   <div className="flex items-center gap-2">
                     <span
                       className={`tabular-nums font-semibold w-10 ${
@@ -245,7 +250,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                     >
                       {cpu === null ? '—' : `${cpu.toFixed(1)}%`}
                     </span>
-                    <div className="hidden sm:block h-1 w-12 rounded-full bg-slate-800 overflow-hidden">
+                    <div className="hidden sm:block h-1.5 w-12 rounded-full bg-slate-800 overflow-hidden">
                       <div
                         className={`h-full ${cpu === null ? 'bg-slate-700' : cpu > 80 ? 'bg-rose-500' : 'bg-sky-400'}`}
                         style={{ width: `${Math.min(100, Math.max(0, cpu ?? 0))}%` }}
@@ -255,7 +260,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 4. Memory */}
-                <td className="py-2 px-2 whitespace-nowrap">
+                <td className="py-2.5 px-2 whitespace-nowrap">
                   <div className="flex items-center gap-2">
                     <span
                       className={`tabular-nums font-semibold ${
@@ -271,7 +276,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 5. Inbound (RX) */}
-                <td className="py-2 px-2 whitespace-nowrap tabular-nums">
+                <td className="py-2.5 px-2 whitespace-nowrap tabular-nums">
                   <div className="flex items-center gap-1 text-emerald-400 font-semibold">
                     <ArrowDownLeft className="h-3 w-3 text-emerald-400/80" />
                     <span>{rxMbps === null ? '—' : `${rxMbps}M`}</span>
@@ -282,7 +287,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 6. Outbound (TX) */}
-                <td className="py-2 px-2 whitespace-nowrap tabular-nums">
+                <td className="py-2.5 px-2 whitespace-nowrap tabular-nums">
                   <div className="flex items-center gap-1 text-sky-400 font-semibold">
                     <ArrowUpRight className="h-3 w-3 text-sky-400/80" />
                     <span>{txMbps === null ? '—' : `${txMbps}M`}</span>
@@ -293,7 +298,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 7. Conns / Procs */}
-                <td className="py-2 px-2 whitespace-nowrap tabular-nums text-slate-300">
+                <td className="py-2.5 px-2 whitespace-nowrap tabular-nums text-slate-300">
                   <span className="font-semibold">{c.conn_count ?? '—'}</span>
                   <span className="text-slate-400 text-[10px]"> conn</span>
                   <span className="text-slate-600 mx-1">·</span>
@@ -301,7 +306,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 8. Protocol & Badges */}
-                <td className="py-2 px-2 whitespace-nowrap">
+                <td className="py-2.5 px-2 whitespace-nowrap">
                   <div className="flex items-center gap-1">
                     {(c.alerts?.hy2_detected || sec.hy2_protocol?.detected) && (
                       <span
@@ -338,7 +343,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 9. Security Diagnostics */}
-                <td className="py-2 px-2 whitespace-nowrap">
+                <td className="py-2.5 px-2 whitespace-nowrap">
                   {risk.hasRisk ? (
                     <div className="flex max-w-[240px] flex-wrap items-center gap-1" title={risk.reasons.join(' · ')}>
                       {risk.isCritical ? (
@@ -363,7 +368,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
 
                 {/* 10. Actions */}
                 <td
-                  className="py-2 pr-3 pl-2 text-right whitespace-nowrap"
+                  className="py-2.5 pr-3 pl-2 text-right whitespace-nowrap"
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-end gap-1.5">
@@ -372,7 +377,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                         type="button"
                         disabled={isSubmitting}
                         onClick={() => onQuickDisposition(identity, 'deny')}
-                        className="flex items-center gap-1 rounded-sm px-2 py-0.5 text-[10px] font-semibold bg-rose-950/80 text-rose-300 border border-rose-500/40 hover:bg-rose-900 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 disabled:opacity-50"
+                        className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold bg-rose-950/80 text-rose-300 border border-rose-500/40 hover:bg-rose-900 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 disabled:opacity-50"
                         title="定向处置违规进程或服务"
                       >
                         <Ban className="h-2.5 w-2.5 text-rose-400" />
@@ -383,7 +388,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                     <button
                       type="button"
                       onClick={() => onSelect(identity)}
-                      className="flex items-center gap-1 rounded-sm px-2 py-0.5 text-[10px] font-medium bg-slate-800 text-sky-300 border border-slate-700 hover:bg-slate-750 hover:text-sky-200 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium bg-slate-800 text-sky-300 border border-slate-700 hover:bg-slate-700 hover:text-sky-200 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
                       title="打开深度排查抽屉"
                     >
                       <Sparkles className="h-2.5 w-2.5 text-sky-400" />
