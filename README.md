@@ -1,12 +1,19 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.204**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.205**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.7.205：为 Runman 增加代次安全的过载停机
+
+- Runman Rust v2 新增 root-only `/v1/stop-overload`，在实例生命周期锁内核验 UUID 代次、运行状态和实时连接数，确认仍超阈值后才停止；实例已替换、负载恢复或 PID 变化时拒绝动作。
+- Watcher 持续过载策略现在可对 Runman 排队停机动作，并携带期望实例代次；Agent 只调用 Runman 条件式接口，不走通用容器 CLI stop。
+- 修正 Runman UDP socket 没有计入连接总数的问题，TCP 总数与 UDP 数现在保持分项和合计一致，连接策略可正确校验样本。
+- Podman writable-layer 大小仍使用 Runman sparse `disk.img` 分配量单独呈现；广义服务/配置/二进制清理仍关闭，直至目标进程与文件有端到端代次证据。
 
 ### v1.7.204：补齐 Runman 深度快照与剩余安全适配
 
@@ -15,7 +22,7 @@ Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/in
 - Runman 的管理员定向用户登录提醒也绑定报告代次，过期或实例替换后的提醒不能重试或标记为已写入。
 - 接入 Runman SSH 认证前 Banner、UDP socket 与进程引用指标、CPU offender 归因、cgroup v2 CPU/内存/I/O guards、显式选择后的 VMess/Trojan/测速保护，以及管理员复核后的 SOCKS 指定进程停止。
 - 前端显示 Runman `disk.img` 逻辑容量和稀疏文件实际分配量；明确该值不等同 Podman writable layer。
-- 通用服务/配置/二进制清理与持续连接过载自动停止仍保持关闭：当前动作协议无法对这些动作端到端绑定 Runman 目标进程/实例代次。
+- 通用服务/配置/二进制清理仍保持关闭：当前动作协议无法对这些动作端到端绑定 Runman 目标进程/文件代次；持续连接过载自动停止已在 v1.7.205 接入代次条件式 Runman API。
 
 ### v1.7.203：补齐 Runman Rust v2 的隔离、带宽保护与登录提示
 

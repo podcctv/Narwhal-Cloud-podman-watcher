@@ -283,6 +283,60 @@ def _runman_exec_request(
         connection.close()
 
 
+def _runman_stop_overload_request(
+    container_name: str,
+    instance_id: str,
+    threshold: int,
+    metric_tcp_active: bool,
+) -> Tuple[bool, str]:
+    """Ask Runman to stop only the exact generation still over its threshold."""
+    if (
+        os.name != 'posix' or not hasattr(socket, 'AF_UNIX')
+        or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', container_name or '')
+        or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', instance_id or '')
+        or type(threshold) is not int or not 1 <= threshold <= 10_000_000
+        or type(metric_tcp_active) is not bool
+    ):
+        return False, 'Runman overload stop target or evidence is invalid'
+    connection = network_quarantine._UnixHTTP('/run/narwhal-agent/connlimit.sock')
+    connection.timeout = 95
+    body = json.dumps({
+        'container_name': container_name,
+        'project': 'default',
+        'instance_id': instance_id,
+        'threshold': threshold,
+        'metric_tcp_active': metric_tcp_active,
+        'reason': 'sustained_connection_overload',
+    }, separators=(',', ':')).encode('utf-8')
+    try:
+        connection.request(
+            'POST', '/v1/stop-overload', body=body,
+            headers={'Content-Type': 'application/json', 'Connection': 'close'},
+        )
+        response = connection.getresponse()
+        raw = response.read(8193)
+        if len(raw) > 8192:
+            return False, 'Runman overload stop response exceeded the limit'
+        try:
+            result = json.loads(raw.decode('utf-8')) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            result = {}
+        if (
+            response.status != 200 or not isinstance(result, dict)
+            or result.get('ok') is not True or result.get('stopped') is not True
+            or result.get('instance_id') != instance_id
+            or type(result.get('current_connections')) is not int
+            or result['current_connections'] <= threshold
+        ):
+            message = result.get('message') if isinstance(result, dict) else None
+            return False, str(message or 'Runman did not confirm a same-generation overload stop')[:500]
+        return True, f"stopped after {result['current_connections']} connections remained above the limit"
+    except (OSError, ValueError, http.client.HTTPException):
+        return False, 'Runman overload stop socket unavailable or timed out; stop was not confirmed'
+    finally:
+        connection.close()
+
+
 def run(cmd: List[str], timeout: float | None = None) -> str:
     if cmd and cmd[0] == _RUNMAN_EXEC_SENTINEL:
         if len(cmd) != 4:
@@ -7566,12 +7620,14 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
         sampled_at = metrics.get('sampled_at')
         counts_valid = all(type(value) is int and value >= 0 for value in (established, pending, time_wait))
         raw_total = metrics.get('tcp_total')
+        udp_valid = type(udp_sockets) is int and udp_sockets >= 0
         metrics_valid = (
             raw_item.get('running') is True
             and metrics.get('schema') == 1
             and metrics.get('source') == 'runman_proc_net'
             and metrics.get('valid') is True
             and counts_valid
+            and udp_valid
             and type(raw_total) is int
             and raw_total == established + pending + time_wait
             and metrics.get('epoch') == generation
@@ -7579,6 +7635,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             and sampled_at > 0
             and sampled_at <= int(time.time()) + 30
         )
+        total_connections = raw_total + udp_sockets if metrics_valid else 0
         traffic_in = raw_item.get('traffic_in_bytes')
         traffic_out = raw_item.get('traffic_out_bytes')
         traffic_counters_available = (
@@ -7630,13 +7687,13 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'sampled_at': sampled_at if metrics_valid else 0,
             'epoch': generation,
             'valid': metrics_valid,
-            'total': raw_total if metrics_valid else 0,
+            'total': total_connections,
             'tcp_total': raw_total if metrics_valid else 0,
             'tcp_established': established if metrics_valid else 0,
             'tcp_pending': pending if metrics_valid else 0,
             'tcp_time_wait': time_wait if metrics_valid else 0,
-            'udp_sockets': udp_sockets if metrics_valid and type(udp_sockets) is int and udp_sockets >= 0 else None,
-            'udp_sockets_available': metrics_valid and type(udp_sockets) is int and udp_sockets >= 0,
+            'udp_sockets': udp_sockets if metrics_valid else None,
+            'udp_sockets_available': metrics_valid,
             'udp_flows': monitor_metrics.get('udp_flows') if monitor_valid else None,
         }
         raw_disk_image = raw_item.get('disk_image') if isinstance(raw_item.get('disk_image'), dict) else {}
@@ -7772,7 +7829,7 @@ def collect_runman_report(
 ) -> Dict[str, object]:
     metrics = container.get('connection_metrics') if isinstance(container.get('connection_metrics'), dict) else {}
     resources = container.get('runman_resources') if isinstance(container.get('runman_resources'), dict) else {}
-    tcp_total = metrics.get('tcp_total') if type(metrics.get('tcp_total')) is int else 0
+    total_connections = metrics.get('total') if type(metrics.get('total')) is int else 0
     mem_bytes = resources.get('mem_bytes') if type(resources.get('mem_bytes')) is int else 0
     mem_limit = resources.get('mem_limit_bytes') if type(resources.get('mem_limit_bytes')) is int else 0
     cpu = resources.get('cpu_percent') if type(resources.get('cpu_percent')) in (int, float) else 0.0
@@ -7885,7 +7942,7 @@ def collect_runman_report(
             'epoch': f'{stable_id}:{instance_id}:runman',
         },
         'network_addresses': sorted(set(ips)),
-        'conn_count': tcp_total if metrics.get('valid') is True else int(report.get('conn_count') or 0),
+        'conn_count': total_connections if metrics.get('valid') is True else int(report.get('conn_count') or 0),
         'udp_flow_count': (
             int(raw_metrics['udp_flows'])
             if metrics_available and type(raw_metrics.get('udp_flows')) in (int, float)
@@ -11406,7 +11463,7 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         runtime_kind = str(action.get("runtime") or "").strip().lower()
         container_name = str(action.get("container_name") or "").strip()
         project = str(action.get("project") or "").strip()
-        if runtime_kind not in ("podman", "docker", "incus"):
+        if runtime_kind not in ("podman", "docker", "incus", "runman"):
             return False, "unsupported runtime for automatic stop"
         if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
             return False, "invalid container target"
@@ -11416,7 +11473,7 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         if str(params.get("reason") or "") != "sustained_connection_overload":
             return False, "automatic stop reason is missing or invalid"
         runtime_bin = get_runtime_bins().get(runtime_kind, "")
-        if not runtime_bin:
+        if runtime_kind != 'runman' and not runtime_bin:
             return False, f"runtime {runtime_kind} is unavailable"
         if params.get('metric_schema') != 1:
             return False, 'legacy automatic stop lacks validated socket evidence; fresh samples required'
@@ -11433,6 +11490,21 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
                 return False, 'automatic stop evidence expired or continuous duration is insufficient'
         except (KeyError, TypeError, ValueError):
             return False, 'automatic stop evidence is incomplete'
+        if runtime_kind == 'runman':
+            instance_id = str(params.get('instance_id') or '')
+            metric_tcp_active = params.get('metric_tcp_active', False)
+            if (
+                project != 'default'
+                or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', container_name)
+                or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', instance_id)
+                or params.get('metric_epoch') != instance_id
+                or _runman_instance_generations.get(container_name) != instance_id
+                or type(metric_tcp_active) is not bool
+            ):
+                return False, 'Runman automatic stop requires the exact live UUID generation'
+            return _runman_stop_overload_request(
+                container_name, instance_id, threshold, metric_tcp_active,
+            )
         if runtime_kind == "incus":
             allowed, guard_message = incus_health.stop_preflight(runtime_bin, project, container_name)
             if not allowed:

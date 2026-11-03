@@ -56,6 +56,7 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
                 "source": "runman_local_proc_net",
                 "valid": True,
                 "tcp_total": 42,
+                "total": 42,
             },
             "runman_resources": {
                 "cpu": 2,
@@ -106,7 +107,7 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
             "stable_id": "11111111-2222-3333-4444-555555555555",
             "name": "11111111-2222-3333-4444-555555555555",
             "runtime": "runman", "instance_id": "generation-1", "status": "running",
-            "connection_metrics": {"schema": 1, "source": "runman_local_proc_net", "valid": True, "tcp_total": 4},
+            "connection_metrics": {"schema": 1, "source": "runman_local_proc_net", "valid": True, "tcp_total": 4, "total": 4},
             "runman_resources": {
                 "cpu": 2, "cpu_percent": 15.5, "mem_bytes": 1024, "mem_limit_bytes": 4096,
                 "disk_gb": 4, "traffic_in_bytes": 100, "traffic_out_bytes": 200,

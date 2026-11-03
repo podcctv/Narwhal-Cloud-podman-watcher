@@ -1,6 +1,6 @@
 # Runman Rust v2 compatibility
 
-Updated for Watcher v1.7.204 and Runman Rust v2 inventory schema 1. This is a source-level compatibility matrix; it does not claim that a live Runman host was exercised.
+Updated for Watcher v1.7.205 and Runman Rust v2 inventory schema 1. This is a source-level compatibility matrix; it does not claim that a live Runman host was exercised.
 
 ## Supported
 
@@ -22,18 +22,18 @@ Updated for Watcher v1.7.204 and Runman Rust v2 inventory schema 1. This is a so
 | Dynamic CPU, memory and I/O guards | Runman guards can lower and restore `cpu.max`, `memory.high` and per-device `io.max` on the verified `system.slice/runman-<uuid>.service/ct` cgroup. Every access rechecks the live PID start ticks, exact VM UUID and cgroup boundary. The guard remains unavailable when cgroup v2 controllers/files are absent or readback no longer matches the saved state. |
 | Speed-test and VMess/Trojan guards | Explicitly selected Runman instances can receive the existing bounded speed-test service policy and protocol-specific network-namespace port rules. Rules require complete process/config/listener evidence and post-apply readback. Runman is selectable per saved policy; the no-policy automatic default still targets Incus/Podman only. |
 | Reviewed SOCKS process stop | An administrator can explicitly stop only the reviewed SOCKS process PIDs after the server confirms a fresh matching Runman report generation. The Agent checks the live instance generation, review token and each PID start tick before signaling, then verifies the process is gone. It does not stop the guest or establish a persistent weak-password block. |
+| Sustained-overload automatic stop | After the server observes the required continuous fresh samples, the Agent sends the expected UUID generation and threshold to Runman's root-only control API. Runman holds the instance lifecycle lock, checks that exact managed generation is still running and still above the selected TCP-active or all-socket threshold, then records the stopped desired state and halts it. A replacement, recovered load, stale evidence or older Runman API fails closed. The action stops the guest; it never deletes it. |
 
 ## Remaining boundaries
 
 | Capability | Current boundary |
 | --- | --- |
 | Podman-style writable image-layer size | Runman exposes `disk.img` logical size and allocated host blocks, plus guest filesystem use. This is a useful sparse-disk allocation metric but is not equivalent to Podman's image writable-layer metric. |
-| Sustained-overload automatic stop | Runman is not stopped automatically from connection alerts. The existing stop action has no Runman expected-generation precondition, so a replacement instance could otherwise be stopped after a race. Keep the per-instance manual connection limit and network quarantine available; automatic stop needs a generation-conditional Runman control API first. |
 | General process/service cleanup | Broad panel-remediation and malware-cleanup jobs still remove service files, configs or binaries by process-family evidence. They are not enabled for Runman because their review/action contract does not yet carry exact per-file and per-process generations end to end. The narrower reviewed SOCKS stop above is supported. |
 
 ## Runtime requirements
 
-- Runman must expose `/run/narwhal-agent/connlimit.sock` with root-only permissions, and Watcher must run with access to that socket. Older Runman builds without `/v1/exec` and `/v1/network-quarantine` can still provide supported read-only inventory, but scans, shell/SSH banner installation, reviewed SOCKS stop, quarantine and Runman bandwidth controls require the updated API.
+- Runman must expose `/run/narwhal-agent/connlimit.sock` with root-only permissions, and Watcher must run with access to that socket. Older Runman builds without `/v1/exec`, `/v1/network-quarantine` and `/v1/stop-overload` can still provide supported read-only inventory, but scans, shell/SSH banner installation, reviewed SOCKS stop, automatic overload stop, quarantine and Runman bandwidth controls require the updated API.
 - `CONTAINER_RUNTIMES` must be `auto` or include `runman`; a setting containing only `podman` excludes Runman inventory.
 - Guest execution requires a running, managed instance and matching generation. Commands that exceed the timeout or output bound fail without being reported as successful.
 - SSH Banner additionally requires OpenSSH server files and service-management support inside the guest. A configured banner file does not prove that every SSH client displayed it.

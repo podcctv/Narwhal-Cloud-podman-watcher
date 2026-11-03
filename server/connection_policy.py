@@ -6,6 +6,7 @@ firewall rule is inferred from an aggregate count.
 """
 import json
 import time
+import uuid
 
 
 def initialize(conn):
@@ -31,6 +32,23 @@ def metrics(container, now, stale_seconds=900):
             or m['sampled_at'] > now + 30 or now - m['sampled_at'] > stale_seconds
             or m['total'] != container.get('conn_count')):
         return None
+    if runtime == 'runman':
+        try:
+            container_id = str(container.get('name') or '')
+            parsed_container_id = uuid.UUID(container_id)
+            generation = str(container.get('instance_id') or '')
+            parsed_generation = uuid.UUID(generation)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if (
+            str(parsed_container_id) != container_id
+            or container.get('project') != 'default'
+            or str(parsed_generation) != generation
+            or parsed_generation.version != 4
+            or parsed_generation.variant != uuid.RFC_4122
+            or generation != m['epoch']
+        ):
+            return None
     return m
 
 
@@ -109,13 +127,16 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                 previous = json.loads(pending['params_json'])
                 if previous.get('threshold') != stop or previous.get('required_duration_seconds') != duration:
                     pending = None  # A different policy cannot lend a pending action/retry history.
+                elif key[1] == 'runman' and previous.get('instance_id') != m['epoch']:
+                    pending = None  # A replacement generation cannot inherit an old stop action.
             if pending and pending['status'] == 'succeeded' and pending['updated_at'] >= state['stop_since'] and state['stop_since']:
                 state['stop_since'], state['stop_samples'] = stamp, 1
                 policy['stop_duration_seconds'] = 0
                 policy['stop_sample_count'] = 1
                 policy['stop_duration_verified'] = False
             ready = (m['total'] > stop and policy['stop_duration_seconds'] >= duration
-                     and state['stop_samples'] >= (2 if duration <= 300 else 3) and key[1] in ('podman', 'incus'))
+                     and state['stop_samples'] >= (2 if duration <= 300 else 3)
+                     and key[1] in ('podman', 'incus', 'runman'))
             incus_guard_reason = _incus_stop_guard(c, runtime_health) if key[1] == 'incus' else ''
             if incus_guard_reason:
                 ready = False
@@ -141,6 +162,7 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                           'observed_at': stamp, 'expires_at': now + max_gap,
                           'stop_since':state['stop_since']}
                 if tcp_active:params['metric_tcp_active']=True
+                if key[1] == 'runman':params['instance_id']=m['epoch']
                 # Protection is independent of delivery/mapping/API availability.
                 params['notice_best_effort'] = True
                 action = conn.execute("""INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at)

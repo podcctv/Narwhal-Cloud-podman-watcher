@@ -32,6 +32,12 @@ class ConnectionPolicyTests(unittest.TestCase):
             'security':{'connection_metrics':{'schema':1,'valid':True,'source':'container_proc_net','epoch':epoch,
                 'sampled_at':stamp,'total':count,'tcp_total':40,'tcp_established':30,'tcp_pending':0,'tcp_time_wait':5,'udp_sockets':count-40}}}
 
+    def runman_sample(self, stamp, generation='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', count=1600):
+        vm_id = '11111111-2222-3333-4444-555555555555'
+        return {'name':vm_id,'runtime':'runman','project':'default','instance_id':generation,'conn_count':count,
+            'security':{'connection_metrics':{'schema':1,'valid':True,'source':'runman_local_proc_net','epoch':generation,
+                'sampled_at':stamp,'total':count,'tcp_total':40,'tcp_established':30,'tcp_pending':0,'tcp_time_wait':5,'udp_sockets':count-40}}}
+
     def observe(self, stamp, count=1600, epoch='boot:net:pid', sample=None, runtime_health=READY_INCUS_HEALTH):
         c = sample or self.sample(stamp,count,epoch)
         result = policy.observe(self.conn,'h',stamp,[c],1000,1500,900,600,now=stamp,
@@ -115,6 +121,29 @@ class ConnectionPolicyTests(unittest.TestCase):
         for stamp in (1000,1450,1900): self.observe(stamp)
         for stamp in (2000,2450,2900): self.observe(stamp,epoch='new')
         self.assertEqual(self.conn.execute('SELECT count(*) FROM security_actions').fetchone()[0],1)
+
+    def test_runman_overload_queues_generation_bound_stop_and_requeues_replacement(self):
+        generation1 = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        generation2 = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+        for stamp in (1000,1450,1900):
+            sample = self.runman_sample(stamp, generation1)
+            queued = policy.observe(self.conn, 'h', stamp, [sample], 1000, 1500, 900, 600, now=stamp)
+            self.assertEqual(queued, 1 if stamp == 1900 else 0)
+        for stamp in (2000,2450,2900):
+            sample = self.runman_sample(stamp, generation2)
+            queued = policy.observe(self.conn, 'h', stamp, [sample], 1000, 1500, 900, 600, now=stamp)
+            self.assertEqual(queued, 1 if stamp == 2900 else 0)
+        rows = self.conn.execute('SELECT params_json FROM security_actions ORDER BY id').fetchall()
+        self.assertEqual([json.loads(row[0])['instance_id'] for row in rows], [generation1, generation2])
+
+    def test_runman_policy_rejects_missing_or_mismatched_generation(self):
+        sample = self.runman_sample(1000)
+        self.assertIsNotNone(policy.metrics(sample, 1000))
+        sample['instance_id'] = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+        self.assertIsNone(policy.metrics(sample, 1000))
+        sample = self.runman_sample(1000)
+        sample['project'] = 'other'
+        self.assertIsNone(policy.metrics(sample, 1000))
 
     def test_retries_are_bounded_and_failure_is_visible(self):
         for stamp in (1000,1450,1900): self.observe(stamp)

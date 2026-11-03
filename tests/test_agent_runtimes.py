@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest import mock
 from unittest.mock import patch
 
+from server import connection_policy as connection_policy
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("narwhal_agent", ROOT / "client" / "agent.py")
 assert SPEC and SPEC.loader
@@ -62,7 +64,7 @@ class RuntimeDiscoveryTests(unittest.TestCase):
         container = {
             'id': stable_id, 'stable_id': stable_id, 'name': stable_id, 'instance_id': 'generation-1',
             'runtime': 'runman', 'status': 'running',
-            'connection_metrics': {'valid': True, 'tcp_total': 7},
+            'connection_metrics': {'valid': True, 'tcp_total': 7, 'total': 7},
             'runman_resources': {
                 'cpu_percent': 1.0, 'mem_bytes': 1024, 'mem_limit_bytes': 4096,
                 'traffic_counters_available': True, 'traffic_in_bytes': 1000, 'traffic_out_bytes': 500,
@@ -82,6 +84,107 @@ class RuntimeDiscoveryTests(unittest.TestCase):
             second = agent.collect_runman_report(container)
         self.assertEqual(second['net_rx_bps'], 100.0)
         self.assertEqual(second['net_tx_bps'], 40.0)
+
+    @unittest.skipUnless(os.name == 'posix', 'Runman inventory uses a root-only Unix socket')
+    def test_runman_udp_sockets_are_included_in_valid_connection_total(self):
+        vm_id = '11111111-2222-3333-4444-555555555555'
+        generation = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        payload = {
+            'schema': 1,
+            'items': [{
+                'id': vm_id,
+                'instance_id': generation,
+                'running': True,
+                'connection_metrics': {
+                    'schema': 1, 'source': 'runman_proc_net', 'valid': True,
+                    'epoch': generation, 'sampled_at': 100,
+                    'tcp_established': 4, 'tcp_pending': 1, 'tcp_time_wait': 2,
+                    'tcp_total': 7, 'udp_sockets': 3,
+                },
+            }],
+        }
+        response = mock.Mock(status=200)
+        response.read.return_value = json.dumps(payload).encode('utf-8')
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        with mock.patch.object(agent.network_quarantine, '_UnixHTTP', return_value=connection), \
+             mock.patch.object(agent.time, 'time', return_value=100):
+            item = agent._runman_inventory_containers()[0]
+            report = agent.collect_runman_report(item)
+        metrics = report['security']['connection_metrics']
+        self.assertTrue(metrics['valid'])
+        self.assertEqual((metrics['tcp_total'], metrics['udp_sockets'], metrics['total']), (7, 3, 10))
+        self.assertEqual(report['conn_count'], 10)
+        self.assertIsNotNone(connection_policy.metrics(report, 100))
+
+    @unittest.skipUnless(os.name == 'posix', 'Runman stop uses a root-only Unix socket')
+    def test_runman_overload_stop_uses_exact_generation_api(self):
+        vm_id = '11111111-2222-3333-4444-555555555555'
+        generation = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        action = {
+            'action_type': 'stop_container', 'runtime': 'runman',
+            'project': 'default', 'container_name': vm_id,
+            'params': {
+                'reason': 'sustained_connection_overload', 'connection_count': 1600,
+                'threshold': 1500, 'duration_seconds': 900,
+                'required_duration_seconds': 900, 'expires_at': 2000,
+                'metric_schema': 1, 'metric_epoch': generation,
+                'instance_id': generation, 'metric_tcp_active': True,
+            },
+        }
+        with mock.patch.object(agent.time, 'time', return_value=1000), \
+             mock.patch.dict(agent._runman_instance_generations, {vm_id: generation}), \
+             mock.patch.object(agent, 'get_runtime_bins', return_value={}), \
+             mock.patch.object(agent.admission_guard, 'status', return_value=False), \
+             mock.patch.object(agent, '_runman_stop_overload_request', return_value=(True, 'stopped')) as stop:
+            self.assertEqual(agent.execute_security_action(action), (True, 'stopped'))
+        stop.assert_called_once_with(vm_id, generation, 1500, True)
+
+    @unittest.skipUnless(os.name == 'posix', 'Runman stop uses a root-only Unix socket')
+    def test_runman_overload_stop_rejects_replaced_generation(self):
+        vm_id = '11111111-2222-3333-4444-555555555555'
+        generation = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        action = {
+            'action_type': 'stop_container', 'runtime': 'runman',
+            'project': 'default', 'container_name': vm_id,
+            'params': {
+                'reason': 'sustained_connection_overload', 'threshold': 1500,
+                'duration_seconds': 900, 'required_duration_seconds': 900,
+                'expires_at': 2000, 'metric_schema': 1,
+                'metric_epoch': generation, 'instance_id': generation,
+            },
+        }
+        with mock.patch.object(agent.time, 'time', return_value=1000), \
+             mock.patch.dict(agent._runman_instance_generations, {vm_id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'}), \
+             mock.patch.object(agent, 'get_runtime_bins', return_value={}), \
+             mock.patch.object(agent.admission_guard, 'status', return_value=False), \
+             mock.patch.object(agent, '_runman_stop_overload_request') as stop:
+            ok, message = agent.execute_security_action(action)
+        self.assertFalse(ok)
+        self.assertIn('generation', message)
+        stop.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix', 'Runman stop uses a root-only Unix socket')
+    def test_runman_stop_request_validates_readback(self):
+        vm_id = '11111111-2222-3333-4444-555555555555'
+        generation = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        response = mock.Mock(status=200)
+        response.read.return_value = json.dumps({
+            'ok': True, 'stopped': True, 'instance_id': generation,
+            'current_connections': 1600,
+        }).encode('utf-8')
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        with mock.patch.object(agent.network_quarantine, '_UnixHTTP', return_value=connection):
+            ok, message = agent._runman_stop_overload_request(vm_id, generation, 1500, True)
+        self.assertTrue(ok)
+        self.assertIn('1600', message)
+        method, path = connection.request.call_args.args[:2]
+        payload = json.loads(connection.request.call_args.kwargs['body'])
+        self.assertEqual((method, path), ('POST', '/v1/stop-overload'))
+        self.assertEqual(payload['instance_id'], generation)
+        self.assertEqual(payload['threshold'], 1500)
+        self.assertTrue(payload['metric_tcp_active'])
 
     def test_runman_cpu_guard_process_sample_uses_generation_bound_exec(self):
         name = '00000000-0000-0000-0000-000000000001'
