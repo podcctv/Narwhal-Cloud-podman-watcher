@@ -24,7 +24,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 try:
-    from client import operations as node_operations, security_banner, tcp_probe, gfw_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, speedtest_guard, manual_bandwidth, cpu_guard, io_guard, memory_guard
+    from client import operations as node_operations, security_banner, tcp_probe, gfw_probe, disk_cleanup, socks_detector, host_security_audit, vmess_guard, speedtest_guard, manual_bandwidth, cpu_guard, io_guard, memory_guard, incus_health
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 except ImportError:
     import operations as node_operations
@@ -40,6 +40,7 @@ except ImportError:
     import cpu_guard
     import io_guard
     import memory_guard
+    import incus_health
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics, parse_prometheus_labels as _parse_prometheus_labels
 
 try:
@@ -4022,7 +4023,7 @@ def _collect_memory_guard(containers: List[Dict[str, object]], interval_seconds:
         print(f"memory guard collection failed: {error}")
 
 
-def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float) -> Dict[str, object]:
+def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float, incus_runtime_health: Dict[str, object] | None = None) -> Dict[str, object]:
     global _pending_firewall_event_cursor
     enabled = os.getenv("SECURITY_MONITOR_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
     access = _collect_access_log_stats(interval_seconds) if enabled else {"enabled": False, "readable_files": 0}
@@ -4048,6 +4049,11 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             **summary["host_firewall"],
             "readback": _runman_firewall_readback(),
         }
+    if isinstance(incus_runtime_health, dict):
+        summary["incus_runtime"] = incus_runtime_health
+        runtime_alerts = incus_runtime_health.get("alerts")
+        if isinstance(runtime_alerts, list):
+            summary["alerts"].extend(item for item in runtime_alerts if isinstance(item, dict))
     firewall_events = _runman_firewall_events(_firewall_event_cursor)
     if isinstance(summary.get("host_firewall"), dict):
         summary["host_firewall"] = {**summary["host_firewall"], **firewall_events}
@@ -7677,6 +7683,28 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
         })
     _runman_instance_generations = generations
     return items
+
+
+def _collect_incus_runtime_health() -> Dict[str, object] | None:
+    configured = os.getenv("CONTAINER_RUNTIMES", "auto").strip().lower()
+    requested = {item.strip() for item in configured.split(",") if item.strip()}
+    incus_enabled = not requested or "auto" in requested or "incus" in requested
+    if not incus_enabled:
+        return None
+
+    runtime = get_runtime_bins().get("incus")
+    if not runtime:
+        if "auto" in requested or not requested:
+            return None
+        runtime = "incus"
+    project = os.getenv("INCUS_PROJECT", "all").strip() or "all"
+    try:
+        instance_scan = incus_health.list_instances(runtime, project)
+        operation_scan = incus_health.list_operations(runtime, project)
+        return incus_health.build_snapshot(instance_scan, operation_scan, project=project)
+    except Exception:
+        unavailable = {"ok": False, "items": [], "latency_ms": 0, "error": "collector_failed"}
+        return incus_health.build_snapshot(unavailable, unavailable, project=project)
 
 
 def list_containers() -> List[Dict[str, str]]:
@@ -11339,6 +11367,10 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
                 return False, 'automatic stop evidence expired or continuous duration is insufficient'
         except (KeyError, TypeError, ValueError):
             return False, 'automatic stop evidence is incomplete'
+        if runtime_kind == "incus":
+            allowed, guard_message = incus_health.stop_preflight(runtime_bin, project, container_name)
+            if not allowed:
+                return False, guard_message
         pid = _incus_instance_pid(runtime_bin, container_name, project) if runtime_kind == 'incus' else 0
         if runtime_kind != 'incus':
             try:
@@ -11752,7 +11784,8 @@ def main() -> None:
                 except Exception as deep_error:
                     print(f"deep sample failed for {c.get('name')}: {deep_error}")
             collected.append(container_report)
-        security = collect_security_summary(collected, security_interval)
+        incus_runtime_health = _collect_incus_runtime_health()
+        security = collect_security_summary(collected, security_interval, incus_runtime_health)
         # The init PID and its kernel start tick are local procfs write guards;
         # they are not part of the telemetry contract.
         for container_report in collected:

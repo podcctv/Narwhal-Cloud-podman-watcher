@@ -175,9 +175,11 @@ class Engine:
         key = (container['runtime'], container.get('project') or '', container['name'])
         with self.lock:
             result = copy.deepcopy(self.results.get(key, {}))
-        identity = str(container.get('instance_id') if container.get('runtime') == 'runman'
-                       else container.get('stable_id') or container.get('id') or '')
+        identity = (str(container.get('instance_id') or '') if container.get('runtime') == 'runman'
+                    else str(container.get('stable_id') or container.get('id') or ''))
         seen = str(result.get('instance_id') or '')
+        if container.get('runtime') == 'runman' and seen and not identity:
+            return {'state': 'pending', 'coverage': 'current Runman generation unavailable'}
         if identity and seen and identity != seen and not (container['runtime'] == 'podman' and len(identity) >= 12 and seen.startswith(identity)):
             return {'state': 'pending', 'coverage': 'instance identity changed'}
         if now-float(result.get('observed_at', 0)) > 900:

@@ -313,7 +313,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     });
 
     return {
-      all: liveContainers.length,
+      all: liveContainers.length + staleContainers.length,
       risk,
       protection,
       protocol,

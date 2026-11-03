@@ -49,6 +49,7 @@ CONNECTION_STOP_MAX_GAP_SECONDS = max(1, min(600, int(os.getenv("CONNECTION_STOP
 STALE_SECONDS = int(os.getenv("STALE_SECONDS", "900"))
 RFW_APPLICATION_PROTOCOLS = ("http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto")
 RFW_CN_ALERT_PROTOCOLS = {"socks", "fet", "wireguard", "mtproto", "openvpn"}
+INCUS_RUNTIME_ALERT_TYPES = ("incus_instance_error", "incus_lifecycle_operation_stuck", "incus_lifecycle_operation_unverified", "incus_api_unavailable", "incus_operation_inventory_unavailable", "incus_api_slow")
 OFFLINE_HIDE_SECONDS = int(os.getenv("OFFLINE_HIDE_SECONDS", str(7 * 24 * 3600)))
 OFFLINE_HOST_PURGE_SECONDS = int(os.getenv("OFFLINE_HOST_PURGE_SECONDS", str(7 * 24 * 3600)))
 PURGE_SECONDS = int(os.getenv("PURGE_SECONDS", str(30 * 24 * 3600)))
@@ -828,6 +829,7 @@ def process_security_alerts(
     alerts: List[Dict[str, Any]],
     partial: bool = False,
     preserve_active_types: Optional[List[str]] = None,
+    resolve_types: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     active_fingerprints: List[str] = []
     notifications: List[Dict[str, Any]] = []
@@ -1010,7 +1012,27 @@ def process_security_alerts(
         ).fetchall()
         active_fingerprints.extend(str(row["fingerprint"]) for row in preserved)
     pending_network_review = "NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status NOT IN ('released','replaced'))"
-    if active_fingerprints:
+    resolve_type_values = sorted({
+        str(item).strip()[:80] for item in (resolve_types or []) if str(item).strip()
+    })
+    if resolve_type_values:
+        type_placeholders = ",".join("?" for _ in resolve_type_values)
+        type_filter = f" AND alert_type IN ({type_placeholders})"
+        if active_fingerprints:
+            fingerprint_placeholders = ",".join("?" for _ in active_fingerprints)
+            conn.execute(
+                f"UPDATE security_alerts SET status='resolved', last_seen=? "
+                f"WHERE host_id=? AND status IN ('active','dismissed'){type_filter} "
+                f"AND fingerprint NOT IN ({fingerprint_placeholders}) AND {pending_network_review}",
+                (ts, host_id, *resolve_type_values, *active_fingerprints),
+            )
+        else:
+            conn.execute(
+                f"UPDATE security_alerts SET status='resolved', last_seen=? "
+                f"WHERE host_id=? AND status IN ('active','dismissed'){type_filter} AND {pending_network_review}",
+                (ts, host_id, *resolve_type_values),
+            )
+    elif active_fingerprints:
         placeholders = ",".join("?" for _ in active_fingerprints)
         conn.execute(
             f"UPDATE security_alerts SET status='resolved', last_seen=? "
@@ -2116,12 +2138,14 @@ def process_connection_overloads(
     host_id: str,
     ts: int,
     containers: List[Dict[str, Any]],
+    incus_runtime_health: Optional[Dict[str, Any]] = None,
 ) -> int:
-    """Count only fresh, comparable samples; legacy agents remain alert-only."""
+    """Count only fresh, comparable samples; Incus stop decisions require a full health scan."""
     return connection_policy.observe(conn, host_id, ts, containers,
         ALERT_CONN_CRITICAL_THRESHOLD, CONNECTION_STOP_THRESHOLD,
         CONNECTION_STOP_DURATION_SECONDS, CONNECTION_STOP_MAX_GAP_SECONDS,
-        auto_stop=CONNECTION_AUTO_STOP_ENABLED, before_stop=buyer_notifications.connection_stop_gate)
+        auto_stop=CONNECTION_AUTO_STOP_ENABLED, before_stop=buyer_notifications.connection_stop_gate,
+        runtime_health=incus_runtime_health)
 
 
 _latest_cache: Dict[str, Any] | None = None
@@ -3727,6 +3751,8 @@ async def report(
     podman_v6 = 1 if network_status.get("ipv6_ok") else 0
 
     containers: List[Dict[str, Any]] = data.get("containers", [])
+    report_security = data.get("security") if isinstance(data.get("security"), dict) else {}
+    incus_runtime_health = report_security.get("incus_runtime") if isinstance(report_security.get("incus_runtime"), dict) else None
     conn = db()
     notifications: List[Dict[str, Any]] = []
     firewall_event_cursor = ""
@@ -3735,7 +3761,7 @@ async def report(
     try:
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config)
         _maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, int(time.time()))
-        automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers)
+        automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers, incus_runtime_health)
         for c in containers:
             stored_payload = dict(c)
             stored_payload["_agent_version"] = agent_version
@@ -3828,11 +3854,24 @@ async def report(
                         preserve_types.append("host_vulnerability")
                     if indicator_scan.get("coverage") != "complete":
                         preserve_types.append("host_security_finding")
+                if incus_runtime_health is None or incus_runtime_health.get("scan_status") != "complete":
+                    preserve_types.extend(INCUS_RUNTIME_ALERT_TYPES)
                 notifications = process_security_alerts(
                     conn, host_id, ts, combined_alerts,
                     preserve_active_types=preserve_types,
                 )
                 buyer_notifications.observe(conn, host_id, ts, containers, combined_alerts)
+            elif ts > previous_sample and incus_runtime_health is not None:
+                runtime_alerts = [
+                    alert for alert in security_alerts
+                    if isinstance(alert, dict) and str(alert.get("type") or "") in INCUS_RUNTIME_ALERT_TYPES
+                ]
+                scan_complete = incus_runtime_health.get("scan_status") == "complete"
+                notifications = process_security_alerts(
+                    conn, host_id, ts, runtime_alerts,
+                    partial=not scan_complete,
+                    resolve_types=list(INCUS_RUNTIME_ALERT_TYPES) if scan_complete else None,
+                )
             automatic_deep_samples_queued = queue_connection_alert_deep_samples(conn, host_id, ts)
             _store_host_firewall_readback(conn, host_id, security, ts)
             historical_security = dict(security)

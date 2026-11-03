@@ -153,6 +153,8 @@ class AbuseGuardTests(unittest.TestCase):
         self.assertEqual(self.engine.status(container, 120)['state'], 'isolated')
         replacement = {**container, 'instance_id': '33333333-3333-4333-8333-333333333333'}
         self.assertEqual(self.engine.status(replacement, 120)['state'], 'pending')
+        missing_generation = {key: value for key, value in container.items() if key != 'instance_id'}
+        self.assertEqual(self.engine.status(missing_generation, 120)['state'], 'pending')
 
     def test_native_provider_refuses_restart_between_sampling_and_new_isolation(self):
         import json

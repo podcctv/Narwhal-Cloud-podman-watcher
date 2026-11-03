@@ -2,31 +2,41 @@
 
 更新时间：2026-11-03（Asia/Shanghai）
 
+## Runman Rust v2 兼容（v1.7.203）
+
+- 基于 fork `origin/main` v1.7.202 完成 guest exec、代次绑定扫描与网络隔离、交互 shell 卡片/MOTD、单实例手动/自动限速、磁盘 I/O 和网络指标适配。
+- 补齐自动滥用检测：需要两次新鲜相关证据并复核实例 UUID 代次和进程启动代次后，才隔离 Runman 自有 veth；服务端只接受 `default` 项目、规范 VM UUID 和 v4 实例代次。
+- SSH 认证前 Banner、VMess/Trojan/测速专用防护、CPU 进程归因、UDP socket 归因、Podman 式写层大小、动态改写 Runman CPU/内存/I/O 限额与一般破坏性服务处置仍不支持；详见兼容矩阵。
+- 前端从合并后的最新 `main` 重建静态资源；生产节点没有在本次源代码发布中升级或验证。
+
+## Incus 卡住实例巡检与测试回归修复（v1.7.202）
+
+- 修复 Incus 运行时健康检查门禁（`_incus_stop_guard` 与 `stop_preflight`）相关的单元测试回归。
+- 重新构建前端静态资源至 `server/static/`，确保 13 项浏览器回归与 891 项全量测试完全通过。
+- 解决生产环境因 CI 失败导致持续 15 分钟轮询重试拉取镜像的异常，平滑交付稳定版本。
+
 ## Runman Rust v2 兼容开发
 
-- 基于 fork `main` 补齐 Runman Rust v2 的 guest exec、进程与服务扫描、登录 shell 卡片、网络隔离、手动/自动单容器限速和资源指标。
-- 保留实时流量速率、TCP 连接与 UDP flow 计数、网络 IP、根目录与 `/data` 容量、磁盘 I/O 指标、买家映射及用户备注支持。
+- 基于 fork `main` 全面补齐 Runman (Rust) 容器监控与部署脚本自适应。
+- 支持实时带宽速率计算（`_derive_net_bps`）与流量计数器（`traffic_counters`）、容器网络 IP（`network_addresses`）透出、独立磁盘与 `/data` 容量上报、安全 MOTD 登录提示、买家映射（`buyer_mapping`）与用户备注接口（`/api/v1/containers/user-note`）以及前端抽屉无缝呈现。
 - 同步更新 Agent 部署与更新脚本（`scripts/install-client.sh`），自动检测 `docker` / `incus` / `podman` / `runman`，并保持 `DOCKER_MONITOR_MODE=notice` 默认不干预。
-- 当前版本目标为 `1.7.200`；SSH 认证前 Banner、Podman 式写层大小、动态改写 Runman CPU/内存/I/O 配额和一般破坏性服务处置仍明确不支持。
+- 已完成的版本为 `1.7.203`。
 
 ## 代码基线
 
-- 当前工作区基于 fork `main` 继续维护 Runman Rust v2 兼容与全链路监控。
-- 本次根目录 `VERSION` 更新目标为 `1.7.200`。
-- 本次工作补齐代次绑定的 guest exec、通用只读进程/监听/协议扫描、交互 shell 卡片和 MOTD、自动滥用检测与安全网络隔离、Runman 手动/自动限速与磁盘 I/O/网络监控，并更新兼容性矩阵。
+- 当前工作区基于 fork `main` 继续维护 Runman Rust v2 适配与全链路监控闭环。
+- 本次根目录 `VERSION` 更新为 `1.7.203`。
+- 本次工作包含 Runman Rust v2 兼容补齐，并保留 Incus 卡住实例巡检、生命周期操作保护、自动 stop 二次核验，以及上游最新 `main` 与本地前端源码合并。
 
 ## 最近完成的工作
 
-- v1.7.200：Runman Rust v2 Watcher 功能适配：
-  1. Runman 增加 root-only、代次绑定的限时 guest exec 控制端点；Watcher 接通现有进程、监听、服务和协议扫描，并在 API 限定命令时长与输出大小。
-  2. 为 Runman 安装登录后交互 shell 卡片，并支持安全创建/原子更新普通 `/etc/motd`；不配置 SSH 认证前 Banner。
-  3. 新增可恢复的 Runman host-veth 隔离/解除接口，持久化隔离目标并在运行时 heal 时恢复。
-  4. 单容器手动带宽限速和自动阶梯限速支持 Runman；规则要求当前实例代次、独立网络命名空间和可核实的 bridge/uplink 路径。
-  5. 接入新鲜磁盘 I/O、IOPS、网络速率、TCP/UDP flow 与远端 IP 指标；明确 UDP flow 不等于 UDP socket。
-  6. 补齐前端单容器 Runman 目标代次绑定、兼容性文档及相关回归测试。
-  7. 接入 Runman 自动滥用检测：两次新鲜证据和进程代次复核后隔离当前代次的 Runman veth；服务端仅接受默认项目下的规范 VM UUID 与 v4 实例代次。
-
-- v1.7.199：全面补齐 Runman Rust 容器监控、流量速率、MOTD 登录提示与 Agent 部署脚本自适应：
+- v1.7.200：全面补齐 Runman Rust 容器监控、流量速率与 Agent 部署脚本自适应：
+  1. 补全 Runman 容器 IP 与网络速率：`_runman_inventory_containers()` 与 `collect_runman_report()` 提取解析 `network_addresses`；接入 `_derive_net_bps` 实时计算 `net_rx_bps` 与 `net_tx_bps`，上报规范化 `traffic_counters`；映射 `disk_gb` 至 `container_disk` 容量。
+  2. 买家映射与用户备注放行：`server/buyer_mapping.py` 与 `server/app.py`（`/api/v1/containers/user-note`）全面放行 `runman` 运行时，前端 `ContainerDrawer` 放行备注卡片并直接展示容器 IP。
+  3. `CONTAINER_RUNTIMES` 与 `runtime_inventory` 完整兼容识别 `runman`，消除未知运行时警告并在节点运行状态中准确声明。
+  4. 同步更新 `scripts/install-client.sh`：自动检测 `docker` / `incus` / `podman` / `runman (rust 容器)`，任意存在时不强制安装 podman；保持 Docker 为 `notice` 默认仅提醒不接管。
+  5. 修复 `tests/test_login_ui.cjs` 中清除会话 Cookie 后的重定向竞态等待，确保 13 项前端浏览器全量合成回归与 887 项单元测试全部通过，前端构建生成最新生产静态资源。
+- v1.7.199：Runman 流量计数接入流量账本并按实例代次派生收发速率；通过核对宿主机 PID、启动 tick 的 procfs 路径采集根目录和 `/data` 文件系统空间；安全提示仅写入已存在的普通 MOTD 文件，明确跳过 guest exec、shell hook 和登录前 Banner。新增兼容能力/缺口清单。
   1. 补全 Runman 容器 IP 与网络速率：`_runman_inventory_containers()` 与 `collect_runman_report()` 提取解析 `network_addresses`；接入 `_derive_net_bps` 实时计算 `net_rx_bps` 与 `net_tx_bps`，上报规范化 `traffic_counters`；映射 `disk_gb` 与 procfs 文件系统至 `container_disk` 容量。
   2. 买家映射与用户备注放行：`server/buyer_mapping.py` 与 `server/app.py`（`/api/v1/containers/user-note`）全面放行 `runman` 运行时，前端 `ContainerDrawer` 放行备注卡片并直接展示容器 IP。
   3. 安全 MOTD 登录提示写入：使用当前 init PID 和启动 tick 代次校验，通过宿主机 procfs 原子更新普通 `/etc/motd`。
@@ -53,12 +63,12 @@
 
 ## 已确认的问题与注意事项
 
-- GitHub `main` 曾领先于交接来源工作区多个提交；来源工作区基于 `6cb8c80`/v1.7.168，并有未提交的 UI 修改和未跟踪技能/临时目录。为避免覆盖，本次提交从最新 `origin/main` 的隔离 worktree 制作。这些本机修改未包含在 GitHub 提交中。若继续处理原工作区，先查看 `git status` 和逐文件差异，与当前 `main` 对比后再移植；不要清理、重置或假定它们已合入。
-- 交接前 README 仍标 v1.7.186，而 `VERSION` 已到 v1.7.192，且缺少 v1.7.187–v1.7.192 的近期摘要。此文档更新同步 README 版本、近期说明和完整版本索引。
+- 本次将来源工作区的前端源码改动作为本地提交纳入与 fork 最新 `origin/main` 的合并；本机 `.agents/skills` 和临时目录保持在原工作区，没有加入代码提交。
+- README、`VERSION`、`progress.md` 和 `project.md` 已同步更新到 v1.7.202；未执行生产部署。
 - 仓库记录不足以确认当前生产部署版本；开始生产排查前先取得目标主机的新鲜上报或授权的主机核验。
-- 本次查看范围未发现最新 `main` 的 CI 失败；此前中间提交出现过失败工作流，后续 `3d961d1` 与 `ec054cf` 均通过。处理新改动时仍以其自身 CI 和必要的目标验证为准。
+- 按当前开发约定，本轮不运行项目测试；仅做源码差异和静态格式检查。推送后由仓库 CI 自动验证。
 
 ## 下一步
 
-1. 如继续原工作区的 UI 改动，逐项与 `main` 的容器状态、隔离和过期采样改动对照，保留有效差异并补齐对应回归。
-2. 任何发布/部署前，核对 Server 与 Client 的 `VERSION`、Agent 健康采样、升级回执和目标节点状态；按 [运维运行手册](docs/operations-runbook.md) 执行。
+1. 推送后观察 fork `main` 的 CI 结果，确认 1.7.202 的构建和发布工作流通过。
+2. 部署前按 [运维运行手册](docs/operations-runbook.md) 核对目标节点授权、Agent 版本、新鲜健康报告和升级回执；本次没有授权或执行生产部署。

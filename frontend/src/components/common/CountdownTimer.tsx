@@ -26,10 +26,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
   const strokeDashoffset = circumference - progress * circumference;
 
   return (
-    <div
-      className="flex h-12 shrink-0 items-center gap-2 rounded-[10px] border border-slate-700/90 bg-slate-900/92 px-2.5 shadow-xs"
-      aria-label="自动刷新控制"
-    >
+    <div className="flex h-12 shrink-0 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/90 px-2 shadow-xs" role="group" aria-label="自动刷新控制">
       {/* Circular Countdown Indicator */}
       <div className="relative flex h-6 w-6 items-center justify-center">
         <svg className="h-6 w-6 -rotate-90 transform" viewBox="0 0 24 24">

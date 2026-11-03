@@ -34,7 +34,30 @@ def metrics(container, now, stale_seconds=900):
     return m
 
 
-def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=None, auto_stop=True, before_stop=None):
+def _incus_stop_guard(container, runtime_health):
+    if not isinstance(runtime_health, dict):
+        return "未收到 Incus 完整实例与操作清单，暂停自动停止；需升级 Agent 并等待完整巡检"
+    if runtime_health.get("scan_status") != "complete":
+        return "Incus 实例或后台操作清单不完整，暂停自动停止以避免重复生命周期操作"
+    runtime_alerts = runtime_health.get("alerts") if isinstance(runtime_health.get("alerts"), list) else []
+    if any(isinstance(alert, dict) and alert.get("type") == "incus_api_slow" for alert in runtime_alerts):
+        return "Incus 管理 API 响应变慢，暂停自动停止并保留生命周期状态"
+    name = str(container.get("name") or "")
+    project = str(container.get("project") or "default")
+    for instance in runtime_health.get("error_instances", []):
+        if isinstance(instance, dict) and str(instance.get("name") or "") == name and str(instance.get("project") or "default") == project:
+            return "Incus 实例处于 ERROR；仅告警并保留现场，不自动再次停止或重启"
+    for operation in runtime_health.get("active_lifecycle_operations", []):
+        if not isinstance(operation, dict):
+            continue
+        if operation.get("target_known") is not True:
+            return "Incus 存在目标不明的启动/停止/重启/删除操作，暂停自动停止"
+        if str(operation.get("name") or "") == name and str(operation.get("project") or "default") == project:
+            action = str(operation.get("action") or "生命周期")
+            return f"Incus 实例已有 {action} 操作运行，等待该操作结束，不重复提交停止请求"
+    return ""
+
+def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=None, auto_stop=True, before_stop=None, runtime_health=None):
     now = int(time.time()) if now is None else now
     queued = 0
     active = set()
@@ -93,6 +116,10 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                 policy['stop_duration_verified'] = False
             ready = (m['total'] > stop and policy['stop_duration_seconds'] >= duration
                      and state['stop_samples'] >= (2 if duration <= 300 else 3) and key[1] in ('podman', 'incus'))
+            incus_guard_reason = _incus_stop_guard(c, runtime_health) if key[1] == 'incus' else ''
+            if incus_guard_reason:
+                ready = False
+                policy.update(status='unverified', reason=incus_guard_reason)
             if not auto_stop:
                 ready = False
                 policy.update(status='disabled', reason='自动停机保护已暂停；继续采集和提醒')
@@ -100,6 +127,8 @@ def observe(conn, host, ts, containers, critical, stop, duration, max_gap, now=N
                 policy.update(status=pending['status'], action_id=pending['id'], reason='停机保护动作已下发，等待节点回执')
                 if now - pending['updated_at'] > max_gap:
                     policy['reason'] = '停机动作等待回执已超时：需要管理员排查；不会重复下发'
+                if incus_guard_reason:
+                    policy['reason'] += f"；{incus_guard_reason}"
             elif ready and pending and pending['status'] == 'failed' and (state['retries'] >= 3 or now - pending['updated_at'] < 900):
                 policy.update(status='failed', action_id=pending['id'], reason='停机保护执行失败：需要管理员排查，已限制重试频率')
             elif ready:

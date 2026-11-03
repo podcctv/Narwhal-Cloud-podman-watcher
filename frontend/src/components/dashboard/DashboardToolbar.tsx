@@ -70,14 +70,14 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               placeholder="搜索容器名 / 主机 / 运行时…"
-              className="ui-input-sm w-full pr-7 pl-8"
+              className="h-8 w-full rounded-lg border border-slate-750 bg-slate-950/80 pl-8 pr-7 text-xs text-slate-200 placeholder-slate-500 transition-colors focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => onSearchChange('')}
                 aria-label="清空搜索"
-                className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-200 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-200 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
                 title="清空搜索"
               >
                 <X className="h-3.5 w-3.5" />
@@ -108,12 +108,13 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'protection'}
               onClick={() => onFilterStateChange('protection')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${filterState === 'protection'
-                ? 'border-sky-500/50 bg-sky-500/20 text-sky-200 shadow-xs'
-                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-sky-200'
-                }`}
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
+                filterState === 'protection'
+                  ? 'border-sky-500/50 bg-sky-500/15 text-sky-200'
+                  : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:bg-slate-800/60 hover:text-sky-200'
+              }`}
             >
-              <ShieldCheck className="h-3.5 w-3.5" />
+              <ShieldCheck className="h-3 w-3" />
               <span>资源与保护</span>
               <span className="rounded-full bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] tabular-nums">{counts.protection}</span>
             </button>
@@ -123,12 +124,13 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'protocol'}
               onClick={() => onFilterStateChange('protocol')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${filterState === 'protocol'
-                ? 'border-violet-500/50 bg-violet-500/20 text-violet-200 shadow-xs'
-                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-violet-200'
-                }`}
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${
+                filterState === 'protocol'
+                  ? 'border-violet-500/50 bg-violet-500/15 text-violet-200'
+                  : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:bg-slate-800/60 hover:text-violet-200'
+              }`}
             >
-              <ShieldCheck className="h-3.5 w-3.5" />
+              <ShieldCheck className="h-3 w-3" />
               <span>协议阻断</span>
               <span className="rounded-full bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] tabular-nums">{counts.protocol}</span>
             </button>
@@ -158,13 +160,14 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={filterState === 'stale'}
               onClick={() => onFilterStateChange('stale')}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${filterState === 'stale'
-                ? 'border-amber-500/50 bg-amber-500/20 text-amber-200 shadow-xs'
-                : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/70 hover:text-amber-200'
-                }`}
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${
+                filterState === 'stale'
+                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:bg-slate-800/60 hover:text-amber-200'
+              }`}
             >
-              <Clock3 className="h-3.5 w-3.5" />
-              <span>离线主机 / 旧快照</span>
+              <Clock3 className="h-3 w-3" />
+              <span>数据过期</span>
               <span className="rounded-full bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] tabular-nums">{counts.stale}</span>
             </button>
 

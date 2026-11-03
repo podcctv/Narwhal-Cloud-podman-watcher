@@ -132,7 +132,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
     >
       <table className="w-full text-left border-collapse text-xs">
         <thead>
-          <tr className="border-b border-slate-800/90 bg-slate-900/95 text-[11px] font-semibold text-slate-300 font-mono">
+          <tr className="border-b border-slate-800/90 bg-slate-900/90 text-[11px] font-semibold text-slate-400 font-mono">
             <th scope="col" className="py-2.5 pl-3 pr-2 w-8">状态</th>
             {renderSortHeader('name', '容器名称 / 运行时')}
             {renderSortHeader('cpu', 'CPU')}
@@ -234,7 +234,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                     >
                       {c.container_name}
                     </button>
-                    <span className="rounded-sm bg-slate-800 px-1.5 py-0.5 text-[9px] text-slate-300 border border-slate-700/60">
+                    <span className="rounded-sm bg-slate-800 px-1 py-0.5 text-[9px] text-slate-400 border border-slate-700/50">
                       {c.runtime}
                     </span>
                   </div>
@@ -298,7 +298,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 </td>
 
                 {/* 7. Conns / Procs */}
-                <td className="py-2.5 px-2 whitespace-nowrap tabular-nums text-slate-300">
+                <td className="py-2 px-2 whitespace-nowrap tabular-nums text-slate-300">
                   <span className="font-semibold">{c.conn_count ?? '—'}</span>
                   <span className="text-slate-400 text-[10px]"> conn</span>
                   <span className="text-slate-600 mx-1">·</span>
@@ -310,7 +310,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                   <div className="flex items-center gap-1">
                     {(c.alerts?.hy2_detected || sec.hy2_protocol?.detected) && (
                       <span
-                        className="inline-flex items-center gap-0.5 rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 text-[9px] font-bold text-violet-300"
+                        className="inline-flex items-center gap-0.5 rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.5 text-[9px] font-bold text-violet-300"
                         title="Hysteria 2 协议活跃"
                       >
                         <Radio className="h-2.5 w-2.5 text-violet-400" />
@@ -320,7 +320,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
 
                     {(c.alerts?.udp_throttled || sec.udp_throttle?.throttled) && (
                       <span
-                        className="inline-flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/60 px-1.5 py-0.2 text-[9px] font-bold text-rose-300 animate-pulse"
+                        className="inline-flex items-center gap-0.5 rounded-full bg-rose-500/20 border border-rose-500/60 px-1.5 py-0.5 text-[9px] font-bold text-rose-300 animate-pulse"
                         title={`UDP 靶向限速生效中: ${udpThrottleRate == null ? '速率未知' : `${udpThrottleRate} Mbps`}`}
                       >
                         <Gauge className="h-2.5 w-2.5 text-rose-400" />
@@ -330,7 +330,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
 
                     {c.alerts?.traffic_imbalance && (
                       <span
-                        className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.2 text-[9px] font-bold text-amber-300"
+                        className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.5 text-[9px] font-bold text-amber-300"
                         title={`出入流量失衡 ${c.alerts.traffic_imbalance_ratio}x`}
                       >
                         <ArrowUpDown className="h-2.5 w-2.5 text-amber-400" />
@@ -347,12 +347,12 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                   {risk.hasRisk ? (
                     <div className="flex max-w-[240px] flex-wrap items-center gap-1" title={risk.reasons.join(' · ')}>
                       {risk.isCritical ? (
-                        <span className="inline-flex items-center gap-1 rounded-sm bg-rose-950/70 border border-rose-500/40 px-1.5 py-0.2 text-[10px] font-bold text-rose-300">
+                        <span className="inline-flex items-center gap-1 rounded-sm bg-rose-950/70 border border-rose-500/40 px-1.5 py-0.5 text-[10px] font-bold text-rose-300">
                           <AlertTriangle className="h-2.5 w-2.5 text-rose-400 shrink-0" />
                           <span>{risk.reasons.length} 项</span>
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded-sm bg-amber-950/70 border border-amber-500/40 px-1.5 py-0.2 text-[10px] font-bold text-amber-300">
+                        <span className="inline-flex items-center gap-1 rounded-sm bg-amber-950/70 border border-amber-500/40 px-1.5 py-0.5 text-[10px] font-bold text-amber-300">
                           <AlertCircle className="h-2.5 w-2.5 text-amber-400 shrink-0" />
                           <span>{risk.reasons.length} 项</span>
                         </span>
