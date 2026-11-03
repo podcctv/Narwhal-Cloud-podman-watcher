@@ -17,13 +17,15 @@ def initialize(conn):
 def metrics(container, now, stale_seconds=900):
     sec = container.get('security') or {}
     m = sec.get('connection_metrics') if isinstance(sec, dict) else None
+    runtime = str(container.get('runtime') or '').lower()
+    expected_source = 'runman_local_proc_net' if runtime == 'runman' else 'container_proc_net'
     if not isinstance(m, dict) or m.get('schema') != 1 or m.get('valid') is not True:
         return None
     fields = ('total', 'tcp_total', 'tcp_established', 'tcp_pending', 'tcp_time_wait', 'udp_sockets', 'sampled_at')
     if any(type(m.get(k)) is not int or m[k] < 0 for k in fields):
         return None
     if (not isinstance(m.get('epoch'), str) or not m['epoch'] or len(m['epoch']) > 200
-            or m.get('source') != 'container_proc_net'
+            or m.get('source') != expected_source
             or m['total'] != m['tcp_total'] + m['udp_sockets']
             or m['tcp_established'] + m['tcp_pending'] + m['tcp_time_wait'] > m['tcp_total']
             or m['sampled_at'] > now + 30 or now - m['sampled_at'] > stale_seconds

@@ -1,10 +1,10 @@
 # 项目概览
 
-更新基线：当前工作区基于 GitHub `main` 完成 Incus CPU 限额命令修复、内存阶梯升档死锁修复与未检测到协议时的假性阻断告警消除，根目录 `VERSION` 为 `1.7.196`（2026-11-02）。提交历史与主要功能索引见 [README.md](README.md)。
+更新基线：当前工作区从 GitHub `main` v1.7.196（`620bbf2`）继续开发 Runman Rust v2 兼容层，目标版本为 `1.7.197`（2026-11-03）。提交历史与主要功能索引见 [README.md](README.md)。
 
 ## 项目目标
 
-Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus 与 Docker 容器及主机状态，并提供告警、调查、受控保护和运维工作流。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
+Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus、Docker 与 Runman Rust v2 实例及主机状态，并提供告警、调查、受控保护和运维工作流。Runman 目前仅接入只读资源/连接清单、主机 RFW 网卡策略和按实例代次核验的 TCP 限额；不支持进程归因、容器内服务处置及容器网络字节统计。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
 
 ## 组件与入口
 

@@ -7351,6 +7351,100 @@ def _incus_containers(runtime: str) -> List[Dict[str, str]]:
     return items
 
 
+def _runman_inventory_containers() -> List[Dict[str, str]]:
+    """Read Runman's bounded, root-only inventory API; never shell into guests."""
+    configured = os.getenv('CONTAINER_RUNTIMES', 'auto').strip().lower().replace(' ', '')
+    if configured != 'auto' and 'runman' not in configured.split(','):
+        return []
+    connection = network_quarantine._UnixHTTP('/run/narwhal-agent/connlimit.sock')
+    try:
+        connection.request('GET', '/v1/inventory', headers={'Connection': 'close'})
+        response = connection.getresponse()
+        raw = response.read(2 * 1024 * 1024 + 1)
+        if response.status != 200 or len(raw) > 2 * 1024 * 1024:
+            return []
+        body = json.loads(raw.decode('utf-8')) if raw else {}
+    except (OSError, ValueError, UnicodeDecodeError, http.client.HTTPException):
+        return []
+    finally:
+        connection.close()
+    if not isinstance(body, dict) or body.get('schema') != 1 or not isinstance(body.get('items'), list):
+        return []
+
+    items: List[Dict[str, str]] = []
+    for raw_item in body['items'][:4096]:
+        if not isinstance(raw_item, dict):
+            continue
+        vm_id = str(raw_item.get('id') or '').lower()
+        generation = str(raw_item.get('instance_id') or '')
+        if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', vm_id):
+            continue
+        if not generation or len(generation) > 200:
+            continue
+        raw_metrics = raw_item.get('connection_metrics')
+        metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
+        established = metrics.get('tcp_established')
+        pending = metrics.get('tcp_pending')
+        time_wait = metrics.get('tcp_time_wait')
+        sampled_at = metrics.get('sampled_at')
+        counts_valid = all(type(value) is int and value >= 0 for value in (established, pending, time_wait))
+        raw_total = metrics.get('tcp_total')
+        metrics_valid = (
+            raw_item.get('running') is True
+            and metrics.get('schema') == 1
+            and metrics.get('source') == 'runman_proc_net'
+            and metrics.get('valid') is True
+            and counts_valid
+            and type(raw_total) is int
+            and raw_total == established + pending + time_wait
+            and metrics.get('epoch') == generation
+            and type(sampled_at) is int
+            and sampled_at > 0
+            and sampled_at <= int(time.time()) + 30
+        )
+        connection_metrics = {
+            'schema': 1,
+            'source': 'runman_local_proc_net',
+            'sampled_at': sampled_at if metrics_valid else 0,
+            'epoch': generation,
+            'valid': metrics_valid,
+            'total': raw_total if metrics_valid else 0,
+            'tcp_total': raw_total if metrics_valid else 0,
+            'tcp_established': established if metrics_valid else 0,
+            'tcp_pending': pending if metrics_valid else 0,
+            'tcp_time_wait': time_wait if metrics_valid else 0,
+            'udp_sockets': 0,
+        }
+        pid = raw_item.get('init_pid')
+        items.append({
+            'id': vm_id,
+            'stable_id': vm_id,
+            'name': vm_id,
+            'runtime': 'runman',
+            'runtime_bin': '',
+            'project': 'default',
+            'pid': str(pid) if type(pid) is int and pid > 0 else '',
+            'image': str(raw_item.get('os_image') or '')[:160],
+            'status': 'running' if raw_item.get('running') is True else 'stopped',
+            'instance_id': generation,
+            'connection_metrics': connection_metrics,
+            'runman_resources': {
+                'cpu': raw_item.get('cpu') if type(raw_item.get('cpu')) is int else 0,
+                'cpu_percent': raw_item.get('cpu_percent') if type(raw_item.get('cpu_percent')) in (int, float) else 0,
+                'ram_mb': raw_item.get('ram_mb') if type(raw_item.get('ram_mb')) is int else 0,
+                'mem_bytes': raw_item.get('mem_bytes') if type(raw_item.get('mem_bytes')) is int else 0,
+                'mem_limit_bytes': raw_item.get('mem_limit_bytes') if type(raw_item.get('mem_limit_bytes')) is int else 0,
+                'disk_gb': raw_item.get('disk_gb') if type(raw_item.get('disk_gb')) is int else 0,
+                'bandwidth_mbps': raw_item.get('bandwidth_mbps') if type(raw_item.get('bandwidth_mbps')) is int else 0,
+                'traffic_in_bytes': raw_item.get('traffic_in_bytes') if type(raw_item.get('traffic_in_bytes')) is int else 0,
+                'traffic_out_bytes': raw_item.get('traffic_out_bytes') if type(raw_item.get('traffic_out_bytes')) is int else 0,
+                'ips': [str(ip)[:64] for ip in raw_item.get('ips', [])[:32]] if isinstance(raw_item.get('ips'), list) else [],
+                'net_metrics_available': raw_item.get('net_metrics_available') is True,
+            },
+        })
+    return items
+
+
 def list_containers() -> List[Dict[str, str]]:
     patterns_env = os.getenv(
         "MONITORED_IMAGE_PATTERNS",
@@ -7365,7 +7459,64 @@ def list_containers() -> List[Dict[str, str]]:
             items.extend(_incus_containers(runtime))
         else:
             items.extend(_oci_containers(runtime_name, runtime, patterns))
+    items.extend(_runman_inventory_containers())
     return items
+
+
+def _runman_bridge_interface() -> str:
+    connection = network_quarantine._UnixHTTP('/run/narwhal-agent/connlimit.sock')
+    try:
+        connection.request('GET', '/v1/inventory', headers={'Connection': 'close'})
+        response = connection.getresponse()
+        raw = response.read(2 * 1024 * 1024 + 1)
+        if response.status != 200 or len(raw) > 2 * 1024 * 1024:
+            return ''
+        body = json.loads(raw.decode('utf-8')) if raw else {}
+        bridge = str(body.get('bridge') or '') if isinstance(body, dict) else ''
+        return bridge if re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', bridge) else ''
+    except (OSError, ValueError, UnicodeDecodeError, http.client.HTTPException):
+        return ''
+    finally:
+        connection.close()
+
+
+def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
+    metrics = container.get('connection_metrics') if isinstance(container.get('connection_metrics'), dict) else {}
+    resources = container.get('runman_resources') if isinstance(container.get('runman_resources'), dict) else {}
+    tcp_total = metrics.get('tcp_total') if type(metrics.get('tcp_total')) is int else 0
+    mem_bytes = resources.get('mem_bytes') if type(resources.get('mem_bytes')) is int else 0
+    mem_limit = resources.get('mem_limit_bytes') if type(resources.get('mem_limit_bytes')) is int else 0
+    cpu = resources.get('cpu_percent') if type(resources.get('cpu_percent')) in (int, float) else 0.0
+    return {
+        'id': str(container.get('id') or ''),
+        'stable_id': str(container.get('stable_id') or container.get('id') or ''),
+        'name': str(container.get('name') or ''),
+        'image': str(container.get('image') or ''),
+        'runtime': 'runman',
+        'project': 'default',
+        'status': str(container.get('status') or 'unknown'),
+        'instance_id': str(container.get('instance_id') or ''),
+        'monitor_mode': 'runman_inventory',
+        'cpu_percent': max(0.0, float(cpu)),
+        'cpu_effective_cpus': float(resources.get('cpu') or 0),
+        'mem_bytes': max(0, mem_bytes),
+        'mem_limit_bytes': max(0, mem_limit),
+        'mem_percent': (100.0 * mem_bytes / mem_limit) if mem_limit > 0 else 0.0,
+        'net_rx_bps': 0.0,
+        'net_tx_bps': 0.0,
+        'conn_count': tcp_total,
+        'tcp_country_stats': [],
+        'udp_country_stats': [],
+        'disk': collect_disk_alert(),
+        'container_disk': {'rw_bytes': 0, 'rootfs_bytes': 0, 'available': False},
+        'top_cpu_process': {'pid': 0, 'cpu_percent': 0.0, 'command': ''},
+        'security': {
+            'connection_metrics': metrics,
+            'inspection_status': 'limited_runman_adapter',
+            'deep_process_inspection_supported': False,
+        },
+        'runman_resources': resources,
+    }
 
 
 def collect_docker_notice(container: Dict[str, str]) -> Dict[str, object]:
@@ -8996,9 +9147,11 @@ def network_health(containers: List[Dict[str, str]] | None = None) -> Tuple[bool
             pid = int(item.get("pid", "") or 0)
         except ValueError:
             pid = 0
-        if runtime_name == "incus":
-            if pid <= 0:
+        if runtime_name in {"incus", "runman"}:
+            if runtime_name == "incus" and pid <= 0:
                 pid = _incus_instance_pid(runtime, name, project)
+            if runtime_name == "runman" and pid <= 0:
+                continue
         else:
             inspect = run([runtime, "inspect", name])
             try:
@@ -9317,6 +9470,10 @@ def _collect_host_firewall_interface_inventory(force: bool = False) -> Dict[str,
                 interface = network.get("network_interface") or network.get("NetworkInterface")
                 name = network.get("name") or network.get("Name")
                 register_network("podman", interface, name)
+
+    runman_bridge = _runman_bridge_interface()
+    if runman_bridge:
+        register_network("runman", runman_bridge, "runman")
 
     inventory = []
     for link in links:
@@ -9812,15 +9969,34 @@ def _execute_host_firewall_rule_delete(action: Dict, node_id: str) -> Tuple[bool
     return _runman_host_firewall_delete_rule(rule)
 
 
+def _runman_connlimit_target(name: str) -> Dict[str, object] | None:
+    connection = network_quarantine._UnixHTTP('/run/narwhal-agent/connlimit.sock')
+    try:
+        connection.request('GET', f'/v1/connlimit/target?container_name={name}&project=default', headers={'Connection': 'close'})
+        response = connection.getresponse()
+        raw = response.read(8193)
+        if response.status != 200 or len(raw) > 8192:
+            return None
+        body = json.loads(raw.decode('utf-8')) if raw else {}
+        return body if isinstance(body, dict) else None
+    except (OSError, ValueError, UnicodeDecodeError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
+
+
 def _execute_container_connlimit(action: Dict) -> Tuple[bool, str]:
     runtime = str(action.get('runtime') or '').strip().lower()
     project = str(action.get('project') or '').strip()
     name = str(action.get('container_name') or '').strip()
     params = action.get('params') if isinstance(action.get('params'), dict) else {}
     action_type = str(action.get('action_type') or '')
-    if runtime != 'incus' or project != 'default':
-        return False, 'TCP connection limits are restricted to the default Incus project'
-    if not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name):
+    if runtime not in {'incus', 'runman'} or project != 'default':
+        return False, 'TCP connection limits require the default Incus or Runman runtime'
+    if runtime == 'runman':
+        if not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', name):
+            return False, 'invalid Runman VM UUID'
+    elif not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name):
         return False, 'invalid Incus instance name'
     instance_id = str(params.get('instance_id') or '')
     if not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', instance_id):
@@ -9857,20 +10033,36 @@ def _execute_container_connlimit(action: Dict) -> Tuple[bool, str]:
                 return False, 'reported TCP connection count did not exceed the requested limit'
             if type(params.get('observed_at')) is not int or int(time.time()) - params['observed_at'] > 900:
                 return False, 'reported TCP connection evidence is stale'
-            runtime_bin = get_runtime_bins().get('incus', 'incus')
-            pid = _incus_instance_pid(runtime_bin, name, project)
-            fresh = _collect_socket_security(pid).get('connection_metrics') or {}
-            if (
-                fresh.get('valid') is not True
-                or fresh.get('epoch') != metric_epoch
-                or type(fresh.get('tcp_established')) is not int
-                or type(fresh.get('tcp_pending')) is not int
-                or fresh['tcp_established'] + fresh['tcp_pending'] <= evidence_threshold
-            ):
-                return False, 'fresh TCP evidence no longer matches this instance or exceeds the limit; no rule applied'
+            if runtime == 'runman':
+                target = _runman_connlimit_target(name)
+                fresh = target.get('connection_metrics') if isinstance(target, dict) and isinstance(target.get('connection_metrics'), dict) else {}
+                if (
+                    target is None or target.get('managed') is not True or target.get('running') is not True
+                    or str(target.get('instance_id') or '').lower() != instance_id.lower()
+                    or fresh.get('valid') is not True
+                    or fresh.get('epoch') != instance_id
+                    or type(fresh.get('sampled_at')) is not int
+                    or int(time.time()) - fresh['sampled_at'] > 120
+                    or type(fresh.get('tcp_established')) is not int
+                    or type(fresh.get('tcp_pending')) is not int
+                    or fresh['tcp_established'] + fresh['tcp_pending'] <= evidence_threshold
+                ):
+                    return False, 'fresh Runman identity or TCP evidence no longer matches; no rule applied'
+            else:
+                runtime_bin = get_runtime_bins().get('incus', 'incus')
+                pid = _incus_instance_pid(runtime_bin, name, project)
+                fresh = _collect_socket_security(pid).get('connection_metrics') or {}
+                if (
+                    fresh.get('valid') is not True
+                    or fresh.get('epoch') != metric_epoch
+                    or type(fresh.get('tcp_established')) is not int
+                    or type(fresh.get('tcp_pending')) is not int
+                    or fresh['tcp_established'] + fresh['tcp_pending'] <= evidence_threshold
+                ):
+                    return False, 'fresh TCP evidence no longer matches this instance or exceeds the limit; no rule applied'
             payload.update({'max_connections': evidence_threshold, 'expires_at': lease_expires_at})
         except (OSError, RuntimeError, TypeError, ValueError, KeyError):
-            return False, 'could not verify current Incus TCP evidence; no rule applied'
+            return False, 'could not verify current container TCP evidence; no rule applied'
     elif action_type != 'release_container_connlimit':
         return False, 'unsupported connection-limit operation'
     return _runman_connlimit_request(payload)
@@ -11138,6 +11330,11 @@ def main() -> None:
         collected = []
         included_deep_sample_ids: List[int] = []
         for c in containers:
+            if c.get("runtime") == "runman":
+                container_report = collect_runman_report(c)
+                container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
+                collected.append(container_report)
+                continue
             if c.get("runtime") == "docker" and docker_mode == "notice":
                 collected.append(collect_docker_notice(c))
                 continue

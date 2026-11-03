@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import {
   BarChart3,
   RefreshCw,
+  AlertTriangle,
+  LoaderCircle,
   Cpu,
   Network,
   ArrowRight,
@@ -22,16 +24,19 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
 }) => {
   const [minutes, setMinutes] = useState(720);
   const [stats, setStats] = useState<StatsResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadData = async () => {
-    if (loading) return;
     setLoading(true);
+    setError(null);
     try {
       const data = await api.getStats(minutes);
       setStats(data);
     } catch (err: any) {
-      onToast('error', `加载统计数据失败：${err.message || err}`);
+      const message = err?.message || String(err);
+      setError(message);
+      onToast('error', `加载统计数据失败：${message}`);
     } finally {
       setLoading(false);
     }
@@ -51,13 +56,15 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
 
   const loadWithMinutes = async (targetMinutes: number) => {
     setMinutes(targetMinutes);
-    if (loading) return;
     setLoading(true);
+    setError(null);
     try {
       const data = await api.getStats(targetMinutes);
       setStats(data);
     } catch (err: any) {
-      onToast('error', `加载统计数据失败：${err.message || err}`);
+      const message = err?.message || String(err);
+      setError(message);
+      onToast('error', `加载统计数据失败：${message}`);
     } finally {
       setLoading(false);
     }
@@ -137,17 +144,30 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
       </div>
 
       {/* KPI Cards */}
+      {error && (
+        <section role="alert" aria-live="assertive" className="flex flex-col gap-3 rounded-xl border border-rose-500/30 bg-rose-950/20 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-rose-300" aria-hidden="true" />
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-rose-100">统计数据未能更新</h3>
+              <p className="mt-1 break-words text-xs text-rose-200">{stats ? '仍显示上次成功读取的数据。' : '当前统计结果未知，不能按零值判断。'} {error}</p>
+            </div>
+          </div>
+          <button type="button" onClick={() => void loadData()} disabled={loading} className="min-h-11 shrink-0 rounded-lg border border-rose-500/40 px-3 text-sm font-medium text-rose-100 hover:bg-rose-900/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-wait disabled:opacity-50">{loading ? '正在重试…' : '重试'}</button>
+        </section>
+      )}
+      {loading && !stats && <p role="status" aria-live="polite" className="rounded-xl border border-slate-800 bg-slate-900/60 p-6 text-sm text-slate-300"><LoaderCircle className="mr-2 inline h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />正在读取统计数据…</p>}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs">
         <div className="ui-surface-card p-4">
           <span className="text-slate-400 block text-[11px]">统计容器数</span>
           <span className="text-xl sm:text-2xl font-extrabold text-slate-100 mt-1 block tabular-nums">
-            {stats?.containers_count || 0}
+            {stats ? stats.containers_count : '—'}
           </span>
         </div>
         <div className="ui-surface-card p-4">
           <span className="text-slate-400 block text-[11px]">累计样本数</span>
           <span className="text-xl sm:text-2xl font-extrabold text-slate-100 mt-1 block tabular-nums">
-            {stats?.samples_count || 0}
+            {stats ? stats.samples_count : '—'}
           </span>
         </div>
         <div className="ui-surface-card p-4">

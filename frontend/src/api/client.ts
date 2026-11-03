@@ -212,7 +212,7 @@ export const api = {
       method: 'POST', body: JSON.stringify({ mode }),
     }),
 
-  getAlertHistory: (params: Record<string, string>) => {
+  getAlertHistory: (params: Record<string, string>, signal?: AbortSignal) => {
     const qs = new URLSearchParams(params).toString();
     return request<{
       items: SecurityAlert[];
@@ -220,7 +220,7 @@ export const api = {
       counts: Record<string, number>;
       alert_types: string[];
       hosts: string[];
-    }>(`/api/v1/security/history?${qs}`);
+    }>(`/api/v1/security/history?${qs}`, { signal });
   },
 
   dispositionAlert: (

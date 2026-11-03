@@ -97,9 +97,9 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   const confirmationCopy = pendingDecision?.decision === 'deny'
     ? { title: '确认执行定向处置？', description: '仅处理本告警已识别的进程、服务或配置；不会停止整个容器。节点将在下一轮上报时执行并回传结果。', confirmLabel: '确认定向处置', tone: 'danger' as const }
     : pendingDecision?.decision === 'apply_container_connlimit'
-    ? { title: '确认临时限制 TCP 新连接？', description: '仅对已核验的 Runman 托管 Incus 实例生效：入站和出站方向各限制为最多 500 条并发 TCP 连接，持续 30 分钟；达到上限后拒绝新的 TCP SYN。已有会话不会被断开，UDP 不受影响。可能影响合法高并发业务；规则可手动撤销并会自动过期。', confirmLabel: '应用 30 分钟限额', tone: 'danger' as const }
+    ? { title: '确认临时限制 TCP 新连接？', description: '仅对已核验的 Incus 或 Runman 实例生效：入站和出站方向各限制为最多 500 条并发 TCP 连接，持续 30 分钟；达到上限后拒绝新的 TCP SYN。已有会话不会被断开，UDP 不受影响。可能影响合法高并发业务；规则可手动撤销并会自动过期。', confirmLabel: '应用 30 分钟限额', tone: 'danger' as const }
     : pendingDecision?.decision === 'release_container_connlimit'
-    ? { title: '解除临时 TCP 限额？', description: '只删除本系统为该 Incus 实例创建并带有专属标记的连接限制规则，不改动其他防火墙规则。', confirmLabel: '解除限额', tone: 'primary' as const }
+    ? { title: '解除临时 TCP 限额？', description: '只删除本系统为该 Incus 或 Runman 实例创建并带有专属标记的连接限制规则，不改动其他防火墙规则。', confirmLabel: '解除限额', tone: 'primary' as const }
     : pendingDecision?.decision === 'allow_silent'
     ? { title: '确认建立放行策略？', description: '该告警对象将被持续放行且不再提醒。你可在告警历史中随时撤销该策略。', confirmLabel: '确认放行', tone: 'primary' as const }
     : pendingDecision?.decision === 'resolve'
@@ -199,7 +199,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           const connlimitPending = ['apply_container_connlimit', 'release_container_connlimit'].includes(connlimitAction?.action_type || '')
             && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
           const canUseConnlimit = alert.type === 'container_connection_count'
-            && alert.runtime === 'incus' && (alert.project || '') === 'default';
+            && (alert.runtime === 'incus' || alert.runtime === 'runman') && (alert.project || '') === 'default';
 
           return (
             <div

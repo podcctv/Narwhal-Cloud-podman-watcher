@@ -609,7 +609,7 @@ export interface HostFirewallAbusePolicy {
   services?: Array<'ookla' | 'cloudflare' | 'fast' | 'tcpquality' | 'iperf3_server' | 'librespeed' | 'openspeedtest' | 'ookla_server'>;
   interfaces: string[];
   /** Fleet templates use logical runtimes and resolve real interfaces per host. */
-  runtimes?: Array<'incus' | 'podman'>;
+  runtimes?: Array<'incus' | 'podman' | 'runman'>;
   /** Service-target policies select container runtimes independently of bridge interfaces. */
   service_runtimes?: Array<'incus' | 'podman'>;
 }
@@ -630,7 +630,7 @@ export interface HostFirewallInterface {
   mtu: number | null;
   addresses: string[];
   is_default_route: boolean;
-  runtimes: Array<'incus' | 'podman'>;
+  runtimes: Array<'incus' | 'podman' | 'runman'>;
   network_names: string[];
   firewall_eligible: boolean;
 }
@@ -849,7 +849,7 @@ export interface FleetFirewallHostStatus {
     status: HostFirewallInterfaceInventory['status'];
     observed_at: number;
     stale: boolean;
-    by_runtime: Record<'incus' | 'podman', string[]>;
+    by_runtime: Record<'incus' | 'podman' | 'runman', string[]>;
   };
   live_readback: Omit<HostFirewallLiveReadback, 'snapshot'>;
   last_action: null | { id: number; status: string; message: string; updated_at_utc8: string };

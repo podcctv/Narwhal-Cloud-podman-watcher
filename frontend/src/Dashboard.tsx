@@ -1,4 +1,5 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback } from 'react';
+import { AlertTriangle, LoaderCircle, RotateCw } from 'lucide-react';
 import {
   ContainerItem,
   SecurityAlert,
@@ -70,6 +71,8 @@ export const Dashboard: React.FC = () => {
   const [securityStatus, setSecurityStatus] = useState<SecurityStatusItem[]>([]);
   const [serverVersion, setServerVersion] = useState<string>('dev');
   const [lastRefreshTime, setLastRefreshTime] = useState<string>('');
+  const [hasLoadedData, setHasLoadedData] = useState(false);
+  const [dataFetchError, setDataFetchError] = useState<string | null>(null);
 
   // Polling controls
   const POLL_INTERVAL = 10;
@@ -131,6 +134,8 @@ export const Dashboard: React.FC = () => {
         });
       }));
       setSecurityStatus(liveSecurityStatus);
+      setHasLoadedData(true);
+      setDataFetchError(null);
 
       const now = new Date();
       setLastRefreshTime(
@@ -139,14 +144,16 @@ export const Dashboard: React.FC = () => {
           .toString()
           .padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
       );
-      setCountdown(isDocumentHidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL);
     } catch (err: any) {
-      addToast('error', `数据获取失败：${err.message || err}`);
+      const message = err?.message || String(err);
+      setDataFetchError(message);
+      addToast('error', `数据获取失败：${message}`);
     } finally {
       isFetchingRef.current = false;
       setIsRefreshing(false);
+      setCountdown(document.hidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL);
     }
-  }, [addToast, isDocumentHidden]);
+  }, [addToast]);
 
   const openAlertContainer = useCallback((identity: ContainerIdentity) => {
     const target = containers.find((container) =>
@@ -259,6 +266,7 @@ export const Dashboard: React.FC = () => {
         onSelectTab={setActiveTab}
         serverVersion={serverVersion}
         activeAlertCount={activeAlertsCount}
+        alertCountState={!hasLoadedData ? 'unknown' : dataFetchError ? 'stale' : 'current'}
         countdown={countdown}
         totalSeconds={effectivePollInterval}
         isPaused={isPaused}
@@ -271,9 +279,39 @@ export const Dashboard: React.FC = () => {
 
       {/* Main Body */}
       <main className="mx-auto w-full max-w-[1536px] flex-1 px-3.5 sm:px-6 pb-16">
+        {activeTab === 'dashboard' && hasLoadedData && dataFetchError && (
+          <section role="alert" aria-live="assertive" className="mb-5 flex flex-col gap-3 rounded-xl border border-amber-500/40 bg-amber-950/30 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" aria-hidden="true" />
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-amber-100">自动刷新失败，当前显示上次成功采样</h2>
+                <p className="mt-1 text-xs text-amber-200">上次成功更新：<span className="font-mono tabular-nums">{lastRefreshTime || '未知'}</span> · {dataFetchError}</p>
+              </div>
+            </div>
+            <button type="button" onClick={() => void fetchAllData()} disabled={isRefreshing} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-400/50 px-3 text-sm font-medium text-amber-100 transition-colors hover:bg-amber-900/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 disabled:cursor-wait disabled:opacity-60">
+              <RotateCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin motion-reduce:animate-none' : ''}`} aria-hidden="true" />
+              {isRefreshing ? '正在重试…' : '立即重试'}
+            </button>
+          </section>
+        )}
+        {activeTab === 'dashboard' && !hasLoadedData && (
+          <section role={dataFetchError ? 'alert' : 'status'} aria-live={dataFetchError ? 'assertive' : 'polite'} className="my-8 flex min-h-48 flex-col items-start justify-center gap-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-6 sm:flex-row sm:items-center sm:justify-between sm:p-8">
+            <div className="flex min-w-0 items-start gap-4">
+              {dataFetchError
+                ? <AlertTriangle className="mt-0.5 h-6 w-6 shrink-0 text-amber-300" aria-hidden="true" />
+                : <LoaderCircle className="mt-0.5 h-6 w-6 shrink-0 animate-spin text-sky-300 motion-reduce:animate-none" aria-hidden="true" />}
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold text-slate-100">{dataFetchError ? '实时监控状态尚未确认' : '正在读取运行状态'}</h2>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">{dataFetchError ? '尚未取得成功采样，主机、容器和告警数量未知。请勿将空列表视为系统健康。' : '正在获取主机、容器、告警与安全遥测数据。'}</p>
+                {dataFetchError && <p className="mt-2 break-words text-xs text-amber-200">读取失败：{dataFetchError} · {isRefreshing ? '正在重试…' : `将在 ${countdown} 秒后自动重试`}</p>}
+              </div>
+            </div>
+            {dataFetchError && <button type="button" onClick={() => void fetchAllData()} disabled={isRefreshing} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-4 text-sm font-medium text-slate-100 transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-wait disabled:opacity-60"><RotateCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin motion-reduce:animate-none' : ''}`} aria-hidden="true" />{isRefreshing ? '正在重试…' : '立即重试'}</button>}
+          </section>
+        )}
         <ErrorBoundary fallbackTitle="主界面视图加载异常">
           <Suspense fallback={<div className="flex min-h-40 items-center justify-center text-sm text-slate-400" role="status">正在载入此页面…</div>}>
-          {activeTab === 'dashboard' && (
+          {activeTab === 'dashboard' && hasLoadedData && (
             <>
               {/* KPI Cards Grid */}
               <KpiGrid

@@ -2171,8 +2171,8 @@ def _validate_host_config(payload: Dict[str, Any]) -> Dict[str, Any]:
                 raise HTTPException(status_code=400, detail=f"{key} 必须在 {lower}-{upper} 秒之间")
     if "container_runtimes" in config:
         value = str(config["container_runtimes"]).lower().replace(" ", "")
-        if not value or any(item not in {"auto", "incus", "podman", "docker"} for item in value.split(",")):
-            raise HTTPException(status_code=400, detail="运行时仅支持 auto/incus/podman/docker")
+        if not value or any(item not in {"auto", "incus", "podman", "docker", "runman"} for item in value.split(",")):
+            raise HTTPException(status_code=400, detail="运行时仅支持 auto/incus/podman/docker/runman")
         config["container_runtimes"] = value
     if "docker_monitor_mode" in config:
         value = str(config["docker_monitor_mode"]).lower()
@@ -2267,7 +2267,7 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
     categories = {"speedtest", "mining", "bt"}
     allowed_services = {"ookla", "cloudflare", "fast", "tcpquality", "iperf3_server", "librespeed", "openspeedtest", "ookla_server"}
     if not isinstance(raw_abuse, dict) or set(raw_abuse) - (categories | {"services", "service_runtimes", "interfaces", "runtimes"}):
-        raise HTTPException(status_code=400, detail="测速服务策略只支持已知测速服务，以及 Incus/Podman 容器目标")
+        raise HTTPException(status_code=400, detail="防火墙策略包含不支持的字段")
     abuse = {}
     for category in sorted(categories):
         value = raw_abuse.get(category, False)
@@ -2298,13 +2298,13 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
         if name not in interfaces:
             interfaces.append(name)
     raw_runtimes = raw_abuse.get("runtimes", [])
-    if not isinstance(raw_runtimes, list) or len(raw_runtimes) > 2:
-        raise HTTPException(status_code=400, detail="容器运行时必须从 Incus / Podman 中选择，最多两项")
+    if not isinstance(raw_runtimes, list) or len(raw_runtimes) > 3:
+        raise HTTPException(status_code=400, detail="容器网桥运行时必须从 Incus / Podman / Runman 中选择，最多三项")
     runtimes = []
     for runtime in raw_runtimes:
         name = str(runtime).strip().lower()
-        if name not in {"incus", "podman"}:
-            raise HTTPException(status_code=400, detail="容器运行时只支持 Incus 或 Podman")
+        if name not in {"incus", "podman", "runman"}:
+            raise HTTPException(status_code=400, detail="容器网桥运行时只支持 Incus、Podman 或 Runman")
         if name not in runtimes:
             runtimes.append(name)
     raw_service_runtimes = raw_abuse.get("service_runtimes", [])
@@ -2836,7 +2836,7 @@ def _host_firewall_interface_inventory(
             if address not in addresses:
                 addresses.append(address)
         raw_runtimes = raw.get("runtimes") if isinstance(raw.get("runtimes"), list) else []
-        runtimes = sorted({str(value).lower() for value in raw_runtimes if str(value).lower() in {"incus", "podman"}})
+        runtimes = sorted({str(value).lower() for value in raw_runtimes if str(value).lower() in {"incus", "podman", "runman"}})
         raw_kind = str(raw.get("kind") or "unknown")[:32]
         kernel_kind = str(raw.get("kernel_kind") or raw_kind)[:32]
         raw_networks = raw.get("network_names") if isinstance(raw.get("network_names"), list) else []
@@ -3328,7 +3328,7 @@ def _fleet_firewall_node_state(
             item["name"] for item in interface_inventory["interfaces"]
             if item["firewall_eligible"] and runtime_name in item["runtimes"]
         ]
-        for runtime_name in ("incus", "podman")
+        for runtime_name in ("incus", "podman", "runman")
     }
     policy_row = conn.execute(
         "SELECT revision,source_fleet_revision,policy_json,updated_by FROM host_firewall_policies WHERE host_id=?", (host_id,)
@@ -4935,12 +4935,15 @@ def _queue_security_action_row(
 def _fresh_connlimit_identity(
     conn: sqlite3.Connection, alert: sqlite3.Row, now: int, max_connections: int
 ) -> tuple[str, str, Dict[str, Any]]:
+    runtime = str(alert["runtime"] or "").lower()
+    if runtime not in {"incus", "runman"}:
+        raise HTTPException(status_code=409, detail="该运行时没有已核验的 TCP 限额适配器；未下发")
     host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (alert["host_id"],)).fetchone()
     if host is None or not str(host["node_id"] or "") or now - int(host["last_seen"] or 0) > STALE_SECONDS:
         raise HTTPException(status_code=409, detail="该节点尚未注册可校验的 Client 身份")
     latest = conn.execute(
-        "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='incus' AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
-        (alert["host_id"], alert["project"], alert["container_name"]),
+        "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
+        (alert["host_id"], runtime, alert["project"], alert["container_name"]),
     ).fetchone()
     if latest is None or now - int(latest["ts"] or 0) > STALE_SECONDS:
         raise HTTPException(status_code=409, detail="节点或容器采样已过期；为避免对错误实例执行防火墙操作，未下发")
@@ -4951,6 +4954,9 @@ def _fresh_connlimit_identity(
     stable_id = str(payload.get("stable_id") or "") if isinstance(payload, dict) else ""
     if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", stable_id):
         raise HTTPException(status_code=409, detail="最新采样没有有效的 Incus 实例 UUID；未下发")
+    instance_generation = str(payload.get("instance_id") or "") if isinstance(payload, dict) else ""
+    if runtime == "runman" and not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", instance_generation):
+        raise HTTPException(status_code=409, detail="最新 Runman 采样没有有效实例代次；未下发")
     metrics = connection_policy.metrics(payload, now) if isinstance(payload, dict) else None
     if not isinstance(metrics, dict):
         raise HTTPException(status_code=409, detail="最新连接证据未通过完整性校验；未下发")
@@ -4971,7 +4977,7 @@ def _fresh_connlimit_identity(
             status_code=409,
             detail=f"当前已建立/待建立 TCP 连接为 {observed_tcp}，未超过限额 {max_connections}；该规则不限制 UDP，未下发",
         )
-    return str(host["node_id"]), stable_id.lower(), {
+    return str(host["node_id"]), (instance_generation if runtime == "runman" else stable_id).lower(), {
         "metric_epoch": epoch,
         "observed_tcp_connections": observed_tcp,
         "observed_at": sampled_at,
@@ -5288,12 +5294,12 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
             raise HTTPException(status_code=403, detail="只有管理员可以修改容器连接限制")
         if (
             alert["alert_type"] != "container_connection_count"
-            or alert["runtime"] != "incus"
+            or alert["runtime"] not in {"incus", "runman"}
             or alert["project"] != "default"
             or not alert["container_name"]
         ):
             conn.close()
-            raise HTTPException(status_code=400, detail="临时 TCP 限额仅适用于 default 项目内的 Incus 连接数告警")
+            raise HTTPException(status_code=400, detail="临时 TCP 限额仅适用于 default 项目内已接入的 Incus/Runman 连接数告警")
         if decision == "apply_container_connlimit":
             raw_limit = payload.get("max_connections", 500)
             raw_duration = payload.get("duration_seconds", 1800)
@@ -5309,8 +5315,8 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                 conn.close()
                 raise
             active = conn.execute(
-                "SELECT params_json,status FROM security_actions WHERE host_id=? AND runtime='incus' AND project='default' AND container_name=? AND action_type='apply_container_connlimit' AND status='succeeded' ORDER BY id DESC LIMIT 1",
-                (alert["host_id"], alert["container_name"]),
+                "SELECT params_json,status FROM security_actions WHERE host_id=? AND runtime=? AND project='default' AND container_name=? AND action_type='apply_container_connlimit' AND status='succeeded' ORDER BY id DESC LIMIT 1",
+                (alert["host_id"], alert["runtime"], alert["container_name"]),
             ).fetchone()
             if active is not None:
                 try:

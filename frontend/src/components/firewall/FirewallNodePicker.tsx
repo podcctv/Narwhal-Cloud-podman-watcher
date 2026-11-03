@@ -122,6 +122,7 @@ export const FirewallNodePicker: React.FC<FirewallNodePickerProps> = ({
           : [
             interfaceStatus.by_runtime.incus.length ? `Incus ${interfaceStatus.by_runtime.incus.length}` : '',
             interfaceStatus.by_runtime.podman.length ? `Podman ${interfaceStatus.by_runtime.podman.length}` : '',
+            interfaceStatus.by_runtime.runman.length ? `Runman ${interfaceStatus.by_runtime.runman.length}` : '',
           ].filter(Boolean).join(' · ') || '未发现容器网桥';
 
         return <button key={host.host_id} type="button" onClick={() => onSelect(host.host_id)} aria-pressed={selected} className={`flex min-h-16 w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${selected ? 'border-sky-600 bg-sky-950/50' : 'border-slate-800 bg-slate-950/50 hover:border-slate-600 hover:bg-slate-900'}`}>

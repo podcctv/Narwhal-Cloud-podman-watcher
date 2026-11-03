@@ -29,7 +29,7 @@ type CnRiskDirection = 'in' | 'out' | 'both';
 type CnRiskAction = 'pass' | 'block';
 type CnRiskProtocol = 'socks' | 'wireguard' | 'fet' | 'mtproto' | 'openvpn';
 type FirewallScope = 'host' | 'fleet';
-type InterfaceFilter = 'all' | 'incus' | 'podman';
+type InterfaceFilter = 'all' | 'incus' | 'podman' | 'runman';
 
 const FLEET_NODE_PAGE_SIZE = 6;
 
@@ -248,11 +248,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const fleetProtectionSeenContainers = fleetHosts.reduce((total, host) => total + host.container_protection_status.containers_seen, 0);
   const fleetInterfaceIssueCount = fleetHosts.filter((host) => host.container_interfaces.status !== 'ready'
     || host.container_interfaces.stale
-    || (!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length)).length;
+    || (!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length && !host.container_interfaces.by_runtime.runman.length)).length;
   const fleetDriftedCount = fleetHosts.filter((host) => host.rfw_status === 'drifted').length;
   const fleetNetworkCoverage = useMemo(() => ({
     incus: fleetHosts.filter((host) => host.container_interfaces.status === 'ready' && !host.container_interfaces.stale && host.container_interfaces.by_runtime.incus.length > 0).length,
     podman: fleetHosts.filter((host) => host.container_interfaces.status === 'ready' && !host.container_interfaces.stale && host.container_interfaces.by_runtime.podman.length > 0).length,
+    runman: fleetHosts.filter((host) => host.container_interfaces.status === 'ready' && !host.container_interfaces.stale && host.container_interfaces.by_runtime.runman.length > 0).length,
   }), [fleetHosts]);
   const filteredFleetHosts = useMemo(() => {
     const query = fleetHostSearch.trim().toLocaleLowerCase();
@@ -270,7 +271,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       if (fleetHostFilter === 'offline' && host.online) return false;
       if (fleetHostFilter === 'interfaces' && host.container_interfaces.status === 'ready'
         && !host.container_interfaces.stale
-        && (host.container_interfaces.by_runtime.incus.length > 0 || host.container_interfaces.by_runtime.podman.length > 0)) return false;
+        && (host.container_interfaces.by_runtime.incus.length > 0 || host.container_interfaces.by_runtime.podman.length > 0 || host.container_interfaces.by_runtime.runman.length > 0)) return false;
       if (fleetHostFilter === 'drifted' && host.rfw_status !== 'drifted') return false;
       return true;
     }).sort((a, b) => {
@@ -503,7 +504,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     setAbuseInterfaces(checked ? [...current, name] : current.filter((item) => item !== name));
   };
 
-  const toggleRuntimeInterfaces = (runtime: 'incus' | 'podman') => {
+  const toggleRuntimeInterfaces = (runtime: 'incus' | 'podman' | 'runman') => {
     if (interfaceInventory?.stale) return;
     const runtimeNames = eligibleInterfaces.filter((item) => item.runtimes.includes(runtime)).map((item) => item.name);
     if (!runtimeNames.length) return;
@@ -520,7 +521,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     setAbuseInterfaces([...current, ...runtimeNames]);
   };
 
-  const toggleFleetRuntime = (runtime: 'incus' | 'podman', checked: boolean) => {
+  const toggleFleetRuntime = (runtime: 'incus' | 'podman' | 'runman', checked: boolean) => {
     if (fleetNetworkCoverage[runtime] === 0) return;
     setAbuse((current) => {
       const selected = current.runtimes || [];
@@ -640,7 +641,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     }
     if (interfaces.length > 16 || (fixedPortEnabled && (!interfaces.length || interfaceInventory?.status !== 'ready' || interfaceInventory.stale || unknownInterfaces.length > 0))) {
       setConfirmOpen(false);
-      onToast('error', interfaceInventory?.stale ? '网卡清单已过期，请刷新并等待母机重新上报后再应用。' : unknownInterfaces.length ? `以下网卡已不在当前采集清单中，请先从草稿移除：${unknownInterfaces.join(', ')}` : '启用防滥用规则前，请从最新采集到的 Incus / Podman 网桥中至少选择一个。');
+      onToast('error', interfaceInventory?.stale ? '网卡清单已过期，请刷新并等待母机重新上报后再应用。' : unknownInterfaces.length ? `以下网卡已不在当前采集清单中，请先从草稿移除：${unknownInterfaces.join(', ')}` : '启用防滥用规则前，请从最新采集到的 Incus / Podman / Runman 网桥中至少选择一个。');
       return;
     }
     const policyAbuse = { ...abuse, speedtest: false, services, service_runtimes: services.length ? serviceRuntimes : [], interfaces, runtimes: [] };
@@ -704,8 +705,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     if (fixedPortEnabled && (!runtimes.length || uncoveredRuntimes.length)) {
       setFleetConfirmOpen(false);
       onToast('error', !runtimes.length
-        ? '启用全局防滥用规则前，请至少选择 Incus 或 Podman。'
-        : `所选运行时目前没有任何节点报告可用网桥：${uncoveredRuntimes.map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join('、')}。请刷新节点清单或取消该选择。`);
+        ? '启用全局防滥用规则前，请至少选择 Incus、Podman 或 Runman。'
+        : `所选运行时目前没有任何节点报告可用网桥：${uncoveredRuntimes.map((runtime) => runtime === 'incus' ? 'Incus' : runtime === 'podman' ? 'Podman' : 'Runman').join('、')}。请刷新节点清单或取消该选择。`);
       return;
     }
     mutationInFlightRef.current = true;
@@ -809,7 +810,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       setRules(hostPolicy.policy.rules || []);
       setAbuse({ ...emptyAbuse, ...hostPolicy.policy.abuse, interfaces: [], runtimes });
       setDirty(true);
-      onToast('info', `已从 ${hostId} 复制规则；容器网卡已转换为运行时选择（${runtimes.map((item) => item === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未选择'}），请检查后再同步。`);
+      onToast('info', `已从 ${hostId} 复制规则；容器网卡已转换为运行时选择（${runtimes.map((item) => item === 'incus' ? 'Incus' : item === 'podman' ? 'Podman' : 'Runman').join(' + ') || '未选择'}），请检查后再同步。`);
     } catch (error: any) {
       onToast('error', `复制单机策略失败：${error.message || error}`);
     } finally {
@@ -915,7 +916,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <h3 className="text-sm font-bold text-slate-100">全局策略模板 <span className="ml-2 font-normal text-slate-400">版本 #{fleetSnapshot?.revision ?? 0}</span></h3>
-          <p className="mt-1 text-xs leading-5 text-slate-400">模板只保存 Incus / Podman 目标；每台母机按自己的最新网卡清单解析 bridge。测速保护不依赖 RFW 网桥。未配置全局模板时，没有单机自定义策略的节点会自动应用默认测速保护。</p>
+          <p className="mt-1 text-xs leading-5 text-slate-400">固定端口模板支持 Incus / Podman / Runman bridge；每台母机按自己的最新网卡清单解析。测速服务保护仍只支持 Incus / Podman，不依赖 RFW 网桥。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => void loadFleetPolicy()} disabled={fleetLoading} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">{fleetLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}刷新全局状态</button>
@@ -954,6 +955,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
         <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Incus 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.incus}/{fleetHosts.length}</strong> 台</span>
         <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Podman 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.podman}/{fleetHosts.length}</strong> 台</span>
+        <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Runman 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.runman}/{fleetHosts.length}</strong> 台</span>
       </div>
       <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -977,7 +979,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               <strong className="min-w-0 flex-1 break-all text-[11px] text-slate-200">{host.host_id}</strong>
               <span className={`rounded-full border px-2 py-0.5 text-[10px] ${rfwStateTone(host.rfw_status)}`}>RFW · {rfwStateLabel[host.rfw_status] || host.rfw_status}</span>
               <span className={`rounded-full border px-2 py-0.5 text-[10px] ${containerProtectionStateTone(host.container_protection_status.state)}`}>容器 · {containerProtectionStateLabel[host.container_protection_status.state] || host.container_protection_status.state}</span>
-              <span className={`text-[10px] ${host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-500'}`}>{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '网卡清单过期/未采集' : `${host.container_interfaces.by_runtime.incus.length ? `Incus ${host.container_interfaces.by_runtime.incus.length}` : ''}${host.container_interfaces.by_runtime.incus.length && host.container_interfaces.by_runtime.podman.length ? ' · ' : ''}${host.container_interfaces.by_runtime.podman.length ? `Podman ${host.container_interfaces.by_runtime.podman.length}` : ''}${!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length ? '无可用容器网桥' : ''}`}</span>
+              <span className={`text-[10px] ${host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-500'}`}>{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '网卡清单过期/未采集' : `${host.container_interfaces.by_runtime.incus.length ? `Incus ${host.container_interfaces.by_runtime.incus.length}` : ''}${host.container_interfaces.by_runtime.podman.length ? `${host.container_interfaces.by_runtime.incus.length ? ' · ' : ''}Podman ${host.container_interfaces.by_runtime.podman.length}` : ''}${host.container_interfaces.by_runtime.runman.length ? `${host.container_interfaces.by_runtime.incus.length || host.container_interfaces.by_runtime.podman.length ? ' · ' : ''}Runman ${host.container_interfaces.by_runtime.runman.length}` : ''}${!host.container_interfaces.by_runtime.incus.length && !host.container_interfaces.by_runtime.podman.length && !host.container_interfaces.by_runtime.runman.length ? '无可用容器网桥' : ''}`}</span>
               <span className="text-[10px] text-slate-500">Watcher {host.agent_version}</span>
             </summary>
             <div className="grid gap-2 border-t border-slate-800 px-3 py-3 text-[10px] sm:grid-cols-2">
@@ -1007,6 +1009,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               <div className={host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-400'}>
                 网卡清单{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '未就绪 / 过期' : '最新'} · Incus: <code className="text-slate-200">{host.container_interfaces.by_runtime.incus.join(', ') || '无'}</code> · Podman: <code className="text-slate-200">{host.container_interfaces.by_runtime.podman.join(', ') || '无'}</code>
               </div>
+              <div className="text-slate-400">Runman: <code className="text-slate-200">{host.container_interfaces.by_runtime.runman.join(', ') || '无'}</code></div>
               {host.last_action?.message && <p className="wrap-break-word leading-4 text-slate-400 sm:col-span-2">{host.last_action.message}</p>}
             </div>
           </details>)}
@@ -1180,11 +1183,11 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
         {scope === 'host' ? <>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {(['incus', 'podman'] as const).map((runtime) => {
+            {(['incus', 'podman', 'runman'] as const).map((runtime) => {
               const runtimeInterfaces = eligibleInterfaces.filter((item) => item.runtimes.includes(runtime));
               const selectedCount = runtimeInterfaces.filter((item) => abuse.interfaces.includes(item.name)).length;
               const checked = runtimeInterfaces.length > 0 && selectedCount === runtimeInterfaces.length;
-              const runtimeLabel = runtime === 'incus' ? 'Incus' : 'Podman';
+              const runtimeLabel = runtime === 'incus' ? 'Incus' : runtime === 'podman' ? 'Podman' : 'Runman';
               return <label key={runtime} className={runtimeInterfaces.length && !interfaceInventory?.stale ? checked ? 'flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-sky-700 bg-sky-950/40 p-3' : 'flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-slate-700 bg-slate-950/60 p-3 hover:border-slate-600' : 'flex min-h-14 items-center gap-3 rounded-lg border border-slate-800 bg-slate-950/30 p-3 opacity-55'}>
                 <input type="checkbox" checked={checked} disabled={!runtimeInterfaces.length || interfaceInventory?.stale} onChange={() => toggleRuntimeInterfaces(runtime)} className="h-4 w-4 shrink-0 accent-sky-500" aria-label={'选择全部 ' + runtimeLabel + ' 网桥'} />
                 <span className="min-w-0 flex-1">
@@ -1202,6 +1205,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
                 ['all', '全部', eligibleInterfaces.length],
                 ['incus', 'Incus', eligibleInterfaces.filter((item) => item.runtimes.includes('incus')).length],
                 ['podman', 'Podman', eligibleInterfaces.filter((item) => item.runtimes.includes('podman')).length],
+                ['runman', 'Runman', eligibleInterfaces.filter((item) => item.runtimes.includes('runman')).length],
               ] as const).map(([key, label, count]) => <button key={key} type="button" onClick={() => setHostInterfaceFilter(key)} aria-pressed={hostInterfaceFilter === key} className={hostInterfaceFilter === key ? 'min-h-9 rounded-lg border border-sky-700 bg-sky-950/60 px-3 text-[10px] text-sky-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400' : 'min-h-9 rounded-lg border border-slate-700 bg-slate-950/70 px-3 text-[10px] text-slate-400 hover:bg-slate-800 focus:outline-hidden focus:ring-2 focus:ring-sky-400'}>{label}<span className="ml-1.5 font-mono tabular-nums">{count}</span></button>)}
             </div>
             <span className="text-[10px] text-slate-500">筛选不改变勾选</span>
@@ -1215,7 +1219,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
                 <span className="mt-1 block break-all text-[10px] leading-4 text-slate-500">{(item.network_names.length ? item.network_names.join(', ') : item.kind) + (item.mtu ? ' · MTU ' + item.mtu : '') + (item.addresses.length ? ' · ' + item.addresses.slice(0, 2).join(', ') : '')}</span>
               </span>
             </label>)}
-          </div> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[11px] leading-5 text-slate-400">当前筛选没有可显示的网卡，请切换到“全部”或其他运行时。</p> : <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">{interfaceInventory?.stale ? '网卡清单已过期，请刷新并等待母机上报后再选择。' : '尚无已确认的 Incus / Podman bridge；请检查 Agent 版本、运行时网络模式后刷新，系统不会猜测网卡名称。'}</p>}
+          </div> : <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[11px] leading-5 text-slate-400">当前筛选没有可显示的网卡，请切换到“全部”或其他运行时。</p> : <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">{interfaceInventory?.stale ? '网卡清单已过期，请刷新并等待母机上报后再选择。' : '尚无已确认的 Incus / Podman / Runman bridge；请检查 Agent 版本、运行时网络模式后刷新，系统不会猜测网卡名称。'}</p>}
 
           {(abuse.interfaces || []).some((name) => !eligibleInterfaces.some((item) => item.name === name)) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] text-amber-100/80">
             <span>旧策略里有未被新清单确认的网卡：{abuse.interfaces.filter((name) => !eligibleInterfaces.some((item) => item.name === name)).join(', ')}</span>
@@ -1224,10 +1228,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         </> : <>
           <p className="mt-2 text-[10px] leading-4 text-slate-400">全局模式按运行时选择，不复制某台母鸡的网卡名。每台主机只会在新鲜清单中映射对应运行时的 bridge。</p>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {(['incus', 'podman'] as const).map((runtime) => {
+            {(['incus', 'podman', 'runman'] as const).map((runtime) => {
               const selected = (abuse.runtimes || []).includes(runtime);
               const coverage = fleetNetworkCoverage[runtime];
-              const runtimeLabel = runtime === 'incus' ? 'Incus' : 'Podman';
+              const runtimeLabel = runtime === 'incus' ? 'Incus' : runtime === 'podman' ? 'Podman' : 'Runman';
               return <label key={runtime} className={selected ? 'flex min-h-20 cursor-pointer items-start gap-3 rounded-xl border border-sky-700 bg-sky-950/40 p-4' : coverage > 0 ? 'flex min-h-20 cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/50 p-4 hover:border-slate-600' : 'flex min-h-20 items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/50 p-4 opacity-60'}>
                 <input type="checkbox" checked={selected} disabled={coverage === 0} onChange={(event) => toggleFleetRuntime(runtime, event.target.checked)} className="mt-1 h-4 w-4 shrink-0 accent-sky-500" aria-label={'全局选择 ' + runtimeLabel + ' 容器网络'} />
                 <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-100">{runtimeLabel}</span><span className="mt-1 block text-[11px] leading-5 text-slate-400">{'当前 ' + coverage + ' / ' + fleetHosts.length + ' 台母机报告了可用 bridge' + (coverage < fleetHosts.length ? ' · ' + (fleetHosts.length - coverage) + ' 台尚未就绪' : '')}</span></span>
@@ -1235,7 +1239,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               </label>;
             })}
           </div>
-          {fleetSnapshot?.revision && (abuse.interfaces || []).length > 0 && !(abuse.runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">旧全局模板使用具体网卡名称，无法安全映射到不同母机；请重新选择 Incus / Podman。</p>}
+          {fleetSnapshot?.revision && (abuse.interfaces || []).length > 0 && !(abuse.runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">旧全局模板使用具体网卡名称，无法安全映射到不同母机；请重新选择 Incus / Podman / Runman。</p>}
         </>}
       </div>
 
@@ -1256,8 +1260,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             <span className="min-w-0"><span className="flex items-center gap-2"><span className="text-sm font-semibold text-slate-100">{title}</span><span className={abuse[key] ? 'rounded-full border border-rose-800 bg-rose-950/50 px-2 py-0.5 text-[9px] text-rose-200' : 'rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[9px] text-slate-500'}>{abuse[key] ? '启用' : '关闭'}</span></span><span className="mt-1 block text-xs leading-5 text-slate-400">{description}</span></span>
           </label>)}
         </div>
-        {(abuse.mining || abuse.bt) && scope === 'host' && abuse.interfaces.length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">固定端口模板已启用，但没有选择目标网卡。请先在上方勾选 Incus / Podman 网桥；测速服务策略不需要网卡。</p>}
-        {(abuse.mining || abuse.bt) && scope === 'fleet' && (abuse.runtimes || []).length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">固定端口模板已启用，但没有选择 Incus / Podman 运行时；测速服务范围在上方单独配置。</p>}
+        {(abuse.mining || abuse.bt) && scope === 'host' && abuse.interfaces.length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">固定端口模板已启用，但没有选择目标网卡。请先在上方勾选 Incus / Podman / Runman 网桥；测速服务策略不需要网卡。</p>}
+        {(abuse.mining || abuse.bt) && scope === 'fleet' && (abuse.runtimes || []).length === 0 && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">固定端口模板已启用，但没有选择 Incus / Podman / Runman 网桥；测速服务范围在上方单独配置。</p>}
         {!abuse.mining && !abuse.bt && <p className="mt-3 text-[10px] leading-4 text-slate-500">固定端口模板保持关闭。上方已选的测速服务策略仍可独立生效，不需要勾选网卡。</p>}
       </div>
       <p className="mx-4 mb-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[10px] leading-4 text-slate-400 sm:mx-5 sm:mb-5">固定端口模板只覆盖 bridge 转发流量；自建服务的端口保护和 TcpQuality 出站 IP 保护只在独立网络命名空间可用。host、pasta、macvlan / ipvlan 等模式会跳过命名空间防火墙，不会猜测宿主机接口或全局封端口。规则只有读回确认后才报告成功。</p>
@@ -1306,7 +1310,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。已启用 ${blockingRules} 条 RFW 主机规则与 ${enabledAbuse} 项容器级保护。测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}（仅容器，不含宿主机自身和 Docker）。服务域名项写入指定容器解析配置，容器监听与动态 IP 规则由 Agent 在独立网络命名空间应用。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
       <div className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/90">RFW 规则依赖 Runman；容器服务规则依赖 Watcher Agent。每类规则都会单独报告执行和读回状态。管理员配置的测速资源保护不构成对用户滥用的认定。</div>
     </ConfirmDialog>
-    <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用 RFW 阻断规则与 ${enabledAbuse} 项容器级保护；测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}（仅容器，不含宿主机自身和 Docker）；固定端口范围：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}。节点会按各自策略执行；无法确认的范围会等待或跳过，不会套用猜测的网卡名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>
+    <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用 RFW 阻断规则与 ${enabledAbuse} 项容器级保护；测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}（仅容器，不含宿主机自身和 Docker）；固定端口范围：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : runtime === 'podman' ? 'Podman' : 'Runman').join(' + ') || '未启用'}。节点会按各自策略执行；无法确认的范围会等待或跳过，不会套用猜测的网卡名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>
       <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">CN GeoIP 规则可按入站来源或出站目标阻断匹配流量，可能影响母机上全部容器与服务。FET 是启发式特征、存在误报；MTProto 仅能识别特定初始化标记，且不做 TCP 重组。节点只有在运行中的 RFW 明确报告支持后才会应用 MTProto 规则；若读回不支持，必须先部署含该检测能力的 RFW 构建。IPv6 暂不支持。策略应用回执不等于内核规则实时读回，节点事件采集可能因缓冲区覆盖而不完整。</div>
     </ConfirmDialog>
   </div>;

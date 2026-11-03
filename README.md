@@ -1,8 +1,14 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.196**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.197**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
+
+### v1.7.197：接入 Runman Rust v2 只读监控与受控网络接口
+
+- 通过 Runman Agent 提供的 root-only Unix socket 读取实例 UUID、代次、CPU/内存资源和新鲜 TCP 连接计数；无法确认的采样保持无效，不用零值伪装为有效证据。
+- 在主机防火墙策略网卡清单中识别 Runman bridge，并映射现有 RFW 策略与读回；连接数限额按 VM UUID 和实例代次核验。
+- 明确将 Runman 容器的进程归因、容器内服务处置和网络字节统计保持为不支持能力，避免把 Runman 实例误交给 Incus/Podman 专用执行器。
 
 ### v1.7.196：修复 Incus CPU 限额命令执行、内存阶梯升档死锁与协议待核验误报
 

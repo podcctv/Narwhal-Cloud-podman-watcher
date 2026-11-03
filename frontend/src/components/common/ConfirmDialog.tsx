@@ -28,14 +28,18 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 }) => {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
+  const onCancelRef = useRef(onCancel);
+  const isSubmittingRef = useRef(isSubmitting);
+  onCancelRef.current = onCancel;
+  isSubmittingRef.current = isSubmitting;
 
   useEffect(() => {
     if (!open) return;
     const previousFocus = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isSubmitting) {
-        onCancel();
+      if (event.key === 'Escape' && !isSubmittingRef.current) {
+        onCancelRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -52,8 +56,11 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => { window.removeEventListener('keydown', onKeyDown); previousFocus?.focus(); };
-  }, [open, isSubmitting, onCancel]);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [open]);
 
   if (!open) return null;
 

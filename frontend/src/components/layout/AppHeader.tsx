@@ -6,7 +6,7 @@ import './app-header.css';
 type Tab = 'dashboard' | 'alerts' | 'investigation' | 'stats' | 'settings' | 'notifications' | 'operations' | 'commerce' | 'firewall';
 interface AppHeaderProps {
   activeTab: Tab; onSelectTab: (tab: Tab) => void; serverVersion: string;
-  activeAlertCount: number; countdown: number; totalSeconds?: number; isPaused: boolean;
+  activeAlertCount: number; alertCountState: 'unknown' | 'current' | 'stale'; countdown: number; totalSeconds?: number; isPaused: boolean;
   onTogglePause: () => void; onRefreshNow: () => void; isRefreshing: boolean;
   lastRefreshTime?: string; onOpenSearch: () => void; onLogout: () => void; isLoggingOut: boolean;
 }
@@ -48,7 +48,7 @@ export const AppHeader: React.FC<AppHeaderProps> = (props) => (
           const selected=props.activeTab===tab || (tab==='settings' && props.activeTab==='notifications');
           return <button type="button" key={tab} onClick={()=>props.onSelectTab(tab)} aria-current={selected?'page':undefined}>
             <Icon aria-hidden="true" size={16}/><span>{label}</span>
-            {tab==='alerts' && props.activeAlertCount>0 && <span className="app-alert-count" aria-label={`${props.activeAlertCount} 项活动告警`}>{props.activeAlertCount>99?'99+':props.activeAlertCount}</span>}
+            {tab==='alerts' && (props.activeAlertCount > 0 || props.alertCountState === 'unknown') && <span className={`app-alert-count${props.alertCountState === 'unknown' ? ' app-alert-count-unknown' : props.alertCountState === 'stale' ? ' app-alert-count-stale' : ''}`} aria-label={props.alertCountState === 'unknown' ? '活动告警数量未知' : `${props.alertCountState === 'stale' ? '上次成功采样：' : ''}${props.activeAlertCount} 项活动告警`}>{props.alertCountState === 'unknown' ? '?' : props.activeAlertCount > 99 ? '99+' : props.activeAlertCount}</span>}
           </button>;
         })}
         <a href="/tcping" className="app-tcp-link" aria-label="全国 TCP 测试"><Globe2 aria-hidden="true" size={16}/><span className="app-nav-full">全国 TCP 测试</span><span className="app-nav-short">TCP 测速</span></a>
