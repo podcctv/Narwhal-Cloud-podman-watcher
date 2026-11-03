@@ -2065,7 +2065,7 @@ class SecurityTelemetryTests(unittest.TestCase):
         ), mock.patch.object(agent, '_incus_instance_pid', return_value=123), mock.patch.object(
             agent, '_collect_socket_security', return_value={'connection_metrics':{'valid':True,'epoch':'fixture','total':1600}}
         ), mock.patch.object(
-            agent.incus_health, 'stop_preflight', return_value=(True, 'ready')
+            agent.incus_health, 'stop_preflight', return_value=(True, '')
         ), mock.patch.object(
             agent, "_run_action_command", return_value=(True, "stopped")
         ) as runner:
