@@ -35,6 +35,7 @@ python -m unittest discover -s tests -v
 
 ## Git 与生产环境
 
+- **提交与推送规范**：任务代码及测试验证完成后，**自动提交并直接推送到当前 fork 仓库的 GitHub `main` 分支（`origin main`），不要提交 PR**。
 - 只暂存当前任务要求的文件；保留他人已存在的 staged、unstaged 和 untracked 内容。不要用 `git reset --hard`、`git clean` 或宽泛暂存来“整理”工作区。
 - 不要覆盖 `server/static/`、SQLite 业务数据、外部 `.env` 或 TLS 文件；备份/恢复遵循运维手册。
 - SSH/生产操作前按用户提供的主机映射确认目标和身份，校验 host key；不猜测别名、不绕过认证。执行前先查看状态和影响范围，执行后读回验证。
