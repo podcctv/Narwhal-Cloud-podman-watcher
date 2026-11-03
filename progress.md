@@ -7,17 +7,23 @@
 - 基于 fork `main` 全面补齐 Runman (Rust) 容器监控与部署脚本自适应。
 - 支持实时带宽速率计算（`_derive_net_bps`）与流量计数器（`traffic_counters`）、容器网络 IP（`network_addresses`）透出、独立磁盘与 `/data` 容量上报、安全 MOTD 登录提示、买家映射（`buyer_mapping`）与用户备注接口（`/api/v1/containers/user-note`）以及前端抽屉无缝呈现。
 - 同步更新 Agent 部署与更新脚本（`scripts/install-client.sh`），自动检测 `docker` / `incus` / `podman` / `runman`，并保持 `DOCKER_MONITOR_MODE=notice` 默认不干预。
-- 本轮版本目标为 `1.7.199`。
+- 本轮版本目标为 `1.7.200`。
 
 ## 代码基线
 
 - 当前工作区基于 fork `main` 继续维护 Runman Rust v2 适配与全链路监控闭环。
-- 本次根目录 `VERSION` 更新目标为 `1.7.199`。
-- 本次工作涵盖 Runman 容器网络 IP、带宽速率与流量计数器补全、独立磁盘与 procfs 文件系统容量映射、安全 MOTD 写入、买家映射与用户备注放行、前端详情抽屉网络展示、Agent 安装脚本多运行时自动检测及全量回归单测。
+- 本次根目录 `VERSION` 更新目标为 `1.7.200`。
+- 本次工作涵盖 Runman 容器网络 IP、带宽速率与流量计数器补全、独立磁盘映射、买家映射与用户备注放行、前端详情抽屉网络展示、Agent 安装脚本多运行时自动检测及全量回归单测。
 
 ## 最近完成的工作
 
-- v1.7.199：全面补齐 Runman Rust 容器监控、流量速率、MOTD 登录提示与 Agent 部署脚本自适应：
+- v1.7.200：全面补齐 Runman Rust 容器监控、流量速率与 Agent 部署脚本自适应：
+  1. 补全 Runman 容器 IP 与网络速率：`_runman_inventory_containers()` 与 `collect_runman_report()` 提取解析 `network_addresses`；接入 `_derive_net_bps` 实时计算 `net_rx_bps` 与 `net_tx_bps`，上报规范化 `traffic_counters`；映射 `disk_gb` 至 `container_disk` 容量。
+  2. 买家映射与用户备注放行：`server/buyer_mapping.py` 与 `server/app.py`（`/api/v1/containers/user-note`）全面放行 `runman` 运行时，前端 `ContainerDrawer` 放行备注卡片并直接展示容器 IP。
+  3. `CONTAINER_RUNTIMES` 与 `runtime_inventory` 完整兼容识别 `runman`，消除未知运行时警告并在节点运行状态中准确声明。
+  4. 同步更新 `scripts/install-client.sh`：自动检测 `docker` / `incus` / `podman` / `runman (rust 容器)`，任意存在时不强制安装 podman；保持 Docker 为 `notice` 默认仅提醒不接管。
+  5. 887 项单元测试全量通过，前端构建生成最新生产静态资源。
+- v1.7.199：Runman 流量计数接入流量账本并按实例代次派生收发速率；通过核对宿主机 PID、启动 tick 的 procfs 路径采集根目录和 `/data` 文件系统空间；安全提示仅写入已存在的普通 MOTD 文件，明确跳过 guest exec、shell hook 和登录前 Banner。新增兼容能力/缺口清单。
   1. 补全 Runman 容器 IP 与网络速率：`_runman_inventory_containers()` 与 `collect_runman_report()` 提取解析 `network_addresses`；接入 `_derive_net_bps` 实时计算 `net_rx_bps` 与 `net_tx_bps`，上报规范化 `traffic_counters`；映射 `disk_gb` 与 procfs 文件系统至 `container_disk` 容量。
   2. 买家映射与用户备注放行：`server/buyer_mapping.py` 与 `server/app.py`（`/api/v1/containers/user-note`）全面放行 `runman` 运行时，前端 `ContainerDrawer` 放行备注卡片并直接展示容器 IP。
   3. 安全 MOTD 登录提示写入：使用当前 init PID 和启动 tick 代次校验，通过宿主机 procfs 原子更新普通 `/etc/motd`。
