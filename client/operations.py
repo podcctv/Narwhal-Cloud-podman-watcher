@@ -205,6 +205,24 @@ def collect(security, containers, interval, runtime_inventory=None):
     health=[{"source":"http_logs","status":log_status,"details":{k:access.get(k,0) for k in ("readable_files","missing_files","unreadable_files","parse_errors","requests")},"guidance":"使用日志向导发现路径，确认 JSON/combined 格式和 Agent 读取权限"},
             {"source":"network_counters","status":"healthy" if all(c.get("traffic_counters",{}).get("available") for c in monitored) and monitored else "partial" if monitored else "idle","details":{"containers":len(monitored),"available":sum(bool(c.get("traffic_counters",{}).get("available")) for c in monitored),"notice_only":len(containers)-len(monitored)},"guidance":"检查运行时统计接口、/proc 网络命名空间权限；首采样不产生速率"},
             {"source":"security","status":security_status,"guidance":"无容器运行时的探针节点不适用容器安全采样；其他节点请启用 SECURITY_MONITOR_ENABLED"}]
+    incus_runtime = security.get("incus_runtime") if isinstance(security, dict) else None
+    if isinstance(incus_runtime, dict):
+        scan_status = str(incus_runtime.get("scan_status") or "unknown")
+        runtime_status = str(incus_runtime.get("status") or "unknown")
+        health_status = "healthy" if runtime_status == "healthy" and scan_status == "complete" else "unavailable" if scan_status == "unavailable" else "warning"
+        health.append({
+            "source": "incus_runtime",
+            "status": health_status,
+            "details": {
+                "scan_status": scan_status,
+                "instances": int(incus_runtime.get("instance_count") or 0),
+                "error_instances": int(incus_runtime.get("error_instance_count") or 0),
+                "active_lifecycle_operations": int(incus_runtime.get("active_lifecycle_operation_count") or 0),
+                "stuck_lifecycle_operations": int(incus_runtime.get("stuck_lifecycle_operation_count") or 0),
+                "api_latency_ms": incus_runtime.get("api_latency_ms") if isinstance(incus_runtime.get("api_latency_ms"), dict) else {},
+            },
+            "guidance": "状态变更异常仅告警并保留现场；先核对实例日志和 Incus 操作，不重复停止，不自动重启 Incus 守护进程。",
+        })
     with ThreadPoolExecutor(max_workers=4) as pool:
         services=list(pool.map(probe,_config.get("services",[])[:20]))
     upgrade_result={}
@@ -218,7 +236,7 @@ def collect(security, containers, interval, runtime_inventory=None):
         except (OSError,ValueError):maintenance['error']='cleanup state unavailable; no automatic deletion'
     return {"health":health,"runtime_inventory":runtime_snapshot,"services":services,"disk_cleanup":maintenance,"log_discovery":_discoveries,"architecture":platform.machine(),"interval_seconds":interval,"upgrade_result":upgrade_result,
             "managed_upgrade":_managed_upgrade_available(),
-            "capabilities":["operations-v1","service-probes","log-discovery","post-remediation-recheck"] + (["public-tcp-v2"] if tcp_probe.available() else []),"schema_version":1}
+            "capabilities":["operations-v1","service-probes","log-discovery","post-remediation-recheck"] + (["public-tcp-v2"] if tcp_probe.available() else []) + (["incus-runtime-health-v1"] if isinstance(incus_runtime, dict) else []),"schema_version":1}
 
 
 def schedule_upgrade(action,node_id):

@@ -1,10 +1,21 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.200**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.201**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
+
+Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.7.201：增加 Incus 卡住实例巡检与重复停止保护
+
+- Client Agent 在有 Incus 的节点上，以有界超时读取容器实例清单和后台操作清单；上报 `ERROR` 实例、长时间运行的启动/停止/重启/删除操作、API 不可用与响应变慢状态。完整扫描独立于通用安全扫描开关。
+- Server 只在 Agent 提供完整实例及操作清单时允许 Incus 连接过载自动停机；`ERROR` 实例、目标已有生命周期操作、操作目标不明或扫描不完整时均不再排队新的 stop。
+- Client 在执行 Incus stop 前重新读取精确项目/实例状态和操作清单；目标不是 `RUNNING`、API 查询失败或发现已有生命周期操作时取消 stop。
+- 对卡住实例仅告警并保留现场，不自动强杀实例、不删除 Incus operation、不自动重启 Incus 守护进程；告警提示人工查看日志路径和 `incus.service` 配置，不读取或上传日志内容。
+- 运维中心增加 Incus 健康项；部分扫描不会清除已有 Incus 告警。排查步骤和配置见 `docs/incus-runtime-health.md`。
+- 安装器、托管更新器、回滚快照及固定来源升级归档均纳入 `client/incus_health.py`，确保新 Agent 模块随版本安装并能安全回滚。
 
 ### v1.7.200：全面补齐 Runman Rust 容器监控、流量速率与 Agent 部署脚本自适应
 

@@ -41,6 +41,7 @@ ARCHIVE_DOWNLOAD_ATTEMPTS = 3
 CLIENT_REQUIRED_FILES = (
     "VERSION",
     "client/agent.py",
+    "client/incus_health.py",
     "client/requirements.txt",
     "scripts/install-client.sh",
     "scripts/lib/interactive.sh",
