@@ -4123,6 +4123,7 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "container_name": r["container_name"],
             "runtime": r["runtime"],
             "project": r["project"],
+            "network_addresses": payload.get("network_addresses", []),
             "monitor_mode": str(payload.get("monitor_mode") or "full"),
             "cpu_percent": r["cpu_percent"],
             "mem_bytes": r["mem_bytes"],
@@ -4214,8 +4215,8 @@ def get_container_user_note(
     project = str(project or "").strip()
     container_name = str(container_name or "").strip()
     container_id = str(container_id or "").strip()
-    if runtime not in {"incus", "podman"}:
-        raise HTTPException(status_code=400, detail="仅支持 Incus 和 Podman 容器")
+    if runtime not in {"incus", "podman", "runman"}:
+        raise HTTPException(status_code=400, detail="仅支持 Incus、Podman 和 Runman 容器")
     if (not host_id or len(host_id) > 255 or not container_name or len(container_name) > 255
             or not container_id or len(container_id) > 255 or len(project) > 255):
         raise HTTPException(status_code=400, detail="主机或容器实例标识无效")
@@ -4272,8 +4273,8 @@ async def save_container_user_note(request: Request) -> JSONResponse:
     user_email = str(payload.get("user_email") or "").strip()
     user_note = str(payload.get("user_note") or "").strip()
 
-    if runtime not in {"incus", "podman"}:
-        raise HTTPException(status_code=400, detail="仅支持 Incus 和 Podman 容器")
+    if runtime not in {"incus", "podman", "runman"}:
+        raise HTTPException(status_code=400, detail="仅支持 Incus、Podman 和 Runman 容器")
     if not host_id or len(host_id) > 255 or not container_name or len(container_name) > 255:
         raise HTTPException(status_code=400, detail="主机或容器标识无效")
     if len(project) > 255 or not container_id or len(container_id) > 255:

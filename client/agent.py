@@ -165,8 +165,8 @@ def get_runtime_bins() -> Dict[str, str]:
     configured = os.getenv("CONTAINER_RUNTIMES", "auto").strip().lower()
     requested = [x.strip() for x in configured.split(",") if x.strip()]
     auto = not requested or "auto" in requested
-    enabled = ("podman", "docker", "incus") if auto else tuple(dict.fromkeys(requested))
-    invalid = [name for name in enabled if name not in ("podman", "docker", "incus")]
+    enabled = ("podman", "docker", "incus", "runman") if auto else tuple(dict.fromkeys(requested))
+    invalid = [name for name in enabled if name not in ("podman", "docker", "incus", "runman")]
     if invalid:
         print(f"warn: unsupported container runtimes ignored: {', '.join(invalid)}")
 
@@ -180,14 +180,17 @@ def get_runtime_bins() -> Dict[str, str]:
             continue
         if shutil.which(name):
             found[name] = name
+    if "runman" in enabled:
+        if os.name == "posix" and hasattr(socket, "AF_UNIX") and os.path.exists("/run/narwhal-agent/connlimit.sock"):
+            found["runman"] = "runman"
 
     if not found and "container_runtimes" not in _warned_missing_bins:
         _warned_missing_bins.add("container_runtimes")
-        wanted = ", ".join(x for x in enabled if x in ("podman", "docker", "incus"))
+        wanted = ", ".join(x for x in enabled if x in ("podman", "docker", "incus", "runman"))
         print(f"missing command: no enabled container runtime found ({wanted})")
     elif not auto:
         for name in enabled:
-            if name in ("podman", "docker", "incus") and name not in found:
+            if name in ("podman", "docker", "incus", "runman") and name not in found:
                 key = f"runtime:{name}"
                 if key not in _warned_missing_bins:
                     _warned_missing_bins.add(key)
@@ -7491,6 +7494,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
         pid = raw_item.get('init_pid') if raw_item.get('running') is True else None
         proc_snapshot = _runman_proc_snapshot(pid) if type(pid) is int and pid > 1 else {}
         pid_start_ticks = str(proc_snapshot.get('pid_start_ticks') or '')
+        ips_list = [str(ip)[:64] for ip in raw_item.get('ips', [])[:32]] if isinstance(raw_item.get('ips'), list) else []
         items.append({
             'id': vm_id,
             'stable_id': vm_id,
@@ -7503,6 +7507,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'image': str(raw_item.get('os_image') or '')[:160],
             'status': 'running' if raw_item.get('running') is True else 'stopped',
             'instance_id': generation,
+            'network_addresses': [ip for ip in ips_list if ip],
             'connection_metrics': connection_metrics,
             'runman_resources': {
                 'cpu': raw_item.get('cpu') if type(raw_item.get('cpu')) is int else 0,
@@ -7540,7 +7545,7 @@ def list_containers() -> List[Dict[str, str]]:
             continue
         if runtime_name == "incus":
             items.extend(_incus_containers(runtime))
-        else:
+        elif runtime_name in ("podman", "docker"):
             items.extend(_oci_containers(runtime_name, runtime, patterns))
     items.extend(_runman_inventory_containers())
     return items
@@ -7574,9 +7579,13 @@ def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
     cpu = resources.get('cpu_percent') if type(resources.get('cpu_percent')) in (int, float) else 0.0
     stable_id = str(container.get('stable_id') or container.get('id') or '')
     instance_id = str(container.get('instance_id') or '')
-    traffic_valid = resources.get('traffic_counters_available') is True
-    traffic_rx = resources.get('traffic_in_bytes') if traffic_valid else 0
-    traffic_tx = resources.get('traffic_out_bytes') if traffic_valid else 0
+    traffic_valid = (
+        resources.get('traffic_counters_available') is True
+        or resources.get('net_metrics_available') is True
+        or bool(resources.get('traffic_in_bytes') or resources.get('traffic_out_bytes'))
+    )
+    traffic_rx = resources.get('traffic_in_bytes') if type(resources.get('traffic_in_bytes')) is int else 0
+    traffic_tx = resources.get('traffic_out_bytes') if type(resources.get('traffic_out_bytes')) is int else 0
     raw_fs = resources.get('container_fs') if isinstance(resources.get('container_fs'), dict) else {}
 
     def fs_usage(name: str) -> Dict[str, int]:
@@ -7593,6 +7602,24 @@ def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
     else:
         _net_counters.pop(f'runman:{stable_id}:{instance_id}', None)
         net_rx_bps, net_tx_bps = 0.0, 0.0
+
+    ips = [str(ip) for ip in resources.get('ips', []) if isinstance(ip, str) and ip]
+    if not ips and isinstance(container.get('network_addresses'), list):
+        ips = [str(ip) for ip in container.get('network_addresses') if isinstance(ip, str) and ip]
+
+    disk_gb = resources.get('disk_gb') if type(resources.get('disk_gb')) is int else 0
+    disk_bytes = disk_gb * 1024 * 1024 * 1024 if disk_gb > 0 else 0
+    fs_root_total = container_fs['root']['total_bytes'] or disk_bytes
+    if fs_root_total > 0 and container_fs['root']['total_bytes'] == 0:
+        container_fs['root']['total_bytes'] = fs_root_total
+
+    container_disk = {
+        'rw_bytes': int(resources.get('disk_used_bytes') or 0),
+        'rootfs_bytes': disk_bytes,
+        'fs': container_fs,
+        'available': resources.get('container_fs_available') is True or disk_bytes > 0,
+    }
+
     return {
         'id': str(container.get('id') or ''),
         'stable_id': stable_id,
@@ -7616,19 +7643,15 @@ def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
             'available': traffic_valid,
             'rx': traffic_rx,
             'tx': traffic_tx,
-            'source': 'runman_lifetime',
+            'source': 'runman',
             'epoch': f'{stable_id}:{instance_id}:runman',
         },
+        'network_addresses': sorted(set(ips)),
         'conn_count': tcp_total,
         'tcp_country_stats': [],
         'udp_country_stats': [],
         'disk': collect_disk_alert(),
-        'container_disk': {
-            'rw_bytes': 0,
-            'rootfs_bytes': 0,
-            'fs': container_fs,
-            'available': resources.get('container_fs_available') is True,
-        },
+        'container_disk': container_disk,
         'top_cpu_process': {'pid': 0, 'cpu_percent': 0.0, 'command': ''},
         'security': {
             'connection_metrics': metrics,
@@ -11525,7 +11548,7 @@ def main() -> None:
             "containers": collected,
             "security": security,
             "operations": node_operations.collect(
-                security, collected, security_interval, runtime_inventory=list(get_runtime_bins().keys()),
+                security, collected, security_interval, runtime_inventory=sorted(set(list(get_runtime_bins().keys()) + [str(c.get("runtime")) for c in collected if c.get("runtime")])),
             ),
         }
         try:

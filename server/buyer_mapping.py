@@ -154,7 +154,7 @@ def apply(conn, catalog, now):
         candidates = index.get(key, [])
         vm = candidates[0] if len(candidates) == 1 else None
         reason = ""
-        if not key or row["runtime"] not in {"incus", "podman"}:
+        if not key or row["runtime"] not in {"incus", "podman", "runman"}:
             reason = "非托管实例 UUID；请手工登记收件人"
         elif len(local.get(key, [])) != 1:
             reason = "同一实例 UUID 对应多个本地身份，拒绝自动关联"

@@ -4,21 +4,26 @@
 
 ## Runman Rust v2 兼容开发
 
-- 当前代码基线为最新 `origin/main`（`1323833` / v1.7.198）；本轮目标版本 `1.7.199` 增加累计流量速率/账本适配和经 PID 代次校验的 Runman MOTD 写入。
-- 连接证据必须是新鲜、完整且实例代次匹配的 `/proc/<pid>/net` 采样；缺字段或解析不完整时只报告未核验，不下发限额。
-- Runman 根目录与真实 `/data` 目录的容量/可用量从经代次校验的 procfs 只读采样；镜像层尺寸和磁盘 I/O 仍未接入。MOTD 仅更新已有普通文件；不调用 guest exec、不修改 shell hook 或 SSH 登录前 Banner，登录展示情况保持未核验。
-- 未适配项、限制和配置见 [Runman Rust v2 兼容清单](docs/runman-rust-v2-compatibility.md)。本地 Python 3.14 `compileall` 通过，完整单测 886 项通过、34 项按平台跳过；GitHub CI 和生产运行状态尚未验证。
+- 基于 fork `main` 全面补齐 Runman (Rust) 容器监控与部署脚本自适应。
+- 支持实时带宽速率计算（`_derive_net_bps`）与流量计数器（`traffic_counters`）、容器网络 IP（`network_addresses`）透出、独立磁盘与 `/data` 容量上报、安全 MOTD 登录提示、买家映射（`buyer_mapping`）与用户备注接口（`/api/v1/containers/user-note`）以及前端抽屉无缝呈现。
+- 同步更新 Agent 部署与更新脚本（`scripts/install-client.sh`），自动检测 `docker` / `incus` / `podman` / `runman`，并保持 `DOCKER_MONITOR_MODE=notice` 默认不干预。
+- 本轮版本目标为 `1.7.199`。
 
 ## 代码基线
 
-- 当前隔离工作区基于最新 fork `main`（`1323833` / v1.7.198）维护 Runman Rust v2 适配。
-- 本次根目录 `VERSION` 更新为 `1.7.199`。
-- 本次工作涵盖 Incus 命令行参数去重、内存高压自适应升档门槛、Alpine/Minimal 容器进程与监听回退机制闭环、前端卡片与详情假性协议告警过滤及对应自动化回归单测。
+- 当前工作区基于 fork `main` 继续维护 Runman Rust v2 适配与全链路监控闭环。
+- 本次根目录 `VERSION` 更新目标为 `1.7.199`。
+- 本次工作涵盖 Runman 容器网络 IP、带宽速率与流量计数器补全、独立磁盘与 procfs 文件系统容量映射、安全 MOTD 写入、买家映射与用户备注放行、前端详情抽屉网络展示、Agent 安装脚本多运行时自动检测及全量回归单测。
 
 ## 最近完成的工作
 
-- v1.7.199：Runman 流量计数接入流量账本并按实例代次派生收发速率；通过核对宿主机 PID、启动 tick 的 procfs 路径采集根目录和 `/data` 文件系统空间；安全提示仅写入已存在的普通 MOTD 文件，明确跳过 guest exec、shell hook 和登录前 Banner。新增兼容能力/缺口清单。完整本地单测通过；尚无 GitHub CI 或生产验证。
-
+- v1.7.199：全面补齐 Runman Rust 容器监控、流量速率、MOTD 登录提示与 Agent 部署脚本自适应：
+  1. 补全 Runman 容器 IP 与网络速率：`_runman_inventory_containers()` 与 `collect_runman_report()` 提取解析 `network_addresses`；接入 `_derive_net_bps` 实时计算 `net_rx_bps` 与 `net_tx_bps`，上报规范化 `traffic_counters`；映射 `disk_gb` 与 procfs 文件系统至 `container_disk` 容量。
+  2. 买家映射与用户备注放行：`server/buyer_mapping.py` 与 `server/app.py`（`/api/v1/containers/user-note`）全面放行 `runman` 运行时，前端 `ContainerDrawer` 放行备注卡片并直接展示容器 IP。
+  3. 安全 MOTD 登录提示写入：使用当前 init PID 和启动 tick 代次校验，通过宿主机 procfs 原子更新普通 `/etc/motd`。
+  4. `CONTAINER_RUNTIMES` 与 `runtime_inventory` 完整兼容识别 `runman`，消除未知运行时警告并在节点运行状态中准确声明。
+  5. 同步更新 `scripts/install-client.sh`：自动检测 `docker` / `incus` / `podman` / `runman (rust 容器)`，任意存在时不强制安装 podman；保持 Docker 为 `notice` 默认仅提醒不接管。
+  6. 单元测试全量通过，前端构建生成最新生产静态资源。
 - v1.7.198：在 Runman 清单与 bridge 只读探测前检查 Unix socket 平台能力；不支持 `AF_UNIX` 时返回不可用，保持 Windows 测试/工具环境可运行。Runman 连接限制、防火墙和 Linux 行为不变。
 - v1.7.196：修复 Incus CPU 限额命令执行、内存阶梯升档死锁与协议待核验误报：
   1. 修复 `client/cpu_guard.py` 中 `_runtime_args` 重复前置 `runtime` 二进制导致 `subprocess.run` 拼接成 `incus incus ...` 并报错 `Error: unknown command "incus" for "incus"` 的缺陷，使 Incus 容器 CPU 配额读取、生效与自动阶梯防护闭环。

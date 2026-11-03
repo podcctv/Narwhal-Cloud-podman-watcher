@@ -617,7 +617,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           {/* Drawer Scrollable Body */}
           <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 sm:space-y-6">
             <AdmissionStatus data={sec.admission} stale={container?.alerts?.stale} />
-            {(identity.runtime === 'incus' || identity.runtime === 'podman') && (
+            {(identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman') && (
               <section className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-4 space-y-3">
                 <div className="flex items-start gap-3">
                   <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-2 text-sky-300">
@@ -1138,6 +1138,14 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
               {/* Listening Ports & Exposure */}
               <div className="font-mono text-xs space-y-1 text-slate-300 pt-1">
+                {container?.network_addresses && container.network_addresses.length > 0 && (
+                  <div className="flex justify-between py-1 border-t border-slate-800/80">
+                    <span className="text-slate-500">网络 IP</span>
+                    <span className="truncate max-w-xs select-all text-sky-300">
+                      {container.network_addresses.join(', ')}
+                    </span>
+                  </div>
+                )}
                 <div className="flex justify-between py-1 border-t border-slate-800/80">
                   <span className="text-slate-500">监听端口</span>
                   <span className="truncate max-w-xs">

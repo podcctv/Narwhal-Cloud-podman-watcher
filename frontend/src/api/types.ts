@@ -1,6 +1,7 @@
 export interface ContainerItem {
   host_id: string;
-  runtime: 'incus' | 'podman' | 'docker' | string;
+  runtime: 'incus' | 'podman' | 'docker' | 'runman' | string;
+  network_addresses?: string[];
   project?: string;
   container_name: string;
   container_id?: string;

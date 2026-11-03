@@ -6,12 +6,19 @@ Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progre
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
-### v1.7.199：Runman 流量速率与 MOTD 登录提示适配
+### v1.7.199：全面补齐 Runman Rust 容器监控、流量速率、MOTD 登录提示与 Agent 部署脚本自适应
 
-- 将 Runman 提供的累计收发字节计数接入 Watcher 流量账本，并按实例 UUID/代次换算每秒收发字节；计数缺失时标为不可用，不把缺失值伪装成零流量。
-- 通过已核验的 init PID 和 procfs 采集 Runman 根文件系统及真实 `/data` 目录的总量/可用量；镜像可写层尺寸与磁盘 I/O 仍未接入。
-- Runman 容器新增仅限登录后 MOTD 的安全写入：使用当前 init PID 和启动 tick 代次校验，通过宿主机 procfs 原子更新已存在的普通 `/etc/motd`；不调用容器 exec，不安装 shell hook，也不改 SSH 登录前 Banner。MOTD 写入成功仍不代表 SSH/PAM 一定展示，`login_display` 保持 `unverified`。
-- 记录 Runman 其余尚未适配的能力和配置条件，见兼容清单。
+- **Runman (Rust v2) 监控全链路补齐**：
+  - 补充网络 IP 透出：解析 Runman 容器 `ips` 并透出至 `network_addresses`，在前端容器抽屉与概览中清晰展示。
+  - 接入实时带宽速率与流量计数器：基于 `_derive_net_bps` 与 `traffic_in_bytes`/`traffic_out_bytes` 换算实时收发带宽 `net_rx_bps` 与 `net_tx_bps`，上报规范化 `traffic_counters`。
+  - 磁盘空间与文件系统空间映射：通过已核验的 init PID 和 procfs 采集 Runman 根文件系统及真实 `/data` 目录的总量/可用量，并映射 `disk_gb` 至 `container_disk` 容量。
+  - 安全 MOTD 登录提示写入：使用当前 init PID 和启动 tick 代次校验，通过宿主机 procfs 原子更新已存在的普通 `/etc/motd`；不调用容器 exec，不安装 shell hook，也不改 SSH 登录前 Banner。
+  - 买家映射与用户备注放行：Server 端 `buyer_mapping` 与 `/api/v1/containers/user-note` 全面放行 `runman` 运行时，前端抽屉支持展示与保存 Runman 容器的客户邮箱与备注。
+  - `CONTAINER_RUNTIMES` 与 `runtime_inventory` 完整兼容识别 `runman`，消除不支持警告并在节点运行状态中准确声明。
+- **Agent 部署与更新脚本同步增强**：
+  - `scripts/install-client.sh` 支持自动同时检测 `docker`、`incus`、`podman`、`runman (rust 容器)`；检测到任何引擎均不强制安装 podman。
+  - 保持 `DOCKER_MONITOR_MODE=notice` 为默认策略（仅发现并提醒，默认不接管生命周期与限额）。
+  - `CONTAINER_RUNTIMES` 配置提示扩展为 `auto or comma-separated podman,docker,incus,runman`。
 
 ### v1.7.197：接入 Runman Rust v2 只读监控与受控网络接口
 

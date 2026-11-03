@@ -162,10 +162,33 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   exit 1
 fi
 
-if ! command -v podman >/dev/null 2>&1 \
-  && ! command -v podman-remote >/dev/null 2>&1 \
-  && ! command -v docker >/dev/null 2>&1 \
-  && ! command -v incus >/dev/null 2>&1; then
+has_podman=0
+has_docker=0
+has_incus=0
+has_runman=0
+
+if command -v podman >/dev/null 2>&1 || command -v podman-remote >/dev/null 2>&1; then
+  has_podman=1
+fi
+if command -v docker >/dev/null 2>&1; then
+  has_docker=1
+fi
+if command -v incus >/dev/null 2>&1; then
+  has_incus=1
+fi
+if [[ -S /run/narwhal-agent/connlimit.sock ]] \
+  || command -v runman >/dev/null 2>&1 \
+  || (command -v systemctl >/dev/null 2>&1 && (systemctl is-active --quiet runman 2>/dev/null || systemctl is-active --quiet runman-agent 2>/dev/null)); then
+  has_runman=1
+fi
+
+detected_runtimes=()
+[[ $has_podman -eq 1 ]] && detected_runtimes+=("podman")
+[[ $has_docker -eq 1 ]] && detected_runtimes+=("docker")
+[[ $has_incus -eq 1 ]] && detected_runtimes+=("incus")
+[[ $has_runman -eq 1 ]] && detected_runtimes+=("runman (rust)")
+
+if [[ ${#detected_runtimes[@]} -eq 0 ]]; then
   if is_truthy "${NARWHAL_ALLOW_NO_RUNTIME:-0}"; then
     echo "[INFO] No container runtime found; continuing without installing Podman."
     echo "[INFO] Set Container runtimes to 'none' when prompted for a host-only probe."
@@ -174,6 +197,8 @@ if ! command -v podman >/dev/null 2>&1 \
     apt-get update
     apt-get install -y podman
   fi
+else
+  echo "[INFO] 检测到本机容器运行时: ${detected_runtimes[*]}"
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -322,9 +347,9 @@ server_url="$(ask_with_default "Server URL (e.g. https://server.example.com or h
 secret="$(ask_with_default "Shared secret" "$default_secret")"
 host_id="$(ask_with_default "Host ID" "$default_host_id")"
 interval="$(ask_with_default "Collect interval seconds" "$default_interval")"
-runtimes="$(ask_with_default "Container runtimes (auto or comma-separated podman,docker,incus)" "$default_runtimes")"
+runtimes="$(ask_with_default "Container runtimes (auto or comma-separated podman,docker,incus,runman)" "$default_runtimes")"
 docker_monitor_mode="$(ask_choice_with_default "请选择 Docker 处理方式" "$default_docker_monitor_mode" \
-  "notice|仅发现并提醒（推荐）" \
+  "notice|仅发现并提醒（默认不管理，推荐）" \
   "full|完整监测" \
   "off|关闭 Docker 发现")"
 monitored_patterns="$(ask_with_default "Podman/Docker image patterns (comma-separated substring match)" "$default_monitored_patterns")"
