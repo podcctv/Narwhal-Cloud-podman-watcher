@@ -7353,6 +7353,8 @@ def _incus_containers(runtime: str) -> List[Dict[str, str]]:
 
 def _runman_inventory_containers() -> List[Dict[str, str]]:
     """Read Runman's bounded, root-only inventory API; never shell into guests."""
+    if os.name != 'posix' or not hasattr(socket, 'AF_UNIX'):
+        return []
     configured = os.getenv('CONTAINER_RUNTIMES', 'auto').strip().lower().replace(' ', '')
     if configured != 'auto' and 'runman' not in configured.split(','):
         return []
@@ -7464,6 +7466,8 @@ def list_containers() -> List[Dict[str, str]]:
 
 
 def _runman_bridge_interface() -> str:
+    if os.name != 'posix' or not hasattr(socket, 'AF_UNIX'):
+        return ''
     connection = network_quarantine._UnixHTTP('/run/narwhal-agent/connlimit.sock')
     try:
         connection.request('GET', '/v1/inventory', headers={'Connection': 'close'})
