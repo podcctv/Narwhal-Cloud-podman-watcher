@@ -12,6 +12,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
+from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("narwhal_server", ROOT / "server" / "app.py")
@@ -1728,8 +1729,23 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        endpoint = next(route.endpoint for route in server.app.routes if getattr(route, "path", "") == "/api/v1/ops/evidence")
-        result = endpoint(host_id="host", runtime="runman", container_name=vm_id, project="default", minutes=60)
+        original_username = server.DASHBOARD_USERNAME
+        original_password = server.DASHBOARD_PASSWORD
+        server.DASHBOARD_USERNAME = "runman-evidence-test"
+        server.DASHBOARD_PASSWORD = "test-only-password"
+        client = TestClient(server.app, base_url="https://testserver")
+        try:
+            response = client.get(
+                f"/api/v1/ops/evidence?host_id=host&runtime=runman&container_name={vm_id}&project=default&minutes=60",
+                auth=(server.DASHBOARD_USERNAME, server.DASHBOARD_PASSWORD),
+            )
+        finally:
+            client.close()
+            server.DASHBOARD_USERNAME = original_username
+            server.DASHBOARD_PASSWORD = original_password
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
         self.assertEqual(result["sample_count"], 1)
         self.assertEqual(result["timeline"][0]["connection_count"], 2)
 
