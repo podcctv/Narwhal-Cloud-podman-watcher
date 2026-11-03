@@ -27,6 +27,8 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onDismis
         return (
           <div
             key={toast.id}
+            role={isError ? 'alert' : 'status'}
+            aria-atomic="true"
             className={`pointer-events-auto flex items-start gap-3 rounded-xl border p-3.5 shadow-2xl backdrop-blur-md transition-all animate-in fade-in slide-in-from-bottom-5 duration-200 ${
               isSuccess
                 ? 'border-emerald-500/45 bg-emerald-950/95 text-emerald-100 shadow-emerald-950/50'
@@ -44,8 +46,8 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onDismis
             <button
               type="button"
               onClick={() => onDismiss(toast.id)}
-              aria-label="关闭提示"
-              className="shrink-0 rounded-md p-1 text-slate-400 transition-colors hover:bg-slate-800/60 hover:text-slate-100"
+              aria-label={`关闭提示：${toast.message}`}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
             >
               <X className="h-4 w-4" />
             </button>

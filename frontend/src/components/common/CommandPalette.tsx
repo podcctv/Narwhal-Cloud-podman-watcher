@@ -20,13 +20,34 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (isOpen) {
-      setTimeout(() => inputRef.current?.focus(), 50);
-      setQuery('');
-      setActiveIndex(0);
-    }
+    if (!isOpen) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    inputRef.current?.focus();
+    setQuery('');
+    setActiveIndex(0);
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href]');
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialogRef.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialogRef.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -55,9 +76,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { id: 'investigation', label: '用户与容器排查', hint: 'User Investigation', icon: Users, color: 'text-sky-300', run: () => onSelectTab('investigation') },
     { id: 'stats', label: '统计分析与排行榜', hint: 'Telemetry & Stats', icon: BarChart3, color: 'text-emerald-400', run: () => onSelectTab('stats') },
     { id: 'commerce', label: '经营分析与账本', hint: 'Commerce & Ledger', icon: BriefcaseBusiness, color: 'text-violet-300', run: () => onSelectTab('commerce') },
+    { id: 'settings', label: '系统设置与推送配置', hint: 'Settings & Push', icon: Settings, color: 'text-sky-300', run: () => onSelectTab('settings') },
     { id: 'operations', label: '运维中心', hint: 'Operations', icon: Wrench, color: 'text-sky-300', run: () => onSelectTab('operations') },
     { id: 'firewall', label: '母机防火墙策略', hint: 'Host Firewall', icon: ShieldCheck, color: 'text-rose-300', run: () => onSelectTab('firewall') },
-    { id: 'settings', label: '系统设置与推送配置', hint: 'Settings & Push', icon: Settings, color: 'text-slate-300', run: () => onSelectTab('settings') },
   ] : [];
   const resultCount = quickActions.length + filteredContainers.length;
 
@@ -88,16 +109,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="全局检索"
-      className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/80 px-3 pt-12 backdrop-blur-xs sm:px-4 sm:pt-20 animate-in fade-in duration-150"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="relative w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-700/90 bg-slate-900 shadow-2xl">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="全局检索" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in duration-150">
+      <div className="relative w-full max-w-2xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl overflow-hidden">
         {/* Search Header */}
         <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-950/50 px-4 py-3.5">
           <Search className="h-5 w-5 shrink-0 text-sky-400" />

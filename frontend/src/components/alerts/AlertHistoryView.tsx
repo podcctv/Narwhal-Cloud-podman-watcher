@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ShieldAlert,
   Filter,
@@ -9,6 +9,7 @@ import {
   ArrowRight,
   Network,
   ShieldCheck,
+  LoaderCircle,
 } from 'lucide-react';
 import { SecurityAlert } from '../../api/types';
 import { api } from '../../api/client';
@@ -18,6 +19,7 @@ import { UserNoticeAction } from './UserNoticeAction';
 import { isProtectionOnlySignal } from './protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from './connectionEvidence';
 import { ProtocolGuardEvidence } from './ProtocolGuardEvidence';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 
 const elapsed = (seconds: number): string => {
   const units: [number, string][] = [[86400, '天'], [3600, '小时'], [60, '分钟'], [1, '秒']];
@@ -81,30 +83,52 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
   const [alertType, setAlertType] = useState('all');
   const [hostId, setHostId] = useState('');
   const [query, setQuery] = useState('');
+  const [submittedQuery, setSubmittedQuery] = useState('');
+  const [searchVersion, setSearchVersion] = useState(0);
 
   const [items, setItems] = useState<SecurityAlert[]>([]);
   const [total, setTotal] = useState(0);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [typeOptions, setTypeOptions] = useState<string[]>([]);
   const [hostOptions, setHostOptions] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
+  const [pendingRemediation, setPendingRemediation] = useState<SecurityAlert | null>(null);
+  const [submittingAlertId, setSubmittingAlertId] = useState<number | null>(null);
+  const loadRequestId = useRef(0);
+  const loadController = useRef<AbortController | null>(null);
+  const filtersRef = useRef({ statusTab, severity, alertType, hostId, submittedQuery, offset });
+  filtersRef.current = { statusTab, severity, alertType, hostId, submittedQuery, offset };
   const limit = 30;
 
   const loadData = async (reset = false) => {
-    if (loading) return;
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
+    const requestId = ++loadRequestId.current;
+    const filters = filtersRef.current;
+    const newOffset = reset ? 0 : filters.offset;
     setLoading(true);
-    const newOffset = reset ? 0 : offset;
+    setLoadError(null);
+    if (reset) {
+      setItems([]);
+      setOffset(0);
+      setTotal(0);
+      setCounts({});
+    }
     try {
       const res = await api.getAlertHistory({
-        status: statusTab,
-        severity,
-        alert_type: alertType,
-        host_id: hostId,
-        query,
+        status: filters.statusTab,
+        severity: filters.severity,
+        alert_type: filters.alertType,
+        host_id: filters.hostId,
+        query: filters.submittedQuery,
         limit: String(limit),
         offset: String(newOffset),
-      });
+      }, controller.signal);
+
+      if (requestId !== loadRequestId.current || controller.signal.aborted) return;
 
       if (reset) {
         setItems(res.items || []);
@@ -119,19 +143,30 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
       if (res.alert_types) setTypeOptions(res.alert_types);
       if (res.hosts) setHostOptions(res.hosts);
     } catch (err: any) {
-      onToast('error', `加载告警记录失败：${err.message || err}`);
+      if (!controller.signal.aborted && requestId === loadRequestId.current) {
+        const message = err?.message || String(err);
+        setLoadError(message);
+        onToast('error', `加载告警记录失败：${message}`);
+      }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted && requestId === loadRequestId.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadData(true);
-  }, [statusTab, severity, alertType, hostId]);
+    void loadData(true);
+  }, [statusTab, severity, alertType, hostId, submittedQuery, searchVersion]);
+
+  useEffect(() => () => {
+    loadRequestId.current += 1;
+    loadController.current?.abort();
+  }, []);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    loadData(true);
+    setSubmittedQuery(query.trim());
+    setOffset(0);
+    setSearchVersion((version) => version + 1);
   };
 
   const handleReset = () => {
@@ -140,18 +175,26 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
     setAlertType('all');
     setHostId('');
     setQuery('');
+    setSubmittedQuery('');
+    setOffset(0);
+    setSearchVersion((version) => version + 1);
   };
 
   const handleDecision = async (
     alertId: number,
     decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen'
   ) => {
+    if (submittingAlertId !== null) return;
+    setSubmittingAlertId(alertId);
     try {
       const res = await api.dispositionAlert(alertId, decision);
       onToast('success', res.queued ? '操作已排队等待节点执行' : '安全状态已更新');
-      loadData(true);
+      await loadData(true);
     } catch (err: any) {
       onToast('error', `处置操作失败：${err.message || err}`);
+    } finally {
+      setSubmittingAlertId(null);
+      setPendingRemediation(null);
     }
   };
 
@@ -199,10 +242,10 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             <Filter className="h-4 w-4 text-sky-400" />
             <span>维度筛选与检索</span>
           </div>
-          <button
+        <button
             type="button"
             onClick={handleReset}
-            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 text-xs text-slate-400 hover:border-slate-700 hover:text-slate-200 transition-colors"
+          className="flex min-h-11 items-center gap-1 rounded-lg px-3 text-xs text-slate-300 transition-colors hover:bg-slate-800 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
             <RotateCcw className="h-3.5 w-3.5" />
             <span>重置筛选</span>
@@ -210,10 +253,11 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
         </div>
 
         {/* Form Controls */}
-        <form onSubmit={handleSearchSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+        <form onSubmit={handleSearchSubmit} className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 md:grid-cols-5">
           <div>
-            <label className="block text-slate-300 font-medium mb-1.5">告警级别</label>
+            <label htmlFor="alert-history-severity" className="mb-1 block text-slate-400">告警级别</label>
             <select
+              id="alert-history-severity"
               value={severity}
               onChange={(e) => setSeverity(e.target.value)}
               className="ui-select ui-select-sm"
@@ -226,8 +270,9 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-slate-300 font-medium mb-1.5">告警类型</label>
+            <label htmlFor="alert-history-type" className="mb-1 block text-slate-400">告警类型</label>
             <select
+              id="alert-history-type"
               value={alertType}
               onChange={(e) => setAlertType(e.target.value)}
               className="ui-select ui-select-sm"
@@ -240,8 +285,9 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-slate-300 font-medium mb-1.5">所属主机</label>
+            <label htmlFor="alert-history-host" className="mb-1 block text-slate-400">所属主机</label>
             <select
+              id="alert-history-host"
               value={hostId}
               onChange={(e) => setHostId(e.target.value)}
               className="ui-select ui-select-sm"
@@ -254,18 +300,22 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-slate-300 font-medium mb-1.5">关键词搜索</label>
+            <label htmlFor="alert-history-query" className="mb-1 block text-slate-400">关键词搜索</label>
             <div className="relative">
               <input
+                id="alert-history-query"
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="容器、说明、进程特征..."
                 className="ui-input ui-input-sm pl-8 pr-3"
               />
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+              <Search aria-hidden="true" className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
             </div>
           </div>
+          <button type="submit" className="inline-flex min-h-11 items-center justify-center gap-2 self-end rounded-lg border border-sky-500/40 bg-sky-500/10 px-4 text-sm font-semibold text-sky-200 transition-colors hover:bg-sky-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300">
+            <Search aria-hidden="true" className="h-4 w-4" />搜索
+          </button>
         </form>
 
         {/* Status Tabs */}
@@ -275,7 +325,8 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
               key={s}
               type="button"
               onClick={() => setStatusTab(s)}
-              className={`flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${
+              aria-pressed={statusTab === s}
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${
                 statusTab === s
                   ? 'border-sky-500/60 bg-sky-950/90 text-sky-200 shadow-xs'
                   : 'border-slate-800 bg-slate-950/70 text-slate-400 hover:text-slate-200 hover:border-slate-700'
@@ -292,13 +343,22 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
 
       {/* Alert Card List */}
       <div className="space-y-3">
-        {items.length === 0 ? (
+        {loadError && (
+          <div role="alert" className="flex flex-col gap-3 rounded-xl border border-rose-500/30 bg-rose-950/20 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="min-w-0 break-words text-sm text-rose-200">告警历史未能更新：{loadError}</p>
+            <button type="button" onClick={() => void loadData(true)} className="min-h-11 shrink-0 rounded-lg border border-rose-500/40 px-3 text-sm font-medium text-rose-100 hover:bg-rose-900/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">重试</button>
+          </div>
+        )}
+        {loading && items.length === 0 ? (
+          <p role="status" aria-live="polite" className="rounded-xl border border-slate-800 bg-slate-900/60 p-8 text-center text-sm text-slate-300">正在读取告警记录…</p>
+        ) : !loadError && items.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-800 p-12 text-center text-slate-500 text-xs">
             没有符合筛选条件的告警记录
           </div>
         ) : (
           items.map((alert) => {
             const isHistorical = alert.status !== 'active';
+            const isSubmitting = submittingAlertId === alert.id;
             const protectionOnly = isProtectionOnlySignal(alert);
             const canRemediate = hasActionEvidence(alert);
             const attribution = alert.deep_evidence?.connection_attribution;
@@ -479,21 +539,23 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                   <div className="flex items-center gap-2">
                     {canRemediate && <button
                       type="button"
-                      onClick={() => handleDecision(alert.id, 'deny')}
-                      className="flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-950/60 px-2.5 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900/80 transition-colors"
+                      onClick={() => setPendingRemediation(alert)}
+                      disabled={submittingAlertId !== null}
+                      className="flex min-h-11 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-950/60 px-3 text-xs font-semibold text-rose-200 transition-colors hover:bg-rose-900/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-wait disabled:opacity-50"
                     >
-                      <Ban className="h-3 w-3" />
+                      <Ban className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>{isHistorical ? '重新定向处置' : '定向处置'}</span>
                     </button>}
 
                     {(alert.status === 'suppressed' || alert.status === 'dismissed') && (
                       <button
                         type="button"
-                        onClick={() => handleDecision(alert.id, 'reopen')}
-                        className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+                        onClick={() => void handleDecision(alert.id, 'reopen')}
+                        disabled={submittingAlertId !== null}
+                        className="flex min-h-11 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs font-medium text-slate-200 transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-wait disabled:opacity-50"
                       >
-                        <Clock className="h-3 w-3" />
-                        <span>恢复提醒</span>
+                        {isSubmitting ? <LoaderCircle className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Clock className="h-3.5 w-3.5" aria-hidden="true" />}
+                        <span>{isSubmitting ? '正在提交…' : '恢复提醒'}</span>
                       </button>
                     )}
                   </div>
@@ -508,15 +570,25 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
           <div className="text-center pt-2">
             <button
               type="button"
-              onClick={() => loadData(false)}
+              onClick={() => void loadData(false)}
               disabled={loading}
-              className="rounded-xl border border-slate-800 bg-slate-900 px-6 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+              className="min-h-11 rounded-xl border border-slate-800 bg-slate-900 px-6 text-xs font-semibold text-slate-300 transition-colors hover:bg-slate-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:cursor-wait disabled:opacity-50"
             >
               {loading ? '加载中...' : `加载更多 (${offset} / ${total})`}
             </button>
           </div>
         )}
       </div>
+      <ConfirmDialog
+        open={pendingRemediation !== null}
+        title="确认定向处置？"
+        description={pendingRemediation ? `将向 ${pendingRemediation.host_id} 的 ${pendingRemediation.runtime}${pendingRemediation.project ? ` / ${pendingRemediation.project}` : ''} 容器 ${pendingRemediation.container_name || '目标实例'} 提交已核验证据对应的定向处置。历史告警会在执行前重新核对目标；此操作不会停止整个容器。` : ''}
+        confirmLabel="确认定向处置"
+        tone="danger"
+        isSubmitting={pendingRemediation !== null && submittingAlertId === pendingRemediation.id}
+        onConfirm={() => { if (pendingRemediation) void handleDecision(pendingRemediation.id, 'deny'); }}
+        onCancel={() => { if (submittingAlertId === null) setPendingRemediation(null); }}
+      />
     </div>
   );
 };

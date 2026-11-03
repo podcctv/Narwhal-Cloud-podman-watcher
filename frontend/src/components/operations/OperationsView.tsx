@@ -46,6 +46,7 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
   const [historyDays, setHistoryDays] = useState(31);
   const [confirm, setConfirm] = useState<{ title: string; message: string; run: () => Promise<unknown> } | null>(null);
   const sequence = useRef(0);
+  const loadedSection = useRef(section);
   const backupSettingsDirty = useRef(false);
   const admin = session.role === 'admin';
   const change = (key: string, value: any) => { if (['interval_hours', 'retention', 'drill_enabled'].includes(key)) backupSettingsDirty.current = true; setForm(f => ({ ...f, [key]: value })); setPreview(null); };
@@ -76,7 +77,11 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
   }, [section, historyEntity, historyPeriod, historyDays]);
   useEffect(() => {
     let alive = true;
-    setLoading(true); setError(''); setPreview(null); setTimeline(null);
+    const sectionChanged = loadedSection.current !== section;
+    loadedSection.current = section;
+    setLoading(true);
+    if (sectionChanged) setError('');
+    setPreview(null); setTimeline(null);
     const refresh = async () => {
       try { await load(); if (alive) setError(''); }
       catch (e) { if (alive) setError(e instanceof Error ? e.message : String(e)); }
@@ -92,10 +97,34 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
     }
   }, [section, data.settings]);
   const act = async (fn: () => Promise<unknown>, message = '操作已完成') => {
+    const isRefresh = fn === load;
     setBusy(true);
-    try { await fn(); onToast('success', message); await load(); }
-    catch (e) { onToast('error', e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); setConfirm(null); }
+    if (isRefresh) setLoading(true);
+    try {
+      await fn();
+      if (isRefresh) {
+        setError('');
+        onToast('success', message);
+        return;
+      }
+      try {
+        await load();
+        setError('');
+        onToast('success', message);
+      } catch (refreshError) {
+        const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        setError(refreshMessage);
+        onToast('error', `操作已完成，但数据刷新失败：${refreshMessage}`);
+      }
+    } catch (e) {
+      const actionError = e instanceof Error ? e.message : String(e);
+      setError(actionError);
+      onToast('error', actionError);
+    } finally {
+      setBusy(false);
+      if (isRefresh) setLoading(false);
+      setConfirm(null);
+    }
   };
   const post = (path: string, payload: RecordData = {}) => request<RecordData>(`/api/v1/ops/${path}`, { method: 'POST', body: JSON.stringify(payload) });
   const hostSelect = <label className="block text-xs text-slate-400">目标节点<select className={`${field} mt-1`} value={form.host_id || ''} onChange={e => change('host_id', e.target.value)}><option value="">请选择节点</option>{overview.hosts.map((h: RecordData) => <option key={h.node} value={h.host_id}>{h.host_id}</option>)}</select></label>;
@@ -103,13 +132,13 @@ export function OperationsView({ onToast, isPaused = false }: { onToast: (type: 
   const selectedEntity = form.entity || '';
   const policyPayload = () => ({ entity: selectedEntity, profile: form.profile, rules: { bandwidth_mbps: Number(form.bandwidth_mbps || 0), bandwidth_ratio: .9, bandwidth_duration_seconds: Number(form.bandwidth_minutes || 10) * 60, silent_until: Number(form.silent_hours || 0) > 0 ? Math.floor(Date.now() / 1000 + Number(form.silent_hours) * 3600) : 0, ...(form.connections ? { connections: Number(form.connections) } : {}), ...(form.rx_mbps ? { rx_bps: Number(form.rx_mbps) * 1e6 / 8 } : {}), ...(form.http_rps ? { http_rps: Number(form.http_rps) } : {}) } });
   return <div className="space-y-5 tabular-nums">
-    <div className="ui-surface-card flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5"><div><h2 className="flex items-center gap-2 text-lg sm:text-xl font-bold text-slate-100"><Activity className="h-5 w-5 text-sky-400" />运维中心</h2><p className="mt-1 text-xs text-slate-400">采集 → 判断 → 执行 → 复查 · {session.username || '用户'} / {session.role}</p></div><button className={button} disabled={busy} onClick={() => void act(load, '数据已刷新')}><RefreshCw className="mr-1.5 inline h-4 w-4" />刷新</button></div>
-    <nav aria-label="运维功能" className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-7">{sections.map(([key, label]) => <button key={key} onClick={() => setSection(key)} aria-current={section === key ? 'page' : undefined} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-xs sm:text-sm font-medium transition-all focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${section === key ? 'border-sky-500/60 bg-sky-950/80 text-sky-200 shadow-xs' : 'border-slate-800 bg-slate-900/70 text-slate-400 hover:border-slate-700 hover:text-slate-100'}`}>{label}</button>)}</nav>
-    {error && <p role="alert" className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-rose-300">{error}</p>}
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="flex items-center gap-2 text-xl font-bold"><Activity className="h-5 w-5 text-sky-400" />运维中心</h2><p className="mt-1 text-xs text-slate-400">采集 → 判断 → 执行 → 复查 · {session.username || '用户'} / {session.role}</p></div><button className={button} disabled={busy} onClick={() => void act(load, '数据已刷新')}><RefreshCw className="mr-1 inline h-4 w-4" />刷新</button></div>
+    <nav aria-label="运维功能" className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">{sections.map(([key, label]) => <button key={key} onClick={() => setSection(key)} aria-current={section === key ? 'page' : undefined} className={`min-h-11 rounded-lg border p-2 text-left text-sm ${section === key ? 'border-sky-400 bg-sky-500/15 text-sky-200' : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-100'}`}>{label}</button>)}</nav>
+    {error && <div role="alert" className="flex flex-col gap-3 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 sm:flex-row sm:items-center sm:justify-between"><p className="min-w-0 break-words text-rose-200">{error}</p><button type="button" disabled={busy} onClick={() => void act(load, '数据已刷新')} className="min-h-11 shrink-0 rounded-lg border border-rose-400/40 px-3 text-sm font-medium text-rose-100 hover:bg-rose-900/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:opacity-50">{busy ? '正在重试…' : '重试'}</button></div>}
     {section === 'storage' && <DiskCleanupPanel admin={session.role === 'admin'} paused={isPaused} onToast={onToast} />}
     {section === 'storage' && <DatabaseGrowthTrend growth={data.growth} />}
     {loading ? <p aria-live="polite" className="py-8 text-slate-400">正在读取运维数据…</p> : <>
-      {section === 'health' && <div className="grid gap-4 lg:grid-cols-2">{!overview.hosts.length && <Empty />}{overview.hosts.map((h: RecordData) => <Card key={h.node} title={h.host_id}><div className="mb-3 flex flex-wrap items-center gap-2"><Status value={h.status} /><span className="text-xs text-slate-500">{date(h.ts)} · {h.data.architecture || '架构未知'}</span></div>{(h.data.health || []).map((s: RecordData) => <div key={s.source} className="space-y-1 border-t border-slate-800 py-3"><div className="flex flex-wrap justify-between gap-2"><span className="text-sm">{s.source}</span><Status value={h.stale ? 'stale' : s.status} /></div><p className="text-xs text-slate-400">{Object.entries(s.details || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}</p><p className="text-xs text-slate-500">{s.guidance}</p></div>)}{!h.data.health && <Empty text="旧版 Client 未上报健康诊断，请先升级；不能据此判定数据为真实 0。" />}<button className={`${button} mt-3`} disabled={!admin || busy || h.stale} title={h.stale ? '节点最近上报已过期' : '重新执行只读主机安全审计'} onClick={() => setConfirm({ title: '请求主机安全复扫', message: `向 ${h.host_id} 请求一次只读扫描。扫描可能短暂增加 CPU 与网络查询；不会自动安装更新或修改配置。`, run: () => post('security/rescan', { host_id: h.host_id }) })}>请求只读复扫</button></Card>)}</div>}
+      {section === 'health' && <div className="grid gap-4 lg:grid-cols-2">{!overview.hosts.length && !error && <Empty />}{overview.hosts.map((h: RecordData) => <Card key={h.node} title={h.host_id}><div className="mb-3 flex flex-wrap items-center gap-2"><Status value={h.status} /><span className="text-xs text-slate-500">{date(h.ts)} · {h.data.architecture || '架构未知'}</span></div>{(h.data.health || []).map((s: RecordData) => <div key={s.source} className="space-y-1 border-t border-slate-800 py-3"><div className="flex flex-wrap justify-between gap-2"><span className="text-sm">{s.source}</span><Status value={h.stale ? 'stale' : s.status} /></div><p className="text-xs text-slate-400">{Object.entries(s.details || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}</p><p className="text-xs text-slate-500">{s.guidance}</p></div>)}{!h.data.health && <Empty text="旧版 Client 未上报健康诊断，请先升级；不能据此判定数据为真实 0。" />}<button className={`${button} mt-3`} disabled={!admin || busy || h.stale} title={h.stale ? '节点最近上报已过期' : '重新执行只读主机安全审计'} onClick={() => setConfirm({ title: '请求主机安全复扫', message: `向 ${h.host_id} 请求一次只读扫描。扫描可能短暂增加 CPU 与网络查询；不会自动安装更新或修改配置。`, run: () => post('security/rescan', { host_id: h.host_id }) })}>请求只读复扫</button></Card>)}</div>}
       {section === 'rechecks' && <div className="space-y-4"><Card title="风险执行后的复查"><p className="mb-4 text-xs text-slate-400">执行成功后等待两次新安全报告。风险复发最多重试两次；未采集、禁用安全或离线不会被标记为验证成功。</p>{!overview.rechecks.length && <Empty text="暂无处置复查记录。新执行的弱认证、恶意进程、面板处置会在这里跟踪。" />}{overview.rechecks.map((r: RecordData) => <div key={r.action_id} className="flex flex-wrap justify-between gap-3 border-t border-slate-800 py-3"><div className="min-w-0 wrap-break-word"><p className="text-sm">{r.host_id} / {r.container_name} · #{r.action_id}</p><p className="mt-1 text-xs text-slate-400">{r.alert_type} · 重试 {r.attempts}/2 · 干净采样 {r.clean_samples}/2</p><p className="mt-1 text-xs text-slate-500">{r.message} · {r.result_message}</p></div><Status value={r.status} /></div>)}</Card><Card title="最近动作与失败原因">{overview.actions.map((a: RecordData) => <div key={a.id} className="border-t border-slate-800 py-3"><div className="flex flex-wrap justify-between gap-2"><span className="text-sm">#{a.id} {a.host_id} / {a.container_name} · {a.action_type}</span><Status value={a.status} /></div><p className="mt-1 wrap-break-word text-xs text-slate-500">{a.result_message || '等待 Client 回执'} · {date(a.updated_at)}</p></div>)}</Card></div>}
       {section === 'storage' && <><div className="grid gap-4 sm:grid-cols-3">{[['数据库', data.database_bytes], ['WAL', data.wal_bytes], ['可复用空间', data.reusable_bytes]].map(([label, n]) => <Card key={String(label)} title={String(label)}><p className="font-mono text-xl text-sky-300">{bytes(Number(n))}</p></Card>)}</div><Card title="保留策略与清理状态"><p className="text-sm text-slate-400">原始 {Math.round(data.raw_retention_seconds / 86400)} 天 · 小时汇总 30 天 · 日汇总 400 天。按表统计可能不含共享索引；已清理的页可复用，不会立即缩小文件。</p><p className="my-3 wrap-break-word text-sm">上次清理：{date(data.cleanup?.last_success)} · {data.cleanup?.error || '无错误'} · 移除 {data.cleanup?.removed_rows || 0} 行</p><button className={button} disabled={!admin || busy} onClick={() => void act(() => post('storage/cleanup'), '已执行一轮有界清理；大积压会由后台继续处理')}><Database className="mr-1 inline h-4 w-4" />执行有界清理</button></Card><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{(data.tables || []).map((t: RecordData) => <Card key={t.name} title={t.name}><p className="font-mono text-sm">{t.rows == null ? '计数超时' : t.rows.toLocaleString()} 行 · {t.bytes == null ? 'dbstat 不可用' : bytes(t.bytes)}</p></Card>)}</div></>}
       {(section === 'traffic' || section === 'baseline') && <div className="grid gap-4 lg:grid-cols-2">{!items.length && <Empty />}{items.map(i => <Card key={i.entity} title={`${i.host_id} / ${i.name}`}><p className="mb-3 text-xs text-slate-500">{i.runtime} · {i.project || '默认项目'} · {date(i.ts)}</p>{section === 'traffic' ? <><div className="grid grid-cols-2 gap-3"><div><p className="text-xs text-slate-400">今日 RX / TX</p><p className="mt-1 font-mono text-sm text-sky-300">{bytes(i.today.rx)} / {bytes(i.today.tx)}</p></div><div><p className="text-xs text-slate-400">本月 RX / TX</p><p className="mt-1 font-mono text-sm text-sky-300">{bytes(i.month.rx)} / {bytes(i.month.tx)}</p></div></div><p className="mt-3 text-xs text-slate-400">覆盖 {Math.round(i.month.covered / 3600 * 10) / 10} 小时 · 间断/重置 {i.month.gaps} · {i.month.estimated ? '含速率估算，不作为精确计费' : '累计计数器差值'}</p>{i.policy.monthly_quota_bytes > 0 && <div className="mt-3"><span className="text-xs text-slate-400">仅统计，不提醒流量额度</span><p className="mt-2 text-sm">参考额度 {bytes(i.policy.monthly_quota_bytes)} · 使用 {Math.round((i.month.rx + i.month.tx) / i.policy.monthly_quota_bytes * 100)}%</p></div>}</> : <><Status value={!i.data.baseline_ready ? 'unavailable' : i.data.anomaly ? 'critical' : 'healthy'} /><p className="mt-3 text-sm text-slate-300">基线入站 {bytes(i.data.medians?.[0])}/s · 连接 {Math.round(i.data.medians?.[1] || 0)}</p><p className="mt-2 text-xs text-slate-400">至少 24 个、跨度一小时的近期样本；流量与连接同时超过 {i.policy.baseline_factor} 倍基线及策略底线，持续三次才告警。不据此自动停业务。</p></>}</Card>)}</div>}
