@@ -8,13 +8,15 @@ import {
   Radio,
   ArrowUpDown,
   CheckCircle2,
+  ShieldCheck,
+  Clock3,
   ChevronsUpDown,
   ChevronsDownUp,
   X,
 } from 'lucide-react';
 
 export type ViewMode = 'grid' | 'table' | 'detailed';
-export type FilterState = 'all' | 'risk' | 'hy2' | 'imbalance' | 'healthy';
+export type FilterState = 'all' | 'risk' | 'protection' | 'protocol' | 'hy2' | 'imbalance' | 'stale' | 'healthy';
 
 interface DashboardToolbarProps {
   viewMode: ViewMode;
@@ -28,8 +30,11 @@ interface DashboardToolbarProps {
   counts: {
     all: number;
     risk: number;
+    protection: number;
+    protocol: number;
     hy2: number;
     imbalance: number;
+    stale: number;
     healthy: number;
   };
   allExpanded: boolean;
@@ -59,17 +64,20 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
           <div className="relative min-w-[200px] flex-1 sm:max-w-xs">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
             <input
-              type="text"
+              type="search"
+              name="container-search"
+              aria-label="搜索容器、主机、运行时、邮箱或备注"
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
-              placeholder="搜索容器名 / 主机 / 运行时..."
+              placeholder="搜索容器名 / 主机 / 运行时…"
               className="h-8 w-full rounded-lg border border-slate-750 bg-slate-950/80 pl-8 pr-7 text-xs text-slate-200 placeholder-slate-500 transition-colors focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => onSearchChange('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 focus:outline-hidden"
+                aria-label="清空搜索"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-200 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
                 title="清空搜索"
               >
                 <X className="h-3.5 w-3.5" />
@@ -82,6 +90,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             {/* All */}
             <button
               type="button"
+              aria-pressed={filterState === 'all'}
               onClick={() => onFilterStateChange('all')}
               className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 filterState === 'all'
@@ -95,9 +104,42 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               </span>
             </button>
 
+            {/* Resource signals and automatic protections */}
+            <button
+              type="button"
+              aria-pressed={filterState === 'protection'}
+              onClick={() => onFilterStateChange('protection')}
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
+                filterState === 'protection'
+                  ? 'border-sky-500/50 bg-sky-500/15 text-sky-200'
+                  : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:bg-slate-800/60 hover:text-sky-200'
+              }`}
+            >
+              <ShieldCheck className="h-3 w-3" />
+              <span>资源与保护</span>
+              <span className="rounded-full bg-slate-800 px-1.5 py-0.2 font-mono text-[10px] tabular-nums">{counts.protection}</span>
+            </button>
+
+            {/* VMess / Trojan protocol guard */}
+            <button
+              type="button"
+              aria-pressed={filterState === 'protocol'}
+              onClick={() => onFilterStateChange('protocol')}
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${
+                filterState === 'protocol'
+                  ? 'border-violet-500/50 bg-violet-500/15 text-violet-200'
+                  : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:bg-slate-800/60 hover:text-violet-200'
+              }`}
+            >
+              <ShieldCheck className="h-3 w-3" />
+              <span>协议阻断</span>
+              <span className="rounded-full bg-slate-800 px-1.5 py-0.2 font-mono text-[10px] tabular-nums">{counts.protocol}</span>
+            </button>
+
             {/* Risk */}
             <button
               type="button"
+              aria-pressed={filterState === 'risk'}
               onClick={() => onFilterStateChange('risk')}
               className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-rose-400 ${
                 filterState === 'risk'
@@ -116,9 +158,26 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               </span>
             </button>
 
+            {/* Stale telemetry */}
+            <button
+              type="button"
+              aria-pressed={filterState === 'stale'}
+              onClick={() => onFilterStateChange('stale')}
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${
+                filterState === 'stale'
+                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:bg-slate-800/60 hover:text-amber-200'
+              }`}
+            >
+              <Clock3 className="h-3 w-3" />
+              <span>数据过期</span>
+              <span className="rounded-full bg-slate-800 px-1.5 py-0.2 font-mono text-[10px] tabular-nums">{counts.stale}</span>
+            </button>
+
             {/* HY2 */}
             <button
               type="button"
+              aria-pressed={filterState === 'hy2'}
               onClick={() => onFilterStateChange('hy2')}
               className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-violet-400 ${
                 filterState === 'hy2'
@@ -140,6 +199,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             {/* Imbalance */}
             <button
               type="button"
+              aria-pressed={filterState === 'imbalance'}
               onClick={() => onFilterStateChange('imbalance')}
               className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-amber-400 ${
                 filterState === 'imbalance'
@@ -161,6 +221,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
             {/* Healthy */}
             <button
               type="button"
+              aria-pressed={filterState === 'healthy'}
               onClick={() => onFilterStateChange('healthy')}
               className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-emerald-400 ${
                 filterState === 'healthy'
@@ -212,6 +273,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
           <div className="flex items-center rounded-lg border border-slate-750 bg-slate-950/80 p-0.5" role="group" aria-label="视图模式">
             <button
               type="button"
+              aria-pressed={viewMode === 'grid'}
               onClick={() => onViewModeChange('grid')}
               className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 viewMode === 'grid'
@@ -226,6 +288,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
 
             <button
               type="button"
+              aria-pressed={viewMode === 'table'}
               onClick={() => onViewModeChange('table')}
               className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 viewMode === 'table'
@@ -240,6 +303,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
 
             <button
               type="button"
+              aria-pressed={viewMode === 'detailed'}
               onClick={() => onViewModeChange('detailed')}
               className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${
                 viewMode === 'detailed'

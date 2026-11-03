@@ -31,6 +31,7 @@ import { ContainerTableView } from './ContainerTableView';
 import { HostDiskPressure, hostDiskPressure } from './HostDiskPressure';
 import { AdmissionStatus } from '../container/AdmissionStatus';
 import { HostBandwidthPanel } from './HostBandwidthPanel';
+import { ContainerStateBadges, hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard, hasContainerResourceAlert, hasContainerResourceGuardFailure, hasContainerProtocolGuardNeedsReview } from './ContainerStateBadges';
 
 interface HostContainerListProps {
   containers: ContainerItem[];
@@ -68,10 +69,13 @@ const matchesContainerFilters = (
   }
   const risk = evaluateContainerRisk(container, activeAlerts);
   switch (filterState) {
+    case 'stale': return Boolean(container.alerts?.stale || container.alerts?.host_stale);
     case 'risk': return risk.hasRisk;
+    case 'protection': return hasContainerResourceOrProtectionActivity(container, activeAlerts);
+    case 'protocol': return hasContainerProtocolGuard(container);
     case 'hy2': return Boolean(container.alerts?.hy2_detected || container.security?.hy2_protocol?.detected);
     case 'imbalance': return Boolean(container.alerts?.traffic_imbalance);
-    case 'healthy': return !risk.hasRisk;
+    case 'healthy': return !risk.hasRisk && !hasContainerResourceOrProtectionActivity(container, activeAlerts) && !hasContainerProtocolGuard(container);
     default: return true;
   }
 };
@@ -120,7 +124,7 @@ export function evaluateContainerRisk(
   };
   const actionableAlert = matchingAlerts.find(isActionable) || null;
 
-  for (const alert of matchingAlerts) {
+  for (const alert of matchingAlerts.filter((alert) => !alert.protection_only)) {
     if (alert.severity === 'critical') {
       reasons.push(alert.title || alert.message || '严重安全威胁');
       sortWeight += 1000;
@@ -170,7 +174,7 @@ export function evaluateContainerRisk(
 
   // 6. Extreme connection flood
   if (container.alerts?.conn || (container.conn_count || 0) > 1500) {
-    reasons.push(`并发连接异常泛洪 (${container.conn_count || 0})`);
+    reasons.push(`并发连接异常泛洪 (${container.conn_count ?? '未知'})`);
     sortWeight += 450;
   }
 
@@ -183,9 +187,10 @@ export function evaluateContainerRisk(
   }
 
   // 8. Hysteria 2 High Concurrency Observation
-  if (container.alerts?.hy2_detected && (container.alerts?.hy2_concurrency || 0) >= 50) {
-    reasons.push(`高并发 Hysteria 2 协议 (UDP并发: ${container.alerts.hy2_concurrency})`);
-    sortWeight += (container.alerts.hy2_concurrency || 0) >= 200 ? 650 : 350;
+  const hy2Concurrency = container.alerts?.hy2_concurrency ?? 0;
+  if ((container.alerts?.hy2_detected || sec.hy2_protocol?.detected) && hy2Concurrency >= 50) {
+    reasons.push(`高并发 Hysteria 2 协议 (UDP 并发: ${hy2Concurrency})`);
+    sortWeight += hy2Concurrency >= 200 ? 650 : 350;
   }
 
   const hasRisk = sortWeight > 0;
@@ -262,30 +267,42 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
     () => containers.filter((c) => !c.alerts?.stale && !c.alerts?.host_stale),
     [containers]
   );
+  const staleContainers = useMemo(
+    () => containers.filter((c) => c.alerts?.stale || c.alerts?.host_stale),
+    [containers]
+  );
 
   // Global counts for filter pills
   const counts = useMemo(() => {
     let risk = 0;
+    let protection = 0;
+    let protocol = 0;
     let hy2 = 0;
     let imbalance = 0;
     let healthy = 0;
 
     liveContainers.forEach((c) => {
       const r = evaluateContainerRisk(c, activeAlerts);
+      const hasResourceOrProtection = hasContainerResourceOrProtectionActivity(c, activeAlerts);
       if (r.hasRisk) risk++;
+      if (hasResourceOrProtection) protection++;
+      if (hasContainerProtocolGuard(c)) protocol++;
       if (c.alerts?.hy2_detected || c.security?.hy2_protocol?.detected) hy2++;
       if (c.alerts?.traffic_imbalance) imbalance++;
-      if (!r.hasRisk) healthy++;
+      if (!r.hasRisk && !hasResourceOrProtection && !hasContainerProtocolGuard(c)) healthy++;
     });
 
     return {
-      all: liveContainers.length,
+      all: liveContainers.length + staleContainers.length,
       risk,
+      protection,
+      protocol,
       hy2,
       imbalance,
+      stale: staleContainers.length,
       healthy,
     };
-  }, [liveContainers, activeAlerts]);
+  }, [liveContainers, staleContainers, activeAlerts]);
 
   const hostMap = useMemo(() => {
     const map: Record<string, ContainerItem[]> = {};
@@ -298,12 +315,12 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
   const offlineHostMap = useMemo(() => {
     const map: Record<string, ContainerItem[]> = {};
-    containers.filter((container) => container.alerts?.host_stale).forEach((container) => {
+    staleContainers.forEach((container) => {
       if (!map[container.host_id]) map[container.host_id] = [];
       map[container.host_id].push(container);
     });
     return map;
-  }, [containers]);
+  }, [staleContainers]);
 
   // Sort hosts: hosts with higher risk come first
   const hostIds = useMemo(() => {
@@ -332,6 +349,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
   );
 
   const visibleOfflineHostIds = useMemo(() => {
+    if (filterState !== 'all' && filterState !== 'stale') return [];
     const query = searchQuery.trim().toLowerCase();
     if (!query) return offlineHostIds;
     return offlineHostIds.filter((hostId) =>
@@ -339,9 +357,11 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
         item.container_name.toLowerCase().includes(query)
         || item.runtime.toLowerCase().includes(query)
         || (item.project || '').toLowerCase().includes(query)
+        || (item.user_email || '').toLowerCase().includes(query)
+        || (item.user_note || '').toLowerCase().includes(query)
       )
     );
-  }, [searchQuery, offlineHostIds, offlineHostMap]);
+  }, [filterState, searchQuery, offlineHostIds, offlineHostMap]);
 
   // Keep fleet lists compact; expand only hosts with an active finding by default.
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>(() => {
@@ -431,7 +451,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         totalHosts={matchingHostIds.length}
-        totalContainers={liveContainers.length}
+        totalContainers={liveContainers.length + staleContainers.length}
         counts={counts}
         allExpanded={allExpanded}
         onToggleAllHosts={handleToggleAll}
@@ -460,16 +480,18 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
           const hostRiskyCount = hostRiskyContainers.length;
 
           // Aggregated host bandwidth
-          const sumRx = hostContainers.reduce((acc, c) => acc + (c.net_rx_bps || 0), 0);
-          const sumTx = hostContainers.reduce((acc, c) => acc + (c.net_tx_bps || 0), 0);
-          const sumRxMbps = fmtMbps(sumRx);
-          const sumTxMbps = fmtMbps(sumTx);
+          const allRxAvailable = hostContainers.every((c) => Number.isFinite(c.net_rx_bps));
+          const allTxAvailable = hostContainers.every((c) => Number.isFinite(c.net_tx_bps));
+          const sumRx = allRxAvailable ? hostContainers.reduce((acc, c) => acc + (c.net_rx_bps || 0), 0) : null;
+          const sumTx = allTxAvailable ? hostContainers.reduce((acc, c) => acc + (c.net_tx_bps || 0), 0) : null;
+          const sumRxLabel = sumRx === null ? '—' : `${fmtMbps(sumRx)}M`;
+          const sumTxLabel = sumTx === null ? '—' : `${fmtMbps(sumTx)}M`;
 
           // Aggregated host CPU average
-          const avgCpu = (
-            hostContainers.reduce((acc, c) => acc + (c.cpu_percent || 0), 0) /
-            (totalContainersOnHost || 1)
-          ).toFixed(1);
+          const availableCpu = hostContainers.map((c) => c.cpu_percent).filter((value): value is number => Number.isFinite(value));
+          const avgCpu = availableCpu.length
+            ? `${(availableCpu.reduce((sum, value) => sum + value, 0) / availableCpu.length).toFixed(1)}%${availableCpu.length < totalContainersOnHost ? ` (${availableCpu.length}/${totalContainersOnHost})` : ''}`
+            : '—';
 
           // Filter containers according to filterState and searchQuery
           const filteredContainers = hostContainers.filter((container) =>
@@ -568,18 +590,18 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                 <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-1 sm:pt-0 border-t border-slate-800/40 sm:border-t-0">
                   {/* Host Aggregate Throughput */}
                   <div className="flex items-center gap-2 text-[11px] font-mono bg-slate-950/60 rounded-lg px-2 py-1 border border-slate-800">
-                    <span className="flex items-center text-emerald-400 font-semibold" title={`母鸡总聚合入栈: ${sumRxMbps} Mbps`}>
+                    <span className="flex items-center text-emerald-400 font-semibold" title={`母鸡总聚合入栈: ${sumRx === null ? '数据不可用' : `${fmtMbps(sumRx)} Mbps`}`}>
                       <ArrowDownLeft className="h-3 w-3 mr-0.5" />
-                      {sumRxMbps}M
+                      {sumRxLabel}
                     </span>
                     <span className="text-slate-600">/</span>
-                    <span className="flex items-center text-sky-400 font-semibold" title={`母鸡总聚合出栈: ${sumTxMbps} Mbps`}>
+                    <span className="flex items-center text-sky-400 font-semibold" title={`母鸡总聚合出栈: ${sumTx === null ? '数据不可用' : `${fmtMbps(sumTx)} Mbps`}`}>
                       <ArrowUpRight className="h-3 w-3 mr-0.5" />
-                      {sumTxMbps}M
+                      {sumTxLabel}
                     </span>
                     <span className="text-slate-600">·</span>
                     <span className="text-slate-400" title="容器平均 CPU 占用">
-                      均 {avgCpu}%
+                      均 {avgCpu}
                     </span>
                   </div>
 
@@ -626,6 +648,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                             key={key}
                             container={c}
                             risk={risk}
+                            activeAlerts={activeAlerts}
                             onSelect={onSelectContainer}
                             onQuickDisposition={(target, decision) =>
                               setPendingDisposition({ target, decision })
@@ -652,21 +675,25 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                       {filteredContainers.map((c) => {
                         const risk = evaluateContainerRisk(c, activeAlerts);
                         const isStale = Boolean(c.alerts?.stale);
-                        const cpu = c.cpu_percent || 0;
-                        const mem = c.mem_percent || 0;
-                        const rxMbps = fmtMbps(c.net_rx_bps);
-                        const txMbps = fmtMbps(c.net_tx_bps);
-                        const memUsed = fmtBytes(c.mem_bytes);
-                        const memLimit = fmtBytes(c.mem_limit_bytes);
+                        const hasResourceAlert = hasContainerResourceAlert(c);
+                        const hasProtectionState = hasContainerResourceOrProtectionActivity(c, activeAlerts) || hasContainerProtocolGuard(c);
+                        const hasResourceGuardFailure = hasContainerResourceGuardFailure(c);
+                        const hasProtocolGuardNeedsReview = hasContainerProtocolGuardNeedsReview(c);
+                        const cpu = typeof c.cpu_percent === 'number' && Number.isFinite(c.cpu_percent) ? c.cpu_percent : null;
+                        const mem = typeof c.mem_percent === 'number' && Number.isFinite(c.mem_percent) ? c.mem_percent : null;
+                        const rxMbps = typeof c.net_rx_bps === 'number' && Number.isFinite(c.net_rx_bps) ? fmtMbps(c.net_rx_bps) : null;
+                        const txMbps = typeof c.net_tx_bps === 'number' && Number.isFinite(c.net_tx_bps) ? fmtMbps(c.net_tx_bps) : null;
+                        const memUsed = typeof c.mem_bytes === 'number' && Number.isFinite(c.mem_bytes) ? fmtBytes(c.mem_bytes) : '—';
+                        const memLimit = typeof c.mem_limit_bytes === 'number' && Number.isFinite(c.mem_limit_bytes) ? fmtBytes(c.mem_limit_bytes) : '—';
                         const sec = c.security || {};
                         const key = `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`;
 
                         let cardStyle =
                           'border-slate-800 bg-slate-900/90 hover:border-sky-500/50 shadow-xs';
-                        if (risk.isCritical) {
+                        if (risk.isCritical || hasResourceGuardFailure) {
                           cardStyle =
                             'border-rose-500/70 bg-linear-to-b from-rose-950/30 via-slate-900/90 to-slate-900/95 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
-                        } else if (risk.isWarning) {
+                        } else if (risk.isWarning || hasResourceAlert || hasProtocolGuardNeedsReview) {
                           cardStyle =
                             'border-amber-500/50 bg-linear-to-b from-amber-950/20 via-slate-900/90 to-slate-900/95 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
                         }
@@ -730,12 +757,15 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                     </span>
                                   )}
                                   <StatusBadge
-                                    status={isStale ? 'stale' : 'healthy'}
+                                    status={isStale ? 'stale' : risk.isCritical || hasResourceGuardFailure ? 'critical' : risk.isWarning || hasResourceAlert || hasProtocolGuardNeedsReview ? 'warning' : hasProtectionState ? 'info' : 'healthy'}
+                                    label={hasProtectionState && !hasResourceAlert && !risk.hasRisk ? '存在管控状态' : undefined}
                                     size="sm"
-                                    pulse={!isStale}
+                                    pulse={!isStale && !risk.hasRisk && !hasResourceAlert && !hasProtectionState}
                                   />
                                 </div>
                               </div>
+
+                              <ContainerStateBadges container={c} activeAlerts={activeAlerts} maxVisible={6} className="mb-2" />
 
                               {/* Resource Meters */}
                               <div className="space-y-2 mt-2 text-xs">
@@ -747,18 +777,18 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                     </span>
                                     <span
                                       className={`tabular-nums font-bold ${
-                                        cpu > 80 ? 'text-rose-400' : 'text-slate-200'
+                                        cpu !== null && cpu > 80 ? 'text-rose-400' : 'text-slate-200'
                                       }`}
                                     >
-                                      {cpu.toFixed(1)}%
+                                      {cpu === null ? '—' : `${cpu.toFixed(1)}%`}
                                     </span>
                                   </div>
                                   <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
                                     <div
                                       className={`h-full transition-all duration-300 ${
-                                        cpu > 80 ? 'bg-rose-500' : 'bg-sky-500'
+                                        cpu === null ? 'bg-slate-700' : cpu > 80 ? 'bg-rose-500' : 'bg-sky-500'
                                       }`}
-                                      style={{ width: `${Math.min(100, Math.max(0, cpu))}%` }}
+                                      style={{ width: `${Math.min(100, Math.max(0, cpu ?? 0))}%` }}
                                     />
                                   </div>
                                 </div>
@@ -771,18 +801,18 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                     </span>
                                     <span
                                       className={`tabular-nums font-bold ${
-                                        mem > 90 ? 'text-amber-400' : 'text-slate-200'
+                                        mem !== null && mem > 90 ? 'text-amber-400' : 'text-slate-200'
                                       }`}
                                     >
-                                      {mem.toFixed(1)}% ({memUsed} / {memLimit})
+                                      {mem === null ? '—' : `${mem.toFixed(1)}%`} ({memUsed} / {memLimit})
                                     </span>
                                   </div>
                                   <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
                                     <div
                                       className={`h-full transition-all duration-300 ${
-                                        mem > 90 ? 'bg-amber-500' : 'bg-emerald-500'
+                                        mem === null ? 'bg-slate-700' : mem > 90 ? 'bg-amber-500' : 'bg-emerald-500'
                                       }`}
-                                      style={{ width: `${Math.min(100, Math.max(0, mem))}%` }}
+                                      style={{ width: `${Math.min(100, Math.max(0, mem ?? 0))}%` }}
                                     />
                                   </div>
                                 </div>
@@ -808,19 +838,19 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                     <div className="mt-1 flex items-center justify-between text-slate-300 tabular-nums font-semibold">
                                       <span className="flex items-center text-emerald-400">
                                         <ArrowDownLeft className="h-3 w-3 mr-0.5" />
-                                        {rxMbps}M
+                                        {rxMbps === null ? '—' : `${rxMbps}M`}
                                       </span>
                                       <span className="flex items-center text-sky-400">
                                         <ArrowUpRight className="h-3 w-3 mr-0.5" />
-                                        {txMbps}M
+                                        {txMbps === null ? '—' : `${txMbps}M`}
                                       </span>
                                     </div>
                                     <div className="mt-1 flex items-center justify-between text-[9px] text-slate-400 border-t border-slate-800/60 pt-1">
-                                      <span title={`TCP: ↓ ${fmtMbps(c.tcp_rx_bps)}M / ↑ ${fmtMbps(c.tcp_tx_bps)}M`}>
-                                        <span className="text-blue-400">T:</span> {fmtMbps(c.tcp_rx_bps)}/{fmtMbps(c.tcp_tx_bps)}M
+                                      <span title={`TCP: ↓ ${c.tcp_rx_bps == null ? '不可用' : `${fmtMbps(c.tcp_rx_bps)}M`} / ↑ ${c.tcp_tx_bps == null ? '不可用' : `${fmtMbps(c.tcp_tx_bps)}M`}`}>
+                                        <span className="text-blue-400">T:</span> {c.tcp_rx_bps == null ? '—' : fmtMbps(c.tcp_rx_bps)}/{c.tcp_tx_bps == null ? '—' : fmtMbps(c.tcp_tx_bps)}M
                                       </span>
-                                      <span title={`UDP: ↓ ${fmtMbps(c.udp_rx_bps)}M / ↑ ${fmtMbps(c.udp_tx_bps)}M`}>
-                                        <span className="text-violet-400">U:</span> {fmtMbps(c.udp_rx_bps)}/{fmtMbps(c.udp_tx_bps)}M
+                                      <span title={`UDP: ↓ ${c.udp_rx_bps == null ? '不可用' : `${fmtMbps(c.udp_rx_bps)}M`} / ↑ ${c.udp_tx_bps == null ? '不可用' : `${fmtMbps(c.udp_tx_bps)}M`}`}>
+                                        <span className="text-violet-400">U:</span> {c.udp_rx_bps == null ? '—' : fmtMbps(c.udp_rx_bps)}/{c.udp_tx_bps == null ? '—' : fmtMbps(c.udp_tx_bps)}M
                                       </span>
                                     </div>
                                   </div>
@@ -830,11 +860,11 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                       <Layers className="h-2.5 w-2.5 text-amber-400" /> 连接/进程
                                     </span>
                                     <div className="mt-1 flex items-center justify-between text-slate-300 tabular-nums font-semibold">
-                                      <span>{c.conn_count || 0} conn</span>
-                                      <span>{sec.process_count || 0} proc</span>
+                                      <span>{c.conn_count ?? '—'} conn</span>
+                                      <span>{sec.process_count ?? '—'} proc</span>
                                     </div>
                                     <div className="mt-2 text-[9px] text-slate-400 font-mono text-right">
-                                      更新: {c.timestamp_iso_utc8?.split(' ')[1] || '实时'}
+                                      更新: {c.timestamp_iso_utc8?.split(' ')[1] || '时间未知'}
                                     </div>
                                   </div>
                                 </div>
@@ -957,25 +987,31 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
             </div>
           );
         })}
-        {matchingHostIds.length === 0 && <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-sm text-slate-500">当前搜索或筛选条件下没有匹配的在线主机。</div>}
+        {matchingHostIds.length === 0 && visibleOfflineHostIds.length === 0 && <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-sm text-slate-500">{filterState === 'stale' ? '当前没有数据过期的容器。' : '当前搜索或筛选条件下没有匹配的在线主机。'}</div>}
       </div>
 
       {visibleOfflineHostIds.length > 0 && (
-        <section className="space-y-3" aria-label="离线主机与历史容器">
+        <section className="space-y-3" aria-label="离线主机与数据过期容器">
           <div className="flex flex-wrap items-end justify-between gap-2 border-b border-slate-800 pb-2">
             <div>
-              <h2 className="text-sm font-semibold text-slate-200">离线主机与历史详情</h2>
-              <p className="mt-1 text-xs text-slate-500">最近 7 天内停止上报的主机。以下仅为最后一次采样，不代表当前运行状态，也不会触发实时风险或远程处置。</p>
+              <h2 className="text-sm font-semibold text-slate-200">离线与数据过期</h2>
+              <p className="mt-1 text-xs text-slate-500">以下展示最后一次上报的容器状态，不代表当前运行状态；数据恢复前不会将其计入正常容器。</p>
             </div>
-            <span className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-1 text-xs text-amber-300">{visibleOfflineHostIds.length} 台未上报</span>
+            <span className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-1 text-xs text-amber-300">{visibleOfflineHostIds.length} 组待恢复数据</span>
           </div>
           {visibleOfflineHostIds.map((hostId) => {
             const items = offlineHostMap[hostId].slice().sort((a, b) => a.container_name.localeCompare(b.container_name));
             const latest = items.reduce((result, item) => Number(item.host_last_seen || item.timestamp || 0) > Number(result.host_last_seen || result.timestamp || 0) ? item : result, items[0]);
-            const offlineSeconds = Math.max(0, ...items.map((item) => Number(item.host_offline_seconds ?? item.offline_seconds ?? 0)));
-            const offlineLabel = offlineSeconds < 3600
+            const offlineAgeSamples = items
+              .map((item) => Number(item.host_offline_seconds ?? item.offline_seconds))
+              .filter((seconds) => Number.isFinite(seconds) && seconds > 0);
+            const offlineSeconds = offlineAgeSamples.length ? Math.max(...offlineAgeSamples) : null;
+            const offlineLabel = offlineSeconds === null
+              ? '时长未知'
+              : offlineSeconds < 3600
               ? `约 ${Math.max(1, Math.floor(offlineSeconds / 60))} 分钟`
               : `约 ${Math.floor(offlineSeconds / 3600)} 小时`;
+            const hostIsOffline = items.every((item) => item.alerts?.host_stale);
             const isExpanded = Boolean(expandedOfflineHosts[hostId]);
             return (
               <article key={`offline-${hostId}`} className="overflow-hidden rounded-xl border border-amber-900/60 bg-slate-900/70">
@@ -989,13 +1025,13 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                   <span className="flex min-w-0 flex-wrap items-center gap-2">
                     <Server className="h-4 w-4 shrink-0 text-amber-400" />
                     <strong className="break-all text-sm text-slate-100">{hostId}</strong>
-                    <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">已停止上报</span>
+                    <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">{hostIsOffline ? '主机离线' : '容器数据过期'}</span>
                     <span className="font-mono text-[11px] text-slate-400">v{latest.agent_version || '未知'}</span>
                   </span>
                   <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
                     <span>最后上报：{latest.host_last_seen_iso_utc8 || latest.timestamp_iso_utc8 || '未知'}</span>
                     <span>约 {offlineLabel}</span>
-                    <span>{items.length} 台历史容器</span>
+                    <span>{items.length} 台状态不可用</span>
                     <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                   </span>
                 </button>
@@ -1006,6 +1042,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                         <li key={`${item.runtime}-${item.project || ''}-${item.container_name}`} className="min-w-0 rounded-lg border border-slate-800 bg-slate-900/70 p-3">
                           <p className="break-all text-sm font-medium text-slate-200">{item.container_name}</p>
                           <p className="mt-1 break-all text-xs text-slate-500">{item.runtime}{item.project ? ` / ${item.project}` : ''} · 最后采样 {item.timestamp_iso_utc8 || '未知'}</p>
+                          <ContainerStateBadges container={item} activeAlerts={activeAlerts} maxVisible={5} className="mt-2" />
                         </li>
                       ))}
                     </ul>
