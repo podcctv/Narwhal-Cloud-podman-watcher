@@ -7,8 +7,6 @@ import {
   Cpu,
   Network,
   ArrowRight,
-  AlertTriangle,
-  LoaderCircle,
 } from 'lucide-react';
 import { StatsResponse, ContainerIdentity } from '../../api/types';
 import { api, fmtBytes, fmtNumber } from '../../api/client';
