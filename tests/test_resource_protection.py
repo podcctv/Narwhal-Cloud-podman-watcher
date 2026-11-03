@@ -98,6 +98,14 @@ class ResourceProtectionPressureTests(unittest.TestCase):
         args = cpu_guard._runtime_args("incus", "", ["config", "get", "c1", "limits.cpu.allowance"])
         self.assertEqual(args, ["config", "get", "c1", "limits.cpu.allowance"])
 
+    def test_runman_cpu_limit_scales_cgroup_v2_quota(self):
+        target, cpus = cpu_guard._half_limit("runman", "200000 100000", 2.0)
+        self.assertEqual(target, "100000 100000")
+        self.assertEqual(cpus, 1.0)
+        tighter, tighter_cpus = cpu_guard._scale_limit("runman", "100000 100000", 0.5)
+        self.assertEqual(tighter, "50000 100000")
+        self.assertEqual(tighter_cpus, 0.5)
+
     def test_memory_guard_tier2_escalation_under_pressure(self):
         start_usage = 85.0
         tier = 2

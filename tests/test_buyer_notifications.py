@@ -114,6 +114,61 @@ class BuyerTests(unittest.TestCase):
         self.assertEqual(row['banner_status'], 'failed')
         self.assertEqual(row['banner_error'], 'Runman MOTD unavailable')
 
+    def test_runman_user_banner_notice_is_bound_to_current_instance_generation(self):
+        vm_id = '11111111-2222-4333-8444-555555555555'
+        generation = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        observed = {
+            'runtime': 'runman', 'project': 'default', 'name': vm_id, 'id': vm_id,
+            'stable_id': vm_id, 'instance_id': generation,
+            'security': {'socks_proxy': {'detected': False}},
+        }
+        alert = {
+            'type': 'malicious_process', 'severity': 'critical', 'runtime': 'runman',
+            'project': 'default', 'container_name': vm_id, 'instance_id': generation,
+            'malicious_processes': [{'process': 'xmrig', 'pid': 101}],
+        }
+        with server.db() as conn:
+            buyer.save_target(conn, {
+                'host_id': 'host', 'runtime': 'runman', 'project': 'default', 'container_name': vm_id,
+                'machine_id': MACHINE, 'user_id': 'user-1', 'node_name': 'Runman node', 'scope': 'user',
+            })
+        self.ingest([alert], container=observed)
+        with server.db() as conn:
+            alert_id = conn.execute("SELECT id FROM security_alerts WHERE alert_type='malicious_process'").fetchone()[0]
+            preview = buyer.notice_preview(conn, alert_id)
+            self.assertTrue(preview['can_submit'])
+            self.assertEqual(preview['container_id'], generation)
+            queued = buyer.queue_user_notice(conn, alert_id, {
+                'request_id': 'b' * 32, 'confirm': True, 'preview_token': preview['preview_token'],
+            }, 'operator')
+            self.assertTrue(queued['ok'])
+
+        replacement = dict(observed, instance_id='bbbbbbbb-cccc-4ddd-8eee-ffffffffffff')
+        with server.db() as conn:
+            conn.execute(
+                "UPDATE reports SET payload_json=? WHERE host_id='host' AND runtime='runman' AND container_name=?",
+                (json.dumps(replacement), vm_id),
+            )
+            preview = buyer.notice_preview(conn, alert_id)
+        self.assertFalse(preview['can_submit'])
+
+    def test_runman_old_notice_does_not_claim_delivery_on_replacement_generation(self):
+        notice_id = 'c' * 32
+        vm_id = '11111111-2222-4333-8444-555555555555'
+        with server.db() as conn:
+            conn.execute(
+                "INSERT INTO buyer_user_notices(id,alert_id,host_id,runtime,project,container_name,subject,created_at,expires_at,telegram_status,banner_status,container_id) VALUES(?,7,'host','runman','default',?,'Notice',?,?, 'succeeded','queued',?)",
+                (notice_id, vm_id, self.now, self.now + 3600, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'),
+            )
+            observed = {
+                'runtime': 'runman', 'project': 'default', 'name': vm_id, 'id': vm_id,
+                'instance_id': 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+                'security': {'motd_delivery': {'status': 'written', 'notice_ids': ['NOTICE-' + notice_id]}},
+            }
+            buyer.observe(conn, 'host', self.now, [observed], [])
+            status = conn.execute('SELECT banner_status FROM buyer_user_notices WHERE id=?', (notice_id,)).fetchone()[0]
+        self.assertEqual(status, 'queued')
+
     def test_report_enqueues_only_and_missing_mapping_blocks(self):
         with mock.patch.object(buyer,"deliver") as send:
             self.ingest()

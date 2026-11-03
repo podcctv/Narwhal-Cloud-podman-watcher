@@ -1653,6 +1653,86 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.close()
         self.assertEqual(action_count, 0)
 
+    def test_runman_diagnostic_requires_and_queues_fresh_generation(self):
+        now = int(time.time())
+        vm_id = "11111111-2222-4333-8444-555555555555"
+        generation = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        payload = {"id": vm_id, "stable_id": vm_id, "instance_id": generation, "monitor_mode": "full"}
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,podman_network_ok_v4,podman_network_ok_v6,ts,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("host", vm_id, "runman", "default", 1, 1, 1, 1, 1, 1, 1, 1, now, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        class State:
+            dashboard_user = "operator"
+
+        class DiagnosticRequest:
+            state = State()
+
+            async def json(self):
+                return {"host_id": "host", "runtime": "runman", "project": "default", "container_name": vm_id}
+
+        first = json.loads(asyncio.run(server.request_container_diagnostic(DiagnosticRequest())).body)
+        params = first["action"]["params"]
+        self.assertEqual(params["instance_id"], generation)
+
+        next_generation = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        conn = server.db()
+        payload["instance_id"] = next_generation
+        conn.execute("UPDATE reports SET payload_json=? WHERE host_id='host' AND runtime='runman'", (json.dumps(payload),))
+        conn.commit()
+        conn.close()
+        second = json.loads(asyncio.run(server.request_container_diagnostic(DiagnosticRequest())).body)
+        self.assertTrue(second["queued"])
+        self.assertNotEqual(first["action"]["id"], second["action"]["id"])
+        self.assertEqual(second["action"]["params"]["instance_id"], next_generation)
+
+    def test_runman_connection_alert_deep_sample_requires_fresh_generation(self):
+        now = int(time.time())
+        vm_id = "11111111-2222-4333-8444-555555555555"
+        generation = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        payload = {"id": vm_id, "stable_id": vm_id, "instance_id": generation}
+        conn = server.db()
+        conn.execute(
+            "INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,podman_network_ok_v4,podman_network_ok_v6,ts,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("host", vm_id, "runman", "default", 1, 1, 1, 1, 1, 1, 1, 1, now, json.dumps(payload)),
+        )
+        alert = {"type": "container_connection_count", "severity": "warning", "runtime": "runman", "project": "default", "container_name": vm_id}
+        server.process_security_alerts(conn, "host", now, [alert])
+        self.assertEqual(server.queue_connection_alert_deep_samples(conn, "host", now), 1)
+        action = conn.execute("SELECT params_json FROM security_actions WHERE action_type='request_deep_sample'").fetchone()
+        self.assertEqual(json.loads(action["params_json"])["instance_id"], generation)
+        conn.close()
+
+    def test_runman_connection_evidence_filters_replaced_instance_history(self):
+        now = int(time.time())
+        vm_id = "11111111-2222-4333-8444-555555555555"
+        old_generation = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        current_generation = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        conn = server.db()
+        for timestamp, generation, total in (
+            (now - 20, old_generation, 1),
+            (now - 10, current_generation, 2),
+        ):
+            payload = {
+                "id": vm_id, "stable_id": vm_id, "instance_id": generation,
+                "security": {"connection_metrics": {"total": total}},
+            }
+            conn.execute(
+                "INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,podman_network_ok_v4,podman_network_ok_v6,ts,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("host", vm_id, "runman", "default", 1, 1, 1, 1, 1, total, 1, 1, timestamp, json.dumps(payload)),
+            )
+        conn.commit()
+        conn.close()
+
+        endpoint = next(route.endpoint for route in server.app.routes if getattr(route, "path", "") == "/api/v1/ops/evidence")
+        result = endpoint(host_id="host", runtime="runman", container_name=vm_id, project="default", minutes=60)
+        self.assertEqual(result["sample_count"], 1)
+        self.assertEqual(result["timeline"][0]["connection_count"], 2)
+
     def test_connection_evidence_refresh_is_bounded_and_critical_upgrade_refreshes(self):
         now = int(time.time())
         alert = {'type':'container_connection_count','severity':'warning','runtime':'incus','project':'default','container_name':'node1'}
@@ -1814,6 +1894,8 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("请求深度上报", html)
         self.assertIn("/api/v1/containers/diagnostics", html)
         self.assertIn("不抓包、不扫描文件", html)
+        self.assertIn("Runman 代次绑定 guest exec", html)
+        self.assertIn("'incus','podman','runman'", html)
 
     def test_successful_automatic_xmrig_remediation_is_saved_in_history(self):
         alert = {

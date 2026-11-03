@@ -19,6 +19,9 @@ _loaded_path = ""
 _checks = {}
 SHELL_START = "# >>> NARWHAL SHELL BANNER BEGIN >>>"
 SHELL_END = "# <<< NARWHAL SHELL BANNER END <<<"
+SSH_BANNER_MARKER = "# NARWHAL MANAGED PREAUTH BANNER v1"
+SSH_BANNER_FILE = "/etc/ssh/narwhal-security-banner.txt"
+SSH_BANNER_DROPIN = "/etc/ssh/sshd_config.d/00-narwhal-security-banner.conf"
 CHANNEL = "https://t.me/flanker_channel"
 FONT = {
     'F': [' _____ ', '|  ___|', '| |_   ', '|  _|  ', '|_|    '],
@@ -405,6 +408,116 @@ def install_shell(container, entries, checked_exec, version, now):
     return ok and 'NARWHAL_SHELL_OK:' in result, 'NARWHAL_SHELL_OK:1' in result
 
 
+def install_ssh_banner(container, content, checked_exec):
+    """Install a pre-authentication SSH banner only through an active safe drop-in."""
+    if str(container.get("runtime") or "").lower() != "runman":
+        return {"state": "not_applicable", "reason": "runtime_not_runman"}
+    text = str(content or "")
+    if not text or len(text.encode("utf-8")) > 32 * 1024 or "\x00" in text:
+        return {"state": "failed", "reason": "banner_content_invalid"}
+    banner_content = SSH_BANNER_MARKER + "\n" + text.rstrip() + "\n"
+    dropin_content = SSH_BANNER_MARKER + "\nBanner " + SSH_BANNER_FILE + "\n"
+    script = r'''set -eu
+cfg=/etc/ssh/sshd_config
+dropdir=/etc/ssh/sshd_config.d
+drop=''' + SSH_BANNER_DROPIN + r'''
+banner=''' + SSH_BANNER_FILE + r'''
+sshd=$(command -v sshd 2>/dev/null || true)
+[ -n "$sshd" ] || [ ! -x /usr/sbin/sshd ] || sshd=/usr/sbin/sshd
+if [ -z "$sshd" ] || [ ! -f "$cfg" ] || [ ! -d "$dropdir" ]; then
+  echo NARWHAL_SSH_BANNER_STATE=unsupported
+  exit 0
+fi
+if ! awk '/^[[:space:]]*#/ {next} tolower($1)=="match" {exit} tolower($1)=="include" && $2 ~ /^\/etc\/ssh\/sshd_config\.d\/.*\.conf$/ {found=1} END {exit !found}' "$cfg"; then
+  echo NARWHAL_SSH_BANNER_STATE=include_unavailable
+  exit 0
+fi
+if grep -Eiq '^[[:space:]]*Banner[[:space:]]+' "$cfg"; then
+  echo NARWHAL_SSH_BANNER_STATE=preserved_operator_config
+  exit 0
+fi
+for f in "$dropdir"/*.conf; do
+  [ -f "$f" ] || continue
+  [ "$f" = "$drop" ] && continue
+  if grep -Eiq '^[[:space:]]*Banner[[:space:]]+' "$f"; then
+    echo NARWHAL_SSH_BANNER_STATE=preserved_operator_config
+    exit 0
+  fi
+done
+if [ -e "$drop" ] && { [ ! -f "$drop" ] || ! grep -Fqx '# NARWHAL MANAGED PREAUTH BANNER v1' "$drop"; }; then
+  echo NARWHAL_SSH_BANNER_STATE=dropin_conflict
+  exit 0
+fi
+if [ -e "$banner" ] && { [ ! -f "$banner" ] || ! grep -Fqx '# NARWHAL MANAGED PREAUTH BANNER v1' "$banner"; }; then
+  echo NARWHAL_SSH_BANNER_STATE=banner_file_conflict
+  exit 0
+fi
+had_drop=0; had_banner=0
+[ ! -e "$drop" ] || had_drop=1
+[ ! -e "$banner" ] || had_banner=1
+backup_drop=$(mktemp /etc/ssh/.narwhal-drop-backup.XXXXXX)
+backup_banner=$(mktemp /etc/ssh/.narwhal-banner-backup.XXXXXX)
+tmp_banner=
+tmp_drop=
+if [ "$had_drop" -eq 1 ]; then cp -p "$drop" "$backup_drop"; fi
+if [ "$had_banner" -eq 1 ]; then cp -p "$banner" "$backup_banner"; fi
+committed=0
+cleanup() {
+  rc=$?
+  [ -z "$tmp_banner" ] || rm -f "$tmp_banner"
+  [ -z "$tmp_drop" ] || rm -f "$tmp_drop"
+  if [ "$committed" -ne 1 ]; then
+    if [ "$had_drop" -eq 1 ]; then cp -p "$backup_drop" "$drop" 2>/dev/null || true; else rm -f "$drop"; fi
+    if [ "$had_banner" -eq 1 ]; then cp -p "$backup_banner" "$banner" 2>/dev/null || true; else rm -f "$banner"; fi
+    "$sshd" -t -f "$cfg" >/dev/null 2>&1 || true
+    if command -v systemctl >/dev/null 2>&1; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; fi
+    if command -v service >/dev/null 2>&1; then service ssh reload >/dev/null 2>&1 || service sshd reload >/dev/null 2>&1 || true; fi
+  fi
+  rm -f "$backup_drop" "$backup_banner"
+  return "$rc"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+tmp_banner=$(mktemp /etc/ssh/.narwhal-banner.XXXXXX)
+tmp_drop=$(mktemp "$dropdir/.narwhal-banner.XXXXXX")
+printf '%s' ''' + shlex.quote(banner_content) + r''' > "$tmp_banner"
+printf '%s' ''' + shlex.quote(dropin_content) + r''' > "$tmp_drop"
+chmod 644 "$tmp_banner" "$tmp_drop"
+if cmp -s "$tmp_banner" "$banner" && cmp -s "$tmp_drop" "$drop"; then
+  actual=$("$sshd" -T -f "$cfg" 2>/dev/null | awk 'tolower($1)=="banner" {print $2; exit}')
+  if [ "$actual" = "$banner" ]; then committed=1; echo NARWHAL_SSH_BANNER_STATE=active; exit 0; fi
+fi
+mv -f "$tmp_banner" "$banner"
+mv -f "$tmp_drop" "$drop"
+if ! "$sshd" -t -f "$cfg"; then echo NARWHAL_SSH_BANNER_STATE=config_invalid; exit 1; fi
+actual=$("$sshd" -T -f "$cfg" 2>/dev/null | awk 'tolower($1)=="banner" {print $2; exit}')
+[ "$actual" = "$banner" ] || { echo NARWHAL_SSH_BANNER_STATE=config_readback_failed; exit 1; }
+reloaded=0
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl is-active --quiet ssh; then systemctl reload ssh && reloaded=1
+  elif systemctl is-active --quiet sshd; then systemctl reload sshd && reloaded=1
+  fi
+fi
+if [ "$reloaded" -eq 0 ] && command -v service >/dev/null 2>&1; then
+  service ssh reload >/dev/null 2>&1 && reloaded=1 || service sshd reload >/dev/null 2>&1 && reloaded=1 || true
+fi
+[ "$reloaded" -eq 1 ] || { echo NARWHAL_SSH_BANNER_STATE=reload_unavailable; exit 1; }
+actual=$("$sshd" -T -f "$cfg" 2>/dev/null | awk 'tolower($1)=="banner" {print $2; exit}')
+[ "$actual" = "$banner" ] || { echo NARWHAL_SSH_BANNER_STATE=reload_readback_failed; exit 1; }
+committed=1
+echo NARWHAL_SSH_BANNER_STATE=active
+'''
+    try:
+        ok, output = checked_exec(container, script)
+    except (OSError, ValueError, TypeError):
+        return {"state": "failed", "reason": "guest_exec_failed"}
+    match = re.search(r"(?m)^NARWHAL_SSH_BANNER_STATE=([a-z_]{1,48})$", str(output or ""))
+    state = match.group(1) if match else "failed"
+    if not ok and state == "active":
+        state = "failed"
+    return {"state": state, "reason": "" if state == "active" else state}
+
+
 def merge(original, banner):
     # Preserve every byte outside owned marker blocks, including whitespace.
     pattern=re.compile(re.escape(START)+r"\n.*?"+re.escape(END)+r"\n?",re.S)
@@ -639,6 +752,12 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     # now uses its generation-bound local guest execution API for shell files.
     is_runman=container.get("runtime")=="runman"
     shell_ok, shell_changed = install_shell(container, entries, checked_exec, version, int(now))
+    ssh_banner = install_ssh_banner(
+        container,
+        render(name, entries, version=version, color=False, sampled_at=int(now)),
+        checked_exec,
+    ) if is_runman else {"state": "not_applicable", "reason": "runtime_not_runman"}
+    delivery["ssh_banner"] = ssh_banner
     banner="" if shell_ok else render(name,entries,version=version,sampled_at=int(now))
     changed=shell_changed
     delivery['shell_delivery'] = 'installed' if shell_ok else 'failed'
@@ -700,9 +819,9 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     delivery["event_ids"]=[e["event_id"] for e in entries]
     # Only IDs selected for actual rendering may be acknowledged as delivered.
     delivery['notice_ids'] = [e['event_id'] for e in select_entries(entries) if e.get('type') == 'user_notice']
-    # Read-only login mechanism check, not a promise that an SSH session displayed it.
+    # A checked sshd Banner config proves pre-auth configuration, not delivery to every client.
     if is_runman:
-        _checks[key]=(now,"unverified")
+        _checks[key]=(now,"configured" if ssh_banner.get("state")=="active" else "unverified")
     elif key not in _checks or now-_checks[key][0]>3600:
         ok,mechanism=checked_exec(container,"if command -v sshd >/dev/null 2>&1; then sshd -T 2>/dev/null | grep '^printmotd '; fi; if grep -qs pam_motd /etc/pam.d/sshd; then printf 'pam_motd\\n'; fi; if grep -qs '/etc/motd' /etc/profile; then printf 'profile_motd\\n'; fi; true")
         _checks[key]=(now,"configured" if ok and any(v in mechanism for v in ("printmotd yes","pam_motd","profile_motd")) else "unverified")

@@ -16,6 +16,7 @@ from typing import Any
 CGROUP_ROOT = Path(os.getenv("NARWHAL_CGROUP_ROOT", "/sys/fs/cgroup"))
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.:@+-]{1,256}\Z")
 _PODMAN_ID = re.compile(r"[0-9a-fA-F]{12,64}\Z")
+_RUNMAN_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 
 def _podman_boundary(segment: str, stable_id: str) -> bool:
@@ -38,6 +39,7 @@ def resolve_container_cgroup(
     *,
     proc_root: str | os.PathLike[str] = "/proc",
     cgroup_root: str | os.PathLike[str] | None = None,
+    expected_start_ticks: str = "",
 ) -> tuple[Path | None, str]:
     """Return the ID-matched container cgroup, never a host/leaf fallback.
 
@@ -53,8 +55,8 @@ def resolve_container_cgroup(
         return None, "容器宿主机 PID 不可用"
 
     runtime_name = str(runtime or "").strip().lower()
-    if runtime_name not in {"incus", "podman"}:
-        return None, "仅支持 Incus / Podman 容器资源 cgroup"
+    if runtime_name not in {"incus", "podman", "runman"}:
+        return None, "仅支持 Incus / Podman / Runman 容器资源 cgroup"
 
     identity = str(stable_id or "").strip()
     container_name = str(name or "").strip()
@@ -83,12 +85,33 @@ def resolve_container_cgroup(
             if container_name and _SAFE_ID.fullmatch(container_name):
                 expected.add(f"lxc.payload.{container_name}")
             matches = [index for index, part in enumerate(parts) if part in expected]
-        else:
+        elif runtime_name == "podman":
             matches = [index for index, part in enumerate(parts) if _podman_boundary(part, identity)]
+        else:
+            vm_id = container_name or identity
+            if not _RUNMAN_ID.fullmatch(vm_id) or identity.lower() != vm_id.lower():
+                return None, "Runman VM UUID 与稳定容器身份不匹配"
+            if not isinstance(expected_start_ticks, str) or not expected_start_ticks.isdigit():
+                return None, "Runman PID 启动代次不可用"
+            stat_text = (Path(proc_root) / str(pid) / "stat").read_text(encoding="ascii", errors="ignore")
+            close_paren = stat_text.rfind(")")
+            stat_fields = stat_text[close_paren + 2 :].split() if close_paren >= 0 else []
+            actual_start_ticks = stat_fields[19] if len(stat_fields) > 19 else ""
+            if actual_start_ticks != expected_start_ticks:
+                return None, "Runman PID 启动代次已变化"
+            expected = f"runman-{vm_id.lower()}.service"
+            matches = [index for index, part in enumerate(parts) if part == expected]
 
         if len(matches) != 1:
             return None, "PID 所在路径中没有唯一匹配该容器 ID 的资源 cgroup"
-        boundary = root.joinpath(*parts[: matches[0] + 1]).resolve(strict=True)
+        if runtime_name == "runman":
+            unit_index = matches[0]
+            if unit_index == 0 or parts[unit_index - 1] != "system.slice" or len(parts) <= unit_index + 1 or parts[unit_index + 1] != "ct":
+                return None, "Runman PID 不在该实例专属的 system.slice/ct cgroup 内"
+            boundary_parts = parts[: unit_index + 2]
+        else:
+            boundary_parts = parts[: matches[0] + 1]
+        boundary = root.joinpath(*boundary_parts).resolve(strict=True)
         if boundary == root or not boundary.is_relative_to(root):
             return None, "容器资源 cgroup 路径越出受控目录"
         events_path = boundary / "cgroup.events"

@@ -455,7 +455,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
   if (!identity) return null;
 
-  const isGuardRuntime = identity.runtime === 'incus' || identity.runtime === 'podman';
+  const isGuardRuntime = identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman';
   const sec = container?.security || {};
   const inIps = sec.inbound_unique_ips == null || !Number.isFinite(sec.inbound_unique_ips) ? null : sec.inbound_unique_ips;
   const inThresh = sec.inbound_unique_ip_threshold || 10;
@@ -716,6 +716,21 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               </div>
             </div>
 
+            {identity.runtime === 'runman' && (
+              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4" aria-label="Runman 磁盘镜像占用">
+                <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                  <HardDrive className="h-4 w-4 text-emerald-300" />
+                  Runman 磁盘镜像占用
+                </div>
+                <p className="mt-2 text-sm tabular-nums text-slate-200">
+                  {container?.container_disk_backing_image_available
+                    ? `${formatMetricBytes(container.container_disk_backing_image_allocated_bytes)} / ${formatMetricBytes(container.container_disk_backing_image_logical_bytes)}`
+                    : '当前样本不可用'}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-400">已分配块 / 镜像逻辑容量；该值来自宿主机 disk.img 文件分配量。</p>
+              </section>
+            )}
+
             {container && isGuardRuntime && (
               <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3" aria-label="容器活动告警与保护信号">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -768,7 +783,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     </h3>
                     <p className="mt-1 text-[11px] text-slate-400">显示触发依据、已读回限额与恢复进度；保护信号不等于客户滥用认定。</p>
                   </div>
-                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] text-slate-300">仅 Incus / Podman</span>
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] text-slate-300">Incus / Podman / Runman</span>
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">

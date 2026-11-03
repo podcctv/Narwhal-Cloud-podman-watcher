@@ -448,6 +448,22 @@ class HostFirewallPolicyTests(unittest.TestCase):
         self.assertEqual(normalized["rules"][0]["protocol"], "wireguard")
         self.assertEqual(normalized["rules"][0]["countries"], ["CN"])
 
+    def test_runman_is_a_selectable_speedtest_service_runtime(self):
+        payload = {
+            "rules": [],
+            "abuse": {
+                "speedtest": False, "mining": False, "bt": False,
+                "services": ["ookla"], "service_runtimes": ["runman"],
+                "interfaces": [], "runtimes": [],
+            },
+        }
+        normalized = server._validate_host_firewall_policy(payload)
+        self.assertEqual(normalized["abuse"]["service_runtimes"], ["runman"])
+        payload["abuse"]["service_runtimes"] = ["docker"]
+        with self.assertRaises(HTTPException) as raised:
+            server._validate_host_firewall_policy(payload)
+        self.assertEqual(raised.exception.status_code, 400)
+
     def test_single_host_application_protocol_requires_fresh_confirmed_rfw_support(self):
         payload = self.policy()
         payload["rules"][0].update({"direction": "out", "protocol": "wireguard", "countries": ["CN"], "ip_type": "geoip"})

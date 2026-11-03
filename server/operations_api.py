@@ -52,6 +52,32 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 item["data"] = ops.loads(item.pop("payload"))
         return items
 
+    def runman_generation(conn, host_id, project, container_name):
+        if project != "default" or not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", container_name):
+            return ""
+        row = conn.execute(
+            "SELECT payload_json FROM reports WHERE host_id=? AND runtime='runman' AND project='default' AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
+            (host_id[:200], container_name[:200]),
+        ).fetchone()
+        payload = ops.loads(row["payload_json"], {}) if row else {}
+        stable_id = str(payload.get("stable_id") or payload.get("id") or "").lower() if isinstance(payload, dict) else ""
+        generation = str(payload.get("instance_id") or "").lower() if isinstance(payload, dict) else ""
+        if (
+            stable_id != container_name.lower()
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", stable_id)
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", generation)
+        ):
+            return ""
+        return generation
+
+    def same_runman_generation(rows_to_filter, generation):
+        matching = []
+        for row in rows_to_filter:
+            payload = ops.loads(row["payload_json"], {})
+            if isinstance(payload, dict) and str(payload.get("instance_id") or "").lower() == generation:
+                matching.append(row)
+        return matching
+
     def queue(conn, host, action_type, params, user):
         row = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (host,)).fetchone()
         if not row or not row[0] or time.time()-row[1] > 900:
@@ -513,8 +539,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             minutes = int(payload.get("minutes", 60))
         except (ValueError, TypeError, AttributeError):
             raise HTTPException(400, "请提供有效的目标容器和回放时间窗") from None
-        if not host_id or not container_name or runtime not in {"incus", "podman"} or not 15 <= minutes <= 60:
-            raise HTTPException(400, "回放仅支持 Incus / Podman，时间窗为 15-60 分钟")
+        if not host_id or not container_name or runtime not in {"incus", "podman", "runman"} or not 15 <= minutes <= 60:
+            raise HTTPException(400, "回放仅支持 Incus / Podman / Runman，时间窗为 15-60 分钟")
         now = int(time.time())
         conn = db()
         try:
@@ -522,6 +548,11 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 "SELECT id,ts,payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND ts BETWEEN ? AND ? ORDER BY ts DESC,id DESC LIMIT 60",
                 (host_id, runtime, project, container_name, now-minutes*60, now),
             ).fetchall()
+            if runtime == "runman":
+                generation = runman_generation(conn, host_id, project, container_name)
+                if not generation:
+                    raise HTTPException(409, "Runman UUID 或实例代次无法确认，未混合历史实例样本")
+                sampled = same_runman_generation(sampled, generation)
             if not sampled:
                 raise HTTPException(409, "所选时间窗内没有采样记录；没有足够数据可回放")
             digest = hashlib.sha256()
@@ -578,7 +609,7 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
 
     @router.get("/evidence")
     def connection_evidence(host_id: str, runtime: str, container_name: str, project: str = "", minutes: int = 1440):
-        if runtime not in {"incus", "podman", "docker"} or not host_id or not container_name:
+        if runtime not in {"incus", "podman", "docker", "runman"} or not host_id or not container_name:
             raise HTTPException(400, "需要明确指定主机、运行时与容器")
         minutes = max(15, min(1440, int(minutes)))
         now = int(time.time())
@@ -588,6 +619,11 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND ts>=? ORDER BY ts DESC LIMIT 300",
                 (host_id[:200], runtime, project[:100], container_name[:200], now - minutes * 60),
             ).fetchall()
+            if runtime == "runman":
+                generation = runman_generation(conn, host_id, project, container_name)
+                if not generation:
+                    raise HTTPException(409, "Runman UUID 或实例代次无法确认，未混合历史实例样本")
+                raw_rows = same_runman_generation(raw_rows, generation)
             assessment = inbound_assessment.assess(raw_rows, now=now, lookback_seconds=min(minutes * 60, 3600))
             by_ip = {item["ip"]: item for item in assessment.get("assessments", []) if isinstance(item, dict)}
             reputation_cache = {}

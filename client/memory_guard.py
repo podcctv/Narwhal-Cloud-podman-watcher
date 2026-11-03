@@ -71,6 +71,7 @@ def _cgroup(container: dict[str, Any]) -> tuple[Path | None, dict[str, Any], str
         container.get("runtime"),
         container.get("stable_id") or container.get("id"),
         container.get("name"),
+        expected_start_ticks=(str(container.get("pid_start_ticks") or "") if container.get("runtime") == "runman" else ""),
     )
     if target is None:
         return None, {}, error
@@ -141,18 +142,32 @@ def _write_high(path: Path, value: str) -> tuple[bool, str]:
         return False, f"写入 memory.high 失败（{type(exc).__name__}）"
 
 
+def _safe_write_high(container: dict[str, Any], path: Path, value: str) -> tuple[bool, str]:
+    if container.get("runtime") == "runman":
+        target, error = resolve_container_cgroup(
+            container.get("pid"), "runman", container.get("stable_id") or container.get("id"),
+            container.get("name"), expected_start_ticks=str(container.get("pid_start_ticks") or ""),
+        )
+        if target is None or target.resolve() != path.resolve():
+            return False, error or "Runman 实例 PID 或 cgroup 代次已变化；拒绝修改 memory.high"
+    return _write_high(path, value)
+
+
 def _identity(container: dict[str, Any]) -> tuple[str, str, str] | None:
     runtime = str(container.get("runtime") or "").strip().lower()
     name = str(container.get("name") or "").strip()
     project = str(container.get("project") or "default").strip()
     stable_id = str(container.get("stable_id") or container.get("id") or "").strip()
-    if runtime not in {"incus", "podman"} or not name or not stable_id:
+    if runtime not in {"incus", "podman", "runman"} or not name or not stable_id:
         return None
     if len(name) > 200 or len(stable_id) > 256 or not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", name):
         return None
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
         return None
-    return "|".join((runtime, project, stable_id)), name, stable_id
+    generation = str(container.get("instance_id") or "").strip() if runtime == "runman" else stable_id
+    if runtime == "runman" and not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", generation):
+        return None
+    return "|".join((runtime, project, generation)), name, stable_id
 
 
 def _pressure_value(pressure: dict[str, Any], kind: str) -> float:
@@ -196,8 +211,8 @@ def _alert(container: dict[str, Any], record: dict[str, Any], succeeded: bool, m
         "runtime": str(container.get("runtime") or ""),
         "project": str(container.get("project") or ""),
         "container_name": str(container.get("name") or ""),
-        "instance_id": str(container.get("stable_id") or container.get("id") or "")[:200],
-        "alert_key": "memory-pressure:" + str(container.get("stable_id") or container.get("id") or "")[:200],
+        "instance_id": str(container.get("instance_id") if container.get("runtime") == "runman" else container.get("stable_id") or container.get("id") or "")[:200],
+        "alert_key": "memory-pressure:" + str(container.get("instance_id") if container.get("runtime") == "runman" else container.get("stable_id") or container.get("id") or "")[:200],
         "ongoing_protection": record.get("stage") not in {"restored", "candidate", "cooldown"},
         "memory_guard": detail,
         "automatic_remediation": {"attempted": True, "succeeded": succeeded, "action_type": "set_cgroup_memory_high", "message": message},
@@ -397,7 +412,7 @@ def observe(
                             if before != current_high:
                                 record.update(stage="manual_override", last_error="执行前 memory.high 已改变；未覆盖管理员配置。")
                             else:
-                                ok, output = _write_high(cgroup_path, target)
+                                ok, output = _safe_write_high(container, cgroup_path, target)
                                 try:
                                     readback = (cgroup_path / "memory.high").read_text(encoding="ascii").strip()
                                 except OSError:
@@ -433,7 +448,7 @@ def observe(
                 except OSError as exc:
                     record.update(stage="restore_failed", last_error=f"无法保存恢复计划：{type(exc).__name__}")
                 else:
-                    ok, output = _write_high(cgroup_path, str(record.get("original") or "max"))
+                    ok, output = _safe_write_high(container, cgroup_path, str(record.get("original") or "max"))
                     try:
                         restored_value = (cgroup_path / "memory.high").read_text(encoding="ascii").strip()
                     except OSError:
@@ -546,7 +561,7 @@ def observe(
                 if before != original:
                     record.update(stage="manual_override", last_error="执行前 memory.high 已发生变化；未覆盖管理员配置。")
                 else:
-                    ok, output = _write_high(cgroup_path, target)
+                    ok, output = _safe_write_high(container, cgroup_path, target)
                     try:
                         readback = (cgroup_path / "memory.high").read_text(encoding="ascii").strip()
                     except OSError:

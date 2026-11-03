@@ -171,11 +171,21 @@ class VmessPlanTests(unittest.TestCase):
         self.assertEqual(result["state"], "internal_only")
         self.assertEqual(result["blocked_endpoints"], [])
 
-    def test_runtime_scope_is_limited_to_incus_and_podman(self):
+    def test_runtime_scope_includes_isolated_runman_but_excludes_docker(self):
+        runman = vmess_guard.plan("runman", self.config, [self.listener], [], "complete")
+        self.assertEqual(runman["state"], "candidate")
+        self.assertEqual(runman["blocked_endpoints"][0]["port"], 443)
         result = vmess_guard.plan("docker", self.config, [self.listener], [], "complete")
         self.assertEqual(result["state"], "unverified")
         self.assertEqual(result["reason"], "runtime_not_supported")
         self.assertEqual(result["blocked_endpoints"], [])
+
+    def test_speedtest_policy_can_select_runman(self):
+        policy = agent.speedtest_guard.normalize_policy({
+            "revision": 1, "services": ["ookla", "iperf3_server"], "runtimes": ["runman"],
+        })
+        self.assertEqual(policy["runtimes"], ["runman"])
+        self.assertEqual(policy["services"], ["iperf3_server", "ookla"])
 
     def test_release_requires_a_complete_absence_scan(self):
         complete = vmess_guard.plan("incus", [], [], [], "complete")

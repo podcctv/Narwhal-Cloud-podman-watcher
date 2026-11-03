@@ -25,7 +25,7 @@ const identity = (item: Data) => JSON.stringify([item.host_id, item.runtime, ite
 const date = (ts?: number) => ts ? new Date(ts * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知时间';
 
 export function AlertReplayPanel({ inventory, initialReplays, onToast }: Props) {
-  const options = useMemo(() => inventory.filter(item => ['incus', 'podman'].includes(item.runtime)), [inventory]);
+  const options = useMemo(() => inventory.filter(item => ['incus', 'podman', 'runman'].includes(item.runtime)), [inventory]);
   const [selected, setSelected] = useState('');
   const [minutes, setMinutes] = useState(60);
   const [replays, setReplays] = useState<Data[]>(initialReplays);
@@ -86,7 +86,7 @@ export function AlertReplayPanel({ inventory, initialReplays, onToast }: Props) 
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem_auto]">
         <label className="text-xs text-slate-400">主机 / 容器 / 备注邮箱
           <select className={`${field} mt-1`} value={selected} onChange={event => setSelected(event.target.value)}>
-            {!options.length && <option value="">暂无 Incus / Podman 服务清单</option>}
+            {!options.length && <option value="">暂无 Incus / Podman / Runman 服务清单</option>}
             {options.map(item => <option key={identity(item)} value={identity(item)}>{item.host_id} / {item.runtime}{item.project ? `/${item.project}` : ''} / {item.container_name}{item.owner?.user_email ? ` · ${item.owner.user_email}` : ''}</option>)}
           </select>
         </label>

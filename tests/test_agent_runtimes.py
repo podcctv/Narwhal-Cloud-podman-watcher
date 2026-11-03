@@ -83,6 +83,22 @@ class RuntimeDiscoveryTests(unittest.TestCase):
         self.assertEqual(second['net_rx_bps'], 100.0)
         self.assertEqual(second['net_tx_bps'], 40.0)
 
+    def test_runman_cpu_guard_process_sample_uses_generation_bound_exec(self):
+        name = '00000000-0000-0000-0000-000000000001'
+        generation = '00000000-0000-4000-8000-000000000002'
+        with mock.patch.dict(agent._runman_instance_generations, {name: generation}), \
+             mock.patch.object(agent, 'get_runtime_bins', return_value={'runman': 'runman'}), \
+             mock.patch.object(agent, 'run', return_value='42\txray\t12.5\t1.0') as runner:
+            sample = agent._sample_cpu_guard_process({
+                'runtime': 'runman', 'runtime_bin': 'runman', 'name': name, 'project': 'default',
+            })
+        self.assertTrue(sample['available'])
+        self.assertEqual(sample['process'], 'xray')
+        self.assertEqual(sample['source'], 'container_proc_stat_delta')
+        command = runner.call_args.args[0]
+        self.assertEqual(command[0], agent._RUNMAN_EXEC_SENTINEL)
+        self.assertEqual(command[1:3], [name, generation])
+
     def test_auto_discovers_all_available_runtimes(self):
         with mock.patch.dict(os.environ, {"CONTAINER_RUNTIMES": "auto"}, clear=False):
             with mock.patch.object(agent.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"), mock.patch.object(agent,"_is_containerized_runtime",return_value=False):
@@ -458,6 +474,11 @@ class SecurityTelemetryTests(unittest.TestCase):
         def read_table(path, _limit):
             if path.endswith("/tcp"):
                 return tcp_table
+            if path.endswith("/udp"):
+                return (
+                    "sl local_address rem_address st tx_queue tr tm->when retrnsmt uid timeout inode\n"
+                    "0: 0200000A:14E9 00000000:0000 07 00000000:00000000 00:00000000 00000000 1000 0 102\n"
+                )
             return "sl local_address rem_address st tx_queue tr tm->when retrnsmt uid timeout inode\n"
 
         def readlink(path):
@@ -467,10 +488,12 @@ class SecurityTelemetryTests(unittest.TestCase):
                 return "socket:[100]"
             if path.endswith("/4"):
                 return "socket:[101]"
+            if path.endswith("/6"):
+                return "socket:[102]"
             raise OSError("not a socket")
 
         with mock.patch.object(agent, "_read_host_proc_text", side_effect=read_table), \
-             mock.patch.object(agent.os, "listdir", return_value=["3", "4", "5"]), \
+             mock.patch.object(agent.os, "listdir", return_value=["3", "4", "5", "6"]), \
              mock.patch.object(agent.os, "readlink", side_effect=readlink):
             result = agent._collect_host_proc_socket_details(
                 123, [{"host_pid": 123, "pid": 1, "process": "worker"}], [], 20,
@@ -487,7 +510,13 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertEqual(result["service_listeners"], [{
             "process": "worker", "pid": 1, "proto": "tcp", "local": "10.0.0.2:443",
             "port": 443, "source": "host_proc_fd_inode",
+        }, {
+            "process": "worker", "pid": 1, "proto": "udp", "local": "10.0.0.2:5353",
+            "port": 5353, "source": "host_proc_fd_inode",
         }])
+        process = next(item for item in result["communication_processes"] if item["pid"] == 1)
+        self.assertEqual(process["udp_socket_fd_references"], 1)
+        self.assertTrue(result["socket_fd_attribution_complete"])
         self.assertTrue(result["listener_inventory_complete"])
 
     def test_host_proc_listener_inventory_requires_exact_process_generation(self):
@@ -1321,6 +1350,34 @@ class SecurityTelemetryTests(unittest.TestCase):
             )["id"],
             42,
         )
+        agent._pending_deep_samples.clear()
+
+    def test_runman_deep_sample_is_bound_to_instance_generation(self):
+        vm_id = "11111111-2222-4333-8444-555555555555"
+        generation = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        action = {
+            "id": 43,
+            "runtime": "runman",
+            "project": "default",
+            "container_name": vm_id,
+            "action_type": "request_deep_sample",
+            "params": {"sample_seconds": 1, "process_limit": 100, "socket_limit": 250, "instance_id": generation},
+        }
+        agent._pending_deep_samples.clear()
+        ok, _ = agent._schedule_deep_sample(action)
+        self.assertTrue(ok)
+        self.assertEqual(agent._pending_deep_sample_for({
+            "runtime": "runman", "project": "default", "name": vm_id, "instance_id": generation,
+        })["id"], 43)
+        self.assertIsNone(agent._pending_deep_sample_for({
+            "runtime": "runman", "project": "default", "name": vm_id,
+            "instance_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        }))
+        agent._pending_deep_samples.clear()
+        invalid = dict(action, id=44, params={"instance_id": "not-a-generation"})
+        ok, reason = agent._schedule_deep_sample(invalid)
+        self.assertFalse(ok)
+        self.assertIn("generation", reason)
         agent._pending_deep_samples.clear()
 
     def test_deep_process_snapshot_redacts_common_credentials(self):

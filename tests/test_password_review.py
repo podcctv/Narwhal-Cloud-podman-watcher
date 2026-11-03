@@ -88,6 +88,63 @@ class PasswordFactsTests(unittest.TestCase):
             action['params']['review_observed_at']=0
             self.assertFalse(agent.stop_reviewed_socks(action)[0]); stop.assert_not_called()
 
+    def test_runman_manual_stop_rechecks_instance_and_process_generations(self):
+        vm_id = '00000000-0000-4000-8000-000000000001'
+        generation = '00000000-0000-4000-8000-000000000002'
+        action = {'runtime': 'runman', 'container_name': vm_id, 'project': 'default', 'params': {
+            'manual_review': True, 'review_token': 'e' * 64,
+            'review_observed_at': int(time.time()), 'instance_id': generation,
+        }}
+        facts = {'review_token': 'e' * 64, 'password_review': [
+            {'pid': 27, 'process': 'gost', 'action_safe': True, 'start_ticks': '12345'}
+        ]}
+        live = mock.Mock()
+        live.inspect.return_value = {'instance_id': generation, 'running': True, 'init_pid': 999}
+        with mock.patch.dict(agent._runman_instance_generations, {vm_id: generation}, clear=True), \
+             mock.patch.object(agent, 'get_runtime_bins', return_value={'runman': 'runman'}), \
+             mock.patch.object(agent.network_quarantine, 'RunmanIsolation', return_value=live) as inspect, \
+             mock.patch.object(agent, 'collect_panel_pairing_indicators', return_value={'socks_proxy': facts}), \
+             mock.patch.object(agent, '_collect_socket_security', return_value={'listening_ports': [6987]}), \
+             mock.patch.object(agent, '_collect_socket_process_details', return_value={
+                 'communication_detail_available': True, 'communication_snapshot_truncated': False,
+                 'service_listeners': [{'pid': 27, 'process': 'gost', 'proto': 'tcp', 'port': 6987, 'local': '*:6987'}],
+             }), \
+             mock.patch.object(agent, '_refine_socks_listener_evidence') as refine, \
+             mock.patch.object(agent, '_stop_scoped_socks', return_value=(True, 'stopped')) as stop:
+            self.assertTrue(agent.stop_reviewed_socks(action)[0])
+            inspect.assert_called_once_with(vm_id, generation)
+            refine.assert_called_once()
+            self.assertEqual(refine.call_args.kwargs['instance_id'], generation)
+            self.assertEqual(stop.call_args.args[0]['params']['instance_id'], generation)
+            self.assertEqual(stop.call_args.args[0]['params']['process_starts'], {'27': '12345'})
+
+            action['params']['instance_id'] = '00000000-0000-4000-8000-000000000003'
+            stop.reset_mock()
+            self.assertFalse(agent.stop_reviewed_socks(action)[0])
+            stop.assert_not_called()
+
+    def test_runman_scoped_stop_requires_process_and_instance_generation(self):
+        vm_id = '00000000-0000-4000-8000-000000000001'
+        generation = '00000000-0000-4000-8000-000000000002'
+        action = {'runtime': 'runman', 'container_name': vm_id, 'project': 'default', 'params': {
+            'instance_id': generation, 'process_names': ['gost'], 'process_pids': [27],
+            'process_starts': {'27': '12345'},
+        }}
+        with mock.patch.dict(agent._runman_instance_generations, {vm_id: generation}, clear=True), \
+             mock.patch.object(agent, 'get_runtime_bins', return_value={'runman': 'runman'}), \
+             mock.patch.object(agent, '_run_action_command', return_value=(True, 'stopped_services=0 killed_processes=1 stop_errors=0')) as execute, \
+             mock.patch.object(agent, '_verify_remediation_stopped', return_value=(True, 'remaining_processes=0')):
+            self.assertTrue(agent._stop_scoped_socks(action)[0])
+            command = execute.call_args.args[0]
+            self.assertEqual(command[0], agent._RUNMAN_EXEC_SENTINEL)
+            self.assertEqual(command[1], vm_id)
+            self.assertEqual(command[2], generation)
+            self.assertIn('/proc/27/stat', command[3])
+            self.assertIn('12345', command[3])
+
+        action['params'].pop('process_starts')
+        self.assertFalse(agent._stop_scoped_socks(action)[0])
+
     def test_reviewed_stop_script_generation_guard_and_no_unsafe_fallback(self):
         action={'runtime':'incus','container_name':'fixture','project':'default','params':{
             'process_names':['gost'],'process_pids':[27],'process_starts':{'27':'12345'}}}
@@ -218,6 +275,72 @@ class UserNoticeTests(unittest.TestCase):
         with server.db() as conn:
             action=conn.execute("SELECT action_type,params_json FROM security_actions WHERE action_type='stop_reviewed_socks'").fetchone()
             self.assertTrue(json.loads(action['params_json'])['manual_review'])
+
+    def test_runman_manual_review_queues_only_for_fresh_matching_generation(self):
+        generation = '00000000-0000-4000-8000-000000000002'
+        vm_id = '00000000-0000-4000-8000-000000000001'
+        self.alert = {
+            'type': 'socks_password_review', 'severity': 'warning', 'runtime': 'runman',
+            'project': 'default', 'container_name': vm_id, 'title': 'SOCKS 密码待人工评估',
+            'message': '已确认服务要求认证；请人工评估', 'instance_id': generation,
+            'review_token': 'c' * 64, 'review_observed_at': self.now,
+            'password_review': [{'pid': 27, 'process': 'gost', 'action_safe': True}],
+        }
+        self.c = {
+            'name': vm_id, 'runtime': 'runman', 'project': 'default', 'id': vm_id,
+            'stable_id': vm_id, 'instance_id': generation,
+        }
+        self.ingest()
+        with server.db() as conn:
+            alert_id = conn.execute('SELECT id FROM security_alerts WHERE alert_type=?', ('socks_password_review',)).fetchone()[0]
+
+        async def call(role='admin', token='c' * 64):
+            async def receive():
+                return {'type': 'http.request', 'body': json.dumps({'decision': 'stop_reviewed_socks', 'review_token': token}).encode()}
+            request = Request({'type': 'http', 'method': 'POST', 'headers': [],
+                               'state': {'dashboard_user': role, 'dashboard_role': role}}, receive)
+            return await server.set_security_alert_disposition(alert_id, request)
+
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as denied:
+            asyncio.run(call(role='operator'))
+        self.assertEqual(denied.exception.status_code, 403)
+        result = asyncio.run(call())
+        self.assertEqual(result.status_code, 202)
+        with server.db() as conn:
+            row = conn.execute("SELECT params_json FROM security_actions WHERE action_type='stop_reviewed_socks'").fetchone()
+            self.assertEqual(json.loads(row['params_json'])['instance_id'], generation)
+
+    def test_runman_manual_review_rejects_replaced_latest_generation(self):
+        generation = '00000000-0000-4000-8000-000000000002'
+        vm_id = '00000000-0000-4000-8000-000000000001'
+        self.alert = {
+            'type': 'socks_password_review', 'severity': 'warning', 'runtime': 'runman',
+            'project': 'default', 'container_name': vm_id, 'title': 'SOCKS 密码待人工评估',
+            'message': '已确认服务要求认证；请人工评估', 'instance_id': generation,
+            'review_token': 'd' * 64, 'review_observed_at': self.now,
+            'password_review': [{'pid': 27, 'process': 'gost', 'action_safe': True}],
+        }
+        self.c = {'name': vm_id, 'runtime': 'runman', 'project': 'default', 'id': vm_id,
+                  'stable_id': vm_id, 'instance_id': generation}
+        self.ingest()
+        with server.db() as conn:
+            conn.execute("UPDATE reports SET payload_json=? WHERE host_id='host'", (json.dumps({
+                **self.c, 'instance_id': '00000000-0000-4000-8000-000000000003'
+            }),))
+            alert_id = conn.execute('SELECT id FROM security_alerts WHERE alert_type=?', ('socks_password_review',)).fetchone()[0]
+
+        async def call():
+            async def receive():
+                return {'type': 'http.request', 'body': json.dumps({'decision': 'stop_reviewed_socks', 'review_token': 'd' * 64}).encode()}
+            request = Request({'type': 'http', 'method': 'POST', 'headers': [],
+                               'state': {'dashboard_user': 'admin', 'dashboard_role': 'admin'}}, receive)
+            return await server.set_security_alert_disposition(alert_id, request)
+
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(call())
+        self.assertEqual(raised.exception.status_code, 409)
 
 
 class UserBannerTests(unittest.TestCase):

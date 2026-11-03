@@ -484,7 +484,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     setDirty(true);
   };
 
-  const toggleServiceRuntime = (runtime: 'incus' | 'podman', checked: boolean) => {
+  const toggleServiceRuntime = (runtime: 'incus' | 'podman' | 'runman', checked: boolean) => {
     setAbuse((current) => {
       const selected = current.service_runtimes || [];
       const service_runtimes = checked ? [...new Set([...selected, runtime])] : selected.filter((item) => item !== runtime);
@@ -636,7 +636,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     const unknownInterfaces = interfaces.filter((name) => !knownInterfaces.has(name));
     if (services.length && !serviceRuntimes.length) {
       setConfirmOpen(false);
-      onToast('error', '请至少选择一个测速服务保护范围：Incus 或 Podman。');
+      onToast('error', '请至少选择一个测速服务保护范围：Incus、Podman 或 Runman。');
       return;
     }
     if (interfaces.length > 16 || (fixedPortEnabled && (!interfaces.length || interfaceInventory?.status !== 'ready' || interfaceInventory.stale || unknownInterfaces.length > 0))) {
@@ -699,7 +699,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     const uncoveredRuntimes = runtimes.filter((runtime) => fleetNetworkCoverage[runtime] === 0);
     if (services.length && !serviceRuntimes.length) {
       setFleetConfirmOpen(false);
-      onToast('error', '请至少选择一个测速服务保护范围：Incus 或 Podman。');
+      onToast('error', '请至少选择一个测速服务保护范围：Incus、Podman 或 Runman。');
       return;
     }
     if (fixedPortEnabled && (!runtimes.length || uncoveredRuntimes.length)) {
@@ -838,7 +838,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-sky-700/60 bg-sky-950/50 text-sky-300"><Shield className="h-5 w-5" aria-hidden="true" /></span>
         <div className="min-w-0">
           <h2 className="text-lg font-bold text-slate-100">母机防火墙策略</h2>
-          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">RFW 主机规则由 Watcher 经 Runman 受限接口应用；测速服务保护由 Agent 在 Incus / Podman 容器内自动应用。</p>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">RFW 主机规则由 Watcher 经 Runman 受限接口应用；测速服务保护由 Agent 在所选 Incus / Podman / Runman 容器内应用。</p>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">8792 是 Agent 面板端口；RFW API 默认仅监听 127.0.0.1:7734（地址可配置）。Watcher 通过 Agent 受限控制通道读回和同步，不需要将 RFW API 暴露到公网。</p>
         </div>
       </div>
@@ -916,7 +916,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <h3 className="text-sm font-bold text-slate-100">全局策略模板 <span className="ml-2 font-normal text-slate-400">版本 #{fleetSnapshot?.revision ?? 0}</span></h3>
-          <p className="mt-1 text-xs leading-5 text-slate-400">固定端口模板支持 Incus / Podman / Runman bridge；每台母机按自己的最新网卡清单解析。测速服务保护仍只支持 Incus / Podman，不依赖 RFW 网桥。</p>
+          <p className="mt-1 text-xs leading-5 text-slate-400">固定端口模板支持 Incus / Podman / Runman bridge；每台母机按自己的最新网卡清单解析。测速服务保护可单独选择 Incus / Podman / Runman，不依赖 RFW 网桥。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => void loadFleetPolicy()} disabled={fleetLoading} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">{fleetLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}刷新全局状态</button>
@@ -951,7 +951,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           </div>)}
         </div>
       </details>}
-      <p className="mt-3 rounded-lg border border-sky-900/50 bg-sky-950/20 p-3 text-[10px] leading-5 text-sky-100/80">RFW 状态只由母机实时规则读回、规则修订号与能力状态判定。测速保护单独按 Incus / Podman 容器的最新 Agent 采样核验；仅保存策略或收到动作成功回执，不算容器保护已验证。</p>
+      <p className="mt-3 rounded-lg border border-sky-900/50 bg-sky-950/20 p-3 text-[10px] leading-5 text-sky-100/80">RFW 状态只由母机实时规则读回、规则修订号与能力状态判定。测速保护单独按所选 Incus / Podman / Runman 容器的最新 Agent 采样核验；仅保存策略或收到动作成功回执，不算容器保护已验证。</p>
       <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
         <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Incus 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.incus}/{fleetHosts.length}</strong> 台</span>
         <span className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-slate-300">Podman 网桥可映射 <strong className="ml-1 font-mono tabular-nums text-slate-100">{fleetNetworkCoverage.podman}/{fleetHosts.length}</strong> 台</span>
@@ -1152,9 +1152,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
           })}
         </div>
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {(['incus', 'podman'] as const).map((runtime) => {
+          {(['incus', 'podman', 'runman'] as const).map((runtime) => {
             const checked = (abuse.service_runtimes || []).includes(runtime);
-            const label = runtime === 'incus' ? 'Incus' : 'Podman';
+            const label = runtime === 'incus' ? 'Incus' : runtime === 'podman' ? 'Podman' : 'Runman';
             return <label key={runtime} className={checked ? 'flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-sky-700 bg-sky-950/30 p-3' : 'flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-slate-700 bg-slate-950/50 p-3 hover:border-slate-600'}>
               <input type="checkbox" checked={checked} onChange={(event) => toggleServiceRuntime(runtime, event.target.checked)} className="h-4 w-4 shrink-0 accent-sky-500" aria-label={'测速服务范围 ' + label} />
               <span className="text-xs font-semibold text-slate-100">{label} 容器</span>
@@ -1162,8 +1162,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
             </label>;
           })}
         </div>
-        <p className="mt-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3 text-[10px] leading-4 text-sky-100/80">默认策略会自动作用于 Incus / Podman 容器，宿主机自身和 Docker 容器不受影响。已有自定义策略会保留；手动调整后仍需保存应用。</p>
-        {(abuse.services || []).length > 0 && !(abuse.service_runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">当前策略未选择 Incus / Podman，因此测速保护范围为空。若要启用容器保护，请勾选目标运行时并保存应用。</p>}
+        <p className="mt-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3 text-[10px] leading-4 text-sky-100/80">未保存策略时的自动默认范围仍为 Incus / Podman；Runman 可在此单独勾选。宿主机自身和 Docker 容器不受影响；手动调整后仍需保存应用。</p>
+        {(abuse.services || []).length > 0 && !(abuse.service_runtimes || []).length && <p className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[10px] leading-4 text-amber-100/80">当前策略未选择 Incus、Podman 或 Runman，因此测速保护范围为空。若要启用容器保护，请勾选目标运行时并保存应用。</p>}
         <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[10px] leading-4 text-slate-500">Ookla、Cloudflare 和 FAST 仅限制指定入口域名，不封共享 CDN IP；浏览器 DoH、直连 IP 或已有 DNS 缓存可能绕过 hosts 解析限制。TcpQuality IP 列表上游不可读时会保留已安装规则并标记过期，不会宣称刷新成功。</p>
       </div>
 
@@ -1307,10 +1307,10 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     <ConfirmDialog open={recoveryIntent !== null} title={recoveryIntent === 'retry' ? '重试当前母机防火墙策略？' : '回滚到上一条历史策略？'} description={recoveryIntent === 'retry' ? `这会把 ${hostId} 当前保存的策略作为新修订重新排队。执行前系统会检查主机在线状态、RFW 实时读回、接口映射和协议能力。` : `这会把 ${hostId} 最近一条历史策略作为新修订排队应用；如果历史规则引用了当前无法确认的接口，系统会拒绝下发。`} confirmLabel={recoveryIntent === 'retry' ? '确认重试并排队' : '确认回滚并排队'} tone="danger" isSubmitting={recoveringPolicy} onConfirm={confirmPolicyRecovery} onCancel={() => { if (!recoveringPolicy) setRecoveryIntent(null); }}>
       <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/80">只有管理员可执行。它会发送一个主机范围的 RFW 操作，但不会触碰其他母机；若正在运行全局模板、Agent 离线或读回过期，后端会拒绝请求。</p>
     </ConfirmDialog>
-    <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。已启用 ${blockingRules} 条 RFW 主机规则与 ${enabledAbuse} 项容器级保护。测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}（仅容器，不含宿主机自身和 Docker）。服务域名项写入指定容器解析配置，容器监听与动态 IP 规则由 Agent 在独立网络命名空间应用。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
+    <ConfirmDialog open={confirmOpen && scope === 'host'} title="应用母机防火墙策略？" description={`此配置将应用于 ${hostId}。已启用 ${blockingRules} 条 RFW 主机规则与 ${enabledAbuse} 项容器级保护。测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : runtime === 'runman' ? 'Runman' : 'Podman').join(' + ') || '未启用'}（仅容器，不含宿主机自身和 Docker）。服务域名项写入指定容器解析配置，容器监听与动态 IP 规则由 Agent 在独立网络命名空间应用。`} confirmLabel="确认并排队" tone="danger" isSubmitting={saving} onConfirm={confirmApply} onCancel={() => setConfirmOpen(false)}>
       <div className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100/90">RFW 规则依赖 Runman；容器服务规则依赖 Watcher Agent。每类规则都会单独报告执行和读回状态。管理员配置的测速资源保护不构成对用户滥用的认定。</div>
     </ConfirmDialog>
-    <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用 RFW 阻断规则与 ${enabledAbuse} 项容器级保护；测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : 'Podman').join(' + ') || '未启用'}（仅容器，不含宿主机自身和 Docker）；固定端口范围：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : runtime === 'podman' ? 'Podman' : 'Runman').join(' + ') || '未启用'}。节点会按各自策略执行；无法确认的范围会等待或跳过，不会套用猜测的网卡名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>
+    <ConfirmDialog open={fleetConfirmOpen && scope === 'fleet'} title="保存并同步全局防火墙策略？" description={`全局版本将递增并覆盖单机期望策略。当前有 ${blockingRules} 条启用 RFW 阻断规则与 ${enabledAbuse} 项容器级保护；测速服务范围：${(abuse.service_runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : runtime === 'runman' ? 'Runman' : 'Podman').join(' + ') || '未启用'}（仅容器，不含宿主机自身和 Docker）；固定端口范围：${(abuse.runtimes || []).map((runtime) => runtime === 'incus' ? 'Incus' : runtime === 'podman' ? 'Podman' : 'Runman').join(' + ') || '未启用'}。节点会按各自策略执行；无法确认的范围会等待或跳过，不会套用猜测的网卡名。`} confirmLabel="确认并同步全体" tone="danger" isSubmitting={fleetSaving} onConfirm={confirmFleetApply} onCancel={() => setFleetConfirmOpen(false)}>
       <div className="mt-4 rounded-lg border border-rose-900/70 bg-rose-950/40 p-3 text-xs leading-5 text-rose-100/90">CN GeoIP 规则可按入站来源或出站目标阻断匹配流量，可能影响母机上全部容器与服务。FET 是启发式特征、存在误报；MTProto 仅能识别特定初始化标记，且不做 TCP 重组。节点只有在运行中的 RFW 明确报告支持后才会应用 MTProto 规则；若读回不支持，必须先部署含该检测能力的 RFW 构建。IPv6 暂不支持。策略应用回执不等于内核规则实时读回，节点事件采集可能因缓冲区覆盖而不完整。</div>
     </ConfirmDialog>
   </div>;

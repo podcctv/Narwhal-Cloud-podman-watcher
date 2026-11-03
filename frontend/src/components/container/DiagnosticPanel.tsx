@@ -94,7 +94,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     }
   };
 
-  const isSupportedRuntime = ['incus', 'podman'].includes(identity.runtime);
+  const isSupportedRuntime = ['incus', 'podman', 'runman'].includes(identity.runtime);
   const inboundIps = sample?.inbound_ips?.length
     ? sample.inbound_ips
     : (sample?.connection_ips || []).filter((ip) => Number(ip.inbound || 0) > 0);

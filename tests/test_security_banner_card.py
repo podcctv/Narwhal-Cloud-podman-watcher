@@ -2,6 +2,8 @@ import base64
 import gzip
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -271,6 +273,7 @@ class CardTests(unittest.TestCase):
                  'id': '00000000-0000-0000-0000-000000000001', 'pid': '42', 'pid_start_ticks': '12345'}
             execute = mock.Mock(return_value=(False, ''))
             with mock.patch.object(banner, 'install_shell', return_value=(True, True)) as install, \
+                    mock.patch.object(banner, 'install_ssh_banner', return_value={'state': 'active', 'reason': ''}) as ssh_install, \
                     mock.patch.object(banner, 'write_proc', return_value=True) as write:
                 self.assertTrue(banner.update(c, [], set(), execute, [], 'test'))
             install.assert_called_once_with(c, mock.ANY, execute, 'test', mock.ANY)
@@ -279,13 +282,34 @@ class CardTests(unittest.TestCase):
             self.assertEqual(write.call_args.kwargs['expected_start_ticks'], '12345')
             self.assertTrue(write.call_args.kwargs['require_existing'])
             execute.assert_not_called()
+            ssh_install.assert_called_once()
             delivery = c['security']['motd_delivery']
             self.assertEqual(delivery['status'], 'written')
             self.assertEqual(delivery['shell_delivery'], 'installed')
             self.assertEqual(delivery['format_version'], 2)
             self.assertEqual(delivery['login_display'], 'configured')
             self.assertEqual(delivery['mechanism'], 'interactive_shell_card')
+            self.assertEqual(delivery['ssh_banner']['state'], 'active')
             banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
+
+    def test_runman_ssh_banner_uses_pre_auth_dropin_and_preserves_operator_config(self):
+        container = {'name': '00000000-0000-0000-0000-000000000001', 'runtime': 'runman'}
+        runner = mock.Mock(return_value=(True, 'NARWHAL_SSH_BANNER_STATE=active'))
+        result = banner.install_ssh_banner(container, 'plain banner', runner)
+        self.assertEqual(result, {'state': 'active', 'reason': ''})
+        script = runner.call_args.args[1]
+        self.assertIn('/etc/ssh/sshd_config.d/00-narwhal-security-banner.conf', script)
+        self.assertIn('sshd" -t -f "$cfg"', script)
+        self.assertIn('preserved_operator_config', script)
+        self.assertIn('cmp -s "$tmp_banner" "$banner"', script)
+        self.assertNotIn('>> /etc/ssh/sshd_config', script)
+        shell = shutil.which('sh') or ('C:/Program Files/Git/bin/bash.exe' if Path('C:/Program Files/Git/bin/bash.exe').is_file() else '')
+        if shell:
+            parsed = subprocess.run([shell, '-n'], input=script, text=True, capture_output=True, timeout=10)
+            self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        runner.return_value = (True, 'NARWHAL_SSH_BANNER_STATE=preserved_operator_config')
+        preserved = banner.install_ssh_banner(container, 'plain banner', runner)
+        self.assertEqual(preserved['state'], 'preserved_operator_config')
 
 
 @unittest.skipUnless(os.name == 'posix', 'PTY requires POSIX')

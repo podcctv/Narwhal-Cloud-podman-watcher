@@ -327,7 +327,8 @@ def observe(conn, host, ts, containers, alerts):
     lookup={(c.get("runtime",""),c.get("project",""),c.get("name")):c for c in containers}
     for notice in conn.execute("SELECT * FROM buyer_user_notices WHERE host_id=? AND expires_at>? AND banner_status='queued'", (host, ts)).fetchall():
         c = lookup.get((notice['runtime'], notice['project'], notice['container_name']))
-        if notice['container_id'] and (not c or str(c.get('id') or '') != notice['container_id']):
+        current_instance = str((c or {}).get('instance_id') or '') if notice['runtime'] == 'runman' else str((c or {}).get('id') or '')
+        if notice['container_id'] and (not c or current_instance != notice['container_id']):
             continue
         delivery = c.get('security', {}).get('motd_delivery', {}) if c else {}
         if 'NOTICE-'+notice['id'] not in delivery.get('notice_ids', []):
@@ -478,7 +479,21 @@ def banner_states(conn, host):
 def container_id(conn, row):
     report = conn.execute('SELECT payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1',
         tuple(row[k] for k in buyer_mapping.IDENTITY)).fetchone()
-    return str(buyer_content.loads(report[0]).get('id') or '')[:200] if report else ''
+    if not report:
+        return ''
+    payload = buyer_content.loads(report[0])
+    if row['runtime'] == 'runman':
+        stable_id = str(payload.get('stable_id') or payload.get('id') or '').lower()
+        generation = str(payload.get('instance_id') or '').lower()
+        if (
+            row['project'] != 'default'
+            or stable_id != str(row['container_name'] or '').lower()
+            or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', stable_id)
+            or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', generation)
+        ):
+            return ''
+        return generation
+    return str(payload.get('id') or '')[:200]
 
 
 def notice_preview(conn, alert_id, *, can_retry=False):
@@ -496,7 +511,22 @@ def notice_preview(conn, alert_id, *, can_retry=False):
     instance = container_id(conn, a)
     snapshot += [t['machine_id'] if mapped else '', t['user_id'] if mapped else '', instance, subject, message]
     token = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False).encode()).hexdigest()
-    live = a['runtime'] in {'incus', 'podman'} and 0 <= now-a['last_seen'] <= 900
+    live = a['runtime'] in {'incus', 'podman', 'runman'} and 0 <= now-a['last_seen'] <= 900
+    if a['runtime'] == 'runman':
+        details = buyer_content.loads(a['details_json'])
+        generation = str(details.get('instance_id') or '').lower()
+        report_at = conn.execute(
+            'SELECT ts FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1',
+            tuple(a[k] for k in buyer_mapping.IDENTITY),
+        ).fetchone()
+        live = bool(
+            live
+            and a['project'] == 'default'
+            and instance
+            and generation == instance
+            and report_at is not None
+            and 0 <= now-int(report_at['ts'] or 0) <= 900
+        )
     latest = []
     for row in conn.execute('SELECT id,telegram_status,banner_status,last_error,telegram_error,banner_error,telegram_attempts,banner_attempts,telegram_manual_retries,banner_manual_retries,telegram_updated_at,banner_updated_at,created_at,expires_at FROM buyer_user_notices WHERE alert_id=? ORDER BY created_at DESC LIMIT 5', (alert_id,)):
         item = dict(row)

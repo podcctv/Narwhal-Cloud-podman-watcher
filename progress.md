@@ -2,11 +2,16 @@
 
 更新时间：2026-11-03（Asia/Shanghai）
 
-## Runman Rust v2 兼容（v1.7.203）
+## Runman Rust v2 兼容（v1.7.204）
 
 - 基于 fork `origin/main` v1.7.202 完成 guest exec、代次绑定扫描与网络隔离、交互 shell 卡片/MOTD、单实例手动/自动限速、磁盘 I/O 和网络指标适配。
 - 补齐自动滥用检测：需要两次新鲜相关证据并复核实例 UUID 代次和进程启动代次后，才隔离 Runman 自有 veth；服务端只接受 `default` 项目、规范 VM UUID 和 v4 实例代次。
-- SSH 认证前 Banner、VMess/Trojan/测速专用防护、CPU 进程归因、UDP socket 归因、Podman 式写层大小、动态改写 Runman CPU/内存/I/O 限额与一般破坏性服务处置仍不支持；详见兼容矩阵。
+- 本轮补齐 SSH 认证前 Banner（含 sshd 配置/读回/重载校验）、guest UDP socket 计数与进程引用归因、CPU offender 采样、Runman 专属 cgroup-v2 CPU/内存/I/O guards、VMess/Trojan 与测速策略接入，以及管理员复核后的 SOCKS 指定 PID 停止。
+- 补上按需与告警触发的 Runman 深度快照入口；Server 与 Agent 均以实例 UUID 代次绑定请求，实例替换后旧快照任务不会落到新实例。
+- 容器连接证据时间线和运维历史回放接入 Runman，只汇总当前已知实例代次；回放仍只读。
+- 用户定向登录提醒支持 Runman，预览、重试与写入回执都核对告警和最新报告中的同一实例代次。
+- Runman 磁盘指标报告 sparse `disk.img` 已分配块，不宣称等同 Podman writable layer。广义服务/配置/二进制清理继续关闭，直至每个目标进程和文件都有端到端代次证据。
+- 持续连接过载自动停止同样保持关闭：Runman 控制 API 尚无“仅当目标仍为该代次才停止”的原子条件；容器替换竞态解决前不启用。
 - 前端从合并后的最新 `main` 重建静态资源；生产节点没有在本次源代码发布中升级或验证。
 
 ## Incus 卡住实例巡检与测试回归修复（v1.7.202）

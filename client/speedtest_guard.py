@@ -23,7 +23,7 @@ except ImportError:
     import vmess_guard
 
 
-SUPPORTED_RUNTIMES = {"incus", "podman"}
+SUPPORTED_RUNTIMES = {"incus", "podman", "runman"}
 SUPPORTED_SERVICES = {
     "ookla", "cloudflare", "fast", "tcpquality",
     "iperf3_server", "librespeed", "openspeedtest", "ookla_server",

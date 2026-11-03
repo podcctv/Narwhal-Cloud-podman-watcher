@@ -149,6 +149,7 @@ def _read_cgroup(container: dict[str, Any]) -> tuple[str | None, dict[str, dict[
         container.get("runtime"),
         container.get("stable_id") or container.get("id"),
         container.get("name"),
+        expected_start_ticks=(str(container.get("pid_start_ticks") or "") if container.get("runtime") == "runman" else ""),
     )
     if target is None:
         return None, {}, error
@@ -219,6 +220,17 @@ def _write_io_max(path: Path, device: str, values: dict[str, str]) -> tuple[bool
         return False, str(exc)[:300]
 
 
+def _safe_write_io_max(container: dict[str, Any], path: Path, device: str, values: dict[str, str]) -> tuple[bool, str]:
+    if container.get("runtime") == "runman":
+        target, error = resolve_container_cgroup(
+            container.get("pid"), "runman", container.get("stable_id") or container.get("id"),
+            container.get("name"), expected_start_ticks=str(container.get("pid_start_ticks") or ""),
+        )
+        if target is None or target.resolve() != path.resolve():
+            return False, error or "Runman 实例 PID 或 cgroup 代次已变化；拒绝修改 io.max"
+    return _write_io_max(path, device, values)
+
+
 def _populated(cgroup_path: str) -> bool | None:
     """Return whether a previous cgroup still owns processes; None means unknown."""
     if not cgroup_path:
@@ -242,13 +254,16 @@ def _identity(container: dict[str, Any]) -> tuple[str, str] | None:
     name = str(container.get("name") or "").strip()
     project = str(container.get("project") or "default").strip()
     stable_id = str(container.get("stable_id") or container.get("id") or "").strip()
-    if runtime not in {"incus", "podman"} or not name or not stable_id:
+    if runtime not in {"incus", "podman", "runman"} or not name or not stable_id:
         return None
     if len(name) > 200 or len(stable_id) > 256 or not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", name):
         return None
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
         return None
-    return "|".join((runtime, project, stable_id)), name
+    generation = str(container.get("instance_id") or "").strip() if runtime == "runman" else stable_id
+    if runtime == "runman" and not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", generation):
+        return None
+    return "|".join((runtime, project, generation)), name
 
 
 def _counter_rates(
@@ -382,8 +397,8 @@ def _trigger_alert(container: dict[str, Any], record: dict[str, Any], action: di
         "runtime": str(container.get("runtime") or ""),
         "project": str(container.get("project") or ""),
         "container_name": str(container.get("name") or ""),
-        "instance_id": str(container.get("stable_id") or container.get("id") or "")[:200],
-        "alert_key": "io-pressure:" + str(container.get("stable_id") or container.get("id") or "")[:200],
+        "instance_id": str(container.get("instance_id") if container.get("runtime") == "runman" else container.get("stable_id") or container.get("id") or "")[:200],
+        "alert_key": "io-pressure:" + str(container.get("instance_id") if container.get("runtime") == "runman" else container.get("stable_id") or container.get("id") or "")[:200],
         "ongoing_protection": record.get("stage") not in {"restored", "candidate"},
         "io_guard": io_detail,
         "automatic_remediation": action,
@@ -603,7 +618,7 @@ def observe(
                             record["stage"] = "restore_failed"
                             record["last_error"] = f"无法保存恢复计划：{str(exc)[:200]}"
                         else:
-                            ok, output = _write_io_max(io_file_path, device, original or {})
+                            ok, output = _safe_write_io_max(container, io_file_path, device, original or {})
                             if ok and _matches_io_max(io_file_path, device, original):
                                 instances[key] = {"stage": "cooldown", "cooldown_until": timestamp + cooldown_seconds,
                                                   "last_seen": timestamp, "restored_at": timestamp}
@@ -652,7 +667,7 @@ def observe(
                                         record["pending"] = None
                                         record["last_error"] = f"无法保存阶梯限额计划：{str(exc)[:180]}"
                                     else:
-                                        ok, output = _write_io_max(io_file_path, device, target)
+                                        ok, output = _safe_write_io_max(container, io_file_path, device, target)
                                         if ok and _matches_io_max(io_file_path, device, target):
                                             record["applied"] = target
                                             record["tier"] = tier + 1
@@ -838,7 +853,7 @@ def observe(
                             reserved.discard(key)
                             action = {"attempted": True, "succeeded": False, "message": record["last_error"]}
                         else:
-                            ok, output = _write_io_max(Path(cgroup_path), device, target)
+                            ok, output = _safe_write_io_max(container, Path(cgroup_path), device, target)
                             if ok and _matches_io_max(Path(cgroup_path), device, target):
                                 record["applied"] = target
                                 record["tier"] = 1

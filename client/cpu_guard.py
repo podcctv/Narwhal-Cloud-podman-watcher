@@ -256,7 +256,7 @@ def _runtime_args(runtime: str, project: str, args: list[str]) -> list[str]:
 
 def _identity(container: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
     runtime = str(container.get("runtime") or "").strip().lower()
-    if runtime not in {"incus", "podman"}:
+    if runtime not in {"incus", "podman", "runman"}:
         return None
     name = str(container.get("name") or "").strip()
     project = str(container.get("project") or "default").strip()
@@ -267,11 +267,43 @@ def _identity(container: dict[str, Any]) -> tuple[str, str, str, str, str] | Non
         return None
     if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
         return None
-    key = "|".join((runtime, project, stable_id))
-    return runtime, project, name, stable_id, key
+    generation = str(container.get("instance_id") or "").strip() if runtime == "runman" else stable_id
+    if runtime == "runman" and not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", generation):
+        return None
+    key = "|".join((runtime, project, generation))
+    return runtime, project, name, generation, key
 
 
-def _read_limit(runtime: str, binary: str, project: str, name: str) -> tuple[dict[str, Any] | str | None, str]:
+def _runman_cpu_cgroup(container: dict[str, Any] | None) -> tuple[Any, str]:
+    if not isinstance(container, dict):
+        return None, "Runman 资源限额缺少容器身份"
+    target, error = resolve_container_cgroup(
+        container.get("pid"), "runman", container.get("stable_id") or container.get("id"),
+        container.get("name"), expected_start_ticks=str(container.get("pid_start_ticks") or ""),
+    )
+    if target is None:
+        return None, error or "Runman 资源 cgroup 无法确认"
+    return target, ""
+
+
+def _valid_runman_cpu_max(value: str) -> bool:
+    match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", str(value or "").strip())
+    if not match:
+        return False
+    quota, period = match.groups()
+    return 1000 <= int(period) <= 1_000_000 and (quota == "max" or 1000 <= int(quota) <= 1_000_000_000)
+
+
+def _read_limit(runtime: str, binary: str, project: str, name: str, container: dict[str, Any] | None = None) -> tuple[dict[str, Any] | str | None, str]:
+    if runtime == "runman":
+        target, error = _runman_cpu_cgroup(container)
+        if target is None:
+            return None, error
+        try:
+            value = (target / "cpu.max").read_text(encoding="ascii").strip()
+        except OSError as exc:
+            return None, f"无法读取 Runman cpu.max（{type(exc).__name__}）"
+        return (value, "") if _valid_runman_cpu_max(value) else (None, "Runman cpu.max 格式无法确认")
     if runtime == "incus":
         code, output = _run(binary, _runtime_args(binary, project, ["config", "get", name, "limits.cpu.allowance"]))
         if code != 0:
@@ -305,6 +337,12 @@ def _limit_cpus(runtime: str, limit: dict[str, Any] | str, effective_cpus: float
             quota, period = float(hard.group(1)), float(hard.group(2))
             return quota / period if period > 0 else 0.0
         return max(0.0, effective_cpus)
+    if runtime == "runman":
+        match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", str(limit or "").strip())
+        if not match:
+            return 0.0
+        quota, period = match.groups()
+        return max(0.0, effective_cpus) if quota == "max" else int(quota) / int(period)
     quota = int(limit.get("cpu_quota") or 0)
     period = int(limit.get("cpu_period") or 0)
     return quota / period if quota > 0 and period > 0 else max(0.0, effective_cpus)
@@ -328,6 +366,20 @@ def _half_limit(
             return f"{quota}ms/{period}ms", quota / period
         quota = max(1, int(baseline * ratio * 100))
         return f"{quota}ms/100ms", quota / 100.0
+    if runtime == "runman":
+        match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", str(limit or "").strip())
+        if not match:
+            return None, 0.0
+        quota, period = match.groups()
+        period_value = int(period)
+        configured = int(quota) / period_value if quota != "max" else available_cpus
+        baseline = min(configured, available_cpus) if available_cpus > 0 else configured
+        if baseline <= 0:
+            return None, 0.0
+        applied_quota = max(1000, int(baseline * ratio * period_value))
+        if quota != "max" and applied_quota >= int(quota):
+            return None, 0.0
+        return f"{applied_quota} {period_value}", applied_quota / period_value
     quota = int(limit.get("cpu_quota") or 0)
     period = int(limit.get("cpu_period") or 0)
     if int(limit.get("nano_cpus") or 0) > 0:
@@ -363,6 +415,15 @@ def _scale_limit(runtime: str, value: dict[str, Any] | str, ratio: float) -> tup
         if next_quota >= quota:
             return None, 0.0
         return f"{next_quota}ms/{max(1, int(period))}ms", next_quota / period
+    if runtime == "runman":
+        match = re.fullmatch(r"([1-9][0-9]*) ([1-9][0-9]*)", str(value or "").strip())
+        if not match:
+            return None, 0.0
+        quota, period = (int(item) for item in match.groups())
+        next_quota = max(1000, int(math.floor(quota * ratio)))
+        if next_quota >= quota:
+            return None, 0.0
+        return f"{next_quota} {period}", next_quota / period
     if not isinstance(value, dict):
         return None, 0.0
     quota = int(value.get("cpu_quota") or 0)
@@ -381,7 +442,7 @@ def _scale_limit(runtime: str, value: dict[str, Any] | str, ratio: float) -> tup
 
 
 def _matches(runtime: str, current: dict[str, Any] | str | None, expected: dict[str, Any] | str) -> bool:
-    if runtime == "incus":
+    if runtime in {"incus", "runman"}:
         return str(current or "").strip() == str(expected or "").strip()
     if not isinstance(current, dict) or not isinstance(expected, dict):
         return False
@@ -396,14 +457,25 @@ def _matches(runtime: str, current: dict[str, Any] | str | None, expected: dict[
 
 
 def _format_limit(runtime: str, value: dict[str, Any] | str) -> str:
-    if runtime == "incus":
+    if runtime in {"incus", "runman"}:
         return str(value or "未设置（继承/default）")
     quota = int(value.get("cpu_quota") or 0) if isinstance(value, dict) else 0
     period = int(value.get("cpu_period") or 0) if isinstance(value, dict) else 0
     return f"{quota}/{period}" if quota > 0 and period > 0 else "不限额"
 
 
-def _set_limit(runtime: str, binary: str, project: str, name: str, value: dict[str, Any] | str) -> tuple[bool, str]:
+def _set_limit(runtime: str, binary: str, project: str, name: str, value: dict[str, Any] | str, container: dict[str, Any] | None = None) -> tuple[bool, str]:
+    if runtime == "runman":
+        if not isinstance(value, str) or not _valid_runman_cpu_max(value):
+            return False, "Runman cpu.max 限值格式无效"
+        target, error = _runman_cpu_cgroup(container)
+        if target is None:
+            return False, error
+        try:
+            (target / "cpu.max").write_text(value, encoding="ascii")
+            return True, ""
+        except OSError as exc:
+            return False, f"写入 Runman cpu.max 失败（{type(exc).__name__}）"
     if runtime == "incus":
         code, output = _run(binary, _runtime_args(binary, project, ["config", "set", name, "limits.cpu.allowance", str(value)]))
         return code == 0, output
@@ -417,7 +489,18 @@ def _set_limit(runtime: str, binary: str, project: str, name: str, value: dict[s
     return code == 0, output
 
 
-def _restore_limit(runtime: str, binary: str, project: str, name: str, value: dict[str, Any] | str) -> tuple[bool, str]:
+def _restore_limit(runtime: str, binary: str, project: str, name: str, value: dict[str, Any] | str, container: dict[str, Any] | None = None) -> tuple[bool, str]:
+    if runtime == "runman":
+        if not isinstance(value, str) or not _valid_runman_cpu_max(value):
+            return False, "Runman 原始 cpu.max 限值格式无效"
+        target, error = _runman_cpu_cgroup(container)
+        if target is None:
+            return False, error
+        try:
+            (target / "cpu.max").write_text(value, encoding="ascii")
+            return True, ""
+        except OSError as exc:
+            return False, f"恢复 Runman cpu.max 失败（{type(exc).__name__}）"
     if runtime == "incus":
         if str(value or "").strip():
             code, output = _run(binary, _runtime_args(binary, project, ["config", "set", name, "limits.cpu.allowance", str(value)]))
@@ -574,7 +657,7 @@ def observe(
             record = None
 
         if isinstance(record, dict) and record.get("stage") in {"applying", "escalating", "active", "restoring", "restore_failed", "apply_unverified", "manual_override"}:
-            current, read_error = _read_limit(runtime, binary, project, name)
+            current, read_error = _read_limit(runtime, binary, project, name, container)
             original = record.get("original")
             applied = record.get("applied")
             if read_error or current is None:
@@ -713,13 +796,13 @@ def observe(
                             record["pending_applied"] = None
                             record["last_error"] = f"无法持久化下一阶 CPU 限额：{exc}"[:300]
                         else:
-                            before, before_error = _read_limit(runtime, binary, project, name)
+                            before, before_error = _read_limit(runtime, binary, project, name, container)
                             if before_error or not _matches(runtime, before, applied):
                                 record["stage"] = "manual_override"
                                 record["last_error"] = before_error or "CPU 配额在阶梯保护执行前发生人工更改；未覆盖。"
                             else:
-                                changed, change_output = _set_limit(runtime, binary, project, name, target)
-                                after, after_error = _read_limit(runtime, binary, project, name)
+                                changed, change_output = _set_limit(runtime, binary, project, name, target, container)
+                                after, after_error = _read_limit(runtime, binary, project, name, container)
                                 if changed and not after_error and _matches(runtime, after, target):
                                     record["applied"] = target
                                     record["applied_cpus"] = target_cpus
@@ -775,8 +858,8 @@ def observe(
                         record["stage"] = "restore_failed"
                         record["last_error"] = f"无法持久化恢复计划：{exc}"[:400]
                     else:
-                        restored, restore_output = _restore_limit(runtime, binary, project, name, original)
-                        after, after_error = _read_limit(runtime, binary, project, name)
+                        restored, restore_output = _restore_limit(runtime, binary, project, name, original, container)
+                        after, after_error = _read_limit(runtime, binary, project, name, container)
                         if restored and not after_error and _matches(runtime, after, original):
                             instances[key] = {"stage": "cooldown", "cooldown_until": timestamp + cooldown_seconds,
                                               "last_seen": timestamp, "restored_at": timestamp}
@@ -952,13 +1035,13 @@ def observe(
             process = candidate.get("top_process") if isinstance(candidate.get("top_process"), dict) else {}
 
         if timestamp - last_attempt < retry_seconds:
-            current, error = _read_limit(runtime, binary, project, name)
+            current, error = _read_limit(runtime, binary, project, name, container)
             result_action = {"attempted": True, "succeeded": False,
                 "message": "CPU 限额操作处于安全重试间隔；本次未重复修改配置。"}
             current_limit = current
             action_error = error
         else:
-            original, read_error = _read_limit(runtime, binary, project, name)
+            original, read_error = _read_limit(runtime, binary, project, name, container)
             applied, applied_cpus = _half_limit(
                 runtime, original, identity["effective_cpus"]
             ) if original is not None else (None, 0.0)
@@ -997,7 +1080,7 @@ def observe(
                         "message": "无法可靠保存自动恢复状态；为避免留下无法还原的配额，未修改容器。"}
                     current_limit = original
                 else:
-                    before_apply, before_error = _read_limit(runtime, binary, project, name)
+                    before_apply, before_error = _read_limit(runtime, binary, project, name, container)
                     if before_error or not _matches(runtime, before_apply, original):
                         record["stage"] = "apply_unverified" if before_error else "manual_override"
                         record["last_error"] = (before_error or "检测到管理员在保护执行前更改 CPU 配额；保留人工设置")[:400]
@@ -1005,8 +1088,8 @@ def observe(
                             "message": "执行前 CPU 配额与已保存的原设置不一致；系统没有覆盖该设置。"}
                         action_error = record["last_error"]
                     else:
-                        applied_ok, apply_output = _set_limit(runtime, binary, project, name, applied)
-                        current_limit, read_error = _read_limit(runtime, binary, project, name)
+                        applied_ok, apply_output = _set_limit(runtime, binary, project, name, applied, container)
+                        current_limit, read_error = _read_limit(runtime, binary, project, name, container)
                         if applied_ok and not read_error and _matches(runtime, current_limit, applied):
                             record["stage"] = "active"
                             record["applied_at"] = timestamp

@@ -19,7 +19,7 @@ except ImportError:
     import socks_detector
 
 
-SUPPORTED_RUNTIMES = {"incus", "podman"}
+SUPPORTED_RUNTIMES = {"incus", "podman", "runman"}
 SUPPORTED_ENGINES = {"xray", "v2ray", "sing-box"}
 SUPPORTED_PROTOCOLS = {"vmess", "trojan"}
 SUPPORTED_GUARD_TYPES = SUPPORTED_PROTOCOLS | {"speedtest"}

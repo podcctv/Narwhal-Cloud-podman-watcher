@@ -35,6 +35,10 @@ export interface ContainerItem {
   agent_version?: string;
   cpu_effective_cpus?: number;
   container_disk_rw_bytes?: number;
+  container_disk_backing_image_available?: boolean;
+  container_disk_backing_image_logical_bytes?: number | null;
+  container_disk_backing_image_allocated_bytes?: number | null;
+  container_disk_backing_image_sampled_at?: number;
   disk_root_used_percent?: number | null;
   disk_used_percent?: number;
   disk_root_total_bytes?: number;
@@ -614,7 +618,7 @@ export interface HostFirewallAbusePolicy {
   /** Fleet templates use logical runtimes and resolve real interfaces per host. */
   runtimes?: Array<'incus' | 'podman' | 'runman'>;
   /** Service-target policies select container runtimes independently of bridge interfaces. */
-  service_runtimes?: Array<'incus' | 'podman'>;
+  service_runtimes?: Array<'incus' | 'podman' | 'runman'>;
 }
 
 export interface HostFirewallRuntimeStatus {
@@ -832,7 +836,7 @@ export interface FleetFirewallHostStatus {
     configured: boolean;
     state: 'not_configured' | 'node_offline' | 'agent_update_required' | 'waiting_policy' | 'policy_not_applied' | 'applying' | 'apply_failed' | 'waiting_samples' | 'samples_stale' | 'active' | 'partial' | 'waiting_revision' | 'unverified';
     services: string[];
-    runtimes: Array<'incus' | 'podman'>;
+    runtimes: Array<'incus' | 'podman' | 'runman'>;
     policy_revision: number;
     observed_at: number;
     age_seconds: number | null;

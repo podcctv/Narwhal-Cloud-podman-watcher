@@ -3115,6 +3115,7 @@ def _security_alert(
         "runtime": str(container.get("runtime") or ""),
         "project": str(container.get("project") or ""),
         "container_name": str(container.get("name") or ""),
+        "instance_id": str(container.get("instance_id") or ""),
         "observation": observation,
     }
 
@@ -3256,7 +3257,7 @@ def _apply_protocol_guard_plan(
     """Apply a protocol-specific guard without sharing another protocol's nft table."""
     status = dict(plan)
     should_reconcile = (
-        runtime_name in {"incus", "podman"}
+        runtime_name in {"incus", "podman", "runman"}
         and not host_or_shared_network
         and bool(namespace_epoch)
         and (
@@ -3327,7 +3328,7 @@ def _apply_protocol_guard_plan(
             status.update(state="unverified", reason="shared_network_namespace", blocked_endpoints=[])
         elif not namespace_epoch:
             status.update(state="unverified", reason="container_namespace_unavailable", blocked_endpoints=[])
-    elif auto_enabled and runtime_name in {"incus", "podman"} and plan.get("release_eligible") is True:
+    elif auto_enabled and runtime_name in {"incus", "podman", "runman"} and plan.get("release_eligible") is True:
         reason = "shared_network_namespace" if host_or_shared_network else "container_namespace_unavailable"
         status.update(state="release_pending", reason=reason, blocked_endpoints=[], pending_endpoints=[])
     return status
@@ -3916,7 +3917,7 @@ def _sample_cpu_guard_process(container: Dict[str, object]) -> Dict[str, object]
     runtime = get_runtime_bins().get(runtime_name, "")
     name = str(container.get("name") or "")
     project = str(container.get("project") or "")
-    if runtime_name not in {"incus", "podman"} or not runtime or not name:
+    if runtime_name not in {"incus", "podman", "runman"} or not runtime or not name:
         return {"available": False, "reason": "运行时或容器身份不可用"}
 
     # Sample /proc stat counters across one second. Only the process name and
@@ -4187,7 +4188,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             detail += "只有确认端口无残留监听且规则删除后读回为空，Agent 才会报告恢复；未停止进程或容器。"
             vmess_alert = _security_alert("vmess_block_release_unverified", "warning", "VMess 端口恢复待核实", detail, len(labels), 0, container)
             vmess_alert.update(alert_key="vmess:release:" + ",".join(labels), vmess_guard=vmess,
-                               instance_id=str(container.get("id") or "")[:200],
+                                instance_id=str(container.get("instance_id") or container.get("id") or "")[:200],
                                automatic_remediation={"attempted": True, "succeeded": False, "message": "未确认规则已移除，旧规则保留"})
             alerts.append(vmess_alert)
         elif container.get("runtime") in {"incus", "podman"} and vmess.get("detected") and vmess.get("state") in {"blocked", "partial", "unverified"}:
@@ -4207,7 +4208,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 vmess_alert.update(
                     alert_key="vmess:" + ",".join(blocked_labels + pending_labels),
                     vmess_guard=vmess,
-                    instance_id=str(container.get("id") or "")[:200],
+                    instance_id=str(container.get("instance_id") or container.get("id") or "")[:200],
                     service_listeners=[item for item in security.get("service_listeners", []) if isinstance(item, dict) and item.get("vmess_block_state") == "blocked"][:20],
                     automatic_remediation={"attempted": True, "succeeded": vmess.get("state") == "blocked", "message": "仅阻断配置端口与实时监听匹配且规则读回确认的 VMess 入口，未停止其他服务"},
                 )
@@ -4299,7 +4300,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 detail += "建议迁移到 VLESS + Reality + Vision。"
                 vmess_alert = _security_alert("vmess_block_unverified", "warning", "VMess 入站保护待核实", detail, len(labels), 0, container)
                 vmess_alert.update(alert_key="vmess:unverified:" + ",".join(labels), vmess_guard=vmess,
-                                   instance_id=str(container.get("id") or "")[:200])
+                                   instance_id=str(container.get("instance_id") or container.get("id") or "")[:200])
             alerts.append(vmess_alert)
         speedtest = security.get("speedtest_guard") if isinstance(security.get("speedtest_guard"), dict) else {}
         if container.get("runtime") in {"incus", "podman"}:
@@ -4332,7 +4333,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 speedtest_alert.update(
                     alert_key="speedtest-attempt:" + ",".join(f"{service}:{target}" for service, target in targets),
                     speedtest_guard=speedtest,
-                    instance_id=str(container.get("id") or "")[:200],
+                    instance_id=str(container.get("instance_id") or container.get("id") or "")[:200],
                 )
                 alerts.append(speedtest_alert)
         trojan = security.get("trojan_guard") if isinstance(security.get("trojan_guard"), dict) else {}
@@ -4348,7 +4349,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             detail += "规则只有在监听消失且 nftables 读回确认后才会移除；未停止进程或容器。"
             alert = _security_alert("trojan_block_release_unverified", "warning", "Trojan 端口恢复待核实", detail, len(labels), 0, container)
             alert.update(alert_key="trojan:release:" + ",".join(labels), trojan_guard=trojan,
-                         instance_id=str(container.get("id") or "")[:200],
+                         instance_id=str(container.get("instance_id") or container.get("id") or "")[:200],
                          automatic_remediation={"attempted": True, "succeeded": False, "message": "未确认 Trojan 规则已移除，旧规则保留"})
             alerts.append(alert)
         elif container.get("runtime") in {"incus", "podman"} and trojan.get("detected") and trojan.get("state") in {"blocked", "partial", "unverified"}:
@@ -4368,7 +4369,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 alert.update(
                     alert_key="trojan:" + ",".join(blocked_labels + pending_labels),
                     trojan_guard=trojan,
-                    instance_id=str(container.get("id") or "")[:200],
+                    instance_id=str(container.get("instance_id") or container.get("id") or "")[:200],
                     service_listeners=[item for item in security.get("service_listeners", [])
                                        if isinstance(item, dict) and item.get("trojan_block_state") == "blocked"][:20],
                     automatic_remediation={"attempted": True, "succeeded": trojan.get("state") == "blocked",
@@ -4414,7 +4415,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                         detail += f"已检查路径：{'、'.join(safe_files)}。"
                 alert = _security_alert("trojan_block_unverified", "warning", "Trojan 入站保护待核实", detail, len(labels), 0, container)
                 alert.update(alert_key="trojan:unverified:" + ",".join(labels), trojan_guard=trojan,
-                             instance_id=str(container.get("id") or "")[:200])
+                             instance_id=str(container.get("instance_id") or container.get("id") or "")[:200])
             alerts.append(alert)
         rx_bps = float(container.get("net_rx_bps") or 0)
         tx_bps = float(container.get("net_tx_bps") or 0)
@@ -6578,7 +6579,7 @@ def _probe_socks_listener(init_pid, key, listener):
     return {'mode': mode, 'reason': 'greeting_only' if mode != 'unknown' else 'timeout_rejected_or_not_socks'}
 
 
-def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, project, init_pid, scope_complete=True):
+def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, project, init_pid, scope_complete=True, instance_id=""):
     """Port/PID scoped evidence; loopback-only dependencies are not auto-stopped."""
     matches = socks.get('process_matches', [])
     endpoints = socks.get('inbound_endpoints', [])
@@ -6654,7 +6655,8 @@ def _refine_socks_listener_evidence(socks, listeners, forwards, runtime, name, p
         listening_ports=sorted({l['port'] for l in selected}), auth_verification=probes)
     socks['password_review'] = reviews[:20]
     # Hash only non-secret evidence and filesystem/process generations, never credentials.
-    material = {'runtime': runtime, 'project': project, 'name': name, 'init_pid': init_pid, 'reviews': reviews}
+    material = {'runtime': runtime, 'project': project, 'name': name, 'instance_id': instance_id,
+                'init_pid': init_pid, 'reviews': reviews}
     socks['review_token'] = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest() if reviews else ''
 
 
@@ -7560,6 +7562,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
         established = metrics.get('tcp_established')
         pending = metrics.get('tcp_pending')
         time_wait = metrics.get('tcp_time_wait')
+        udp_sockets = metrics.get('udp_sockets')
         sampled_at = metrics.get('sampled_at')
         counts_valid = all(type(value) is int and value >= 0 for value in (established, pending, time_wait))
         raw_total = metrics.get('tcp_total')
@@ -7632,9 +7635,22 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'tcp_established': established if metrics_valid else 0,
             'tcp_pending': pending if metrics_valid else 0,
             'tcp_time_wait': time_wait if metrics_valid else 0,
-            'udp_sockets': 0,
+            'udp_sockets': udp_sockets if metrics_valid and type(udp_sockets) is int and udp_sockets >= 0 else None,
+            'udp_sockets_available': metrics_valid and type(udp_sockets) is int and udp_sockets >= 0,
             'udp_flows': monitor_metrics.get('udp_flows') if monitor_valid else None,
         }
+        raw_disk_image = raw_item.get('disk_image') if isinstance(raw_item.get('disk_image'), dict) else {}
+        disk_image_valid = (
+            raw_disk_image.get('source') == 'runman_disk_image'
+            and raw_disk_image.get('available') is True
+            and type(raw_disk_image.get('sampled_at')) is int
+            and raw_disk_image['sampled_at'] > 0
+            and raw_disk_image['sampled_at'] <= int(time.time()) + 30
+            and type(raw_disk_image.get('logical_bytes')) is int
+            and raw_disk_image['logical_bytes'] >= 0
+            and type(raw_disk_image.get('allocated_bytes')) is int
+            and 0 <= raw_disk_image['allocated_bytes'] <= raw_disk_image['logical_bytes']
+        )
         pid = raw_item.get('init_pid') if raw_item.get('running') is True else None
         proc_snapshot = _runman_proc_snapshot(pid) if type(pid) is int and pid > 1 else {}
         pid_start_ticks = str(proc_snapshot.get('pid_start_ticks') or '')
@@ -7671,6 +7687,13 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
                     if proc_snapshot.get('container_fs_available') is True
                     else monitor_metrics.get('disk_used_bytes') or 0
                 ),
+                'disk_image': {
+                    'available': disk_image_valid,
+                    'source': 'runman_sparse_disk_image',
+                    'sampled_at': raw_disk_image.get('sampled_at') if disk_image_valid else 0,
+                    'logical_bytes': raw_disk_image.get('logical_bytes') if disk_image_valid else None,
+                    'allocated_bytes': raw_disk_image.get('allocated_bytes') if disk_image_valid else None,
+                },
                 'monitor_metrics': monitor_metrics,
                 'container_fs': proc_snapshot.get('container_fs', {
                     'root': {'total_bytes': 0, 'avail_bytes': 0},
@@ -7808,6 +7831,9 @@ def collect_runman_report(
         'fs': container_fs,
         'available': resources.get('container_fs_available') is True or disk_bytes > 0,
         'io': disk_io,
+        'backing_image': resources.get('disk_image') if isinstance(resources.get('disk_image'), dict) else {
+            'available': False, 'source': 'runman_sparse_disk_image',
+        },
     }
     report = dict(base_report) if isinstance(base_report, dict) else {}
     security = dict(report.get('security')) if isinstance(report.get('security'), dict) else {}
@@ -7829,7 +7855,7 @@ def collect_runman_report(
             merged_fs[fs_name] = existing_fs[fs_name]
     container_disk.update({
         key: value for key, value in existing_disk.items()
-        if key not in {'rw_bytes', 'rootfs_bytes', 'fs', 'io', 'available'}
+        if key not in {'rw_bytes', 'rootfs_bytes', 'fs', 'io', 'available', 'backing_image'}
     })
     container_disk['fs'] = merged_fs
     report.update({
@@ -8487,7 +8513,8 @@ def collect_container(
     _refine_socks_listener_evidence(socks_proxy, owned_listeners, network_exposure,
                                   runtime, name, project, pid,
                                   scope_complete=communication.get('communication_detail_available') is True
-                                      and not communication.get('communication_snapshot_truncated'))
+                                      and not communication.get('communication_snapshot_truncated'),
+                                  instance_id=str(container.get('instance_id') or ''))
     auto_block_vmess = os.getenv("SECURITY_AUTO_BLOCK_VMESS", "true").strip().lower() not in ("0", "false", "no", "off")
     host_or_shared_network = network_mode == "host" or network_mode.startswith(("container:", "ns:"))
     vmess_listener_inventory_complete = vmess_target_inventory_complete
@@ -8511,7 +8538,7 @@ def collect_container(
     vmess_plan["protocol_inventory_reason"] = socks_proxy.get("protocol_inventory_reason", "")
     vmess_status = dict(vmess_plan)
     should_reconcile_vmess = (
-        runtime_name in {"incus", "podman"}
+        runtime_name in {"incus", "podman", "runman"}
         and not host_or_shared_network
         and bool(namespace_epoch)
         and (
@@ -8594,7 +8621,7 @@ def collect_container(
             vmess_status.update(state="unverified", reason="shared_network_namespace", blocked_endpoints=[])
         elif not namespace_epoch:
             vmess_status.update(state="unverified", reason="container_namespace_unavailable", blocked_endpoints=[])
-    elif auto_block_vmess and runtime_name in {"incus", "podman"} and vmess_plan.get("release_eligible") is True:
+    elif auto_block_vmess and runtime_name in {"incus", "podman", "runman"} and vmess_plan.get("release_eligible") is True:
         reason = "shared_network_namespace" if host_or_shared_network else "container_namespace_unavailable"
         vmess_status.update(state="release_pending", reason=reason, blocked_endpoints=[], pending_endpoints=[])
 
@@ -9011,6 +9038,7 @@ def _collect_host_proc_socket_details(
     sockets: List[Dict[str, object]] = []
     service_listeners: List[Dict[str, object]] = []
     listener_keys = set()
+    socket_fd_references: Dict[Tuple[int, str], Dict[str, int]] = {}
     snapshot_count = 0
     snapshot_cap = max(500, min(2000, socket_limit * 2))
     listener_inventory_complete = fd_inventory_complete and socket_tables_complete and socket_tables_parse_complete
@@ -9029,9 +9057,12 @@ def _collect_host_proc_socket_details(
             local_port = _parse_port(local_port_hex)
             remote_port = _parse_port(remote_port_hex)
             state = parts[3].upper()
+            owners = inode_owners.get(parts[9], set())
+            for owner_pid, owner_name in owners:
+                counts = socket_fd_references.setdefault((owner_pid, owner_name), {"tcp": 0, "udp": 0})
+                counts[proto] += 1
             is_listener = (proto == "tcp" and state == "0A") or (proto == "udp" and remote_port == 0)
             if is_listener and local_port > 0:
-                owners = inode_owners.get(parts[9], set())
                 if not owners:
                     owners = {(0, "")}
                 local_endpoint = f"[{local_ip}]:{local_port}" if ":" in local_ip else f"{local_ip}:{local_port}"
@@ -9057,7 +9088,6 @@ def _collect_host_proc_socket_details(
                 continue
             if not _is_trackable_ip(remote_ip):
                 continue
-            owners = inode_owners.get(parts[9], set())
             owner_pid, owner_name = sorted(owners)[0] if owners else (0, "unknown")
             state_name = state_names.get(state, state.lower())
             direction, origin, direction_evidence = _classify_socket_origin(
@@ -9096,6 +9126,14 @@ def _collect_host_proc_socket_details(
         if isinstance(remote_ips, set):
             remote_ips.add(str(item.get("remote_ip") or ""))
     process_totals = []
+    for (owner_pid, owner_name), counts in socket_fd_references.items():
+        aggregate = totals.setdefault(
+            (owner_pid, owner_name),
+            {"pid": owner_pid, "process": owner_name, "inbound_connections": 0,
+             "outbound_connections": 0, "unknown_connections": 0, "remote_ips": set()},
+        )
+        aggregate["tcp_socket_fd_references"] = counts["tcp"]
+        aggregate["udp_socket_fd_references"] = counts["udp"]
     for aggregate in totals.values():
         remote_ips = aggregate.pop("remote_ips", set())
         aggregate["unique_remote_ips"] = len(remote_ips) if isinstance(remote_ips, set) else 0
@@ -9113,6 +9151,7 @@ def _collect_host_proc_socket_details(
         "communication_sockets": sockets,
         "service_listeners": service_listeners,
         "listener_inventory_complete": listener_inventory_complete,
+        "socket_fd_attribution_complete": fd_inventory_complete and socket_tables_complete and socket_tables_parse_complete,
         "communication_owner_attributed_count": _communication_socket_owner_count({"communication_sockets": sockets}),
         "process_attribution_available": _communication_socket_owner_count({"communication_sockets": sockets}) > 0,
     }
@@ -10657,7 +10696,7 @@ def stop_reviewed_socks(action: Dict) -> Tuple[bool, str]:
     """Explicit human decision; re-prove live ownership and the reviewed generation."""
     params = action.get('params') if isinstance(action.get('params'), dict) else {}
     runtime, name, project = (str(action.get(k) or '') for k in ('runtime', 'container_name', 'project'))
-    if runtime not in {'incus', 'podman'} or not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name) or (project and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', project)):
+    if runtime not in {'incus', 'podman', 'runman'} or not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name) or (project and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', project)):
         return False, 'invalid or notice-only target'
     if params.get('manual_review') is not True or not re.fullmatch(r'[0-9a-f]{64}', str(params.get('review_token', ''))):
         return False, 'explicit reviewed evidence is required'
@@ -10670,21 +10709,40 @@ def stop_reviewed_socks(action: Dict) -> Tuple[bool, str]:
     binary = get_runtime_bins().get(runtime, '')
     if not binary:
         return False, 'runtime unavailable'
-    pid_text = str(_incus_instance_pid(binary, name, project)) if runtime == 'incus' else run([binary, 'inspect', '--format', '{{.State.Pid}}', name]).strip()
+    instance_id = ''
+    if runtime == 'runman':
+        instance_id = str(params.get('instance_id') or '').lower()
+        if (
+            project != 'default'
+            or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', instance_id)
+            or _runman_instance_generations.get(name, '').lower() != instance_id
+        ):
+            return False, 'Runman reviewed instance generation is unavailable or changed'
+        try:
+            live = network_quarantine.RunmanIsolation(name, instance_id).inspect()
+        except (network_quarantine.QuarantineError, OSError, ValueError):
+            return False, 'Runman live instance generation could not be verified'
+        if live.get('running') is not True or str(live.get('instance_id') or '').lower() != instance_id:
+            return False, 'Runman instance is stopped or its generation changed'
+        pid_text = str(live.get('init_pid') or '')
+    else:
+        pid_text = str(_incus_instance_pid(binary, name, project)) if runtime == 'incus' else run([binary, 'inspect', '--format', '{{.State.Pid}}', name]).strip()
     if not pid_text.isdigit() or int(pid_text) <= 1:
         return False, 'container process unavailable'
     socks = collect_panel_pairing_indicators(name, binary, project).get('socks_proxy', {})
     sockets = _collect_socket_security(int(pid_text))
     communication = _collect_socket_process_details(binary, name, project, sockets.get('listening_ports', []))
     _refine_socks_listener_evidence(socks, communication.get('service_listeners', []), [], binary, name, project, int(pid_text),
-        scope_complete=communication.get('communication_detail_available') is True and not communication.get('communication_snapshot_truncated'))
+        scope_complete=communication.get('communication_detail_available') is True and not communication.get('communication_snapshot_truncated'),
+        instance_id=instance_id)
     reviews = socks.get('password_review', [])
     if socks.get('review_token') != params['review_token'] or not reviews or not all(r.get('action_safe') for r in reviews):
         return False, 'ownership/configuration/listeners changed or mixed service; refresh and review again'
     # Only PID-scoped stops; no persistent weak-auth policy and no whole-container stop.
     scoped = {**action, 'params': {'process_names': sorted({r['process'] for r in reviews}),
                                 'process_pids': sorted({r['pid'] for r in reviews}),
-                                'process_starts': {str(r['pid']): r.get('start_ticks', '') for r in reviews}}}
+                                'process_starts': {str(r['pid']): r.get('start_ticks', '') for r in reviews},
+                                **({'instance_id': instance_id} if runtime == 'runman' else {})}}
     return _stop_scoped_socks(scoped)
 
 
@@ -10692,7 +10750,7 @@ def _stop_scoped_socks(action: Dict) -> Tuple[bool, str]:
     runtime_kind = str(action.get("runtime") or "").strip().lower()
     container_name = str(action.get("container_name") or "").strip()
     project = str(action.get("project") or "").strip()
-    if runtime_kind not in ("podman", "incus"):
+    if runtime_kind not in ("podman", "incus", "runman"):
         return False, "Docker and unknown runtimes are notice-only"
     if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
         return False, "invalid container target"
@@ -10724,6 +10782,14 @@ def _stop_scoped_socks(action: Dict) -> Tuple[bool, str]:
     names = " ".join(shlex.quote(item) for item in process_names)
     pids = " ".join(str(item) for item in process_pids)
     starts = params.get('process_starts')
+    if runtime_kind == 'runman':
+        instance_id = str(params.get('instance_id') or '').lower()
+        if (
+            not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', instance_id)
+            or _runman_instance_generations.get(container_name, '').lower() != instance_id
+            or starts is None
+        ):
+            return False, 'Runman stop requires the reviewed live instance and process generations'
     start_guard = ''
     signal_guard = ''
     kill_guard = '[ -d "/proc/$pid" ]'
@@ -11436,9 +11502,13 @@ def _schedule_deep_sample(action: Dict) -> Tuple[bool, str]:
     container_name = str(action.get("container_name") or "").strip()
     if action_id <= 0 or not container_name:
         return False, "invalid deep sample request"
-    if runtime not in ("incus", "podman"):
-        return False, "deep sampling is limited to Incus and Podman containers"
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
+    if runtime not in ("incus", "podman", "runman"):
+        return False, "deep sampling is limited to Incus, Podman and Runman containers"
+    if runtime == "runman":
+        generation = str(params.get("instance_id") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", generation):
+            return False, "Runman deep sampling requires a valid instance generation"
     try:
         normalized_params = {
             "sample_seconds": max(0.5, min(2.0, float(params.get("sample_seconds") or 1.0))),
@@ -11448,6 +11518,8 @@ def _schedule_deep_sample(action: Dict) -> Tuple[bool, str]:
     except (TypeError, ValueError):
         return False, "invalid deep sample limits"
     scheduled = dict(action)
+    if runtime == "runman":
+        normalized_params["instance_id"] = generation
     scheduled["params"] = normalized_params
     _pending_deep_samples[action_id] = scheduled
     return True, "scheduled for the next report cycle"
@@ -11457,6 +11529,7 @@ def _pending_deep_sample_for(container: Dict[str, object]) -> Dict[str, object] 
     runtime = str(container.get("runtime") or "")
     project = str(container.get("project") or "")
     name = str(container.get("name") or "")
+    generation = str(container.get("instance_id") or "").lower()
     return next(
         (
             action
@@ -11464,6 +11537,10 @@ def _pending_deep_sample_for(container: Dict[str, object]) -> Dict[str, object] 
             if str(action.get("runtime") or "") == runtime
             and str(action.get("project") or "") == project
             and str(action.get("container_name") or "") == name
+            and (
+                runtime != "runman"
+                or str((action.get("params") or {}).get("instance_id") or "").lower() == generation
+            )
         ),
         None,
     )

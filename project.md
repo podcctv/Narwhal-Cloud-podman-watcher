@@ -1,10 +1,10 @@
 # 项目概览
 
-更新基线：本次从 fork 最新 `origin/main`（`43ee526` / v1.7.202）继续维护 Runman Rust v2 兼容；发布目标为 `1.7.203`（2026-11-03）。提交历史与主要功能索引见 [README.md](README.md)。
+更新基线：本次从 fork 最新 `origin/main`（`37ff8d7` / v1.7.203）继续维护 Runman Rust v2 兼容；发布目标为 `1.7.204`（2026-11-03）。提交历史与主要功能索引见 [README.md](README.md)。
 
 ## 项目目标
 
-Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus、Docker 与 Runman Rust v2 实例及主机状态，并提供告警、调查、受控保护和运维工作流。Incus 实例状态巡检、生命周期操作卡死告警与 stop 前二次核验见 [Incus 运行时健康手册](docs/incus-runtime-health.md)。Runman 支持代次绑定的受限 guest exec、通用只读进程/监听/协议扫描、shell 卡片与 MOTD、主机 RFW、TCP 限额、自动滥用检测与 veth 隔离、手动/自动单容器限速，以及磁盘 I/O 和网络指标。SSH 认证前 Banner、专用 VMess/Trojan/测速规则、CPU 进程归因、UDP socket 归因、Podman 式镜像写层大小、动态 CPU/内存/I/O 配额和一般破坏性服务处置仍未适配。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
+Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus、Docker 与 Runman Rust v2 实例及主机状态，并提供告警、调查、受控保护和运维工作流。Incus 实例状态巡检、生命周期操作卡死告警与 stop 前二次核验见 [Incus 运行时健康手册](docs/incus-runtime-health.md)。Runman 支持代次绑定的受限 guest exec、只读进程/监听/协议扫描与深度快照、连接来源时间线/历史回放、shell 卡片/MOTD/按用户定向登录提醒/条件式 SSH 认证前 Banner、主机 RFW、TCP 限额、自动滥用检测与 veth 隔离、手动/自动限速、CPU offender 采样、UDP socket/进程引用指标、cgroup v2 CPU/内存/I/O guards、明确选择后的 VMess/Trojan/测速保护，以及人工复核后的 SOCKS 指定进程停止。它上报 sparse `disk.img` 分配量，不宣称等同 Podman writable layer；持续连接过载自动停止与广义服务/配置/二进制清理仍关闭，分别等待代次条件式 stop API 和目标进程/文件代次证据。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
 
 ## 组件与入口
 

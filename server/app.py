@@ -1065,7 +1065,8 @@ def queue_connection_alert_deep_samples(
     for alert in alerts:
         if queued >= 10:
             break  # Avoid a large incident fan-out starving the report transaction.
-        if str(alert["runtime"]) not in ("incus", "podman"):
+        runtime = str(alert["runtime"] or "")
+        if runtime not in ("incus", "podman", "runman"):
             continue
         alert_id = int(alert["id"])
         existing = conn.execute(
@@ -1081,13 +1082,49 @@ def queue_connection_alert_deep_samples(
             if _alert_details(alert['details_json']).get('connection_policy', {}).get('escalated')
             else ''
         )
+        params = {
+            "sample_seconds": 1.0,
+            "process_limit": 100,
+            "socket_limit": 250,
+            "evidence_schema": 5,
+            "stage": stage,
+        }
+        if runtime == "runman":
+            latest = conn.execute(
+                "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='runman' AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
+                (host_id, str(alert["project"] or ""), str(alert["container_name"] or "")),
+            ).fetchone()
+            try:
+                latest_payload = json.loads(latest["payload_json"] or "{}") if latest is not None else {}
+            except (TypeError, ValueError):
+                latest_payload = {}
+            stable_id = str(latest_payload.get("stable_id") or latest_payload.get("id") or "").lower() if isinstance(latest_payload, dict) else ""
+            generation = str(latest_payload.get("instance_id") or "").lower() if isinstance(latest_payload, dict) else ""
+            if (
+                str(alert["project"] or "") != "default"
+                or stable_id != str(alert["container_name"] or "").lower()
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", stable_id)
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", generation)
+                or latest is None
+                or int(latest["ts"] or 0) > now + 30
+                or now - int(latest["ts"] or 0) > STALE_SECONDS
+            ):
+                continue
+            params["instance_id"] = generation
         if existing is not None:
             previous_params = _alert_details(existing['params_json'])
-            if existing['status'] in ('queued', 'dispatched', 'running'):
+            if runtime == "runman" and previous_params.get("instance_id") != params.get("instance_id"):
+                if existing['status'] in ('queued', 'dispatched', 'running'):
+                    conn.execute(
+                        "UPDATE security_actions SET status='failed',result_message='Runman 实例代次已变化，旧深度采样已取消',updated_at=? WHERE id=?",
+                        (now, existing['id']),
+                    )
+                existing = None
+            if existing is not None and existing['status'] in ('queued', 'dispatched', 'running'):
                 if now - int(existing['created_at']) > 900:
                     conn.execute("UPDATE security_actions SET status='failed',result_message='深度取证等待超过15分钟，需要重新采样',updated_at=? WHERE id=?", (now, existing['id']))
                 continue
-            if now - int(existing['created_at']) < 900 and (previous_params.get('stage') == stage or existing['status'] == 'failed'):
+            if existing is not None and now - int(existing['created_at']) < 900 and (previous_params.get('stage') == stage or existing['status'] == 'failed'):
                 continue
         conn.execute(
             """
@@ -1099,7 +1136,7 @@ def queue_connection_alert_deep_samples(
             (
                 alert_id, str(alert["host_id"]), str(alert["runtime"]),
                 str(alert["project"]), str(alert["container_name"]), "request_deep_sample",
-                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 5, 'stage': stage}),
+                json.dumps(params),
                 now, now,
             ),
         )
@@ -2332,13 +2369,13 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
         if name not in runtimes:
             runtimes.append(name)
     raw_service_runtimes = raw_abuse.get("service_runtimes", [])
-    if not isinstance(raw_service_runtimes, list) or len(raw_service_runtimes) > 2:
-        raise HTTPException(status_code=400, detail="测速服务运行时必须从 Incus / Podman 中选择，最多两项")
+    if not isinstance(raw_service_runtimes, list) or len(raw_service_runtimes) > 3:
+        raise HTTPException(status_code=400, detail="测速服务运行时必须从 Incus / Podman / Runman 中选择，最多三项")
     service_runtimes = []
     for runtime in raw_service_runtimes:
         name = str(runtime).strip().lower()
-        if name not in {"incus", "podman"}:
-            raise HTTPException(status_code=400, detail="测速服务范围只支持 Incus 或 Podman")
+        if name not in {"incus", "podman", "runman"}:
+            raise HTTPException(status_code=400, detail="测速服务范围只支持 Incus、Podman 或 Runman")
         if name not in service_runtimes:
             service_runtimes.append(name)
     if interfaces and runtimes:
@@ -2350,7 +2387,7 @@ def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
     if fixed_rules and not interfaces and not runtimes:
         raise HTTPException(status_code=400, detail="启用固定端口规则前必须选择已采集的容器网卡或运行时")
     if services and not service_runtimes:
-        raise HTTPException(status_code=400, detail="启用测速服务识别前必须选择 Incus、Podman 或两者")
+        raise HTTPException(status_code=400, detail="启用测速服务识别前必须选择 Incus、Podman 或 Runman")
     abuse["interfaces"] = interfaces
     abuse["runtimes"] = runtimes
     abuse["services"] = sorted(services)
@@ -3567,7 +3604,7 @@ def _host_container_protection_status(
     """Aggregate per-container Agent readbacks for Incus/Podman protection."""
     abuse = policy.get("abuse") if isinstance(policy, dict) and isinstance(policy.get("abuse"), dict) else {}
     services = sorted({str(item).strip().lower() for item in abuse.get("services", []) if isinstance(item, str) and item.strip()})
-    runtimes = sorted({str(item).strip().lower() for item in abuse.get("service_runtimes", []) if item in {"incus", "podman"}})
+    runtimes = sorted({str(item).strip().lower() for item in abuse.get("service_runtimes", []) if item in {"incus", "podman", "runman"}})
     configured = bool(services and runtimes)
     result: Dict[str, Any] = {
         "configured": configured, "state": "not_configured", "services": services,
@@ -4122,6 +4159,20 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         if host_stale and not include_stale:
             continue
         container_disk = payload.get("container_disk", {})
+        backing_image = container_disk.get("backing_image", {}) if isinstance(container_disk, dict) else {}
+        backing_image = backing_image if isinstance(backing_image, dict) else {}
+        backing_image_available = (
+            r["runtime"] == "runman"
+            and backing_image.get("available") is True
+            and backing_image.get("source") == "runman_sparse_disk_image"
+            and type(backing_image.get("logical_bytes")) is int
+            and backing_image["logical_bytes"] >= 0
+            and type(backing_image.get("allocated_bytes")) is int
+            and 0 <= backing_image["allocated_bytes"] <= backing_image["logical_bytes"]
+            and type(backing_image.get("sampled_at")) is int
+            and 0 < backing_image["sampled_at"] <= now + 30
+            and now - backing_image["sampled_at"] <= 300
+        )
         top_cpu_process = payload.get("top_cpu_process", {})
         offline_hours = stale_seconds // 3600
         rx_bps = float(r["net_rx_bps"] or 0)
@@ -4192,6 +4243,10 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "disk_data_mountpoint": host_disk.get("data_mountpoint") or disk.get("data_mountpoint", "/"),
             "container_disk_rw_bytes": container_disk.get("rw_bytes", 0),
             "container_disk_rootfs_bytes": container_disk.get("rootfs_bytes", 0),
+            "container_disk_backing_image_available": backing_image_available,
+            "container_disk_backing_image_logical_bytes": backing_image.get("logical_bytes") if backing_image_available else None,
+            "container_disk_backing_image_allocated_bytes": backing_image.get("allocated_bytes") if backing_image_available else None,
+            "container_disk_backing_image_sampled_at": backing_image.get("sampled_at") if backing_image_available else 0,
             "container_fs_root_total_bytes": container_disk.get("fs", {}).get("root", {}).get("total_bytes", 0),
             "container_fs_root_avail_bytes": container_disk.get("fs", {}).get("root", {}).get("avail_bytes", 0),
             "container_fs_data_total_bytes": container_disk.get("fs", {}).get("data", {}).get("total_bytes", 0),
@@ -4467,8 +4522,8 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
     runtime = str(payload.get("runtime") or "")[:40].lower()
     project = str(payload.get("project") or "")[:100]
     container_name = str(payload.get("container_name") or "")[:200]
-    if not host_id or not container_name or runtime not in ("incus", "podman"):
-        raise HTTPException(status_code=400, detail="Incus or Podman container identity is required")
+    if not host_id or not container_name or runtime not in ("incus", "podman", "runman"):
+        raise HTTPException(status_code=400, detail="Incus, Podman or Runman container identity is required")
 
     conn = db()
     latest = conn.execute(
@@ -4500,6 +4555,20 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
         conn.close()
         raise HTTPException(status_code=409, detail="container is not in full monitoring mode")
 
+    deep_sample_params = {"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 5}
+    if runtime == "runman":
+        stable_id = str(latest_payload.get("stable_id") or latest_payload.get("id") or "").lower()
+        generation = str(latest_payload.get("instance_id") or "").lower()
+        if (
+            project != "default"
+            or stable_id != container_name.lower()
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", stable_id)
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", generation)
+        ):
+            conn.close()
+            raise HTTPException(status_code=409, detail="Runman 实例身份或代次未通过校验；未下发深度采样")
+        deep_sample_params["instance_id"] = generation
+
     existing = conn.execute(
         """
         SELECT * FROM security_actions
@@ -4509,6 +4578,14 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
         """,
         (host_id, runtime, project, container_name),
     ).fetchone()
+    if existing is not None and runtime == "runman":
+        existing_params = _alert_details(existing["params_json"])
+        if existing_params.get("instance_id") != deep_sample_params.get("instance_id"):
+            conn.execute(
+                "UPDATE security_actions SET status='failed',result_message='Runman 实例代次已变化，旧深度采样已取消',updated_at=? WHERE id=?",
+                (int(time.time()), existing["id"]),
+            )
+            existing = None
     queued = existing is None
     if existing is None:
         now = int(time.time())
@@ -4525,7 +4602,7 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
                 project,
                 container_name,
                 "request_deep_sample",
-                json.dumps({"sample_seconds": 1.0, "process_limit": 100, "socket_limit": 250, "evidence_schema": 5}),
+                json.dumps(deep_sample_params),
                 str(getattr(request.state, "dashboard_user", "dashboard"))[:100],
                 now,
                 now,
@@ -5194,19 +5271,48 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     action = None
     queued = False
     if decision == 'stop_reviewed_socks':
+        if alert['runtime'] == 'runman' and getattr(request.state, 'dashboard_role', 'admin') != 'admin':
+            conn.close()
+            raise HTTPException(status_code=403, detail='Runman 人工停止操作仅限管理员')
         details = json.loads(alert['details_json'])
         reviews = details.get('password_review', [])
         observed = details.get('review_observed_at', 0)
         token = details.get('review_token', '')
+        runman_generation = ''
+        runman_identity_ok = True
+        if alert['runtime'] == 'runman':
+            runman_generation = str(details.get('instance_id') or '').lower()
+            latest = conn.execute(
+                "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='runman' AND project='default' AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
+                (alert['host_id'], alert['container_name']),
+            ).fetchone()
+            try:
+                latest_payload = json.loads(latest['payload_json'] or '{}') if latest is not None else {}
+            except (TypeError, ValueError):
+                latest_payload = {}
+            stable_id = str(latest_payload.get('stable_id') or latest_payload.get('id') or '').lower() if isinstance(latest_payload, dict) else ''
+            latest_generation = str(latest_payload.get('instance_id') or '').lower() if isinstance(latest_payload, dict) else ''
+            report_at = int(latest['ts'] or 0) if latest is not None else 0
+            runman_identity_ok = (
+                alert['project'] == 'default'
+                and bool(re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', alert['container_name'].lower()))
+                and bool(re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', runman_generation))
+                and stable_id == alert['container_name'].lower()
+                and latest_generation == runman_generation
+                and report_at > 0 and report_at <= now + 30 and 0 <= now - report_at <= STALE_SECONDS
+            )
         if (alert['alert_type'] != 'socks_password_review' or alert['status'] != 'active'
-            or alert['runtime'] not in {'incus', 'podman'} or not isinstance(observed, (int, float))
+            or alert['runtime'] not in {'incus', 'podman', 'runman'} or not isinstance(observed, (int, float))
             or not 0 <= now-observed <= 900 or not 0 <= now-alert['last_seen'] <= 900
             or not isinstance(reviews, list) or not reviews or not all(isinstance(r, dict) and r.get('action_safe') is True for r in reviews)
-            or not re.fullmatch(r'[0-9a-f]{64}', str(token)) or payload.get('review_token') != token):
+            or not re.fullmatch(r'[0-9a-f]{64}', str(token)) or payload.get('review_token') != token
+            or not runman_identity_ok):
             conn.close()
             raise HTTPException(status_code=409, detail='证据过期、目标不明确或包含混合业务；请刷新后重新审核，未停止服务')
-        action, queued = _queue_security_action_row(conn, alert, 'stop_reviewed_socks',
-            {'manual_review': True, 'review_token': token, 'review_observed_at': observed}, requested_by)
+        reviewed_params = {'manual_review': True, 'review_token': token, 'review_observed_at': observed}
+        if alert['runtime'] == 'runman':
+            reviewed_params['instance_id'] = runman_generation
+        action, queued = _queue_security_action_row(conn, alert, 'stop_reviewed_socks', reviewed_params, requested_by)
     elif decision == "deny":
         if alert["alert_type"] not in _ACTIONABLE_ALERT_TYPES:
             conn.close()
@@ -7669,7 +7775,7 @@ svg{width:100%;height:220px;border-top:1px solid #29466f}.kv{display:grid;grid-t
 </style></head><body><a class='skip-link' href='#detail-main'>跳到主要内容</a><main id='detail-main' class='page'>
     <header class='top'><div><h1 id='title'>容器详情</h1><div id='subtitle' class='subtitle'>正在读取容器内部指标…</div></div><nav class='actions'><span id='detail-version' class='version-pill warn'>版本检查中</span><a class='btn' href='/stats'>返回统计页</a><a class='btn' href='/'>返回总览</a></nav></header>
     <div id='status' class='status'>正在加载最新采样与历史数据…</div>
-    <section class='panel diagnostic' aria-labelledby='diagnostic-title'><div class='diagnostic-head'><div><h2 id='diagnostic-title'>按需深度上报</h2><p>仅在下一周期对当前 Incus/Podman 容器做一次有界快照；不抓包、不扫描文件，上报成功后自动恢复普通采集。</p></div><button id='request-diagnostic' class='btn primary' type='button' aria-label='请求当前容器在下一周期上报深度详情' onclick='requestDeepSample()'>请求深度上报</button></div><div id='diagnostic-state' class='diagnostic-state'>尚未请求深度上报。</div><div id='diagnostic-report'><div class='comm-note'>收到报告后将在这里显示瞬时流量、详细进程、连接 IP 和进程归属。</div></div></section>
+    <section class='panel diagnostic' aria-labelledby='diagnostic-title'><div class='diagnostic-head'><div><h2 id='diagnostic-title'>按需深度上报</h2><p>仅在下一周期对当前 Incus、Podman 或 Runman 容器做一次有界快照；不抓包、不扫描文件，上报成功后自动恢复普通采集。</p></div><button id='request-diagnostic' class='btn primary' type='button' aria-label='请求当前容器在下一周期上报深度详情' onclick='requestDeepSample()'>请求深度上报</button></div><div id='diagnostic-state' class='diagnostic-state'>尚未请求深度上报。</div><div id='diagnostic-report'><div class='comm-note'>收到报告后将在这里显示瞬时流量、详细进程、连接 IP 和进程归属。</div></div></section>
 <section id='metrics' class='metrics'></section>
 <section class='charts'><article class='panel'><h2>容器 CPU / 内存历史</h2><div class='legend'><span><i class='dot' style='background:#4a90e2'></i>CPU%</span><span><i class='dot' style='background:#16a085'></i>内存%</span></div><svg id='resource-chart' viewBox='0 0 900 220' preserveAspectRatio='none'></svg></article><article class='panel'><h2>容器网络速率历史</h2><div class='legend'><span><i class='dot' style='background:#2ecc71'></i>RX Mbps</span><span><i class='dot' style='background:#f39c12'></i>TX Mbps</span></div><svg id='network-chart' viewBox='0 0 900 220' preserveAspectRatio='none'></svg></article></section>
 <section class='details'><article class='panel'><h2>容器内部进程</h2><div id='processes'></div></article><article class='panel'><h2>容器网络命名空间</h2><dl id='network' class='kv'></dl></article><article class='panel'><h2>安全与面板检查</h2><div id='security'></div></article><article class='panel'><h2>容器文件系统</h2><dl id='filesystem' class='kv'></dl></article></section>
@@ -7681,15 +7787,15 @@ function fmtBytes(n){const x=Number(n||0);if(x<=0)return '0 B';const u=['B','KB'
 function mbps(v){return Number(v||0)*8/1000000}function num(v,d=2){const n=Number(v||0);return Number.isFinite(n)?n.toFixed(d):'0.00'}
 function linePoints(values,max,w=900,h=220,pad=18){return values.map((v,i)=>`${i*(w/Math.max(1,values.length-1))},${(h-pad)-(Number(v||0)/Math.max(1,max))*(h-pad*2)}`).join(' ')}
 function drawChart(id,series){const svg=document.getElementById(id);const values=series.flatMap(x=>x.values);const max=Math.max(1,...values);let grid='';for(let i=0;i<=4;i++){const y=18+i*46;grid+=`<line x1='0' y1='${y}' x2='900' y2='${y}' stroke='#29466f' stroke-width='1'/>`}svg.innerHTML=grid+series.map(x=>`<polyline fill='none' stroke='${x.color}' stroke-width='2.5' points='${linePoints(x.values,max)}'/>`).join('')}
-    function sourceText(runtime){if(runtime==='incus')return 'Incus 容器级 cgroup/OpenMetrics 与网络命名空间';if(runtime==='podman')return 'Podman 容器 stats 与网络命名空间';return 'Docker 仅提醒模式（不执行深度采集）'}
+    function sourceText(runtime){if(runtime==='incus')return 'Incus 容器级 cgroup/OpenMetrics 与网络命名空间';if(runtime==='podman')return 'Podman 容器 stats 与网络命名空间';if(runtime==='runman')return 'Runman 代次绑定 guest exec 与网络命名空间';return 'Docker 仅提醒模式（不执行深度采集）'}
     function listHtml(items,empty,mapper){return items.length?`<ul class='list'>${items.map(mapper).join('')}</ul>`:`<div class='ok'>${esc(empty)}</div>`}
     let diagnosticSubmitting=false;
     function detailIdentity(){const q=new URLSearchParams(location.search);return {host_id:q.get('host')||'',runtime:q.get('runtime')||'',project:q.get('project')||'',container_name:q.get('container')||''}}
     function renderDiagnostic(data,runtime){
      const action=data?.action||null,sample=data?.sample||null,state=document.getElementById('diagnostic-state'),button=document.getElementById('request-diagnostic');
-     const active=action&&['queued','dispatched'].includes(action.status);button.disabled=diagnosticSubmitting||active||!['incus','podman'].includes(runtime);
+      const active=action&&['queued','dispatched'].includes(action.status);button.disabled=diagnosticSubmitting||active||!['incus','podman','runman'].includes(runtime);
      button.innerText=diagnosticSubmitting?'正在提交…':active?'等待上报中':'请求深度上报';
-     if(!['incus','podman'].includes(runtime)){state.className='diagnostic-state warn';state.innerText='Docker 默认仅提醒，不执行深度采集。'}
+      if(!['incus','podman','runman'].includes(runtime)){state.className='diagnostic-state warn';state.innerText='Docker 默认仅提醒，不执行深度采集。'}
      else if(diagnosticSubmitting){state.className='diagnostic-state warn';state.innerText='正在提交一次性采样任务，请稍候…'}
      else if(action?.status==='queued'){state.className='diagnostic-state warn';state.innerText=`任务 #${action.id} 已排队，等待节点领取（通常 10 秒内）。`}
      else if(action?.status==='dispatched'){state.className='diagnostic-state warn';state.innerText=`任务 #${action.id} 已由节点领取，正在等待下一次上报。`}

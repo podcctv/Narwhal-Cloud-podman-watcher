@@ -1,6 +1,6 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.203**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.204**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
@@ -8,12 +8,21 @@ Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
 
+### v1.7.204：补齐 Runman 深度快照与剩余安全适配
+
+- Runman 支持按需与连接告警触发的有界深度快照；请求、排队和执行均绑定当前实例 UUID 代次，实例替换后不会把旧任务套到新容器。
+- 容器抽屉的连接来源时间线与运维回放开放 Runman，并按实例代次过滤历史采样；回放和人工反馈均不触发处置策略。
+- Runman 的管理员定向用户登录提醒也绑定报告代次，过期或实例替换后的提醒不能重试或标记为已写入。
+- 接入 Runman SSH 认证前 Banner、UDP socket 与进程引用指标、CPU offender 归因、cgroup v2 CPU/内存/I/O guards、显式选择后的 VMess/Trojan/测速保护，以及管理员复核后的 SOCKS 指定进程停止。
+- 前端显示 Runman `disk.img` 逻辑容量和稀疏文件实际分配量；明确该值不等同 Podman writable layer。
+- 通用服务/配置/二进制清理与持续连接过载自动停止仍保持关闭：当前动作协议无法对这些动作端到端绑定 Runman 目标进程/实例代次。
+
 ### v1.7.203：补齐 Runman Rust v2 的隔离、带宽保护与登录提示
 
 - 新增 root-only、代次绑定的 Runman guest exec 和持久化 veth 隔离接口；Watcher 接入通用只读进程/监听/协议扫描、交互 shell 卡片与安全 MOTD 更新。
 - Runman 支持单容器手动与自动带宽限速、自动滥用检测与隔离；网络动作核对 VM UUID、实例代次、专属网络命名空间及可读回路径。
 - 接入磁盘读写速率/IOPS、TCP/UDP flow 和远端 IP 等新鲜指标，并同步前端目标身份与静态产物。
-- 兼容矩阵列明仍未实现的 SSH 认证前 Banner、协议端口自动防护、CPU 进程归因、UDP socket 归因、可写层大小、动态资源配额和一般破坏性服务处置。
+- 当时的兼容矩阵列明后续仍待适配的 SSH 认证前 Banner、协议端口自动防护、CPU 进程归因、UDP socket 归因、可写层大小、动态资源配额和一般破坏性服务处置。
 
 ### v1.7.202：修复 Incus 健康检查单测回归并同步前端生产资源
 

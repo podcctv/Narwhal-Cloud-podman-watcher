@@ -17,8 +17,13 @@ export function SocksPasswordReview({ alert, onRefresh, onToast }: { alert: Secu
   const [busy, setBusy] = useState(false);
   if (alert.type !== 'socks_password_review') return null;
   const reviews: Review[] = Array.isArray(alert.details?.password_review) ? alert.details.password_review : [];
-  const fresh = Date.now()/1000 - Number(alert.details?.review_observed_at || 0) <= 900;
-  const canStop = fresh && alert.status === 'active' && ['incus', 'podman'].includes(alert.runtime) && reviews.length > 0 && reviews.every(r => r.action_safe) && Boolean(alert.details?.review_token);
+  const age = Date.now()/1000 - Number(alert.details?.review_observed_at || 0);
+  const fresh = age >= 0 && age <= 900;
+  const runmanGeneration = String(alert.details?.instance_id || '').toLowerCase();
+  const runmanGenerationValid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(runmanGeneration);
+  const canStop = fresh && alert.status === 'active'
+    && (['incus', 'podman'].includes(alert.runtime) || (alert.runtime === 'runman' && alert.project === 'default' && runmanGenerationValid))
+    && reviews.length > 0 && reviews.every(r => r.action_safe) && Boolean(alert.details?.review_token);
   return <div className="space-y-3 rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 text-xs text-slate-300">
     <div className="flex items-center gap-2 font-semibold text-amber-200"><KeyRound className="h-4 w-4" aria-hidden="true" />要求认证已确认 · 密码由管理员评估</div>
     <p>仅统计配置中的密码组成，不显示原文、用户名或哈希；未尝试使用该密码登录，字符种类多不等于密码一定安全。</p>
