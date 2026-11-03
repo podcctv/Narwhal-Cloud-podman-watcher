@@ -53,7 +53,7 @@ const RESOURCE_GUARD_FAILURE_STATES = ['limit_failed', 'limited_unverified', 'li
 const PROTOCOL_GUARD_REVIEW_STATES = ['partial', 'unverified', 'release_pending'];
 
 const supportsContainerGuards = (container: ContainerItem) =>
-  container.runtime === 'incus' || container.runtime === 'podman';
+  container.runtime === 'incus' || container.runtime === 'podman' || container.runtime === 'runman';
 
 const resourceGuardSignal = (label: string, guard: GuardLike | undefined): ContainerSignal | null => {
   if (!guard) return null;

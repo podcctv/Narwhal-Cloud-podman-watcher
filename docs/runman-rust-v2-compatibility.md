@@ -1,6 +1,6 @@
 # Runman Rust v2 compatibility
 
-Updated for Watcher v1.7.205 and Runman Rust v2 inventory schema 1. This is a source-level compatibility matrix; it does not claim that a live Runman host was exercised.
+Updated for Watcher v1.7.206 and Runman Rust v2 inventory schema 1. This is a source-level compatibility matrix; it does not claim that a live Runman host was exercised.
 
 ## Supported
 
@@ -20,8 +20,9 @@ Updated for Watcher v1.7.205 and Runman Rust v2 inventory schema 1. This is a so
 | UDP socket and process attribution | Rust inventory reports fresh guest network-namespace UDP socket counts when both IPv4/IPv6 TCP and UDP tables parse completely. Watcher attributes visible TCP and connected UDP table entries by socket inode; it reports UDP file-descriptor references for unconnected sockets. Shared inherited descriptors can appear for each owning process, so these are process references rather than unique network sockets. Missing procfs permissions or incomplete snapshots remain unavailable. |
 | CPU offender attribution | A bounded one-second guest `/proc` CPU-time delta identifies the top process for Runman CPU pressure alerts. The generic container report also uses guest `ps` when available; unavailable process snapshots remain unknown. |
 | Dynamic CPU, memory and I/O guards | Runman guards can lower and restore `cpu.max`, `memory.high` and per-device `io.max` on the verified `system.slice/runman-<uuid>.service/ct` cgroup. Every access rechecks the live PID start ticks, exact VM UUID and cgroup boundary. The guard remains unavailable when cgroup v2 controllers/files are absent or readback no longer matches the saved state. |
-| Speed-test and VMess/Trojan guards | Explicitly selected Runman instances can receive the existing bounded speed-test service policy and protocol-specific network-namespace port rules. Rules require complete process/config/listener evidence and post-apply readback. Runman is selectable per saved policy; the no-policy automatic default still targets Incus/Podman only. |
-| Reviewed SOCKS process stop | An administrator can explicitly stop only the reviewed SOCKS process PIDs after the server confirms a fresh matching Runman report generation. The Agent checks the live instance generation, review token and each PID start tick before signaling, then verifies the process is gone. It does not stop the guest or establish a persistent weak-password block. |
+| Speed-test and VMess/Trojan guards | Explicitly selected Runman instances can receive the existing bounded speed-test service policy and protocol-specific network-namespace port rules. Rules require complete process/config/listener evidence and post-apply readback. Runman is selectable per saved policy; the no-policy automatic default firewall policy includes Runman alongside Incus/Podman, activating default speed-test blocking automatically. |
+| Reviewed SOCKS process stop | An administrator can explicitly stop only the reviewed SOCKS process PIDs after the server confirms a fresh matching Runman report generation. The Agent checks the live instance generation, review token and each PID start tick before signaling, then verifies the process is gone. It does not stop the guest or establish a persistent weak-password block. |
+| Precise malicious process and panel remediation | Bounded guest execution provides exact generation-checked malicious process (e.g. xmrig/miners) and paired panel remediation without stopping the guest VM. Remediations verify UUIDv4 generation alignment before issuing commands and confirm process termination afterward. Alert review and disposition endpoints on the server validate canonical UUID and generation. |
 | Sustained-overload automatic stop | After the server observes the required continuous fresh samples, the Agent sends the expected UUID generation and threshold to Runman's root-only control API. Runman holds the instance lifecycle lock, checks that exact managed generation is still running and still above the selected TCP-active or all-socket threshold, then records the stopped desired state and halts it. A replacement, recovered load, stale evidence or older Runman API fails closed. The action stops the guest; it never deletes it. |
 
 ## Remaining boundaries
@@ -29,7 +30,7 @@ Updated for Watcher v1.7.205 and Runman Rust v2 inventory schema 1. This is a so
 | Capability | Current boundary |
 | --- | --- |
 | Podman-style writable image-layer size | Runman exposes `disk.img` logical size and allocated host blocks, plus guest filesystem use. This is a useful sparse-disk allocation metric but is not equivalent to Podman's image writable-layer metric. |
-| General process/service cleanup | Broad panel-remediation and malware-cleanup jobs still remove service files, configs or binaries by process-family evidence. They are not enabled for Runman because their review/action contract does not yet carry exact per-file and per-process generations end to end. The narrower reviewed SOCKS stop above is supported. |
+| Broad unverified guest filesystem wipes | Wholesale deletion of unverified guest paths without process-to-file generation alignment remains disabled. Generation-verified guest execution for targeted malicious processes and paired panels is supported. |
 
 ## Runtime requirements
 

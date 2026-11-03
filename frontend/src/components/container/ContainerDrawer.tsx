@@ -773,7 +773,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               </section>
             )}
 
-            {(identity.runtime === 'incus' || identity.runtime === 'podman') && (
+            {(identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman') && (
               <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>

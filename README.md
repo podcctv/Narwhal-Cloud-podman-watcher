@@ -1,12 +1,20 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.205**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.206**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.7.206：实现 Runman 泛化恶意进程/服务精准处置与全局默认测速拦截
+
+- 补齐 Runman 容器的恶意挖矿/恶意进程（如 xmrig）及控制面板精准停止与配置处置；通过绑定 UUIDv4 实例代次并经由 /run/narwhal-agent/connlimit.sock 发起 guest exec，实现不关机精确停止并读回核验。
+- 服务端告警处置与动作队列全面支持 Runman，严格核对实例 UUID 与代次，防止实例替换或过期导致误杀。
+- 全局无策略时母机防火墙默认服务策略自动纳入 
+unman，默认测速拦截与协议规则即开即用。
+- 前端容器状态徽章与详情抽屉全面放行 Runman 资源防护卡片与防护状态透出。
 
 ### v1.7.205：为 Runman 增加代次安全的过载停机
 

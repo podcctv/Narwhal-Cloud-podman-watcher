@@ -4993,7 +4993,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             if (
                 auto_remediate_xmrig
                 and confirmed_xmrig
-                and str(container.get("runtime") or "").lower() in ("podman", "incus")
+                and str(container.get("runtime") or "").lower() in ("podman", "incus", "runman")
             ):
                 auto_ok, auto_message = remediate_malicious_process(
                     {
@@ -5007,6 +5007,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                                 for item in confirmed_xmrig
                                 if int(item.get("pid") or 0) > 1
                             ],
+                            "instance_id": str(container.get("instance_id") or ""),
                         },
                     }
                 )
@@ -5088,7 +5089,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             and (auto_panel or (auto_remediate_xrayr and "xrayr" in confirmed_patterns))
             and confirmed_patterns
             and not bool(panel_pairing.get("approved"))
-            and str(container.get("runtime") or "").lower() in ("podman", "incus")
+            and str(container.get("runtime") or "").lower() in ("podman", "incus", "runman")
         ):
             xrayr_ok, xrayr_message = remediate_panel_pairing(
                 {
@@ -5105,6 +5106,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                             and int(item.get("pid") or 0) > 1
                         ],
                         "config_files": config_files,
+                        "instance_id": str(container.get("instance_id") or ""),
                     },
                 }
             )
@@ -5124,7 +5126,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             and not remaining_unapproved_domains
             and not xrayr_auto_result
         )
-        if panel_detection_enabled and auto_matched_domains and not xrayr_auto_result:
+        if panel_detection_enabled and auto_matched_domains and not xrayr_auto_result and str(container.get("runtime") or "").lower() in ("podman", "incus", "runman"):
             auto_ok, auto_message = remediate_panel_pairing(
                 {
                     "runtime": container.get("runtime"),
@@ -5138,6 +5140,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                             if isinstance(item, dict) and int(item.get("pid") or 0) > 1
                         ],
                         "config_files": config_files,
+                        "instance_id": str(container.get("instance_id") or ""),
                     },
                 }
             )
@@ -10833,6 +10836,8 @@ def _stop_scoped_socks(action: Dict) -> Tuple[bool, str]:
     if not process_names:
         return False, "no locally approved SOCKS process target"
     runtime_bin = get_runtime_bins().get(runtime_kind, "")
+    if runtime_kind == "runman" and not runtime_bin:
+        runtime_bin = "runman"
     if not runtime_bin:
         return False, f"runtime {runtime_kind} is unavailable"
 
@@ -11012,13 +11017,29 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
     runtime_kind = str(action.get("runtime") or "").strip().lower()
     container_name = str(action.get("container_name") or "").strip()
     project = str(action.get("project") or "").strip()
-    if runtime_kind not in ("podman", "incus"):
+    if runtime_kind not in ("podman", "incus", "runman"):
         return False, "Docker and unknown runtimes are notice-only"
-    if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
-        return False, "invalid container target"
-    if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
-        return False, "invalid Incus project"
+    if runtime_kind == "runman":
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", container_name.lower()):
+            return False, "invalid Runman VM UUID"
+        if project and project != "default":
+            return False, "invalid Runman project"
+    else:
+        if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
+            return False, "invalid container target"
+        if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
+            return False, "invalid Incus project"
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
+    if runtime_kind == "runman":
+        expected_generation = str(params.get("instance_id") or "").strip()
+        current_generation = _runman_instance_generations.get(container_name, "").strip()
+        if expected_generation and current_generation and expected_generation != current_generation:
+            return False, "Runman instance generation changed; remediation refused"
+        if not current_generation and not expected_generation:
+            return False, "Runman instance generation unavailable; remediation refused"
+        if not current_generation and expected_generation:
+            current_generation = expected_generation
+            _runman_instance_generations[container_name] = expected_generation
     requested_names = params.get("process_names") if isinstance(params.get("process_names"), list) else []
     process_names = sorted(
         {
@@ -11031,6 +11052,8 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
     if not process_names:
         return False, "no exact allowlisted malware target"
     runtime_bin = get_runtime_bins().get(runtime_kind, "")
+    if runtime_kind == "runman" and not runtime_bin:
+        runtime_bin = "runman"
     if not runtime_bin:
         return False, f"runtime {runtime_kind} is unavailable"
 
@@ -11142,15 +11165,31 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
 
 def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     runtime_kind = str(action.get("runtime") or "").lower()
-    if runtime_kind not in ("podman", "incus"):
+    if runtime_kind not in ("podman", "incus", "runman"):
         return False, "Docker and unknown runtimes are notice-only"
     container_name = str(action.get("container_name") or "")
     project = str(action.get("project") or "")
-    if not container_name or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
-        return False, "invalid container target"
-    if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
-        return False, "invalid Incus project"
+    if runtime_kind == "runman":
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", container_name.lower()):
+            return False, "invalid Runman VM UUID"
+        if project and project != "default":
+            return False, "invalid Runman project"
+    else:
+        if not container_name or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
+            return False, "invalid container target"
+        if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
+            return False, "invalid Incus project"
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
+    if runtime_kind == "runman":
+        expected_generation = str(params.get("instance_id") or "").strip()
+        current_generation = _runman_instance_generations.get(container_name, "").strip()
+        if expected_generation and current_generation and expected_generation != current_generation:
+            return False, "Runman instance generation changed; remediation refused"
+        if not current_generation and not expected_generation:
+            return False, "Runman instance generation unavailable; remediation refused"
+        if not current_generation and expected_generation:
+            current_generation = expected_generation
+            _runman_instance_generations[container_name] = expected_generation
     requested_patterns = params.get("process_patterns") if isinstance(params.get("process_patterns"), list) else []
     requested_pids = params.get("process_pids") if isinstance(params.get("process_pids"), list) else []
     requested_files = params.get("config_files") if isinstance(params.get("config_files"), list) else []

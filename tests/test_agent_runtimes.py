@@ -2355,6 +2355,111 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertTrue(alert["automatic_remediation"]["succeeded"])
         remediate.assert_called_once()
 
+    def test_runman_xmrig_is_auto_remediated_with_generation_safety(self):
+        container = {
+            "name": "01234567-89ab-cdef-0123-456789abcdef",
+            "runtime": "runman",
+            "project": "default",
+            "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+            "security": {
+                "suspicious_processes": [
+                    {"pid": 99, "process": "xmrig", "pattern": "xmrig"}
+                ]
+            },
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"SECURITY_ACCESS_LOG_PATHS": "", "SECURITY_AUTO_REMEDIATE_XMRIG": "true"},
+            clear=False,
+        ), mock.patch.object(
+            agent,
+            "remediate_malicious_process",
+            return_value=(True, "killed_processes=1 removed_services=0 removed_configs=0"),
+        ) as remediate:
+            result = agent.collect_security_summary([container], 60)
+        alert = next(item for item in result["alerts"] if item["type"] == "malicious_process")
+        self.assertEqual(alert["severity"], "critical")
+        self.assertEqual(alert["container_name"], "01234567-89ab-cdef-0123-456789abcdef")
+        self.assertEqual(alert["malicious_processes"][0]["process"], "xmrig")
+        self.assertTrue(alert["automatic_remediation"]["succeeded"])
+        remediate.assert_called_once()
+        call_action = remediate.call_args[0][0]
+        self.assertEqual(call_action["runtime"], "runman")
+        self.assertEqual(call_action["params"]["instance_id"], "550e8400-e29b-41d4-a716-446655440000")
+
+    def test_remediate_malicious_process_runman_executes_guest_exec(self):
+        action = {
+            "runtime": "runman",
+            "project": "default",
+            "container_name": "01234567-89ab-cdef-0123-456789abcdef",
+            "params": {
+                "process_names": ["xmrig"],
+                "process_pids": [1234],
+                "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+            },
+        }
+        with mock.patch.object(agent, "get_runtime_bins", return_value={"runman": "runman"}), \
+             mock.patch.object(
+                 agent,
+                 "_run_action_command",
+                 return_value=(True, "killed_processes=1 removed_services=0 removed_configs=0 cleanup_errors=0 matched_processes=1 signal_errors=0 remaining_processes=0"),
+             ) as runner, \
+             mock.patch.dict(agent._runman_instance_generations, {"01234567-89ab-cdef-0123-456789abcdef": "550e8400-e29b-41d4-a716-446655440000"}, clear=True):
+            ok, output = agent.remediate_malicious_process(action)
+        self.assertTrue(ok)
+        self.assertIn("killed_processes=1", output)
+        command = runner.call_args_list[0].args[0]
+        self.assertEqual(command[0], agent._RUNMAN_EXEC_SENTINEL)
+        self.assertEqual(command[1], "01234567-89ab-cdef-0123-456789abcdef")
+        self.assertEqual(command[2], "550e8400-e29b-41d4-a716-446655440000")
+
+    def test_remediate_malicious_process_runman_refuses_generation_mismatch(self):
+        action = {
+            "runtime": "runman",
+            "project": "default",
+            "container_name": "01234567-89ab-cdef-0123-456789abcdef",
+            "params": {
+                "process_names": ["xmrig"],
+                "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+            },
+        }
+        with mock.patch.dict(agent._runman_instance_generations, {"01234567-89ab-cdef-0123-456789abcdef": "550e8400-e29b-41d4-a716-999999999999"}, clear=True):
+            ok, message = agent.remediate_malicious_process(action)
+        self.assertFalse(ok)
+        self.assertIn("generation changed", message)
+
+    def test_remediate_panel_pairing_runman_executes_guest_exec(self):
+        action = {
+            "runtime": "runman",
+            "project": "default",
+            "container_name": "01234567-89ab-cdef-0123-456789abcdef",
+            "params": {
+                "process_patterns": ["v2bx"],
+                "process_pids": [4321],
+                "config_files": ["/etc/V2bX/config.json"],
+                "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+            },
+        }
+        env = {
+            "SECURITY_PANEL_PROCESS_PATTERNS": "v2bx",
+            "SECURITY_PANEL_CONFIG_PATHS": "/etc/V2bX/config.json",
+        }
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(agent, "get_runtime_bins", return_value={"runman": "runman"}), \
+             mock.patch.object(
+                 agent,
+                 "_run_action_command",
+                 return_value=(True, "killed_processes=1 removed_services=0 removed_configs=1 cleanup_errors=0 matched_processes=1 signal_errors=0 remaining_processes=0"),
+             ) as runner, \
+             mock.patch.dict(agent._runman_instance_generations, {"01234567-89ab-cdef-0123-456789abcdef": "550e8400-e29b-41d4-a716-446655440000"}, clear=True):
+            ok, _ = agent.remediate_panel_pairing(action)
+        self.assertTrue(ok)
+        command = runner.call_args_list[0].args[0]
+        self.assertEqual(command[0], agent._RUNMAN_EXEC_SENTINEL)
+        self.assertEqual(command[1], "01234567-89ab-cdef-0123-456789abcdef")
+        self.assertEqual(command[2], "550e8400-e29b-41d4-a716-446655440000")
+        self.assertIn("/etc/V2bX/config.json", command[3])
+
     def test_docker_xmrig_is_notice_only_and_never_auto_remediated(self):
         container = {
             "name": "customer-helper",

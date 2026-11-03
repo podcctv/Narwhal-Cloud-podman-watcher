@@ -1354,7 +1354,7 @@ def _telegram_active_alerts(severity: str = "all", offset: int = 0, limit: int =
 
 
 def _telegram_actionable(alert: sqlite3.Row) -> bool:
-    if alert["runtime"] not in ("podman", "incus"):
+    if alert["runtime"] not in ("podman", "incus", "runman"):
         return False
     if alert["alert_type"] not in ("unauthorized_panel_pairing", "socks_weak_auth", "malicious_process"):
         return False
@@ -2410,7 +2410,7 @@ def _empty_host_firewall_policy() -> Dict[str, Any]:
                 "cloudflare", "fast", "iperf3_server", "librespeed",
                 "ookla", "ookla_server", "openspeedtest", "tcpquality",
             ],
-            "service_runtimes": ["incus", "podman"],
+            "service_runtimes": ["incus", "podman", "runman"],
             "interfaces": [],
             "runtimes": [],
         },
@@ -5185,7 +5185,7 @@ async def queue_security_action(alert_id: int, request: Request) -> JSONResponse
     if alert["alert_type"] != "unauthorized_panel_pairing":
         conn.close()
         raise HTTPException(status_code=400, detail="this action only supports panel-pairing alerts")
-    if alert["runtime"] not in ("podman", "incus"):
+    if alert["runtime"] not in ("podman", "incus", "runman"):
         conn.close()
         raise HTTPException(status_code=400, detail="Docker and unknown runtimes are notice-only")
     if not alert["container_name"]:
@@ -5224,6 +5224,8 @@ async def queue_security_action(alert_id: int, request: Request) -> JSONResponse
             "process_pids": process_pids,
             "config_files": sorted(set(config_files)),
         }
+        if alert["runtime"] == "runman" and details.get("instance_id"):
+            params["instance_id"] = str(details["instance_id"])
 
     requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
     row, queued = _queue_security_action_row(conn, alert, action_type, params, requested_by)
@@ -5323,7 +5325,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                     "and exact XMRig alerts"
                 ),
             )
-        if alert["runtime"] not in ("podman", "incus"):
+        if alert["runtime"] not in ("podman", "incus", "runman"):
             conn.close()
             raise HTTPException(status_code=400, detail="Docker is notice-only and cannot be denied")
         if not alert["container_name"]:
@@ -5368,6 +5370,8 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                 "process_pids": process_pids,
                 "config_files": config_files,
             }
+            if alert["runtime"] == "runman" and details.get("instance_id"):
+                params["instance_id"] = str(details["instance_id"])
             action, queued = _queue_security_action_row(
                 conn, alert, "remediate_panel_pairing", params, requested_by
             )
@@ -5395,6 +5399,8 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                 "process_names": ["xmrig"],
                 "process_pids": sorted(set(process_pids)),
             }
+            if alert["runtime"] == "runman" and details.get("instance_id"):
+                params["instance_id"] = str(details["instance_id"])
             action, queued = _queue_security_action_row(
                 conn, alert, "remediate_malicious_process", params, requested_by
             )
@@ -5411,14 +5417,14 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
             (alert["fingerprint"], requested_by, now, now),
         )
         conn.execute("UPDATE security_alerts SET status='suppressed' WHERE id=?", (alert_id,))
-        if alert["alert_type"] == "unauthorized_panel_pairing" and alert["runtime"] in ("podman", "incus"):
+        if alert["alert_type"] == "unauthorized_panel_pairing" and alert["runtime"] in ("podman", "incus", "runman"):
             details = _alert_action_evidence(alert)
             domains = details.get("unapproved_domains") or []
             if domains:
                 action, queued = _queue_security_action_row(
                     conn, alert, "allow_panel_domains", {"domains": domains}, requested_by
                 )
-        elif alert["alert_type"] == "socks_weak_auth" and alert["runtime"] in ("podman", "incus"):
+        elif alert["alert_type"] == "socks_weak_auth" and alert["runtime"] in ("podman", "incus", "runman"):
             action, queued = _queue_security_action_row(
                 conn, alert, "release_socks_auth", {}, requested_by
             )
@@ -7151,7 +7157,7 @@ const labels={active:'活动',suppressed:'允许且不再提醒',dismissed:'本�
 const decisions={deny:'禁止/处理',allow_silent:'允许且不再提醒',dismiss_once:'本次取消提醒',reopen:'恢复提醒'};
 function esc(value){return String(value??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
 function showToast(message,error=false){const toast=document.getElementById('toast');toast.textContent=message;toast.className=`toast${error?' error':''}`;toast.hidden=false;setTimeout(()=>{toast.hidden=true},4500)}
-function actionable(alert){const details=alert.details||{};const supported=alert.runtime==='incus'||alert.runtime==='podman';if(!supported)return false;if(alert.type==='unauthorized_panel_pairing')return (details.process_patterns||[]).length>0||(details.config_files||[]).length>0;if(alert.type==='socks_weak_auth')return ['no_auth','weak_password'].includes(details.socks_auth_mode)&&(details.socks_processes||[]).length>0;if(alert.type==='malicious_process')return (details.malicious_processes||[]).some(x=>x.process==='xmrig');return false;}
+function actionable(alert){const details=alert.details||{};const supported=alert.runtime==='incus'||alert.runtime==='podman'||alert.runtime==='runman';if(!supported)return false;if(alert.type==='unauthorized_panel_pairing')return (details.process_patterns||[]).length>0||(details.config_files||[]).length>0;if(alert.type==='socks_weak_auth')return ['no_auth','weak_password'].includes(details.socks_auth_mode)&&(details.socks_processes||[]).length>0;if(alert.type==='malicious_process')return (details.malicious_processes||[]).some(x=>x.process==='xmrig');return false;}
 function evidenceText(alert){const d=alert.details||{};if(alert.type==='unauthorized_panel_pairing')return [`域名：${(d.unapproved_domains||[]).join(', ')||'-'}`,`进程：${(d.process_patterns||[]).join(', ')||'-'}`,`配置：${(d.config_files||[]).join(', ')||'-'}`];if(alert.type==='socks_weak_auth')return [`认证：${d.socks_auth_mode||'unknown'}`,`进程：${(d.socks_processes||[]).join(', ')||'-'}`,`配置：${(d.socks_config_files||[]).join(', ')||'-'}`];if(alert.type==='malicious_process')return [`进程：${(d.malicious_processes||[]).map(x=>x.process).join(', ')||'-'}`,`PID：${(d.malicious_processes||[]).map(x=>x.pid||'-').join(', ')||'-'}`,'策略：仅精确匹配 XMRig'];return [`指标：${alert.value||0}`,`阈值：${alert.threshold||0}`,`类型：${alert.type}`];}
 function resultText(alert){const automatic=alert.details?.automatic_remediation;const action=alert.latest_action;const decision=alert.latest_decision;const parts=[];if(automatic?.attempted)parts.push(`自动处置：${automatic.succeeded?'成功':'失败'} · ${automatic.message||'-'}`);if(action)parts.push(`节点操作：${action.status} · ${action.result_message||action.action_type}`);if(decision)parts.push(`人工决定：${decisions[decision.decision]||decision.decision} · ${decision.requested_by} · ${decision.created_at_utc8}`);return parts.join('<br>');}
 function card(alert){const runtime=alert.project?`${alert.runtime}/${alert.project}`:(alert.runtime||'-');const evidence=evidenceText(alert);const canAct=actionable(alert);const historical=alert.status!=='active';const controls=[];if(canAct)controls.push(`<button class='btn btn-danger' type='button' data-action-id='${alert.id}' onclick="decide(${alert.id},'deny')">${historical?'重新禁止/处理':'禁止/处理'}</button>`);if(alert.status==='suppressed'||alert.status==='dismissed')controls.push(`<button class='btn btn-secondary' type='button' data-action-id='${alert.id}' onclick="decide(${alert.id},'reopen')">恢复提醒</button>`);const result=resultText(alert);return `<article class='alert-card ${esc(alert.severity)}'><div class='alert-top'><div class='alert-title'><h3>${esc(alert.title||alert.type)}</h3><div class='meta'><span class='pill ${esc(alert.status)}'>${esc(labels[alert.status]||alert.status)}</span><span class='pill'>${esc(alert.severity)}</span><span class='pill'>${esc(alert.host_id)}</span><span class='pill'>${esc(runtime)}</span><span class='pill'>${esc(alert.container_name||'-')}</span></div></div><span class='pill'>出现 ${Number(alert.occurrence_count||0)} 次</span></div><p class='message'>${esc(alert.message)}</p><div class='evidence'>${evidence.map((x,i)=>`<div class='evidence-block'><span>${['关键证据','关联对象','处置范围'][i]||'证据'}</span><strong>${esc(x)}</strong></div>`).join('')}</div>${result?`<div class='result'>${result}</div>`:''}<footer class='card-footer'><div class='timestamps'>首次 ${esc(alert.first_seen_utc8)} · 最近 ${esc(alert.last_seen_utc8)}</div><div class='actions'>${controls.join('')}</div></footer></article>`;}

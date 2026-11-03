@@ -2,6 +2,17 @@
 
 更新时间：2026-11-03（Asia/Shanghai）
 
+## Runman 泛化恶意进程/服务精准处置与全局默认测速拦截（v1.7.206）
+
+- 泛化恶意文件/服务配置精准停止：在 client/agent.py 中为 Runman 接入 
+emediate_malicious_process 与 
+emediate_panel_pairing，严格绑定 UUIDv4 实例代次，采用容器内有界 guest exec 执行处置与移除，并执行终止核验，不停止整个客机。
+- 服务端告警动作接入：在 server/app.py 中对安全告警动作队列与处置接口（/api/v1/security/alerts/{id}/actions、/disposition）放行 Runman，核验 instance_id 代次一致性。
+- 全局无策略默认测速拦截：在母机防火墙默认空策略 _empty_host_firewall_policy 的 service_runtimes 中加入 
+unman，使 Runman 节点在无定制策略时亦能自动继承全局测速拦截。
+- 前端适配与状态徽章：放行 ContainerStateBadges 与 ContainerDrawer 中的 Runman 资源保护展示与卡片交互。
+- 补齐单元测试：在 	ests/test_agent_runtimes.py 和 	ests/test_server_runtime.py 增补测试用例并通过。全量 936 项测试全部通过。
+
 ## Runman Rust v2 兼容（v1.7.205）
 
 - Runman Rust v2 新增 root-only `/v1/stop-overload`；它在生命周期锁内复核同一 UUID 代次、运行状态及实时连接阈值，再写入 Stopped desired state 并停止实例。
