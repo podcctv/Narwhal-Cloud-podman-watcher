@@ -1388,7 +1388,10 @@ class ServerRuntimeTests(unittest.TestCase):
             container['security'] = {'connection_metrics': {'schema':1,'valid':True,'source':'container_proc_net','epoch':'boot:ns:pid',
                 'sampled_at':ts,'total':count,'tcp_total':count,'tcp_established':count,'tcp_pending':0,'tcp_time_wait':0,'udp_sockets':0}}
             with mock.patch.object(server.connection_policy.time, 'time', return_value=ts):
-                return server.process_connection_overloads(conn, 'host', ts, [container])
+                return server.process_connection_overloads(conn, 'host', ts, [container], {
+                    'scan_status': 'complete', 'alerts': [], 'error_instances': [],
+                    'active_lifecycle_operations': [],
+                })
         self.assertEqual(observe(900), 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM connection_overloads").fetchone()[0], 0)
         container["conn_count"] += 1

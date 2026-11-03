@@ -8,6 +8,14 @@ from client import agent
 from server import connection_policy as policy
 
 
+READY_INCUS_HEALTH = {
+    'scan_status': 'complete',
+    'alerts': [],
+    'error_instances': [],
+    'active_lifecycle_operations': [],
+}
+
+
 class ConnectionPolicyTests(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(':memory:')
@@ -24,10 +32,19 @@ class ConnectionPolicyTests(unittest.TestCase):
             'security':{'connection_metrics':{'schema':1,'valid':True,'source':'container_proc_net','epoch':epoch,
                 'sampled_at':stamp,'total':count,'tcp_total':40,'tcp_established':30,'tcp_pending':0,'tcp_time_wait':5,'udp_sockets':count-40}}}
 
-    def observe(self, stamp, count=1600, epoch='boot:net:pid', sample=None):
+    def observe(self, stamp, count=1600, epoch='boot:net:pid', sample=None, runtime_health=READY_INCUS_HEALTH):
         c = sample or self.sample(stamp,count,epoch)
-        result = policy.observe(self.conn,'h',stamp,[c],1000,1500,900,600,now=stamp)
+        result = policy.observe(self.conn,'h',stamp,[c],1000,1500,900,600,now=stamp,
+                                runtime_health=runtime_health)
         return result,c['connection_policy']
+
+    def test_incus_stop_fails_closed_without_a_complete_runtime_scan(self):
+        self.assertEqual(self.observe(1000)[0],0)
+        self.assertEqual(self.observe(1450)[0],0)
+        queued, result = self.observe(1900, runtime_health=None)
+        self.assertEqual(queued,0)
+        self.assertEqual(result['status'],'unverified')
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM security_actions').fetchone()[0],0)
 
     def test_continuous_stop_requires_three_fresh_samples_and_only_queues_once(self):
         self.assertEqual(self.observe(1000)[0],0)
