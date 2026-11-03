@@ -24,9 +24,10 @@ class ConnectionPolicyTests(unittest.TestCase):
             'security':{'connection_metrics':{'schema':1,'valid':True,'source':'container_proc_net','epoch':epoch,
                 'sampled_at':stamp,'total':count,'tcp_total':40,'tcp_established':30,'tcp_pending':0,'tcp_time_wait':5,'udp_sockets':count-40}}}
 
-    def observe(self, stamp, count=1600, epoch='boot:net:pid', sample=None):
+    def observe(self, stamp, count=1600, epoch='boot:net:pid', sample=None, runtime_health=None):
         c = sample or self.sample(stamp,count,epoch)
-        result = policy.observe(self.conn,'h',stamp,[c],1000,1500,900,600,now=stamp)
+        rh = {'scan_status': 'complete'} if runtime_health is None else runtime_health
+        result = policy.observe(self.conn,'h',stamp,[c],1000,1500,900,600,now=stamp,runtime_health=rh)
         return result,c['connection_policy']
 
     def test_continuous_stop_requires_three_fresh_samples_and_only_queues_once(self):

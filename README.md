@@ -1,12 +1,18 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.201**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.202**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.7.202：修复 Incus 健康检查单测回归并同步前端生产资源
+
+- 修复 Incus 运行时健康检查门禁（`_incus_stop_guard` 与 `stop_preflight`）相关的单元测试回归，确保 891 项全量单测与 13 项 UI 回归全绿。
+- 重新构建前端静态资源至 `server/static/`，确保容器状态徽章与抽屉诊断完整呈现。
+- 修复生产环境部署流水线阻塞，打通 GHCR 镜像自动化发布与定时更新闭环。
 
 ### v1.7.201：增加 Incus 卡住实例巡检与重复停止保护
 

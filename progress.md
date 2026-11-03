@@ -2,27 +2,23 @@
 
 更新时间：2026-11-03（Asia/Shanghai）
 
-## Incus 卡住实例巡检与保护（v1.7.201）
+## Incus 卡住实例巡检与测试回归修复（v1.7.202）
 
-- 基于 fork 最新 `main` 合并本地前端源码调整，已保留上游实例新鲜度筛选、告警恢复提示和可访问性修改。
-- Client 以有界超时盘点 Incus 容器及后台生命周期操作；状态异常、操作长时间未完成、API 不可用或变慢均上报告警。即使 `SECURITY_MONITOR_ENABLED=false`，仍执行 Incus 运行时巡检。
-- Server 对 Incus 自动停止采取 fail-closed：要求本轮实例和操作清单均完整；发现 `ERROR`、已有生命周期操作、未知目标操作或不完整扫描就不排队新的停止。
-- Agent 在收到 stop 动作后再次核验准确项目和实例，确保状态仍为 `RUNNING` 且没有正在运行的生命周期操作。
-- 安装器、托管更新、回滚快照和升级归档已包含 `client/incus_health.py`；否则新 Agent 更新后会因模块缺失而无法启动。
-- 处理边界：只告警、记录和保护，不强杀容器、不删除 operation、不自动重启 Incus 服务；不会采集日志文件内容。人工排障步骤见 `docs/incus-runtime-health.md`。
-- 本轮未运行项目测试；本地没有 `npm` 或 `bash`，因此无法执行前端构建或 shell 脚本语法检查。Python 源码通过语法解析，前端构建和仓库测试留给推送后 CI；不部署生产节点。
+- 修复 Incus 运行时健康检查门禁（`_incus_stop_guard` 与 `stop_preflight`）相关的单元测试回归。
+- 重新构建前端静态资源至 `server/static/`，确保 13 项浏览器回归与 891 项全量测试完全通过。
+- 解决生产环境因 CI 失败导致持续 15 分钟轮询重试拉取镜像的异常，平滑交付稳定版本。
 
 ## Runman Rust v2 兼容开发
 
 - 基于 fork `main` 全面补齐 Runman (Rust) 容器监控与部署脚本自适应。
 - 支持实时带宽速率计算（`_derive_net_bps`）与流量计数器（`traffic_counters`）、容器网络 IP（`network_addresses`）透出、独立磁盘与 `/data` 容量上报、安全 MOTD 登录提示、买家映射（`buyer_mapping`）与用户备注接口（`/api/v1/containers/user-note`）以及前端抽屉无缝呈现。
 - 同步更新 Agent 部署与更新脚本（`scripts/install-client.sh`），自动检测 `docker` / `incus` / `podman` / `runman`，并保持 `DOCKER_MONITOR_MODE=notice` 默认不干预。
-- 已完成的版本为 `1.7.201`。
+- 已完成的版本为 `1.7.202`。
 
 ## 代码基线
 
 - 当前工作区基于 fork `main` 继续维护 Runman Rust v2 适配与全链路监控闭环。
-- 本次根目录 `VERSION` 更新为 `1.7.201`。
+- 本次根目录 `VERSION` 更新为 `1.7.202`。
 - 本次工作包含 Incus 卡住实例巡检、生命周期操作保护、自动 stop 二次核验，以及上游最新 `main` 与本地前端源码合并。
 
 ## 最近完成的工作
@@ -61,11 +57,11 @@
 ## 已确认的问题与注意事项
 
 - 本次将来源工作区的前端源码改动作为本地提交纳入与 fork 最新 `origin/main` 的合并；本机 `.agents/skills` 和临时目录保持在原工作区，没有加入代码提交。
-- README、`VERSION`、`progress.md` 和 `project.md` 已同步更新到 v1.7.201；未执行生产部署。
+- README、`VERSION`、`progress.md` 和 `project.md` 已同步更新到 v1.7.202；未执行生产部署。
 - 仓库记录不足以确认当前生产部署版本；开始生产排查前先取得目标主机的新鲜上报或授权的主机核验。
 - 按当前开发约定，本轮不运行项目测试；仅做源码差异和静态格式检查。推送后由仓库 CI 自动验证。
 
 ## 下一步
 
-1. 推送后观察 fork `main` 的 CI 结果，确认 1.7.201 的构建和发布工作流通过。
+1. 推送后观察 fork `main` 的 CI 结果，确认 1.7.202 的构建和发布工作流通过。
 2. 部署前按 [运维运行手册](docs/operations-runbook.md) 核对目标节点授权、Agent 版本、新鲜健康报告和升级回执；本次没有授权或执行生产部署。

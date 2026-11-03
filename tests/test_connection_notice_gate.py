@@ -15,7 +15,7 @@ class ProtectionFirstTests(unittest.TestCase):
             'security':{'connection_metrics':{'schema':1,'valid':True,'source':'container_proc_net','epoch':epoch,
                 'sampled_at':stamp,'total':count,'tcp_total':count,'tcp_established':count,'tcp_pending':0,'tcp_time_wait':0,'udp_sockets':0}}}
         with fixtures.server.db() as conn:
-            policy.observe(conn,'host',stamp,[c],1000,2000,300,360,now=stamp,before_stop=callback or buyer.connection_stop_gate)
+            policy.observe(conn,'host',stamp,[c],1000,2000,300,360,now=stamp,before_stop=callback or buyer.connection_stop_gate,runtime_health={'scan_status':'complete'})
         return c['connection_policy']
 
     def count_actions(self):
