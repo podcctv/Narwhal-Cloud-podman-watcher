@@ -5,6 +5,7 @@ import hmac
 import http.client
 import ipaddress
 import json
+import math
 import os
 import posixpath
 import re
@@ -63,6 +64,8 @@ _warned_timeout_commands = set()
 _podman_bin = None
 _container_bin = None
 _runtime_bins = None
+_RUNMAN_EXEC_SENTINEL = "__narwhal_runman_exec__"
+_runman_instance_generations: Dict[str, str] = {}
 _net_counters: Dict[str, Dict[str, float]] = {}
 _cpu_counters: Dict[str, Dict[str, float]] = {}
 _warned_parse_paths = set()
@@ -226,7 +229,68 @@ def _runtime_command_timeout() -> float:
     return max(5.0, min(300.0, configured))
 
 
+def _runman_exec_request(
+    container_name: str,
+    instance_id: str,
+    command: str,
+    timeout: float = 30.0,
+) -> Tuple[bool, str]:
+    """Use Runman's generation-bound, root-only guest execution endpoint."""
+    if (
+        os.name != "posix" or not hasattr(socket, "AF_UNIX")
+        or not re.fullmatch(r"[0-9a-fA-F-]{36}", container_name or "")
+        or not instance_id or len(instance_id) > 200
+        or not command or len(command.encode("utf-8")) > 64 * 1024 or "\0" in command
+    ):
+        return False, "Runman guest execution target or command is invalid"
+    timeout_seconds = max(1, min(90, int(float(timeout))))
+    connection = network_quarantine._UnixHTTP("/run/narwhal-agent/connlimit.sock")
+    connection.timeout = timeout_seconds + 5
+    body = json.dumps({
+        "container_name": container_name,
+        "project": "default",
+        "instance_id": instance_id,
+        "command": command,
+        "timeout_seconds": timeout_seconds,
+    }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        connection.request(
+            "POST", "/v1/exec", body=body,
+            headers={"Content-Type": "application/json", "Connection": "close"},
+        )
+        response = connection.getresponse()
+        # JSON escaping can expand 64 KiB of guest output several-fold.
+        raw = response.read(512 * 1024 + 1)
+        if len(raw) > 512 * 1024:
+            return False, "Runman guest execution response exceeded the limit"
+        try:
+            result = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            result = {}
+        if not isinstance(result, dict):
+            return False, "Runman guest execution returned an invalid response"
+        output = str(result.get("stdout") or "")
+        error = str(result.get("stderr") or result.get("message") or "")
+        if response.status != 200 or result.get("ok") is not True:
+            return False, (output or error or "Runman guest execution failed")[:8000]
+        if result.get("instance_id") != instance_id or result.get("exit_code") != 0:
+            return False, "Runman guest execution identity or exit status was not confirmed"
+        return True, output
+    except (OSError, ValueError, http.client.HTTPException):
+        return False, "Runman guest execution socket unavailable or timed out"
+    finally:
+        connection.close()
+
+
 def run(cmd: List[str], timeout: float | None = None) -> str:
+    if cmd and cmd[0] == _RUNMAN_EXEC_SENTINEL:
+        if len(cmd) != 4:
+            return ""
+        ok, output = _runman_exec_request(
+            cmd[1], cmd[2], cmd[3],
+            _runtime_command_timeout() if timeout is None else timeout,
+        )
+        return output if ok else ""
     env = None
     if cmd and cmd[0] == "podman-remote":
         socket_path = os.getenv("PODMAN_SOCKET", "/run/podman/podman.sock")
@@ -273,6 +337,13 @@ def _runtime_base(runtime: str, project: str = "") -> List[str]:
 
 
 def _runtime_exec_cmd(runtime: str, name: str, shell_command: str, project: str = "") -> List[str]:
+    if _runtime_kind(runtime) == "runman":
+        return [
+            _RUNMAN_EXEC_SENTINEL,
+            name,
+            _runman_instance_generations.get(name, ""),
+            shell_command,
+        ]
     cmd = _runtime_base(runtime, project) + ["exec", name]
     if _runtime_kind(runtime) == "incus":
         cmd.append("--")
@@ -3531,6 +3602,13 @@ def _checked_banner_exec(container, command):
         return False, ""
     if not runtime_bin:
         return False, ""
+    if runtime_kind == "runman":
+        return _runman_exec_request(
+            str(container.get("name") or ""),
+            str(container.get("instance_id") or ""),
+            str(command),
+            _runtime_command_timeout(),
+        )
     try:
         result = subprocess.run(_runtime_exec_cmd(runtime_bin, str(container.get("name") or ""), command, str(container.get("project") or "")), capture_output=True, text=True, timeout=_runtime_command_timeout())
         return result.returncode == 0, result.stdout
@@ -3556,6 +3634,15 @@ def _abuse_provider(container):
         state, _ = api.request('GET', '/1.0/instances/'+quote(name, safe='')+'/state')
         pid = int(state.get('pid') or 0)
         driver = network_quarantine.IncusIsolation(api, name, identity)
+    elif runtime == 'runman':
+        identity = str(container.get('instance_id') or '')
+        if project != 'default' or not re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}', name) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', identity):
+            raise network_quarantine.QuarantineError('Runman generation identity is unavailable')
+        driver = network_quarantine.RunmanIsolation(name, identity)
+        state = driver.inspect()
+        pid = int(state.get('init_pid') or 0)
+        if state.get('running') is not True:
+            raise network_quarantine.QuarantineError('Runman instance is not running')
     else:
         binary = get_runtime_bins().get('podman', '')
         if not binary:
@@ -3592,6 +3679,10 @@ def _abuse_provider(container):
         if runtime == 'incus':
             current, _ = api.request('GET', driver.path+'/state')
             current_pid = int(current.get('pid') or 0)
+        elif runtime == 'runman':
+            if fresh.get('instance_id') != identity or fresh.get('running') is not True:
+                raise network_quarantine.QuarantineError('Runman generation changed during collection')
+            current_pid = int(fresh.get('init_pid') or 0)
         else:
             current_pid = int(fresh.get('State', {}).get('Pid') or 0)
         if current_pid != pid or abuse_collection.host_metadata(pid)['start_ticks'] != init_ticks:
@@ -4057,7 +4148,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 )
             )
             continue
-        abuse_state = abuse_guard.status(container) if container.get('runtime') in {'incus', 'podman'} else {'state': 'unsupported'}
+        abuse_state = abuse_guard.status(container) if container.get('runtime') in {'incus', 'podman', 'runman'} else {'state': 'unsupported'}
         if not isinstance(container.get('security'), dict):
             container['security'] = {}
         container['security']['abuse_guard'] = abuse_state
@@ -5128,8 +5219,11 @@ def collect_top_cpu_process(name: str, runtime: str = "", project: str = "") -> 
     top_cmd = [runtime, "top", name, "pcpu,pid,comm,args"]
     if kind == "docker":
         top_cmd = [runtime, "top", name, "-eo", "pcpu,pid,comm,args"]
-    elif kind == "incus":
-        top_cmd = _runtime_base(runtime, project) + ["exec", name, "--", "ps", "-eo", "pcpu,pid,comm,args"]
+    elif kind in {"incus", "runman"}:
+        if kind == "runman":
+            top_cmd = _runtime_exec_cmd(runtime, name, "ps -eo pcpu,pid,comm,args 2>/dev/null", project)
+        else:
+            top_cmd = _runtime_base(runtime, project) + ["exec", name, "--", "ps", "-eo", "pcpu,pid,comm,args"]
     out = run(top_cmd)
     best = {"pid": 0, "cpu_percent": 0.0, "command": ""}
     for line in out.splitlines():
@@ -6898,8 +6992,8 @@ def _host_dnat_network_exposure(
     network_addresses: List[str],
     host_conntrack: Dict[str, object] | None,
 ) -> List[Dict[str, str]]:
-    """Map explicit host TCP DNAT rules to a matching Incus/Podman address."""
-    if runtime_name not in {"incus", "podman"} or not isinstance(host_conntrack, dict):
+    """Map explicit host TCP DNAT rules to a matching container address."""
+    if runtime_name not in {"incus", "podman", "runman"} or not isinstance(host_conntrack, dict):
         return []
     addresses = {str(value) for value in network_addresses if _is_trackable_ip(str(value))}
     mappings = host_conntrack.get("nat_mappings")
@@ -7420,7 +7514,9 @@ def _runman_proc_snapshot(pid: int) -> Dict[str, object]:
 
 
 def _runman_inventory_containers() -> List[Dict[str, str]]:
-    """Read Runman's bounded, root-only inventory API; never shell into guests."""
+    """Read Runman's bounded, root-only inventory and generation-bound metrics."""
+    global _runman_instance_generations
+    _runman_instance_generations = {}
     if os.name != 'posix' or not hasattr(socket, 'AF_UNIX'):
         return []
     configured = os.getenv('CONTAINER_RUNTIMES', 'auto').strip().lower().replace(' ', '')
@@ -7442,6 +7538,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
         return []
 
     items: List[Dict[str, str]] = []
+    generations: Dict[str, str] = {}
     for raw_item in body['items'][:4096]:
         if not isinstance(raw_item, dict):
             continue
@@ -7451,6 +7548,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             continue
         if not generation or len(generation) > 200:
             continue
+        generations[vm_id] = generation
         raw_metrics = raw_item.get('connection_metrics')
         metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
         established = metrics.get('tcp_established')
@@ -7478,6 +7576,45 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             type(traffic_in) is int and traffic_in >= 0
             and type(traffic_out) is int and traffic_out >= 0
         )
+        raw_monitor = raw_item.get('monitor_metrics')
+        monitor = raw_monitor if isinstance(raw_monitor, dict) else {}
+        monitor_at = monitor.get('sampled_at')
+        monitor_valid = (
+            raw_item.get('running') is True
+            and monitor.get('schema') == 1
+            and monitor.get('source') == 'runman_history'
+            and monitor.get('valid') is True
+            and type(monitor_at) is int
+            and monitor_at > 0
+            and monitor_at <= int(time.time()) + 30
+            and int(time.time()) - monitor_at <= 180
+            and type(monitor.get('samples')) is int
+            and monitor.get('samples') > 0
+        )
+        monitor_metrics: Dict[str, object] = {
+            'available': monitor_valid,
+            'sampled_at': monitor_at if type(monitor_at) is int and monitor_at > 0 else 0,
+            'window_seconds': monitor.get('window_seconds') if type(monitor.get('window_seconds')) is int else 0,
+            'samples': monitor.get('samples') if type(monitor.get('samples')) is int else 0,
+        }
+        for field in (
+            'cpu_percent', 'disk_used_bytes', 'disk_read_bytes_per_second',
+            'disk_write_bytes_per_second', 'disk_read_iops', 'disk_write_iops',
+            'net_rx_bits_per_second', 'net_tx_bits_per_second',
+            'net_rx_packets_per_second', 'net_tx_packets_per_second',
+            'tcp_connections', 'udp_flows', 'remote_ip_count',
+        ):
+            value = monitor.get(field)
+            valid_value = (
+                type(value) is int and value >= 0
+                or type(value) is float and math.isfinite(value) and value >= 0
+            )
+            monitor_metrics[field] = value if monitor_valid and valid_value else None
+        raw_cpu = raw_item.get('cpu_percent')
+        if monitor_valid and type(monitor_metrics.get('cpu_percent')) in (int, float):
+            raw_cpu = monitor_metrics['cpu_percent']
+        if type(raw_cpu) not in (int, float) or not math.isfinite(float(raw_cpu)) or raw_cpu < 0:
+            raw_cpu = 0.0
         connection_metrics = {
             'schema': 1,
             'source': 'runman_local_proc_net',
@@ -7490,6 +7627,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'tcp_pending': pending if metrics_valid else 0,
             'tcp_time_wait': time_wait if metrics_valid else 0,
             'udp_sockets': 0,
+            'udp_flows': monitor_metrics.get('udp_flows') if monitor_valid else None,
         }
         pid = raw_item.get('init_pid') if raw_item.get('running') is True else None
         proc_snapshot = _runman_proc_snapshot(pid) if type(pid) is int and pid > 1 else {}
@@ -7500,7 +7638,9 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'stable_id': vm_id,
             'name': vm_id,
             'runtime': 'runman',
-            'runtime_bin': '',
+            # Dispatch marker for _runtime_exec_cmd; this is not a binary to
+            # invoke. Runman commands go through its generation-bound API.
+            'runtime_bin': 'runman',
             'project': 'default',
             'pid': str(pid) if type(pid) is int and pid > 0 else '',
             'pid_start_ticks': pid_start_ticks,
@@ -7511,7 +7651,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'connection_metrics': connection_metrics,
             'runman_resources': {
                 'cpu': raw_item.get('cpu') if type(raw_item.get('cpu')) is int else 0,
-                'cpu_percent': raw_item.get('cpu_percent') if type(raw_item.get('cpu_percent')) in (int, float) else 0,
+                'cpu_percent': raw_cpu,
                 'ram_mb': raw_item.get('ram_mb') if type(raw_item.get('ram_mb')) is int else 0,
                 'mem_bytes': raw_item.get('mem_bytes') if type(raw_item.get('mem_bytes')) is int else 0,
                 'mem_limit_bytes': raw_item.get('mem_limit_bytes') if type(raw_item.get('mem_limit_bytes')) is int else 0,
@@ -7520,7 +7660,12 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
                 'traffic_in_bytes': traffic_in if traffic_counters_available else 0,
                 'traffic_out_bytes': traffic_out if traffic_counters_available else 0,
                 'traffic_counters_available': traffic_counters_available,
-                'disk_used_bytes': proc_snapshot.get('disk_used_bytes', 0),
+                'disk_used_bytes': (
+                    proc_snapshot.get('disk_used_bytes', 0)
+                    if proc_snapshot.get('container_fs_available') is True
+                    else monitor_metrics.get('disk_used_bytes') or 0
+                ),
+                'monitor_metrics': monitor_metrics,
                 'container_fs': proc_snapshot.get('container_fs', {
                     'root': {'total_bytes': 0, 'avail_bytes': 0},
                     'data': {'total_bytes': 0, 'avail_bytes': 0},
@@ -7530,6 +7675,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
                 'net_metrics_available': raw_item.get('net_metrics_available') is True,
             },
         })
+    _runman_instance_generations = generations
     return items
 
 
@@ -7570,13 +7716,17 @@ def _runman_bridge_interface() -> str:
         connection.close()
 
 
-def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
+def collect_runman_report(
+    container: Dict[str, object], base_report: Dict[str, object] | None = None,
+) -> Dict[str, object]:
     metrics = container.get('connection_metrics') if isinstance(container.get('connection_metrics'), dict) else {}
     resources = container.get('runman_resources') if isinstance(container.get('runman_resources'), dict) else {}
     tcp_total = metrics.get('tcp_total') if type(metrics.get('tcp_total')) is int else 0
     mem_bytes = resources.get('mem_bytes') if type(resources.get('mem_bytes')) is int else 0
     mem_limit = resources.get('mem_limit_bytes') if type(resources.get('mem_limit_bytes')) is int else 0
     cpu = resources.get('cpu_percent') if type(resources.get('cpu_percent')) in (int, float) else 0.0
+    if not math.isfinite(float(cpu)) or float(cpu) < 0:
+        cpu = 0.0
     stable_id = str(container.get('stable_id') or container.get('id') or '')
     instance_id = str(container.get('instance_id') or '')
     traffic_valid = (
@@ -7613,14 +7763,48 @@ def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
     if fs_root_total > 0 and container_fs['root']['total_bytes'] == 0:
         container_fs['root']['total_bytes'] = fs_root_total
 
+    raw_metrics = resources.get('monitor_metrics') if isinstance(resources.get('monitor_metrics'), dict) else {}
+    metrics_available = raw_metrics.get('available') is True
+    disk_io = {
+        'available': metrics_available,
+        'sampled_at': raw_metrics.get('sampled_at') if type(raw_metrics.get('sampled_at')) is int else 0,
+        'samples': raw_metrics.get('samples') if type(raw_metrics.get('samples')) is int else 0,
+        'read_bytes_per_second': raw_metrics.get('disk_read_bytes_per_second') if metrics_available else None,
+        'write_bytes_per_second': raw_metrics.get('disk_write_bytes_per_second') if metrics_available else None,
+        'read_iops': raw_metrics.get('disk_read_iops') if metrics_available else None,
+        'write_iops': raw_metrics.get('disk_write_iops') if metrics_available else None,
+    }
     container_disk = {
         'rw_bytes': int(resources.get('disk_used_bytes') or 0),
         'rootfs_bytes': disk_bytes,
         'fs': container_fs,
         'available': resources.get('container_fs_available') is True or disk_bytes > 0,
+        'io': disk_io,
     }
-
-    return {
+    report = dict(base_report) if isinstance(base_report, dict) else {}
+    security = dict(report.get('security')) if isinstance(report.get('security'), dict) else {}
+    security.update({
+        'connection_metrics': metrics,
+        'runman_metrics': raw_metrics,
+        'inspection_status': 'runman_guest_exec' if str(container.get('status')) == 'running' else 'stopped',
+        'deep_process_inspection_supported': str(container.get('status')) == 'running',
+    })
+    existing_disk = report.get('container_disk') if isinstance(report.get('container_disk'), dict) else {}
+    existing_fs = existing_disk.get('fs') if isinstance(existing_disk.get('fs'), dict) else {}
+    merged_fs = dict(existing_fs)
+    for fs_name in ('root', 'data'):
+        # Generation-checked procfs values are authoritative; guest df is a
+        # fallback where the host cannot traverse /proc/PID/root.
+        if container_fs[fs_name]['total_bytes'] > 0:
+            merged_fs[fs_name] = container_fs[fs_name]
+        elif isinstance(existing_fs.get(fs_name), dict):
+            merged_fs[fs_name] = existing_fs[fs_name]
+    container_disk.update({
+        key: value for key, value in existing_disk.items()
+        if key not in {'rw_bytes', 'rootfs_bytes', 'fs', 'io', 'available'}
+    })
+    container_disk['fs'] = merged_fs
+    report.update({
         'id': str(container.get('id') or ''),
         'stable_id': stable_id,
         'name': str(container.get('name') or ''),
@@ -7631,7 +7815,7 @@ def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
         'instance_id': instance_id,
         'pid': str(container.get('pid') or ''),
         'pid_start_ticks': str(container.get('pid_start_ticks') or ''),
-        'monitor_mode': 'runman_inventory',
+        'monitor_mode': 'runman_guest_exec' if base_report is not None else 'runman_inventory',
         'cpu_percent': max(0.0, float(cpu)),
         'cpu_effective_cpus': float(resources.get('cpu') or 0),
         'mem_bytes': max(0, mem_bytes),
@@ -7647,19 +7831,24 @@ def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
             'epoch': f'{stable_id}:{instance_id}:runman',
         },
         'network_addresses': sorted(set(ips)),
-        'conn_count': tcp_total,
-        'tcp_country_stats': [],
-        'udp_country_stats': [],
-        'disk': collect_disk_alert(),
+        'conn_count': tcp_total if metrics.get('valid') is True else int(report.get('conn_count') or 0),
+        'udp_flow_count': (
+            int(raw_metrics['udp_flows'])
+            if metrics_available and type(raw_metrics.get('udp_flows')) in (int, float)
+            else int(report.get('udp_flow_count') or 0)
+        ),
+        'tcp_country_stats': report.get('tcp_country_stats', []),
+        'udp_country_stats': report.get('udp_country_stats', []),
+        'disk': report.get('disk') or collect_disk_alert(),
         'container_disk': container_disk,
-        'top_cpu_process': {'pid': 0, 'cpu_percent': 0.0, 'command': ''},
-        'security': {
-            'connection_metrics': metrics,
-            'inspection_status': 'limited_runman_adapter',
-            'deep_process_inspection_supported': False,
-        },
+        'top_cpu_process': report.get('top_cpu_process') or {'pid': 0, 'cpu_percent': 0.0, 'command': ''},
+        'security': security,
         'runman_resources': resources,
-    }
+        'instance_id': instance_id,
+        'pid': str(container.get('pid') or ''),
+        'pid_start_ticks': str(container.get('pid_start_ticks') or ''),
+    })
+    return report
 
 
 def collect_docker_notice(container: Dict[str, str]) -> Dict[str, object]:
@@ -7733,7 +7922,7 @@ def collect_container_disk_usage(
         )
     rw_bytes = 0
     rootfs_bytes = 0
-    if include_layer_size and _runtime_kind(runtime) != "incus":
+    if include_layer_size and _runtime_kind(runtime) not in {"incus", "runman"}:
         inspect = run([runtime, "container", "inspect", "--size", name])
         if inspect:
             try:
@@ -7807,8 +7996,9 @@ def collect_container(
     precomputed_incus_metrics: Dict[Tuple[str, str], Dict[str, float]] | None = None,
     precomputed_network_addresses: List[str] | None = None,
     host_conntrack: Dict[str, object] | None = None,
+    precomputed_runman_resources: Dict[str, object] | None = None,
 ) -> Dict:
-    runtime = runtime or get_container_bin()
+    runtime = "runman" if runtime_name == "runman" else runtime or get_container_bin()
     runtime_name = runtime_name or _runtime_kind(runtime)
     if not runtime:
         return {
@@ -7845,6 +8035,31 @@ def collect_container(
         parsed_stats = _incus_stats(runtime, name, project, precomputed_incus_metrics)
         parsed_tpl = _parse_stats_template("")
         parsed_compact = _parse_stats_compact("")
+    elif runtime_name == "runman":
+        resources = precomputed_runman_resources if isinstance(precomputed_runman_resources, dict) else {}
+        runman_cpu = resources.get("cpu_percent")
+        runman_mem = resources.get("mem_bytes")
+        runman_mem_limit = resources.get("mem_limit_bytes")
+        runman_rx = resources.get("traffic_in_bytes")
+        runman_tx = resources.get("traffic_out_bytes")
+        parsed_stats = {
+            "cpu_percent": float(runman_cpu) if type(runman_cpu) in (int, float) else 0.0,
+            "cpu_effective_cpus": float(resources.get("cpu") or 0),
+            "cpu_sample_available": type(runman_cpu) in (int, float),
+            "mem_bytes": int(runman_mem) if type(runman_mem) is int else 0,
+            "mem_limit_bytes": int(runman_mem_limit) if type(runman_mem_limit) is int else 0,
+            "mem_percent": (
+                100.0 * int(runman_mem) / int(runman_mem_limit)
+                if type(runman_mem) is int and type(runman_mem_limit) is int and runman_mem_limit > 0
+                else 0.0
+            ),
+            "net_rx_total_bytes": int(runman_rx) if type(runman_rx) is int else 0,
+            "net_tx_total_bytes": int(runman_tx) if type(runman_tx) is int else 0,
+            "net_rx_total_packets": 0,
+            "net_tx_total_packets": 0,
+        }
+        parsed_tpl = _parse_stats_template("")
+        parsed_compact = _parse_stats_compact("")
     else:
         stats_json = run([runtime, "stats", "--no-stream", "--format", "json", name])
         parsed_stats = _parse_stats_json(stats_json)
@@ -7864,7 +8079,7 @@ def collect_container(
         parsed_compact = _parse_stats_compact(stats_compact)
 
     cpu_candidates = [parsed_stats["cpu_percent"], parsed_tpl["cpu_percent"], parsed_compact["cpu_percent"]]
-    cpu_pressure_sample_available = bool(parsed_stats.get("cpu_sample_available")) if runtime_name == "incus" else False
+    cpu_pressure_sample_available = bool(parsed_stats.get("cpu_sample_available")) if runtime_name in {"incus", "runman"} else False
     mem_candidates = [parsed_stats["mem_bytes"], parsed_tpl["mem_bytes"], parsed_compact["mem_bytes"]]
     mem_limit_candidates = [
         parsed_stats.get("mem_limit_bytes", 0),
@@ -7904,7 +8119,7 @@ def collect_container(
     rx_packet_total = int(parsed_stats.get("net_rx_total_packets", 0) or 0)
     tx_packet_total = int(parsed_stats.get("net_tx_total_packets", 0) or 0)
     cpu_effective_cpus = float(parsed_stats.get("cpu_effective_cpus", 0.0) or 0.0)
-    if runtime_name == "incus" and cpu_effective_cpus <= 0:
+    if runtime_name in {"incus", "runman"} and cpu_effective_cpus <= 0:
         cpu_effective_cpus = _host_cpu_capacity()
 
     conn_count = 0
@@ -7917,7 +8132,7 @@ def collect_container(
     if runtime_name == "incus":
         if pid <= 0:
             pid = _incus_instance_pid(runtime, name, project)
-    else:
+    elif runtime_name != "runman":
         inspect = run([runtime, "inspect", name])
     if inspect:
         try:
@@ -7997,7 +8212,7 @@ def collect_container(
     )
     process_count = _read_process_count_from_pid(pid)
 
-    if runtime_name != "incus" and stats_json.strip() == "" and stats_tpl.strip() == "" and stats_compact.strip() == "":
+    if runtime_name not in {"incus", "runman"} and stats_json.strip() == "" and stats_tpl.strip() == "" and stats_compact.strip() == "":
         warn_key = f"{runtime}:stats-empty"
         if warn_key not in _warned_parse_paths:
             _warned_parse_paths.add(warn_key)
@@ -8099,7 +8314,7 @@ def collect_container(
     )
     communication_sockets = communication.get("communication_sockets")
     if (
-        runtime_name in {"incus", "podman"}
+        runtime_name in {"incus", "podman", "runman"}
         and pid > 1
         and (
             (
@@ -9390,6 +9605,10 @@ def signed_post_json(server: str, secret: str, path: str, payload: Dict) -> Dict
 
 
 def _run_action_command(cmd: List[str]) -> Tuple[bool, str]:
+    if cmd and cmd[0] == _RUNMAN_EXEC_SENTINEL:
+        if len(cmd) != 4:
+            return False, "invalid Runman guest execution request"
+        return _runman_exec_request(cmd[1], cmd[2], cmd[3], 90.0)
     env = None
     if cmd and cmd[0] == "podman-remote":
         socket_path = os.getenv("PODMAN_SOCKET", "/run/podman/podman.sock")
@@ -10977,11 +11196,15 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             key = network_quarantine.target(runtime, target['project'], target['name'], identity)
             if runtime == 'incus':
                 driver = network_quarantine.IncusIsolation(network_quarantine.IncusAPI(target['project']), target['name'], identity)
-            else:
+            elif runtime == 'podman':
                 binary = get_runtime_bins().get('podman', '')
                 if not binary:
                     raise network_quarantine.QuarantineError('Podman unavailable')
                 driver = network_quarantine.PodmanIsolation(_run_action_command, binary, target['name'], identity)
+            elif runtime == 'runman':
+                driver = network_quarantine.RunmanIsolation(target['name'], identity)
+            else:
+                raise network_quarantine.QuarantineError('unsupported runtime')
             guard = abuse_guard.engine()
             with guard.lock:
                 network_quarantine.release(guard.journal, key, driver)
@@ -11004,6 +11227,8 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
                 if not binary:
                     raise network_quarantine.QuarantineError('Podman unavailable')
                 driver = network_quarantine.PodmanIsolation(_run_action_command, binary, target['name'], identity)
+            elif runtime == 'runman':
+                driver = network_quarantine.RunmanIsolation(target['name'], identity)
             else:
                 raise network_quarantine.QuarantineError('unsupported runtime')
             guard = abuse_guard.engine()
@@ -11473,7 +11698,7 @@ def main() -> None:
         collected = []
         included_deep_sample_ids: List[int] = []
         for c in containers:
-            if c.get("runtime") == "runman":
+            if c.get("runtime") == "runman" and c.get("status") != "running":
                 container_report = collect_runman_report(c)
                 container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
                 collected.append(container_report)
@@ -11500,12 +11725,17 @@ def main() -> None:
                     else None,
                     c.get("network_addresses") if isinstance(c.get("network_addresses"), list) else None,
                     host_conntrack,
+                    c.get("runman_resources") if c.get("runtime") == "runman" and isinstance(c.get("runman_resources"), dict) else None,
                 )
+            if c.get("runtime") == "runman":
+                container_report = collect_runman_report(c, container_report)
             container_security = container_report.get("security")
             container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
             if security_enabled and isinstance(container_security, dict):
                 container_security["access_log"] = _collect_container_access_log_stats(c, security_interval)
             pending_deep_sample = _pending_deep_sample_for(c)
+            if c.get("runtime") == "runman" and c.get("status") != "running":
+                pending_deep_sample = None
             if pending_deep_sample is not None:
                 try:
                     container_report["deep_sample"] = collect_container_deep_sample(

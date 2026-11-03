@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from client import network_quarantine as q
 
 
@@ -84,6 +85,33 @@ class FakePodman:
         return True, ''
 
 
+class FakeRunmanConnection:
+    state = {'instance_id': '22222222-2222-4222-8222-222222222222', 'isolated': False,
+             'interface_up': True, 'running': True, 'ok': True, 'init_pid': 123}
+
+    def __init__(self, _path):
+        self.timeout = 0
+        self.body = None
+
+    def request(self, method, path, body=None, headers=None):
+        if method != 'POST' or path != '/v1/network-quarantine':
+            raise AssertionError('unexpected Runman request')
+        self.body = json.loads(body)
+
+    def getresponse(self):
+        action = self.body['action']
+        if action == 'isolate':
+            self.state.update(isolated=True, interface_up=False)
+        elif action == 'release':
+            self.state.update(isolated=False, interface_up=True)
+        elif action == 'replacement':
+            self.state['instance_id'] = '33333333-3333-4333-8333-333333333333'
+        return type('Response', (), {'status': 200, 'read': lambda _self, _limit: json.dumps(self.state).encode()})()
+
+    def close(self):
+        pass
+
+
 class NetworkQuarantineTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -92,6 +120,40 @@ class NetworkQuarantineTests(unittest.TestCase):
 
     def tearDown(self):
         self.directory.cleanup()
+
+    def test_runman_veth_quarantine_is_generation_bound_and_reversible(self):
+        FakeRunmanConnection.state = {'instance_id': '22222222-2222-4222-8222-222222222222', 'isolated': False,
+                                      'interface_up': True, 'running': True, 'ok': True, 'init_pid': 123}
+        driver = q.RunmanIsolation('11111111-2222-3333-4444-555555555555', '22222222-2222-4222-8222-222222222222')
+        key = q.target('runman', 'default', driver.name, driver.instance_id)
+        with mock.patch.object(q, '_UnixHTTP', FakeRunmanConnection):
+            result = q.quarantine(self.journal, key, driver, EVIDENCE)
+            self.assertTrue(result['ingress_blocked'] and result['egress_blocked'])
+            self.assertTrue(FakeRunmanConnection.state['isolated'])
+            q.release(self.journal, key, driver)
+            self.assertFalse(FakeRunmanConnection.state['isolated'])
+            self.assertEqual(self.journal.read(), {})
+            self.assertEqual(driver.prove_replaced(), '33333333-3333-4333-8333-333333333333')
+
+    def test_runman_rejects_changed_generation_and_unverified_interface(self):
+        FakeRunmanConnection.state = {'instance_id': 'replacement-generation', 'isolated': False,
+                                      'interface_up': True, 'running': True, 'ok': True, 'init_pid': 123}
+        driver = q.RunmanIsolation('11111111-2222-3333-4444-555555555555', '22222222-2222-4222-8222-222222222222')
+        with mock.patch.object(q, '_UnixHTTP', FakeRunmanConnection):
+            with self.assertRaises(q.QuarantineError):
+                driver.snapshot()
+
+    def test_runman_quarantine_target_requires_default_project_and_uuid_generation(self):
+        name = '11111111-2222-3333-4444-555555555555'
+        generation = '22222222-2222-4222-8222-222222222222'
+        self.assertTrue(q.target('runman', 'default', name, generation))
+        for project, vm_id, instance_id in (
+            ('other', name, generation),
+            ('default', 'customer', generation),
+            ('default', name, 'generation-1'),
+        ):
+            with self.assertRaises(q.QuarantineError):
+                q.target('runman', project, vm_id, instance_id)
 
     def test_incUS_masks_all_nics_and_proxy_and_restores_inheritance(self):
         api = FakeIncus()
@@ -258,7 +320,8 @@ class NetworkQuarantineTests(unittest.TestCase):
 
     def test_invalid_target_protected_management_and_unsafe_evidence_rejected(self):
         for runtime, name, identity in (('docker', 'customer', PODMAN_ID), ('incus', 'x;evil', INSTANCE_ID),
-                                        ('podman', 'narwhal-monitor-server', PODMAN_ID), ('incus', 'customer', 'short')):
+                                        ('podman', 'narwhal-monitor-server', PODMAN_ID), ('incus', 'customer', 'short'),
+                                        ('runman', 'customer', 'short')):
             with self.assertRaises(q.QuarantineError):
                 q.target(runtime, '', name, identity)
         with self.assertRaises(q.QuarantineError):

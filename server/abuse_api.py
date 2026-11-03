@@ -8,6 +8,8 @@ from fastapi.responses import JSONResponse
 
 KINDS = {'outbound_scan', 'authentication_bruteforce', 'credential_stuffing', 'identity_enumeration'}
 REPLACEMENT_REVIEW_VERSION = (1, 7, 188)
+RUNMAN_VM_ID_RE = re.compile(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}')
+RUNMAN_GENERATION_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
 
 
 def supports_replacement_review(version):
@@ -31,7 +33,11 @@ def normalized_alert(value):
     if not isinstance(value, dict) or value.get('type') != 'prohibited_activity':
         raise HTTPException(400, 'invalid abuse event type')
     runtime, project, name, identity = (str(value.get(k) or '') for k in ('runtime', 'project', 'container_name', 'instance_id'))
-    if runtime not in {'incus', 'podman'} or not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name) or not re.fullmatch(r'[A-Za-z0-9-]{12,100}', identity):
+    if runtime == 'runman':
+        valid_identity = project == 'default' and RUNMAN_VM_ID_RE.fullmatch(name) and RUNMAN_GENERATION_RE.fullmatch(identity)
+    else:
+        valid_identity = runtime in {'incus', 'podman'} and re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name) and re.fullmatch(r'[A-Za-z0-9-]{12,100}', identity)
+    if not valid_identity:
         raise HTTPException(400, 'stable supported instance identity required')
     if project and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', project):
         raise HTTPException(400, 'invalid project')

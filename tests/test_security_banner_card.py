@@ -263,16 +263,17 @@ class CardTests(unittest.TestCase):
                 self.assertEqual(c['security']['motd_delivery']['format_version'], 2)
             banner.incidents.clear()
 
-    def test_runman_uses_only_generation_checked_motd_path(self):
+    def test_runman_installs_shell_card_and_keeps_generation_checked_motd(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
                 'SECURITY_MOTD_STATE_FILE': str(Path(directory)/'state.json')}):
             banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
             c = {'name': '00000000-0000-0000-0000-000000000001', 'runtime': 'runman',
                  'id': '00000000-0000-0000-0000-000000000001', 'pid': '42', 'pid_start_ticks': '12345'}
             execute = mock.Mock(return_value=(False, ''))
-            with mock.patch.object(banner, 'install_shell', side_effect=AssertionError('Runman must not exec')), \
+            with mock.patch.object(banner, 'install_shell', return_value=(True, True)) as install, \
                     mock.patch.object(banner, 'write_proc', return_value=True) as write:
                 self.assertTrue(banner.update(c, [], set(), execute, [], 'test'))
+            install.assert_called_once_with(c, mock.ANY, execute, 'test', mock.ANY)
             write.assert_called_once()
             self.assertEqual(write.call_args.args[0], 42)
             self.assertEqual(write.call_args.kwargs['expected_start_ticks'], '12345')
@@ -280,8 +281,10 @@ class CardTests(unittest.TestCase):
             execute.assert_not_called()
             delivery = c['security']['motd_delivery']
             self.assertEqual(delivery['status'], 'written')
-            self.assertEqual(delivery['shell_delivery'], 'unsupported_runman_exec_api')
-            self.assertEqual(delivery['login_display'], 'unverified')
+            self.assertEqual(delivery['shell_delivery'], 'installed')
+            self.assertEqual(delivery['format_version'], 2)
+            self.assertEqual(delivery['login_display'], 'configured')
+            self.assertEqual(delivery['mechanism'], 'interactive_shell_card')
             banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
 
 

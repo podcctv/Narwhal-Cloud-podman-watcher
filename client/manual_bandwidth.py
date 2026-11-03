@@ -95,8 +95,8 @@ def validate_policy(policy: Any, host_id: str, node_id: str) -> dict[str, Any]:
             project = str(item.get("project") or "")
             name = str(item.get("container_name") or "")
             container_id = str(item.get("container_id") or "")
-            if runtime not in {"incus", "podman"}:
-                raise BandwidthPolicyError("only Incus and Podman containers can be limited")
+            if runtime not in {"incus", "podman", "runman"}:
+                raise BandwidthPolicyError("only Incus, Podman, and Runman containers can be limited")
             if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", name):
                 raise BandwidthPolicyError("invalid container name")
             if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
@@ -183,7 +183,7 @@ def _container_target(
         c.get("runtime") == item["runtime"]
         and str(c.get("project") or "") == item["project"]
         and c.get("name") == item["container_name"]
-        and str(c.get("id") or "") == item["container_id"]), None)
+        and str((c.get("instance_id") if item["runtime"] == "runman" else c.get("id")) or "") == item["container_id"]), None)
     if not match:
         raise BandwidthPolicyError("container identity is not present in the current runtime inventory")
     pid = _container_process_pid(item, match)
@@ -238,6 +238,17 @@ def _running_container_inventory(containers: list[dict[str, Any]]) -> list[tuple
             binaries["podman"].add(os.path.realpath(remote))
 
     peers: set[tuple[str, str, str, int]] = set()
+    for item in containers:
+        if not isinstance(item, dict) or item.get("runtime") != "runman" or item.get("status") != "running":
+            continue
+        generation = str(item.get("instance_id") or "")
+        try:
+            pid = int(item.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", generation) or pid <= 1:
+            raise BandwidthPolicyError("running Runman inventory is incomplete; network isolation cannot be verified")
+        peers.add(("runman", str(item.get("project") or "default"), generation.lower(), pid))
     max_output = 8 * 1024 * 1024
     for runtime, commands in binaries.items():
         for binary in sorted(commands):
@@ -307,7 +318,8 @@ def _verify_container_namespace(
     target_found = False
     for runtime, project, container_id, peer_pid in peers:
         is_target = (runtime == item["runtime"] and project == item["project"]
-                     and (container_id == item["container_id"] if runtime == "incus"
+                     and (container_id == item["container_id"]
+                          if runtime in {"incus", "runman"}
                           else container_id.startswith(item["container_id"])))
         if is_target and peer_pid != pid:
             raise BandwidthPolicyError("container process changed during isolation verification")
@@ -679,10 +691,14 @@ def _remove_entry(entry: dict[str, Any], expected_host: str, actual_host: str, a
 
 
 def _identity(item: dict[str, Any]) -> tuple[str, str, str, str]:
+    runtime = str(item.get("runtime") or "")
+    container_id = (
+        item.get("instance_id") if runtime == "runman" else item.get("id") or item.get("container_id")
+    )
     return (
-        str(item.get("runtime") or ""), str(item.get("project") or ""),
+        runtime, str(item.get("project") or ""),
         str(item.get("name") or item.get("container_name") or ""),
-        str(item.get("id") or item.get("container_id") or ""),
+        str(container_id or ""),
     )
 
 
@@ -865,7 +881,7 @@ def _uses_selected_host_interface(
         for item in bridge_inventory
         if isinstance(item, dict) and item.get("kind") == "bridge"
         and isinstance(item.get("runtimes"), list)
-        and any(runtime in {"incus", "podman"} for runtime in item.get("runtimes", []))
+        and any(runtime in {"incus", "podman", "runman"} for runtime in item.get("runtimes", []))
     }
     # A selected default-route NIC also covers containers attached to a
     # runtime-owned bridge, whose external route is forwarded by the host.
@@ -878,7 +894,7 @@ def _auto_sample_map(samples: list[dict[str, Any]]) -> dict[tuple[str, str, str,
         if not isinstance(sample, dict):
             continue
         identity = _identity(sample)
-        if identity[0] in {"incus", "podman"} and identity[2] and identity[3]:
+        if identity[0] in {"incus", "podman", "runman"} and identity[2] and identity[3]:
             result[identity] = sample
     return result
 
@@ -954,7 +970,7 @@ def _automatic_limits(
 
     candidates = {
         _identity(item): item for item in containers if isinstance(item, dict)
-        and _identity(item)[0] in {"incus", "podman"}
+        and _identity(item)[0] in {"incus", "podman", "runman"}
         and _identity(item)[2] and _identity(item)[3]
     }
     current_sample = max(0, int(sample_at or 0))
@@ -1107,14 +1123,14 @@ def _automatic_limits(
             tiers = _auto_tier_rates(base_rates[direction])
             if 1 <= stage <= len(tiers):
                 rates[direction] = tiers[stage - 1]
-        if rates and identity[0] in {"incus", "podman"}:
+        if rates and identity[0] in {"incus", "podman", "runman"}:
             auto_limits.append({
                 "scope": "container", "runtime": identity[0], "project": identity[1],
                 "container_name": identity[2], "container_id": identity[3],
                 "upload_mbps": rates.get("upload", 0),
                 "download_mbps": rates.get("download", 0),
             })
-        if identity[0] in {"incus", "podman"}:
+        if identity[0] in {"incus", "podman", "runman"}:
             upload_state = directions.get("upload") if isinstance(directions.get("upload"), dict) else {}
             download_state = directions.get("download") if isinstance(directions.get("download"), dict) else {}
             status_items.append({

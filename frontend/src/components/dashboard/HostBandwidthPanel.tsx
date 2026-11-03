@@ -20,6 +20,15 @@ const reportedLabel: Record<string, string> = {
   applied: '节点已应用并读回', failed: '节点应用失败', rejected: '节点拒绝策略', unconfigured: '未配置限速',
 };
 const directionLabel: Record<string, string> = { upload: '上行', download: '下行' };
+type BandwidthRuntime = 'incus' | 'podman' | 'runman';
+type BandwidthCandidate = { runtime: BandwidthRuntime; project?: string; container_name: string; container_id: string };
+const bandwidthCandidate = (item: ContainerItem): BandwidthCandidate | null => {
+  if (item.runtime !== 'incus' && item.runtime !== 'podman' && item.runtime !== 'runman') return null;
+  // Runman IDs are stable VM UUIDs; policies must instead follow the current
+  // replacement generation so a recreated guest never inherits an old limit.
+  const id = item.runtime === 'runman' ? item.container_generation_id : item.container_id;
+  return id ? { runtime: item.runtime as BandwidthRuntime, project: item.project, container_name: item.container_name, container_id: id } : null;
+};
 const bandwidthPriorityFixIsAvailable = (value: string) => {
   const match = value.match(/(?:^|[^0-9])v?(\d+)\.(\d+)\.(\d+)/i);
   if (!match) return null;
@@ -70,19 +79,19 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
 
   useEffect(() => { void refresh(); }, [hostId]);
 
-  const candidates = useMemo(() => containers.filter((item) =>
-    (item.runtime === 'incus' || item.runtime === 'podman') && item.container_id
-  ), [containers]);
+  const candidates = useMemo(() => containers
+    .map(bandwidthCandidate)
+    .filter((item): item is BandwidthCandidate => item !== null), [containers]);
   const targetKey = (item: Pick<ManualBandwidthLimit, 'runtime' | 'project' | 'container_name' | 'container_id'>) =>
     [item.runtime, item.project || '', item.container_name, item.container_id].join('\0');
   const configured = new Set(containerLimits.map(targetKey));
   const availableCandidates = candidates.filter((item) => !configured.has(targetKey({
-    runtime: item.runtime as 'incus' | 'podman', project: item.project || '',
-    container_name: item.container_name, container_id: item.container_id || '',
+    runtime: item.runtime, project: item.project || '',
+    container_name: item.container_name, container_id: item.container_id,
   })));
   const selectedCandidate = availableCandidates.find((item) => targetKey({
-    runtime: item.runtime as 'incus' | 'podman', project: item.project || '',
-    container_name: item.container_name, container_id: item.container_id || '',
+    runtime: item.runtime, project: item.project || '',
+    container_name: item.container_name, container_id: item.container_id,
   }) === newTarget);
   const selectedInterface = context?.interfaces.find((item) => item.name === hostLimit?.interface);
   const reportedAuto = context?.reported?.auto_throttle;
@@ -96,7 +105,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
     if (Array.isArray(context?.reported?.active_limits)) return context.reported.active_limits;
     const grouped = new Map<string, {
       scope: 'host' | 'container'; target: string; interface: string;
-      runtime: 'incus' | 'podman' | ''; project: string; container_name: string;
+      runtime: BandwidthRuntime | ''; project: string; container_name: string;
       container_id: string; upload_mbps: number; download_mbps: number; last_confirmed_at: number;
     }>();
     for (const item of reportedItems) {
@@ -104,7 +113,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
       const scope = item.scope;
       const target = String(item.target || item.container_name || item.interface || '');
       if (!target) continue;
-      const runtime = item.runtime === 'incus' || item.runtime === 'podman' ? item.runtime : '';
+      const runtime = item.runtime === 'incus' || item.runtime === 'podman' || item.runtime === 'runman' ? item.runtime : '';
       const project = String(item.project || '');
       const containerId = String(item.container_id || '');
       const iface = String(item.interface || '');
@@ -143,7 +152,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
   const addContainer = () => {
     if (!selectedCandidate?.container_id) return;
     setContainerLimits((current) => [...current, {
-      scope: 'container', runtime: selectedCandidate.runtime as 'incus' | 'podman',
+      scope: 'container', runtime: selectedCandidate.runtime,
       project: selectedCandidate.project || '', container_name: selectedCandidate.container_name,
       container_id: selectedCandidate.container_id || '',
       upload_mbps: rateValue(newUpload), download_mbps: rateValue(newDownload),
@@ -194,7 +203,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
     </div>
 
     <div className="mt-3 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100/90">
-      母机限速会作用于所选网卡上的母机及经过它的容器流量；容器限速只作用于所选 Incus / Podman 容器的默认网卡。不会改写已有 root qdisc 或 RFW 规则。修改策略后最多等待一个 Agent 动作轮询周期。
+      母机限速会作用于所选网卡上的母机及经过它的容器流量；容器限速只作用于所选 Incus / Podman / Runman 容器的默认网卡。不会改写已有 root qdisc 或 RFW 规则。修改策略后最多等待一个 Agent 动作轮询周期。
     </div>
 
     {(context?.reported || waitingForApply) && <p className={`mt-3 text-xs ${waitingForApply ? 'text-amber-200' : context?.reported?.state === 'applied' ? 'text-emerald-300' : context?.reported?.state === 'failed' || context?.reported?.state === 'rejected' ? 'text-rose-300' : 'text-slate-400'}`} role="status">
@@ -251,7 +260,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
           </label>
         </div>
         <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-[11px] leading-5 text-slate-400">
-          以当前所选网卡的带宽为基准；例如 20 Mbps 的方向，平均速率达到 16 Mbps 并累计覆盖 5 分钟有效采样后触发，随后依次为 10 → 5 → 1 Mbps。之后每级按当前容器限额的 80% 继续判断；低于当前限额的一半并累计 10 分钟后，每次恢复一级。只处理能由 Agent 确认网络归属的 Incus / Podman 容器；共享网络命名空间、网卡路径或采样无法确认时，不启动新的自动限速。超出 policer 的数据包会被丢弃。
+          以当前所选网卡的带宽为基准；例如 20 Mbps 的方向，平均速率达到 16 Mbps 并累计覆盖 5 分钟有效采样后触发，随后依次为 10 → 5 → 1 Mbps。之后每级按当前容器限额的 80% 继续判断；低于当前限额的一半并累计 10 分钟后，每次恢复一级。Incus / Podman / Runman 均需由 Agent 确认网络归属；共享网络命名空间、网卡路径或采样无法确认时，不启动新的自动限速。超出 policer 的数据包会被丢弃。
         </div>
         {selectedInterface && autoThrottleEnabled && <p className="mt-2 text-[11px] leading-5 text-sky-200/80">
           当前网络范围：{selectedInterface.kind === 'bridge' ? `直接接入 ${selectedInterface.name} 的运行时 bridge 容器` : selectedInterface.is_default_route ? `挂接到运行时 bridge、经默认路由 ${selectedInterface.name} 转发的容器` : `Agent 验证默认网络确实经过 ${selectedInterface.name} 的容器`}。未能确认路径的容器会跳过保护。
@@ -305,7 +314,7 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
       </div>
 
       <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-semibold uppercase tracking-wide text-slate-200">单容器限速</h4><span className="text-[11px] text-slate-500">仅 Incus / Podman · {containerLimits.length} 条</span></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-semibold uppercase tracking-wide text-slate-200">单容器限速</h4><span className="text-[11px] text-slate-500">Incus / Podman / Runman · {containerLimits.length} 条</span></div>
         {containerLimits.length > 0 && <div className="mt-3 space-y-2">
           {containerLimits.map((item, index) => <div key={targetKey(item)} className="grid gap-2 rounded-lg border border-slate-800 p-2.5 sm:grid-cols-[minmax(180px,1.3fr)_1fr_1fr_auto] sm:items-center">
             <div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-100" title={item.container_name}>{item.container_name}</p><p className="truncate font-mono text-[10px] text-slate-500">{item.runtime}{item.project ? `/${item.project}` : ''} · {item.container_id}</p></div>
@@ -316,13 +325,13 @@ export const HostBandwidthPanel: React.FC<HostBandwidthPanelProps> = ({ hostId, 
         </div>}
         <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(200px,1.4fr)_1fr_1fr_auto] sm:items-end">
           <label className="block text-xs text-slate-400">在线容器<select className={`${fieldClass} mt-1`} value={newTarget} onChange={(event) => setNewTarget(event.target.value)}>
-            <option value="">选择容器</option>{availableCandidates.map((item) => <option key={targetKey({ runtime: item.runtime as 'incus' | 'podman', project: item.project || '', container_name: item.container_name, container_id: item.container_id || '' })} value={targetKey({ runtime: item.runtime as 'incus' | 'podman', project: item.project || '', container_name: item.container_name, container_id: item.container_id || '' })}>{item.runtime}/{item.project ? `${item.project}/` : ''}{item.container_name}</option>)}
+            <option value="">选择容器</option>{availableCandidates.map((item) => <option key={targetKey({ runtime: item.runtime, project: item.project || '', container_name: item.container_name, container_id: item.container_id })} value={targetKey({ runtime: item.runtime, project: item.project || '', container_name: item.container_name, container_id: item.container_id })}>{item.runtime}/{item.project ? `${item.project}/` : ''}{item.container_name}</option>)}
           </select></label>
           <label className="block text-xs text-slate-400">上行 Mbps<input aria-label="新容器上行限速 Mbps" className={`${fieldClass} mt-1`} type="number" min="0" max="100000" step="1" value={newUpload} onChange={(event) => setNewUpload(event.target.value)} /></label>
           <label className="block text-xs text-slate-400">下行 Mbps<input aria-label="新容器下行限速 Mbps" className={`${fieldClass} mt-1`} type="number" min="0" max="100000" step="1" value={newDownload} onChange={(event) => setNewDownload(event.target.value)} /></label>
           <button type="button" onClick={addContainer} disabled={!selectedCandidate || (!rateValue(newUpload) && !rateValue(newDownload))} className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg border border-sky-800 px-3 text-xs text-sky-200 hover:bg-sky-950/50 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />添加</button>
         </div>
-        {!candidates.length && <p className="mt-2 text-xs text-amber-300">最新采样中没有可限速的 Incus / Podman 容器；容器身份或 Agent 采集未就绪。</p>}
+        {!candidates.length && <p className="mt-2 text-xs text-amber-300">最新采样中没有可限速的 Incus / Podman / Runman 容器；容器身份或 Agent 采集未就绪。</p>}
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">

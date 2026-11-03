@@ -127,6 +127,33 @@ class AbuseGuardTests(unittest.TestCase):
         self.engine.forget(container,'a'*64)
         self.assertNotIn(('podman','','customer'),self.engine.results)
 
+    def test_runman_schedule_carries_generation_to_provider(self):
+        container = {'runtime': 'runman', 'runtime_bin': 'runman', 'project': 'default',
+                    'name': '11111111-1111-4111-8111-111111111111',
+                    'id': '11111111-1111-4111-8111-111111111111',
+                    'stable_id': '11111111-1111-4111-8111-111111111111',
+                    'instance_id': '22222222-2222-4222-8222-222222222222'}
+        received = []
+        def provider(value):
+            received.append(value)
+            raise OSError('fixture')
+        self.assertTrue(self.engine.schedule([container], provider, lambda value: None))
+        self.engine.worker.join(timeout=3)
+        self.assertEqual(received[0]['instance_id'], container['instance_id'])
+
+    def test_runman_status_tracks_current_generation_not_vm_uuid(self):
+        container = {'runtime': 'runman', 'project': 'default',
+                    'name': '11111111-1111-4111-8111-111111111111',
+                    'id': '11111111-1111-4111-8111-111111111111',
+                    'stable_id': '11111111-1111-4111-8111-111111111111',
+                    'instance_id': '22222222-2222-4222-8222-222222222222'}
+        key = ('runman', 'default', container['name'])
+        self.engine.results[key] = {'state': 'isolated', 'observed_at': 100,
+                                    'instance_id': container['instance_id']}
+        self.assertEqual(self.engine.status(container, 120)['state'], 'isolated')
+        replacement = {**container, 'instance_id': '33333333-3333-4333-8333-333333333333'}
+        self.assertEqual(self.engine.status(replacement, 120)['state'], 'pending')
+
     def test_native_provider_refuses_restart_between_sampling_and_new_isolation(self):
         import json
         from client import agent

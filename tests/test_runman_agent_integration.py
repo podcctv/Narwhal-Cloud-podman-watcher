@@ -100,6 +100,49 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
         self.assertEqual(r2["traffic_counters"]["rx"], 1500000)
         self.assertEqual(r2["traffic_counters"]["tx"], 3000000)
 
+    def test_runman_report_preserves_guest_security_scans_and_fresh_io_metrics(self):
+        container = {
+            "id": "11111111-2222-3333-4444-555555555555",
+            "stable_id": "11111111-2222-3333-4444-555555555555",
+            "name": "11111111-2222-3333-4444-555555555555",
+            "runtime": "runman", "instance_id": "generation-1", "status": "running",
+            "connection_metrics": {"schema": 1, "source": "runman_local_proc_net", "valid": True, "tcp_total": 4},
+            "runman_resources": {
+                "cpu": 2, "cpu_percent": 15.5, "mem_bytes": 1024, "mem_limit_bytes": 4096,
+                "disk_gb": 4, "traffic_in_bytes": 100, "traffic_out_bytes": 200,
+                "traffic_counters_available": True,
+                "monitor_metrics": {
+                    "available": True, "sampled_at": 100, "samples": 3,
+                    "cpu_percent": 15.5, "disk_read_bytes_per_second": 2048.0,
+                    "disk_write_bytes_per_second": 1024.0, "disk_read_iops": 2.0,
+                    "disk_write_iops": 1.0, "udp_flows": 7,
+                    "net_rx_bits_per_second": 8000.0,
+                },
+            },
+        }
+        base = {
+            "conn_count": 4,
+            "top_cpu_process": {"pid": 9, "cpu_percent": 70.0, "command": "proxy"},
+            "security": {"suspicious_processes": [{"pid": 9, "name": "proxy"}],
+                         "protocol_rates": {"udp_rx_bps": 10.0}},
+        }
+        report = agent.collect_runman_report(container, base)
+        self.assertEqual(report["top_cpu_process"]["command"], "proxy")
+        self.assertEqual(report["security"]["suspicious_processes"][0]["name"], "proxy")
+        self.assertEqual(report["security"]["protocol_rates"]["udp_rx_bps"], 10.0)
+        self.assertEqual(report["udp_flow_count"], 7)
+        self.assertEqual(report["container_disk"]["io"]["read_bytes_per_second"], 2048.0)
+        self.assertTrue(report["security"]["deep_process_inspection_supported"])
+
+    def test_runman_banner_exec_is_bound_to_discovered_generation(self):
+        container = {
+            "name": "11111111-2222-3333-4444-555555555555", "runtime": "runman",
+            "runtime_bin": "runman", "instance_id": "generation-1",
+        }
+        with mock.patch.object(agent, "_runman_exec_request", return_value=(True, "ok")) as execute:
+            self.assertEqual(agent._checked_banner_exec(container, "id"), (True, "ok"))
+        execute.assert_called_once_with(container["name"], "generation-1", "id", agent._runtime_command_timeout())
+
     def test_runman_in_runtime_bins_without_warning(self):
         with mock.patch.dict(os.environ, {"CONTAINER_RUNTIMES": "runman"}):
             with mock.patch.object(agent.os.path, "exists", return_value=True), \

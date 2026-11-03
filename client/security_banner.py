@@ -635,18 +635,13 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
         for k in sorted(_checks,key=lambda k:_checks[k][0])[:-1000]:
             _checks.pop(k,None)
     persisted=persist()
-    # Default branding remains even after incident retention expires. Runtimes
-    # with guest exec use the interactive shell card; others use the MOTD path.
+    # Default branding remains even after incident retention expires. Runman
+    # now uses its generation-bound local guest execution API for shell files.
     is_runman=container.get("runtime")=="runman"
-    if is_runman:
-        # Runman intentionally exposes no guest exec API. MOTD via procfs is the
-        # only supported banner path; never try to modify guest shell startup.
-        shell_ok, shell_changed = False, False
-    else:
-        shell_ok, shell_changed = install_shell(container, entries, checked_exec, version, int(now))
+    shell_ok, shell_changed = install_shell(container, entries, checked_exec, version, int(now))
     banner="" if shell_ok else render(name,entries,version=version,sampled_at=int(now))
     changed=shell_changed
-    delivery['shell_delivery'] = 'unsupported_runman_exec_api' if is_runman else 'installed' if shell_ok else 'failed'
+    delivery['shell_delivery'] = 'installed' if shell_ok else 'failed'
     try:
         pid=int(container.get("pid") or 0)
         if pid>1:
@@ -660,10 +655,27 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
             raise OSError("无容器 PID")
     except (OSError,ValueError,AttributeError):
         if is_runman:
-            delivery.update(
-                status="failed",
-                error="Runman MOTD 未写入：需新鲜且代次已核验的 init PID，以及已存在的普通 /etc/motd 文件",
-            )
+            try:
+                ok,original=checked_exec(container,"[ ! -L /etc/motd ] && { [ ! -e /etc/motd ] || [ -f /etc/motd ]; } && { [ ! -f /etc/motd ] || [ $(wc -c < /etc/motd) -le 65536 ]; } && { cat /etc/motd 2>/dev/null || [ ! -e /etc/motd ]; }")
+                if not ok:
+                    raise OSError("容器 MOTD 读取失败")
+                content=merge(original,banner)
+                if original!=content:
+                    command="set -eu; [ ! -L /etc/motd ]; t=$(mktemp /etc/.narwhal-motd.XXXXXX); trap 'rm -f -- \"$t\"' EXIT; if [ -f /etc/motd ]; then cp -p /etc/motd \"$t\"; else chmod 644 \"$t\"; fi; printf '%s' "+shlex.quote(content)+" > \"$t\"; mv -f -- \"$t\" /etc/motd"
+                    ok,_=checked_exec(container,command)
+                    if not ok:
+                        raise OSError("容器 MOTD 写入失败")
+                    ok,check=checked_exec(container,"cat /etc/motd")
+                    if not ok or check!=content:
+                        raise OSError("MOTD 写后校验失败")
+                    changed=True
+                delivery.update(status="written" if changed else "unchanged",method="runtime_atomic")
+            except (OSError,ValueError):
+                delivery.update(
+                    status="written" if shell_ok else "failed",
+                    method="interactive_shell" if shell_ok else "unavailable",
+                    error="Runman MOTD 写入 / 校验失败；仅在代次校验通过时通过 guest exec 创建，普通文件或符号链接检查未通过",
+                )
         else:
             try:
                 ok,original=checked_exec(container,"[ ! -L /etc/motd ] && { [ ! -e /etc/motd ] || [ -f /etc/motd ]; } && { [ ! -f /etc/motd ] || [ $(wc -c < /etc/motd) -le 65536 ]; } && { cat /etc/motd 2>/dev/null || [ ! -e /etc/motd ]; }")

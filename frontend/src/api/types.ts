@@ -7,6 +7,8 @@ export interface ContainerItem {
   container_id?: string;
   /** Runtime-stable identity, distinct from the display name for Incus. */
   container_instance_id?: string;
+  /** Runman replacement generation, used to bind host-side controls exactly. */
+  container_generation_id?: string;
   user_email?: string;
   user_email_source?: 'manual' | 'upstream' | 'unmatched' | string;
   user_email_status?: string;
@@ -646,7 +648,7 @@ export interface HostFirewallInterfaceInventory {
 export interface ManualBandwidthLimit {
   scope: 'host' | 'container';
   interface?: string;
-  runtime?: 'incus' | 'podman';
+  runtime?: 'incus' | 'podman' | 'runman';
   project?: string;
   container_name?: string;
   container_id?: string;
@@ -662,9 +664,9 @@ export interface ManualBandwidthLimitResponse {
   sample_at: number;
   interfaces: Array<{
     name: string; kind: string; state: string; is_default_route: boolean;
-    runtimes?: Array<'incus' | 'podman'>; network_names?: string[];
+    runtimes?: Array<'incus' | 'podman' | 'runman'>; network_names?: string[];
   }>;
-  containers: Array<{ runtime: 'incus' | 'podman'; project: string; container_name: string; container_id: string }>;
+  containers: Array<{ runtime: 'incus' | 'podman' | 'runman'; project: string; container_name: string; container_id: string }>;
   policy: {
     schema: 1; revision: number; limits: ManualBandwidthLimit[];
     auto_throttle: {
@@ -678,7 +680,7 @@ export interface ManualBandwidthLimitResponse {
     updated_at?: number;
     active_limits?: Array<{
       scope: 'host' | 'container'; target: string; interface?: string;
-      runtime?: 'incus' | 'podman'; project?: string; container_name?: string;
+      runtime?: 'incus' | 'podman' | 'runman'; project?: string; container_name?: string;
       container_id?: string; upload_mbps: number; download_mbps: number;
       last_confirmed_at?: number;
     }>;

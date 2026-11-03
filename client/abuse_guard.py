@@ -133,12 +133,12 @@ class Engine:
         with self.lock:
             if self.worker is not None and self.worker.is_alive():
                 return False
-            eligible = [c for c in containers if c.get('runtime') in {'podman', 'incus'} and c.get('name') not in isolation.PROTECTED]
+            eligible = [c for c in containers if c.get('runtime') in {'podman', 'incus', 'runman'} and c.get('name') not in isolation.PROTECTED]
             if not eligible:
                 return False
             selected = [eligible[(self.cursor+i) % len(eligible)] for i in range(min(batch_size, len(eligible)))]
             self.cursor = (self.cursor+len(selected)) % len(eligible)
-            selected = [{k: c.get(k) for k in ('runtime', 'runtime_bin', 'project', 'name', 'id', 'pid', 'stable_id')} for c in selected]
+            selected = [{k: c.get(k) for k in ('runtime', 'runtime_bin', 'project', 'name', 'id', 'pid', 'stable_id', 'instance_id')} for c in selected]
             for container in selected:
                 container['project'] = container.get('project') or ''
             def work():
@@ -175,7 +175,8 @@ class Engine:
         key = (container['runtime'], container.get('project') or '', container['name'])
         with self.lock:
             result = copy.deepcopy(self.results.get(key, {}))
-        identity = str(container.get('stable_id') or container.get('id') or '')
+        identity = str(container.get('instance_id') if container.get('runtime') == 'runman'
+                       else container.get('stable_id') or container.get('id') or '')
         seen = str(result.get('instance_id') or '')
         if identity and seen and identity != seen and not (container['runtime'] == 'podman' and len(identity) >= 12 and seen.startswith(identity)):
             return {'state': 'pending', 'coverage': 'instance identity changed'}

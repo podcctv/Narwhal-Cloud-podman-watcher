@@ -1,35 +1,38 @@
 # Runman Rust v2 compatibility
 
-Updated for Watcher v1.7.199 and the Runman Rust v2 inventory schema 1. This is a source-level compatibility matrix; it does not claim a live Runman host was exercised.
+Updated for Watcher v1.7.200 and Runman Rust v2 inventory schema 1. This is a source-level compatibility matrix; it does not claim that a live Runman host was exercised.
 
 ## Supported
 
 | Capability | Status and boundaries |
 | --- | --- |
-| Instance inventory | UUID, instance generation, running state, image, IP addresses, CPU and memory limits/usage come from Runman's root-only Unix socket. |
-| TCP connection evidence | Fresh TCP state counts from Runman's `/proc/<pid>/net` sampling are accepted only when the sample is valid and its generation matches the instance. |
-| Host firewall integration | Watcher recognizes the Runman bridge for host RFW interface inventory/readback. This is host policy visibility, not per-container isolation. |
-| Temporary TCP connection limit | Supported through the Runman connection-limit API, with UUID, running state, fresh counts, and instance generation checked before applying. |
-| Traffic accounting and rates | Lifetime inbound/outbound byte totals are consumed as cumulative traffic counters. Watcher sends them to the traffic ledger and derives bytes/second between samples, keyed by UUID and instance generation. The first sample after Agent restart or a new generation establishes a baseline and reports zero rate. |
-| Container filesystem space | Read-only `statvfs` of the root filesystem and a real `/data` directory through the generation-checked init PID. Root and `/data` total/available space feed the existing filesystem report fields. Symlinked or unavailable `/data` is left unavailable. |
-| Post-login MOTD | Watcher can update a pre-existing regular `/etc/motd` through `/proc/<init_pid>/root`, after checking the init PID start ticks. It preserves the file mode/owner and verifies the atomic replacement. No Runman guest exec endpoint is used. |
+| Inventory and identity | Instance UUID, replacement generation, running state, image, IPs, CPU/memory limits and usage come from Runman's root-only Unix socket. Controls that can mutate a guest or network are bound to the current generation. |
+| TCP connections and traffic | Fresh TCP state counts are checked against the instance generation. Cumulative byte counters feed Watcher's traffic ledger and rate calculations; a restart or new generation starts with a fresh baseline. |
+| Resource and filesystem metrics | Fresh Runman history samples expose CPU, disk usage/read/write rates and IOPS, network rates, TCP/UDP flow counts and remote-IP count. Root and `/data` filesystem capacity use the generation-checked init PID and guest `df` fallback. |
+| Process and security scans | The Watcher uses bounded guest exec for generic read-only process, listener, SOCKS and protocol inventory, and merges those results with Runman metrics. The endpoint binds UUID plus generation, limits each command to 90 seconds and caps combined output at 64 KiB. Specialized protocol guards and service actions have separate runtime gates listed below. |
+| Shell card and MOTD | Watcher installs its interactive-shell card through generation-bound guest exec. It updates `/etc/motd` through checked procfs when possible and falls back to an atomic guest-exec update/create after rejecting symlinks and non-regular files. Shell delivery is reported separately from whether a user saw it. |
+| Host firewall and temporary TCP limit | The Runman bridge participates in host RFW interface discovery/readback. Temporary TCP limits continue to require a live UUID, fresh connection evidence and matching generation. |
+| Network quarantine | The Watcher can quarantine a Runman instance by lowering its Runman-owned host veth, recording desired state first, and reading the link state back. Release is generation-bound and reversible; Runman reapplies the recorded state after restart/heal. |
+| Automatic abuse detection and quarantine | Runman is included in the bounded abuse scan. It requires two fresh corroborating samples, validates the current UUID generation and guest process incarnation, then quarantines only the instance-owned host veth; the alert API accepts only a canonical VM UUID, UUID v4 generation and the `default` project. |
+| Per-instance bandwidth limits | Manual and automatic limits use `tc` in the instance's network namespace. The target is the current generation. Automatic limits start only when Watcher proves the dedicated network namespace, selected uplink path and fresh traffic sample; rates are policers, so packets above the rate are dropped. |
 
-## Not supported yet
+## Remaining boundaries
 
-| Capability | Why it remains unavailable |
+| Capability | Current boundary |
 | --- | --- |
-| Interactive shell card (`/etc/profile.d` and `.bashrc`) | Not installed by this adapter. Unlike MOTD, it needs multiple shell startup files and a renderer script to be created or updated with correct ownership in Runman's user namespace. Runman has no guest exec API for validating the target shell environment, so Watcher reports shell delivery unsupported. |
-| SSH pre-authentication `Banner` | The feature does not edit `sshd_config`; MOTD is a post-login mechanism. Whether SSH/PAM displays it is unverified and reported as such. |
-| MOTD creation when absent | Runman containers may use user namespaces. Watcher refuses to create a missing file because host-root ownership may not map to guest root correctly. Existing file must be a bounded regular file, not a symlink. |
-| Image writable-layer size and disk I/O rates | The current Runman watcher contract does not provide image-layer size or I/O counters. Root and `/data` filesystem space are supported separately through procfs. |
-| Per-process metrics and attribution | No Runman-specific process inventory contract is available to Watcher; top CPU process and process-attributed network/security evidence remain unavailable. |
-| In-container service/protocol scans and remediation | No guest exec/control API is exposed. Service restarts, process termination, protocol configuration scans, and service guard actions are not dispatched to Runman. |
-| Per-container quarantine and bandwidth shaping | Existing Runman support is the TCP connection-limit API plus host RFW interface awareness. Those do not provide guest network isolation or per-instance traffic shaping. |
-| UDP connection/security breakdown | Current Runman inventory reports TCP counts only; it does not supply UDP socket counts or per-protocol byte rates. |
+| SSH pre-authentication `Banner` | Not configured. The shell card runs after authentication in interactive shells; MOTD is also post-login and does not prove that SSH/PAM displayed it. Watcher does not edit `sshd_config`. |
+| UDP sockets and per-protocol UDP attribution | Runman reports UDP conntrack flow counts from host monitoring, not guest UDP socket counts or per-process UDP attribution. `udp_sockets` remains unavailable/zero and must not be interpreted as a measured empty socket set. |
+| Writable image-layer size | Runman uses an overlay on a sized `disk.img`; allocated disk capacity and guest filesystem usage are available, but a Podman-style writable image-layer size is not a comparable metric. |
+| Dynamic CPU, memory and I/O guard changes | Watcher does not rewrite Runman's systemd cgroup limits or disk configuration. Runman owns those resource settings; its current Watcher API is read-only for them. |
+| CPU offender attribution | Runman reports current CPU usage, but the Watcher's one-second per-process CPU attribution path is still limited to Incus and Podman. |
+| Specialized protocol and speedtest guards | Read-only protocol inventory is available through guest exec; VMess/Trojan port-rule reconciliation and the speedtest endpoint guard remain gated to Incus/Podman pending Runman-specific namespace tests and readback coverage. |
+| General destructive guest remediation | Existing queued process/service remediation actions do not all carry the evidence generation end-to-end. Automatic process/service deletion or restart therefore remains disabled for Runman. Network quarantine is separate and generation-bound. |
 
 ## Runtime requirements
 
-- Client must run on Linux with Unix socket support and access to `/run/narwhal-agent/connlimit.sock`; Runman creates a root-only directory/socket, so the local Watcher needs the matching host privileges.
-- `CONTAINER_RUNTIMES` must be `auto` or include `runman`. Setting it to only `podman` excludes Runman inventory.
-- Filesystem and MOTD collection additionally need an active Runman init PID, a host PID namespace or host `/proc` mount whose `NSpid` outer PID matches Runman's PID, readable process root, and a stable PID start-time sample. MOTD also requires an existing regular `/etc/motd` file.
-- `login_display=unverified` is intentional. It means Watcher did not verify an SSH/PAM display path; it does not claim the MOTD was seen.
+- Runman must expose `/run/narwhal-agent/connlimit.sock` with root-only permissions, and Watcher must run with access to that socket. Older Runman builds without `/v1/exec` and `/v1/network-quarantine` can still provide supported read-only inventory, but scans, shell installation, quarantine and Runman bandwidth controls require the updated API.
+- `CONTAINER_RUNTIMES` must be `auto` or include `runman`; a setting containing only `podman` excludes Runman inventory.
+- Guest execution requires a running, managed instance and matching generation. Commands that exceed the timeout or output bound fail without being reported as successful.
+- Filesystem/MOTD procfs access additionally requires a readable process root and stable init PID start ticks. When procfs cannot safely update MOTD, guest exec performs bounded regular-file/symlink checks before an atomic write.
+- Network shaping and quarantine require an existing Runman veth and a verified, dedicated network namespace. Shared/unreadable namespaces, stale identities, missing interfaces or uncertain routes cause the operation to fail closed.
+- No live SSH display or production node was verified as part of this source change.

@@ -36,12 +36,17 @@ class QuarantineError(RuntimeError):
 
 
 def target(runtime, project, name, instance_id):
-    if runtime not in {'incus', 'podman'}:
+    if runtime not in {'incus', 'podman', 'runman'}:
         raise QuarantineError('unsupported runtime; no network change performed')
     if not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}', name or '') or name in PROTECTED:
         raise QuarantineError('invalid or protected instance')
     if project and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', project):
         raise QuarantineError('invalid project')
+    if runtime == 'runman':
+        vm_id = re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}', name or '')
+        generation = re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', instance_id or '')
+        if project != 'default' or not vm_id or not generation:
+            raise QuarantineError('Runman requires a canonical VM UUID and current UUID generation')
     if not re.fullmatch(r'[A-Za-z0-9-]{12,100}', instance_id or ''):
         raise QuarantineError('stable instance identity required')
     return json.dumps([runtime, project or '', name, instance_id], separators=(',', ':'))
@@ -414,6 +419,81 @@ class PodmanIsolation:
                 except QuarantineError:
                     pass
             raise
+
+
+class RunmanIsolation:
+    """Generation-bound quarantine through Runman's persistent veth control."""
+
+    def __init__(self, name, instance_id, socket_path='/run/narwhal-agent/connlimit.sock'):
+        self.name, self.instance_id, self.socket_path = name, instance_id, socket_path
+
+    def command(self, action):
+        connection = _UnixHTTP(self.socket_path)
+        connection.timeout = 15
+        body = json.dumps({
+            'container_name': self.name,
+            'project': 'default',
+            'instance_id': self.instance_id,
+            'action': action,
+        }, separators=(',', ':'))
+        try:
+            connection.request('POST', '/v1/network-quarantine', body=body,
+                               headers={'Content-Type': 'application/json', 'Connection': 'close'})
+            response = connection.getresponse()
+            raw = response.read(16*1024+1)
+            if response.status != 200 or len(raw) > 16*1024:
+                raise QuarantineError('Runman network quarantine request was not confirmed')
+            result = json.loads(raw.decode('utf-8')) if raw else {}
+        except QuarantineError:
+            raise
+        except (OSError, ValueError, UnicodeDecodeError, http.client.HTTPException):
+            raise QuarantineError('Runman network quarantine socket unavailable or invalid') from None
+        finally:
+            connection.close()
+        if not isinstance(result, dict) or result.get('ok') is not True:
+            raise QuarantineError('Runman network quarantine returned an invalid response')
+        generation = str(result.get('instance_id') or '')
+        if action != 'replacement' and generation != self.instance_id:
+            raise QuarantineError('Runman instance generation changed; refused')
+        if type(result.get('isolated')) is not bool or type(result.get('interface_up')) is not bool or type(result.get('running')) is not bool:
+            raise QuarantineError('Runman network quarantine readback is incomplete')
+        return result
+
+    def inspect(self):
+        return self.command('inspect')
+
+    def snapshot(self):
+        state = self.inspect()
+        if state['running'] is not True or state['isolated'] is not False or state['interface_up'] is not True:
+            raise QuarantineError('Runman interface is not in a verified connected state')
+        return {'interface_was_up': True}
+
+    def isolate(self, backup):
+        if not isinstance(backup, dict) or backup.get('interface_was_up') is not True:
+            raise QuarantineError('Runman quarantine recovery state is invalid')
+        state = self.command('isolate')
+        if state['running'] is not True or state['isolated'] is not True or state['interface_up'] is not False:
+            raise QuarantineError('Runman interface-down isolation was not confirmed')
+
+    def verify(self, backup):
+        state = self.inspect()
+        if state['running'] is not True or state['isolated'] is not True or state['interface_up'] is not False:
+            raise QuarantineError('Runman quarantine is not active on the host veth')
+
+    def release(self, backup):
+        if not isinstance(backup, dict) or backup.get('interface_was_up') is not True:
+            raise QuarantineError('Runman quarantine recovery state is invalid')
+        self.verify(backup)
+        state = self.command('release')
+        if state['isolated'] is not False or (state['running'] and not state['interface_up']):
+            raise QuarantineError('Runman network release readback mismatch')
+
+    def prove_replaced(self):
+        state = self.command('replacement')
+        generation = str(state.get('instance_id') or '')
+        if not generation or generation == self.instance_id:
+            raise QuarantineError('Runman replacement generation could not be verified')
+        return generation
 
 
 def quarantine(journal, key, driver, evidence):

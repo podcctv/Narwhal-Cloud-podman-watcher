@@ -1,10 +1,19 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.199**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.200**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
+
+### v1.7.200：补齐 Runman guest exec、登录 shell 卡片、隔离与带宽保护
+
+- Runman 提供 root-only、代次绑定的受限 guest exec；Watcher 因此接通通用只读进程/监听/协议扫描，安装交互 shell 卡片，并支持安全创建或更新 `/etc/motd`。shell 卡片与 MOTD 都是认证后的提示，不是 SSH 认证前 `sshd_config Banner`。
+- 新增持久化、可读回的 Runman veth 隔离与解除接口；运行时按代次检查身份，并在启动修复时恢复隔离目标状态。
+- 自动滥用检测加入 Runman：至少两次新鲜相关证据、当前实例代次与宿主机进程代次全部核验后，才隔离该实例的 host veth；服务端严格校验默认项目、VM UUID 和 v4 实例代次。
+- Runman 单容器手动限速与自动阶梯限速接入 `tc` 网络命名空间路径核验；自动限速还要求新鲜采样、独立网络命名空间及已验证的 Runman bridge/uplink 归属。
+- Runman 新鲜历史指标补充磁盘读写速率/IOPS、网络速率、TCP/UDP 流量与远端 IP 计数；UDP flow 计数不等同于 UDP socket 数量。
+- 明确仍不支持 SSH 认证前 Banner、Podman 式 writable layer 大小、动态改写 Runman CPU/内存/I/O 配额，以及未全程携带证据代次的一般破坏性服务处置。
 
 ### v1.7.199：全面补齐 Runman Rust 容器监控、流量速率、MOTD 登录提示与 Agent 部署脚本自适应
 

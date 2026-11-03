@@ -100,6 +100,19 @@ class AbuseAPITests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 abuse_api.normalized_alert(value)
 
+    def test_runman_abuse_alert_requires_default_project_and_uuid_generation(self):
+        value = alert()
+        value.update(runtime='runman', project='default',
+                     container_name='11111111-1111-4111-8111-111111111111',
+                     instance_id='22222222-2222-4222-8222-222222222222')
+        self.assertEqual(abuse_api.normalized_alert(value)['runtime'], 'runman')
+        for key, invalid in (('project', 'other'), ('container_name', 'customer'),
+                             ('instance_id', 'generation-1')):
+            candidate = dict(value)
+            candidate[key] = invalid
+            with self.assertRaises(HTTPException):
+                abuse_api.normalized_alert(candidate)
+
     def test_pid_one_container_application_supported_but_boolean_rejected(self):
         value=alert();value['abuse_evidence'][0]['pid']=1
         self.assertEqual(abuse_api.normalized_alert(value)['abuse_evidence'][0]['pid'],1)

@@ -2,6 +2,7 @@
 
 ## 登录提示
 
+- v1.7.200：Runman 通过 root-only guest exec API（VM UUID + 当前代次、命令限时与输出上限）安装交互 shell 卡片；MOTD 仍优先走代次校验的 procfs 原子更新，失败后可安全创建或更新普通 `/etc/motd`。这是认证后的交互提示，不修改 SSH 认证前 Banner，也不证明用户实际看见。
 - v1.7.199：Runman Rust v2 使用经过 init PID 启动代次核验的宿主机 procfs 路径更新已有普通 `/etc/motd`，不执行 guest 命令、不安装 shell hook、不更改登录前 SSH Banner。Runman 的 `login_display` 固定为 `unverified`；MOTD 文件写入不能证明 sshd/PAM 已配置展示。
 - v1.7.8：默认闭合品牌卡片由主机 Agent 每轮刷新；新建并运行、被 Agent 发现的受监控 Podman/Incus 容器在下一轮自动安装，无需修改创建模板。停止容器待启动后安装；显式关闭安全监测/登录提示及 Docker 仅提醒模式仍保留原策略，不擅自越权写入。
 - v1.7.9：混合运行时宿主机按容器的实际 runtime 选择 Banner 写入命令，不再回退到宿主机默认 Podman；运行时缺失或不匹配时拒绝写入其他运行时。

@@ -1,10 +1,10 @@
 # 项目概览
 
-更新基线：本次从 fork `origin/main`（`1323833` / v1.7.198）继续维护 Runman Rust v2 兼容层，目标版本为 `1.7.199`（2026-11-03）。提交历史与主要功能索引见 [README.md](README.md)。
+更新基线：本次从 fork `origin/main`（v1.7.199）继续维护 Runman Rust v2 兼容层，目标版本为 `1.7.200`（2026-11-03）。提交历史与主要功能索引见 [README.md](README.md)。
 
 ## 项目目标
 
-Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus、Docker 与 Runman Rust v2 实例及主机状态，并提供告警、调查、受控保护和运维工作流。Runman 支持只读实例资源/TCP 连接清单、主机 RFW 网卡策略、按代次核验的 TCP 限额、累计流量账本与速率、根目录和 `/data` 文件系统空间，以及通过代次校验写入已有普通 `/etc/motd` 的登录后提示。进程归因、shell 卡片、登录前 SSH Banner、镜像层大小、磁盘 I/O 和容器内服务处置仍未适配。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
+Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus、Docker 与 Runman Rust v2 实例及主机状态，并提供告警、调查、受控保护和运维工作流。Runman 支持代次绑定的只读扫描与 guest exec、资源/文件系统及磁盘 I/O 指标、累计流量和 TCP/UDP flow 计数、交互 shell 卡片与 MOTD、主机 RFW、TCP 限额、veth 网络隔离、手动和自动单容器带宽限速，以及双样本确认后的自动滥用检测与代次隔离。SSH 认证前 Banner、Podman 式镜像写层大小、动态改写 Runman CPU/内存/I/O 配额、VMess/Trojan 自动端口规则、测速目标防护和未携带证据代次的一般破坏性服务处置仍未支持。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
 
 ## 组件与入口
 

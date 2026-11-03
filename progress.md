@@ -4,18 +4,27 @@
 
 ## Runman Rust v2 兼容开发
 
-- 基于 fork `main` 全面补齐 Runman (Rust) 容器监控与部署脚本自适应。
-- 支持实时带宽速率计算（`_derive_net_bps`）与流量计数器（`traffic_counters`）、容器网络 IP（`network_addresses`）透出、独立磁盘与 `/data` 容量上报、安全 MOTD 登录提示、买家映射（`buyer_mapping`）与用户备注接口（`/api/v1/containers/user-note`）以及前端抽屉无缝呈现。
+- 基于 fork `main` 补齐 Runman Rust v2 的 guest exec、进程与服务扫描、登录 shell 卡片、网络隔离、手动/自动单容器限速和资源指标。
+- 保留实时流量速率、TCP 连接与 UDP flow 计数、网络 IP、根目录与 `/data` 容量、磁盘 I/O 指标、买家映射及用户备注支持。
 - 同步更新 Agent 部署与更新脚本（`scripts/install-client.sh`），自动检测 `docker` / `incus` / `podman` / `runman`，并保持 `DOCKER_MONITOR_MODE=notice` 默认不干预。
-- 本轮版本目标为 `1.7.199`。
+- 当前版本目标为 `1.7.200`；SSH 认证前 Banner、Podman 式写层大小、动态改写 Runman CPU/内存/I/O 配额和一般破坏性服务处置仍明确不支持。
 
 ## 代码基线
 
-- 当前工作区基于 fork `main` 继续维护 Runman Rust v2 适配与全链路监控闭环。
-- 本次根目录 `VERSION` 更新目标为 `1.7.199`。
-- 本次工作涵盖 Runman 容器网络 IP、带宽速率与流量计数器补全、独立磁盘与 procfs 文件系统容量映射、安全 MOTD 写入、买家映射与用户备注放行、前端详情抽屉网络展示、Agent 安装脚本多运行时自动检测及全量回归单测。
+- 当前工作区基于 fork `main` 继续维护 Runman Rust v2 兼容与全链路监控。
+- 本次根目录 `VERSION` 更新目标为 `1.7.200`。
+- 本次工作补齐代次绑定的 guest exec、通用只读进程/监听/协议扫描、交互 shell 卡片和 MOTD、自动滥用检测与安全网络隔离、Runman 手动/自动限速与磁盘 I/O/网络监控，并更新兼容性矩阵。
 
 ## 最近完成的工作
+
+- v1.7.200：Runman Rust v2 Watcher 功能适配：
+  1. Runman 增加 root-only、代次绑定的限时 guest exec 控制端点；Watcher 接通现有进程、监听、服务和协议扫描，并在 API 限定命令时长与输出大小。
+  2. 为 Runman 安装登录后交互 shell 卡片，并支持安全创建/原子更新普通 `/etc/motd`；不配置 SSH 认证前 Banner。
+  3. 新增可恢复的 Runman host-veth 隔离/解除接口，持久化隔离目标并在运行时 heal 时恢复。
+  4. 单容器手动带宽限速和自动阶梯限速支持 Runman；规则要求当前实例代次、独立网络命名空间和可核实的 bridge/uplink 路径。
+  5. 接入新鲜磁盘 I/O、IOPS、网络速率、TCP/UDP flow 与远端 IP 指标；明确 UDP flow 不等于 UDP socket。
+  6. 补齐前端单容器 Runman 目标代次绑定、兼容性文档及相关回归测试。
+  7. 接入 Runman 自动滥用检测：两次新鲜证据和进程代次复核后隔离当前代次的 Runman veth；服务端仅接受默认项目下的规范 VM UUID 与 v4 实例代次。
 
 - v1.7.199：全面补齐 Runman Rust 容器监控、流量速率、MOTD 登录提示与 Agent 部署脚本自适应：
   1. 补全 Runman 容器 IP 与网络速率：`_runman_inventory_containers()` 与 `collect_runman_report()` 提取解析 `network_addresses`；接入 `_derive_net_bps` 实时计算 `net_rx_bps` 与 `net_tx_bps`，上报规范化 `traffic_counters`；映射 `disk_gb` 与 procfs 文件系统至 `container_disk` 容量。

@@ -82,8 +82,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 "name": name, "kind": str(item.get("kind") or "")[:40],
                 "state": str(item.get("state") or "unknown")[:24],
                 "is_default_route": item.get("is_default_route") is True,
-                "runtimes": [runtime for runtime in item.get("runtimes", [])
-                             if runtime in {"incus", "podman"}][:2]
+                  "runtimes": [runtime for runtime in item.get("runtimes", [])
+                               if runtime in {"incus", "podman", "runman"}][:3]
                     if isinstance(item.get("runtimes"), list) else [],
                 "network_names": [str(network)[:100] for network in item.get("network_names", [])
                                   if isinstance(network, str)][:16]
@@ -101,10 +101,13 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         containers = []
         for row in latest_container_rows:
             item = ops.loads(row["payload_json"], {})
-            if row["runtime"] not in {"incus", "podman"}:
+            if row["runtime"] not in {"incus", "podman", "runman"}:
                 continue
             name = str(row["container_name"] or "")
-            container_id = str(item.get("id") or "")
+            container_id = (
+                str(item.get("instance_id") or "") if row["runtime"] == "runman"
+                else str(item.get("id") or "")
+            )
             if not name or not container_id:
                 continue
             containers.append({
@@ -369,6 +372,8 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                     project = str(item.get("project") or "")
                     name = str(item.get("container_name") or "")
                     container_id = str(item.get("container_id") or "")
+                    if runtime not in {"incus", "podman", "runman"}:
+                        raise HTTPException(400, "单容器限速仅支持 Incus、Podman 和 Runman")
                     if (runtime, project, name, container_id) not in known_containers:
                         raise HTTPException(409, "容器身份与最新采样不匹配；刷新后重新选择目标容器")
                     if len(name) > 200 or len(project) > 100 or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,256}", container_id):

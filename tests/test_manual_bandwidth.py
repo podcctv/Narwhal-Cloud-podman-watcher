@@ -32,9 +32,85 @@ class ManualBandwidthTests(unittest.TestCase):
         with self.assertRaises(limiter.BandwidthPolicyError):
             limiter.validate_policy({**TARGET, "limits": [{**TARGET["limits"][0], "upload_mbps": 1.0}]}, HOST, NODE)
 
+    def test_runman_policy_accepts_generation_scoped_target(self):
+        vm_id = "11111111-2222-3333-4444-555555555555"
+        generation = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        policy = limiter.validate_policy({**TARGET, "limits": [{
+            "scope": "container", "runtime": "runman", "project": "default",
+            "container_name": vm_id, "container_id": generation,
+            "upload_mbps": 5, "download_mbps": 10,
+        }], "auto_throttle": {"enabled": False}}, HOST, NODE)
+        self.assertEqual(policy["limits"][0]["container_id"], generation)
+
     def test_proc_stat_handles_spaces_in_process_name(self):
         rest = ["S"] + ["0"] * 18 + ["987654"]
         self.assertEqual(limiter._proc_start_ticks("12 (a process with spaces) " + " ".join(rest)), "987654")
+
+    def test_runman_bandwidth_identity_uses_current_generation(self):
+        vm_id = "11111111-2222-3333-4444-555555555555"
+        generation = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self.assertEqual(
+            limiter._identity({"runtime": "runman", "project": "default", "name": vm_id,
+                               "id": vm_id, "instance_id": generation}),
+            ("runman", "default", vm_id, generation),
+        )
+
+    def test_runman_peer_inventory_is_strict_and_needs_no_runtime_binary(self):
+        inventory = [{"runtime": "runman", "project": "default", "name": "vm",
+                      "instance_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                      "status": "running", "pid": "42"}]
+        with patch.object(limiter.shutil, "which", return_value=None):
+            self.assertEqual(
+                limiter._running_container_inventory(inventory),
+                [("runman", "default", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 42)],
+            )
+            with self.assertRaisesRegex(limiter.BandwidthPolicyError, "inventory is incomplete"):
+                limiter._running_container_inventory([{**inventory[0], "pid": "invalid"}])
+
+    def test_runman_shared_network_namespace_is_rejected(self):
+        item = {"runtime": "runman", "project": "default",
+                "container_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+        peers = [
+            ("runman", "default", item["container_id"], 42),
+            ("runman", "default", "bbbbbbbb-cccc-dddd-eeee-ffffffffffff", 43),
+        ]
+
+        def stat(path, *args, **kwargs):
+            inode = 1 if str(path) == "/proc/1/ns/net" else 42
+            return SimpleNamespace(st_ino=inode)
+
+        with patch.object(limiter.os, "stat", side_effect=stat):
+            with self.assertRaisesRegex(limiter.BandwidthPolicyError, "shared container network namespace"):
+                limiter._verify_container_namespace(item, 42, "42", [], peers)
+
+    def test_runman_automatic_throttle_tracks_generation_and_verified_bridge(self):
+        vm_id = "11111111-2222-3333-4444-555555555555"
+        generation = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        item = {"runtime": "runman", "project": "default", "name": vm_id,
+                "id": vm_id, "instance_id": generation, "pid": "42", "status": "running"}
+        sample = {**item, "net_tx_bps": 3_000_000, "net_rx_bps": 0,
+                  "traffic_counters": {"available": True}}
+        target = {"namespace_inode": "42", "process_generation": "987654",
+                  "interface_index": 3, "peer_index": 7, "interface": "eth0"}
+        links = {7: {"ifname": "rv1", "master": "rmbr0"}}
+        bridge_inventory = [{"name": "rmbr0", "kind": "bridge", "runtimes": ["runman"]}]
+
+        def stat(path, *args, **kwargs):
+            return SimpleNamespace(st_ino=1 if str(path) == "/proc/1/ns/net" else 42)
+
+        with patch.object(limiter, "_host_link_snapshot", return_value=(links, {"eth0"}, "")), \
+                patch.object(limiter.os, "stat", side_effect=stat):
+            limits, status = limiter._automatic_limits(
+                {"enabled": True}, {"interface": "eth0", "upload_mbps": 20, "download_mbps": 20},
+                HOST, NODE, [item], [sample], 1000, 300, bridge_inventory,
+                {}, lambda _host, _policy, _containers: dict(target),
+            )
+
+        self.assertEqual(limits, [{"scope": "container", "runtime": "runman", "project": "default",
+                                   "container_name": vm_id, "container_id": generation,
+                                   "upload_mbps": 10, "download_mbps": 0}])
+        self.assertEqual(status["mapped_containers"], 1)
+        self.assertEqual(status["items"][0]["container_id"], generation)
 
     def test_podman_pid_requires_matching_container_id(self):
         item = {"runtime": "podman", "container_name": "proxy", "container_id": "abc123"}

@@ -4116,6 +4116,7 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "agent_version": str(payload.get("_agent_version") or "unknown"),
             "container_id": payload.get("id", ""),
             "container_instance_id": str(payload.get("stable_id") or ""),
+            "container_generation_id": str(payload.get("instance_id") or ""),
             "user_email": manual_email or upstream_email,
             "user_email_source": "manual" if manual_email else "upstream" if upstream_email else "unmatched" if mapping_issue else "",
             "user_email_status": mapping_issue if not (manual_email or upstream_email) else "",
