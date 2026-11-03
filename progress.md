@@ -4,18 +4,20 @@
 
 ## Runman Rust v2 兼容开发
 
-- 基于 fork `main`（`1cab7c4` / v1.7.197）维护 Runman root-only Unix socket 适配：实例清单、代次、资源指标、TCP 连接证据、RFW 网卡识别与临时 TCP 限额；本轮为非 POSIX 探测增加安全跳过。
+- 当前代码基线为最新 `origin/main`（`1323833` / v1.7.198）；本轮目标版本 `1.7.199` 增加累计流量速率/账本适配和经 PID 代次校验的 Runman MOTD 写入。
 - 连接证据必须是新鲜、完整且实例代次匹配的 `/proc/<pid>/net` 采样；缺字段或解析不完整时只报告未核验，不下发限额。
-- Runman 不复用 Incus/Podman 进程、服务、隔离或带宽执行器；这些能力及容器网络字节统计仍不支持。
-- 本轮版本目标为 `1.7.198`。代码构建、GitHub Actions 和生产状态需分别记录，不能用构建成功替代生产验证。
+- Runman 根目录与真实 `/data` 目录的容量/可用量从经代次校验的 procfs 只读采样；镜像层尺寸和磁盘 I/O 仍未接入。MOTD 仅更新已有普通文件；不调用 guest exec、不修改 shell hook 或 SSH 登录前 Banner，登录展示情况保持未核验。
+- 未适配项、限制和配置见 [Runman Rust v2 兼容清单](docs/runman-rust-v2-compatibility.md)。本地 Python 3.14 `compileall` 通过，完整单测 886 项通过、34 项按平台跳过；GitHub CI 和生产运行状态尚未验证。
 
 ## 代码基线
 
-- 当前工作区基于 fork `main`（`1cab7c4` / v1.7.197）继续维护 Runman Rust v2 适配。
-- 本次根目录 `VERSION` 更新目标为 `1.7.198`。
+- 当前隔离工作区基于最新 fork `main`（`1323833` / v1.7.198）维护 Runman Rust v2 适配。
+- 本次根目录 `VERSION` 更新为 `1.7.199`。
 - 本次工作涵盖 Incus 命令行参数去重、内存高压自适应升档门槛、Alpine/Minimal 容器进程与监听回退机制闭环、前端卡片与详情假性协议告警过滤及对应自动化回归单测。
 
 ## 最近完成的工作
+
+- v1.7.199：Runman 流量计数接入流量账本并按实例代次派生收发速率；通过核对宿主机 PID、启动 tick 的 procfs 路径采集根目录和 `/data` 文件系统空间；安全提示仅写入已存在的普通 MOTD 文件，明确跳过 guest exec、shell hook 和登录前 Banner。新增兼容能力/缺口清单。完整本地单测通过；尚无 GitHub CI 或生产验证。
 
 - v1.7.198：在 Runman 清单与 bridge 只读探测前检查 Unix socket 平台能力；不支持 `AF_UNIX` 时返回不可用，保持 Windows 测试/工具环境可运行。Runman 连接限制、防火墙和 Linux 行为不变。
 - v1.7.196：修复 Incus CPU 限额命令执行、内存阶梯升档死锁与协议待核验误报：

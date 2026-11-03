@@ -2,6 +2,7 @@
 
 ## 登录提示
 
+- v1.7.199：Runman Rust v2 使用经过 init PID 启动代次核验的宿主机 procfs 路径更新已有普通 `/etc/motd`，不执行 guest 命令、不安装 shell hook、不更改登录前 SSH Banner。Runman 的 `login_display` 固定为 `unverified`；MOTD 文件写入不能证明 sshd/PAM 已配置展示。
 - v1.7.8：默认闭合品牌卡片由主机 Agent 每轮刷新；新建并运行、被 Agent 发现的受监控 Podman/Incus 容器在下一轮自动安装，无需修改创建模板。停止容器待启动后安装；显式关闭安全监测/登录提示及 Docker 仅提醒模式仍保留原策略，不擅自越权写入。
 - v1.7.9：混合运行时宿主机按容器的实际 runtime 选择 Banner 写入命令，不再回退到宿主机默认 Podman；运行时缺失或不匹配时拒绝写入其他运行时。
 - v1.7.10：升级健康检查的网络计数器范围仅包含真正受监控的容器；Docker `notice` 只提醒项独立统计，不再导致健康节点无法完成升级验证。Docker `full` 及其他运行时缺少计数器仍报告不完整。

@@ -7351,6 +7351,71 @@ def _incus_containers(runtime: str) -> List[Dict[str, str]]:
     return items
 
 
+def _runman_proc_snapshot(pid: int) -> Dict[str, object]:
+    """Read PID identity and filesystem usage from one pinned proc directory."""
+    result: Dict[str, object] = {
+        'pid_start_ticks': '',
+        'disk_used_bytes': 0,
+        'container_fs': {
+            'root': {'total_bytes': 0, 'avail_bytes': 0},
+            'data': {'total_bytes': 0, 'avail_bytes': 0},
+        },
+        'container_fs_available': False,
+    }
+    procfd = None
+    rootfd = None
+    try:
+        procfd = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY)
+        if not security_banner._proc_host_pid_matches(procfd, pid):
+            return result
+        samples = []
+        for _ in range(2):
+            fd = os.open('stat', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=procfd)
+            with os.fdopen(fd, 'r', encoding='ascii', errors='ignore') as handle:
+                samples.append(_proc_stat_start_ticks(handle.read(4096)))
+        if not samples[0] or samples[0] != samples[1]:
+            return result
+        result['pid_start_ticks'] = samples[0]
+        rootfd = os.open('root', os.O_RDONLY | os.O_DIRECTORY, dir_fd=procfd)
+
+        def fs_usage(usage) -> Dict[str, int] | None:
+            block_size = int(usage.f_frsize or usage.f_bsize or 0)
+            if block_size <= 0:
+                return None
+            total = int(usage.f_blocks) * block_size
+            available = min(int(usage.f_bavail), int(usage.f_blocks)) * block_size
+            return {'total_bytes': max(0, total), 'avail_bytes': max(0, available)}
+
+        root_stat = os.fstatvfs(rootfd)
+        root_usage = fs_usage(root_stat)
+        if root_usage is None:
+            return result
+        result['container_fs']['root'] = root_usage
+        result['disk_used_bytes'] = max(
+            0, (int(root_stat.f_blocks) - int(root_stat.f_bfree))
+            * int(root_stat.f_frsize or root_stat.f_bsize),
+        )
+        try:
+            datafd = os.open('data', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
+            try:
+                data_usage = fs_usage(os.fstatvfs(datafd))
+                if data_usage is not None:
+                    result['container_fs']['data'] = data_usage
+            finally:
+                os.close(datafd)
+        except OSError:
+            pass
+        result['container_fs_available'] = True
+        return result
+    except OSError:
+        return result
+    finally:
+        if rootfd is not None:
+            os.close(rootfd)
+        if procfd is not None:
+            os.close(procfd)
+
+
 def _runman_inventory_containers() -> List[Dict[str, str]]:
     """Read Runman's bounded, root-only inventory API; never shell into guests."""
     if os.name != 'posix' or not hasattr(socket, 'AF_UNIX'):
@@ -7404,6 +7469,12 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             and sampled_at > 0
             and sampled_at <= int(time.time()) + 30
         )
+        traffic_in = raw_item.get('traffic_in_bytes')
+        traffic_out = raw_item.get('traffic_out_bytes')
+        traffic_counters_available = (
+            type(traffic_in) is int and traffic_in >= 0
+            and type(traffic_out) is int and traffic_out >= 0
+        )
         connection_metrics = {
             'schema': 1,
             'source': 'runman_local_proc_net',
@@ -7417,7 +7488,9 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'tcp_time_wait': time_wait if metrics_valid else 0,
             'udp_sockets': 0,
         }
-        pid = raw_item.get('init_pid')
+        pid = raw_item.get('init_pid') if raw_item.get('running') is True else None
+        proc_snapshot = _runman_proc_snapshot(pid) if type(pid) is int and pid > 1 else {}
+        pid_start_ticks = str(proc_snapshot.get('pid_start_ticks') or '')
         items.append({
             'id': vm_id,
             'stable_id': vm_id,
@@ -7426,6 +7499,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'runtime_bin': '',
             'project': 'default',
             'pid': str(pid) if type(pid) is int and pid > 0 else '',
+            'pid_start_ticks': pid_start_ticks,
             'image': str(raw_item.get('os_image') or '')[:160],
             'status': 'running' if raw_item.get('running') is True else 'stopped',
             'instance_id': generation,
@@ -7438,8 +7512,15 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
                 'mem_limit_bytes': raw_item.get('mem_limit_bytes') if type(raw_item.get('mem_limit_bytes')) is int else 0,
                 'disk_gb': raw_item.get('disk_gb') if type(raw_item.get('disk_gb')) is int else 0,
                 'bandwidth_mbps': raw_item.get('bandwidth_mbps') if type(raw_item.get('bandwidth_mbps')) is int else 0,
-                'traffic_in_bytes': raw_item.get('traffic_in_bytes') if type(raw_item.get('traffic_in_bytes')) is int else 0,
-                'traffic_out_bytes': raw_item.get('traffic_out_bytes') if type(raw_item.get('traffic_out_bytes')) is int else 0,
+                'traffic_in_bytes': traffic_in if traffic_counters_available else 0,
+                'traffic_out_bytes': traffic_out if traffic_counters_available else 0,
+                'traffic_counters_available': traffic_counters_available,
+                'disk_used_bytes': proc_snapshot.get('disk_used_bytes', 0),
+                'container_fs': proc_snapshot.get('container_fs', {
+                    'root': {'total_bytes': 0, 'avail_bytes': 0},
+                    'data': {'total_bytes': 0, 'avail_bytes': 0},
+                }),
+                'container_fs_available': proc_snapshot.get('container_fs_available') is True,
                 'ips': [str(ip)[:64] for ip in raw_item.get('ips', [])[:32]] if isinstance(raw_item.get('ips'), list) else [],
                 'net_metrics_available': raw_item.get('net_metrics_available') is True,
             },
@@ -7491,28 +7572,63 @@ def collect_runman_report(container: Dict[str, object]) -> Dict[str, object]:
     mem_bytes = resources.get('mem_bytes') if type(resources.get('mem_bytes')) is int else 0
     mem_limit = resources.get('mem_limit_bytes') if type(resources.get('mem_limit_bytes')) is int else 0
     cpu = resources.get('cpu_percent') if type(resources.get('cpu_percent')) in (int, float) else 0.0
+    stable_id = str(container.get('stable_id') or container.get('id') or '')
+    instance_id = str(container.get('instance_id') or '')
+    traffic_valid = resources.get('traffic_counters_available') is True
+    traffic_rx = resources.get('traffic_in_bytes') if traffic_valid else 0
+    traffic_tx = resources.get('traffic_out_bytes') if traffic_valid else 0
+    raw_fs = resources.get('container_fs') if isinstance(resources.get('container_fs'), dict) else {}
+
+    def fs_usage(name: str) -> Dict[str, int]:
+        raw = raw_fs.get(name) if isinstance(raw_fs.get(name), dict) else {}
+        total = raw.get('total_bytes') if type(raw.get('total_bytes')) is int else 0
+        available = raw.get('avail_bytes') if type(raw.get('avail_bytes')) is int else 0
+        return {'total_bytes': max(0, total), 'avail_bytes': max(0, min(total, available))}
+
+    container_fs = {'root': fs_usage('root'), 'data': fs_usage('data')}
+    if traffic_valid:
+        net_rx_bps, net_tx_bps = _derive_net_bps(
+            f'runman:{stable_id}:{instance_id}', traffic_rx, traffic_tx,
+        )
+    else:
+        _net_counters.pop(f'runman:{stable_id}:{instance_id}', None)
+        net_rx_bps, net_tx_bps = 0.0, 0.0
     return {
         'id': str(container.get('id') or ''),
-        'stable_id': str(container.get('stable_id') or container.get('id') or ''),
+        'stable_id': stable_id,
         'name': str(container.get('name') or ''),
         'image': str(container.get('image') or ''),
         'runtime': 'runman',
         'project': 'default',
         'status': str(container.get('status') or 'unknown'),
-        'instance_id': str(container.get('instance_id') or ''),
+        'instance_id': instance_id,
+        'pid': str(container.get('pid') or ''),
+        'pid_start_ticks': str(container.get('pid_start_ticks') or ''),
         'monitor_mode': 'runman_inventory',
         'cpu_percent': max(0.0, float(cpu)),
         'cpu_effective_cpus': float(resources.get('cpu') or 0),
         'mem_bytes': max(0, mem_bytes),
         'mem_limit_bytes': max(0, mem_limit),
         'mem_percent': (100.0 * mem_bytes / mem_limit) if mem_limit > 0 else 0.0,
-        'net_rx_bps': 0.0,
-        'net_tx_bps': 0.0,
+        'net_rx_bps': net_rx_bps,
+        'net_tx_bps': net_tx_bps,
+        'traffic_counters': {
+            'available': traffic_valid,
+            'rx': traffic_rx,
+            'tx': traffic_tx,
+            'source': 'runman_lifetime',
+            'epoch': f'{stable_id}:{instance_id}:runman',
+        },
         'conn_count': tcp_total,
         'tcp_country_stats': [],
         'udp_country_stats': [],
         'disk': collect_disk_alert(),
-        'container_disk': {'rw_bytes': 0, 'rootfs_bytes': 0, 'available': False},
+        'container_disk': {
+            'rw_bytes': 0,
+            'rootfs_bytes': 0,
+            'fs': container_fs,
+            'available': resources.get('container_fs_available') is True,
+        },
         'top_cpu_process': {'pid': 0, 'cpu_percent': 0.0, 'command': ''},
         'security': {
             'connection_metrics': metrics,
@@ -11384,6 +11500,12 @@ def main() -> None:
                     print(f"deep sample failed for {c.get('name')}: {deep_error}")
             collected.append(container_report)
         security = collect_security_summary(collected, security_interval)
+        # The init PID and its kernel start tick are local procfs write guards;
+        # they are not part of the telemetry contract.
+        for container_report in collected:
+            if container_report.get('runtime') == 'runman':
+                container_report.pop('pid', None)
+                container_report.pop('pid_start_ticks', None)
         payload = {
             "host_id": args.host_id,
             "node_id": args.node_id,

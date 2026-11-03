@@ -91,6 +91,29 @@ class BuyerTests(unittest.TestCase):
         self.assertEqual(len(data["notice_events"]), 1)
         self.assertEqual(data["notice_events"][0]["notice_id"], "live")
 
+    def test_runman_unsupported_shell_with_failed_motd_closes_notice_as_failed(self):
+        notice_id = 'runman-no-motd'
+        name = '00000000-0000-0000-0000-000000000001'
+        with server.db() as conn:
+            conn.execute(
+                "INSERT INTO buyer_user_notices(id,alert_id,host_id,runtime,project,container_name,subject,created_at,expires_at,telegram_status,banner_status) VALUES(?,7,'host','runman','default',?,'Notice',?,?, 'succeeded','queued')",
+                (notice_id, name, self.now, self.now + 3600),
+            )
+            conn.commit()
+            observed = {
+                'runtime': 'runman', 'project': 'default', 'name': name, 'id': name,
+                'security': {'motd_delivery': {
+                    'status': 'failed', 'shell_delivery': 'unsupported_runman_exec_api',
+                    'notice_ids': ['NOTICE-' + notice_id], 'error': 'Runman MOTD unavailable',
+                }},
+            }
+            buyer.observe(conn, 'host', self.now, [observed], [])
+            row = conn.execute(
+                'SELECT banner_status,banner_error FROM buyer_user_notices WHERE id=?', (notice_id,),
+            ).fetchone()
+        self.assertEqual(row['banner_status'], 'failed')
+        self.assertEqual(row['banner_error'], 'Runman MOTD unavailable')
+
     def test_report_enqueues_only_and_missing_mapping_blocks(self):
         with mock.patch.object(buyer,"deliver") as send:
             self.ingest()
@@ -448,17 +471,30 @@ class BannerTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name=='posix',"POSIX dirfd required")
     def test_linux_atomic_writer_rejects_symlinks_and_preserves_mode(self):
-        root=Path(self.tmp.name)/"root"; (root/"etc").mkdir(parents=True)
+        root=Path(self.tmp.name)/"rootfs"; (root/"etc").mkdir(parents=True)
+        proc=Path(self.tmp.name)/"proc"; proc.mkdir()
+        (proc/"root").symlink_to(root,target_is_directory=True)
+        (proc/"stat").write_text('10000 (runman-init) S '+' '.join(['0']*18+['456'])+'\n')
+        (proc/"status").write_text('Name:\trunman-init\nNSpid:\t10000 1\n')
         motd=root/"etc/motd"; motd.write_text("custom\n"); motd.chmod(0o640)
         actual_open=os.open
         def local_open(path,*args,**kw):
-            return actual_open(str(root) if path=='/proc/10000/root' else path,*args,**kw)
+            return actual_open(str(proc) if path=='/proc/10000' else path,*args,**kw)
         with mock.patch.object(banner.os,"open",side_effect=local_open):
-            self.assertTrue(banner.write_proc(10000,"notice"))
+            self.assertTrue(banner.write_proc(10000,"notice",expected_start_ticks='456',require_existing=True))
             self.assertEqual(motd.stat().st_mode&0o777,0o640)
-            self.assertTrue(banner.write_proc(10000,""))
+            self.assertTrue(banner.write_proc(10000,"",expected_start_ticks='456',require_existing=True))
             self.assertEqual(motd.read_text(),"custom\n")
+            with self.assertRaises(OSError):
+                banner.write_proc(10000,"notice",expected_start_ticks='999',require_existing=True)
+            (proc/"status").write_text('Name:\trunman-init\nNSpid:\t99 1\n')
+            with self.assertRaises(OSError):
+                banner.write_proc(10000,"notice",expected_start_ticks='456',require_existing=True)
+            (proc/"status").write_text('Name:\trunman-init\nNSpid:\t10000 1\n')
             protected=root/"secret"; protected.write_text("untouched")
             motd.unlink(); motd.symlink_to(protected)
-            with self.assertRaises(OSError): banner.write_proc(10000,"notice")
+            with self.assertRaises(OSError): banner.write_proc(10000,"notice",expected_start_ticks='456',require_existing=True)
             self.assertEqual(protected.read_text(),"untouched")
+            motd.unlink()
+            with self.assertRaises(OSError): banner.write_proc(10000,"notice",expected_start_ticks='456',require_existing=True)
+            self.assertFalse(motd.exists())

@@ -1,8 +1,17 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.198**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.199**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
+
+Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
+
+### v1.7.199：Runman 流量速率与 MOTD 登录提示适配
+
+- 将 Runman 提供的累计收发字节计数接入 Watcher 流量账本，并按实例 UUID/代次换算每秒收发字节；计数缺失时标为不可用，不把缺失值伪装成零流量。
+- 通过已核验的 init PID 和 procfs 采集 Runman 根文件系统及真实 `/data` 目录的总量/可用量；镜像可写层尺寸与磁盘 I/O 仍未接入。
+- Runman 容器新增仅限登录后 MOTD 的安全写入：使用当前 init PID 和启动 tick 代次校验，通过宿主机 procfs 原子更新已存在的普通 `/etc/motd`；不调用容器 exec，不安装 shell hook，也不改 SSH 登录前 Banner。MOTD 写入成功仍不代表 SSH/PAM 一定展示，`login_display` 保持 `unverified`。
+- 记录 Runman 其余尚未适配的能力和配置条件，见兼容清单。
 
 ### v1.7.197：接入 Runman Rust v2 只读监控与受控网络接口
 

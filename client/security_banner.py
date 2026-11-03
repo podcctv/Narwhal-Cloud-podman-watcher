@@ -455,12 +455,55 @@ def persist():
     return True
 
 
-def write_proc(pid, banner):
-    """Do not follow a container-controlled /etc or /etc/motd symlink on the host."""
-    rootfd=os.open(f"/proc/{pid}/root",os.O_RDONLY|os.O_DIRECTORY)
-    etcfd=None
-    temporary=".narwhal-motd-"+os.urandom(8).hex()
+def _proc_start_ticks(procfd):
+    fd=os.open("stat",os.O_RDONLY|os.O_NOFOLLOW,dir_fd=procfd)
+    with os.fdopen(fd,"r",encoding="ascii",errors="ignore") as handle:
+        raw=handle.read(4096).strip()
+    closing=raw.rfind(")")
+    if closing<0 or raw[closing+1:closing+2]!=" ":
+        return ""
+    fields=raw[closing+2:].split()
+    if len(fields)<=19:
+        return ""
+    ticks=fields[19]
+    return ticks if ticks.isdigit() and int(ticks)>0 else ""
+
+
+def _proc_host_pid_matches(procfd, expected_pid):
+    """Require the procfs entry's outermost PID to match Runman's host PID."""
     try:
+        fd=os.open("status",os.O_RDONLY|os.O_NOFOLLOW,dir_fd=procfd)
+        with os.fdopen(fd,"r",encoding="ascii",errors="ignore") as handle:
+            for line in handle:
+                if line.startswith("NSpid:"):
+                    pids=line.partition(":")[2].split()
+                    return bool(pids) and pids[0].isdigit() and int(pids[0])==int(expected_pid)
+    except (OSError,TypeError,ValueError):
+        return False
+    return False
+
+
+def write_proc(pid, banner, expected_start_ticks=None, require_existing=False):
+    """Do not follow a container-controlled /etc or /etc/motd symlink on the host."""
+    pid=int(pid)
+    if pid<=1:
+        raise OSError("无效容器 PID")
+    temporary=".narwhal-motd-"+os.urandom(8).hex()
+    procfd=os.open(f"/proc/{pid}",os.O_RDONLY|os.O_DIRECTORY)
+    rootfd=None
+    etcfd=None
+    try:
+        if require_existing and expected_start_ticks is None:
+            raise OSError("缺少容器 init PID 代次")
+        if expected_start_ticks is not None:
+            expected=str(expected_start_ticks).strip()
+            if (
+                not expected.isdigit() or int(expected)<=0
+                or not _proc_host_pid_matches(procfd,pid)
+                or _proc_start_ticks(procfd)!=expected
+            ):
+                raise OSError("容器 init PID 代次已变化或无法核验")
+        rootfd=os.open("root",os.O_RDONLY|os.O_DIRECTORY,dir_fd=procfd)
         etcfd=os.open("etc",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=rootfd)
         original=""
         info=None
@@ -471,9 +514,14 @@ def write_proc(pid, banner):
                 if not stat.S_ISREG(info.st_mode) or info.st_size>65536:
                     raise ValueError("MOTD 不是有界普通文件")
                 original=f.read(65537)
+                if len(original.encode("utf-8"))>65536:
+                    raise ValueError("MOTD 读取时超过大小上限")
         except FileNotFoundError:
-            pass
+            if require_existing:
+                raise OSError("容器内 /etc/motd 不存在；为避免 user namespace 所有权错误，不创建")
         content=merge(original,banner)
+        if len(content.encode("utf-8"))>131072:
+            raise ValueError("MOTD 写入内容超过大小上限")
         if original==content:
             return False
         fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=etcfd)
@@ -494,8 +542,10 @@ def write_proc(pid, banner):
         if etcfd is not None:
             try: os.unlink(temporary,dir_fd=etcfd)
             except FileNotFoundError: pass
-            os.close(etcfd)
-        os.close(rootfd)
+        for fd in (etcfd,rootfd,procfd):
+            if fd is not None:
+                try: os.close(fd)
+                except OSError: pass
 
 
 def update(container, alerts, threat_types, checked_exec, server_states, version, partial=False):
@@ -585,37 +635,53 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
         for k in sorted(_checks,key=lambda k:_checks[k][0])[:-1000]:
             _checks.pop(k,None)
     persisted=persist()
-    # Default branding remains even after incident retention expires. A shell hook
-    # renders at session width; MOTD is the fallback only, preventing SSH duplicates.
-    shell_ok, shell_changed = install_shell(container, entries, checked_exec, version, int(now))
+    # Default branding remains even after incident retention expires. Runtimes
+    # with guest exec use the interactive shell card; others use the MOTD path.
+    is_runman=container.get("runtime")=="runman"
+    if is_runman:
+        # Runman intentionally exposes no guest exec API. MOTD via procfs is the
+        # only supported banner path; never try to modify guest shell startup.
+        shell_ok, shell_changed = False, False
+    else:
+        shell_ok, shell_changed = install_shell(container, entries, checked_exec, version, int(now))
     banner="" if shell_ok else render(name,entries,version=version,sampled_at=int(now))
     changed=shell_changed
-    delivery['shell_delivery'] = 'installed' if shell_ok else 'failed'
+    delivery['shell_delivery'] = 'unsupported_runman_exec_api' if is_runman else 'installed' if shell_ok else 'failed'
     try:
         pid=int(container.get("pid") or 0)
         if pid>1:
-            changed=write_proc(pid,banner) or changed
+            changed=write_proc(
+                pid,banner,
+                expected_start_ticks=container.get("pid_start_ticks") if is_runman else None,
+                require_existing=is_runman,
+            ) or changed
             delivery.update(status="written" if changed else "unchanged",method="proc_atomic")
         else:
             raise OSError("无容器 PID")
     except (OSError,ValueError,AttributeError):
-        try:
-            ok,original=checked_exec(container,"[ ! -L /etc/motd ] && { [ ! -e /etc/motd ] || [ -f /etc/motd ]; } && { [ ! -f /etc/motd ] || [ $(wc -c < /etc/motd) -le 65536 ]; } && { cat /etc/motd 2>/dev/null || [ ! -e /etc/motd ]; }")
-            if not ok:
-                raise OSError("容器 MOTD 读取失败")
-            content=merge(original,banner)
-            if original!=content:
-                command="set -eu; [ ! -L /etc/motd ]; t=$(mktemp /etc/.narwhal-motd.XXXXXX); trap 'rm -f -- \"$t\"' EXIT; if [ -f /etc/motd ]; then cp -p /etc/motd \"$t\"; else chmod 644 \"$t\"; fi; printf '%s' "+shlex.quote(content)+" > \"$t\"; mv -f -- \"$t\" /etc/motd"
-                ok,_=checked_exec(container,command)
+        if is_runman:
+            delivery.update(
+                status="failed",
+                error="Runman MOTD 未写入：需新鲜且代次已核验的 init PID，以及已存在的普通 /etc/motd 文件",
+            )
+        else:
+            try:
+                ok,original=checked_exec(container,"[ ! -L /etc/motd ] && { [ ! -e /etc/motd ] || [ -f /etc/motd ]; } && { [ ! -f /etc/motd ] || [ $(wc -c < /etc/motd) -le 65536 ]; } && { cat /etc/motd 2>/dev/null || [ ! -e /etc/motd ]; }")
                 if not ok:
-                    raise OSError("容器 MOTD 写入失败")
-                ok,check=checked_exec(container,"cat /etc/motd")
-                if not ok or check!=content:
-                    raise OSError("MOTD 写后校验失败")
-                changed=True
-            delivery.update(status="written" if changed else "unchanged",method="runtime_atomic")
-        except (OSError,ValueError):
-            delivery.update(status="failed",error="MOTD 写入 / 校验失败；原内容或符号链接已保留")
+                    raise OSError("容器 MOTD 读取失败")
+                content=merge(original,banner)
+                if original!=content:
+                    command="set -eu; [ ! -L /etc/motd ]; t=$(mktemp /etc/.narwhal-motd.XXXXXX); trap 'rm -f -- \"$t\"' EXIT; if [ -f /etc/motd ]; then cp -p /etc/motd \"$t\"; else chmod 644 \"$t\"; fi; printf '%s' "+shlex.quote(content)+" > \"$t\"; mv -f -- \"$t\" /etc/motd"
+                    ok,_=checked_exec(container,command)
+                    if not ok:
+                        raise OSError("容器 MOTD 写入失败")
+                    ok,check=checked_exec(container,"cat /etc/motd")
+                    if not ok or check!=content:
+                        raise OSError("MOTD 写后校验失败")
+                    changed=True
+                delivery.update(status="written" if changed else "unchanged",method="runtime_atomic")
+            except (OSError,ValueError):
+                delivery.update(status="failed",error="MOTD 写入 / 校验失败；原内容或符号链接已保留")
     delivery["state_persisted"]=persisted
     if shell_ok or delivery.get('status') in {'written','unchanged'}:
         delivery['format_version'] = 2
@@ -623,7 +689,9 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
     # Only IDs selected for actual rendering may be acknowledged as delivered.
     delivery['notice_ids'] = [e['event_id'] for e in select_entries(entries) if e.get('type') == 'user_notice']
     # Read-only login mechanism check, not a promise that an SSH session displayed it.
-    if key not in _checks or now-_checks[key][0]>3600:
+    if is_runman:
+        _checks[key]=(now,"unverified")
+    elif key not in _checks or now-_checks[key][0]>3600:
         ok,mechanism=checked_exec(container,"if command -v sshd >/dev/null 2>&1; then sshd -T 2>/dev/null | grep '^printmotd '; fi; if grep -qs pam_motd /etc/pam.d/sshd; then printf 'pam_motd\\n'; fi; if grep -qs '/etc/motd' /etc/profile; then printf 'profile_motd\\n'; fi; true")
         _checks[key]=(now,"configured" if ok and any(v in mechanism for v in ("printmotd yes","pam_motd","profile_motd")) else "unverified")
     delivery["login_display"]=_checks[key][1]

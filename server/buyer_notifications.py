@@ -336,7 +336,7 @@ def observe(conn, host, ts, containers, alerts):
             attempt = int(notice['banner_attempts'] or 0) + 1
             conn.execute("UPDATE buyer_user_notices SET banner_status='written',banner_attempts=?,banner_error='',banner_updated_at=?,updated_at=? WHERE id=? AND banner_status='queued'", (attempt, ts, ts, notice['id']))
             _notice_event(conn, notice['id'], 'banner', 'written', attempt, ts, '已写入容器登录提醒文件；不代表用户已登录或已阅读')
-        elif delivery.get('status') == 'failed' and delivery.get('shell_delivery') == 'failed':
+        elif delivery.get('status') == 'failed' and delivery.get('shell_delivery') in {'failed', 'unsupported_runman_exec_api'}:
             attempt = int(notice['banner_attempts'] or 0) + 1
             error = clean(delivery.get('error') or 'Agent 未能写入或校验登录提醒', 300)
             conn.execute("UPDATE buyer_user_notices SET banner_status='failed',banner_attempts=?,banner_error=?,banner_updated_at=?,updated_at=? WHERE id=? AND banner_status='queued'", (attempt, error, ts, ts, notice['id']))

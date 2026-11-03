@@ -263,6 +263,27 @@ class CardTests(unittest.TestCase):
                 self.assertEqual(c['security']['motd_delivery']['format_version'], 2)
             banner.incidents.clear()
 
+    def test_runman_uses_only_generation_checked_motd_path(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                'SECURITY_MOTD_STATE_FILE': str(Path(directory)/'state.json')}):
+            banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
+            c = {'name': '00000000-0000-0000-0000-000000000001', 'runtime': 'runman',
+                 'id': '00000000-0000-0000-0000-000000000001', 'pid': '42', 'pid_start_ticks': '12345'}
+            execute = mock.Mock(return_value=(False, ''))
+            with mock.patch.object(banner, 'install_shell', side_effect=AssertionError('Runman must not exec')), \
+                    mock.patch.object(banner, 'write_proc', return_value=True) as write:
+                self.assertTrue(banner.update(c, [], set(), execute, [], 'test'))
+            write.assert_called_once()
+            self.assertEqual(write.call_args.args[0], 42)
+            self.assertEqual(write.call_args.kwargs['expected_start_ticks'], '12345')
+            self.assertTrue(write.call_args.kwargs['require_existing'])
+            execute.assert_not_called()
+            delivery = c['security']['motd_delivery']
+            self.assertEqual(delivery['status'], 'written')
+            self.assertEqual(delivery['shell_delivery'], 'unsupported_runman_exec_api')
+            self.assertEqual(delivery['login_display'], 'unverified')
+            banner.incidents.clear(); banner._loaded_path = ''; banner._checks.clear()
+
 
 @unittest.skipUnless(os.name == 'posix', 'PTY requires POSIX')
 class ShellTests(unittest.TestCase):

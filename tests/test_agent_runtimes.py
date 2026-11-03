@@ -25,6 +25,64 @@ class RuntimeDiscoveryTests(unittest.TestCase):
         agent._disk_alert_cache_at = 0.0
         agent._warned_missing_bins.clear()
 
+    @unittest.skipUnless(os.name == 'posix', 'Runman procfs adapter requires POSIX dirfd support')
+    def test_runman_proc_snapshot_reads_generation_and_filesystem_space(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            proc = base / 'proc'
+            proc.mkdir()
+            root = base / 'rootfs'
+            (root / 'etc').mkdir(parents=True)
+            (root / 'data').mkdir()
+            (proc / 'root').symlink_to(root, target_is_directory=True)
+            (proc / 'stat').write_text('4242 (runman-init) S ' + ' '.join(['0'] * 18 + ['12345']) + '\n')
+            (proc / 'status').write_text('Name:\trunman-init\nNSpid:\t4242 1\n')
+            actual_open = os.open
+
+            def local_open(path, *args, **kwargs):
+                return actual_open(str(proc) if path == '/proc/4242' else path, *args, **kwargs)
+
+            with mock.patch.object(agent.os, 'open', side_effect=local_open):
+                snapshot = agent._runman_proc_snapshot(4242)
+                (proc / 'status').write_text('Name:\trunman-init\nNSpid:\t99 1\n')
+                mismatched = agent._runman_proc_snapshot(4242)
+            self.assertEqual(snapshot['pid_start_ticks'], '12345')
+            self.assertTrue(snapshot['container_fs_available'])
+            self.assertGreaterEqual(snapshot['disk_used_bytes'], 0)
+            self.assertGreater(snapshot['container_fs']['root']['total_bytes'], 0)
+            self.assertGreater(snapshot['container_fs']['data']['total_bytes'], 0)
+            self.assertEqual(mismatched['pid_start_ticks'], '')
+            self.assertFalse(mismatched['container_fs_available'])
+
+    def test_runman_report_uses_generation_scoped_cumulative_traffic(self):
+        stable_id = '00000000-0000-0000-0000-000000000001'
+        key = f'runman:{stable_id}:generation-1'
+        agent._net_counters.pop(key, None)
+        self.addCleanup(agent._net_counters.pop, key, None)
+        container = {
+            'id': stable_id, 'stable_id': stable_id, 'name': stable_id, 'instance_id': 'generation-1',
+            'runtime': 'runman', 'status': 'running',
+            'connection_metrics': {'valid': True, 'tcp_total': 7},
+            'runman_resources': {
+                'cpu_percent': 1.0, 'mem_bytes': 1024, 'mem_limit_bytes': 4096,
+                'traffic_counters_available': True, 'traffic_in_bytes': 1000, 'traffic_out_bytes': 500,
+                'container_fs': {'root': {'total_bytes': 10000, 'avail_bytes': 7000}},
+                'container_fs_available': True,
+            },
+        }
+        with mock.patch.object(agent.time, 'time', return_value=1000):
+            first = agent.collect_runman_report(container)
+        self.assertEqual(first['net_rx_bps'], 0.0)
+        self.assertEqual(first['traffic_counters']['rx'], 1000)
+        self.assertEqual(first['conn_count'], 7)
+        self.assertEqual(first['container_disk']['fs']['root'], {'total_bytes': 10000, 'avail_bytes': 7000})
+        container['runman_resources']['traffic_in_bytes'] = 2000
+        container['runman_resources']['traffic_out_bytes'] = 900
+        with mock.patch.object(agent.time, 'time', return_value=1010):
+            second = agent.collect_runman_report(container)
+        self.assertEqual(second['net_rx_bps'], 100.0)
+        self.assertEqual(second['net_tx_bps'], 40.0)
+
     def test_auto_discovers_all_available_runtimes(self):
         with mock.patch.dict(os.environ, {"CONTAINER_RUNTIMES": "auto"}, clear=False):
             with mock.patch.object(agent.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"), mock.patch.object(agent,"_is_containerized_runtime",return_value=False):
@@ -2252,7 +2310,7 @@ class SecurityTelemetryTests(unittest.TestCase):
             banner.incidents.clear()
             banner._checks.clear()
             content = ["Welcome to Ubuntu 24.04 LTS\\n"]
-            def write(pid, text):
+            def write(pid, text, **kwargs):
                 merged = banner.merge(content[0], text)
                 changed = merged != content[0]
                 content[0] = merged
