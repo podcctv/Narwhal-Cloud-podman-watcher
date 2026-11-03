@@ -248,7 +248,7 @@ def _run(runtime: str, args: list[str], timeout: float = 20.0) -> tuple[int, str
 
 
 def _runtime_args(runtime: str, project: str, args: list[str]) -> list[str]:
-    prefix = [runtime]
+    prefix: list[str] = []
     if os.path.basename(runtime) == "incus" and project:
         prefix.extend(["--project", project])
     return prefix + args

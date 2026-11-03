@@ -4,12 +4,17 @@
 
 ## 代码基线
 
-- 当前工作区基于 GitHub `main`（`721696e`）完成 Trojan/VMess 阻断有效召回兼容优化与面板端点级诊断原因透出。
-- 本次根目录 `VERSION` 更新为 `1.7.195`。
-- 本次工作涵盖 Agent 协议解析识别、宿主机 proc 时钟回退机制闭环、前端详情抽屉端点级未核实原因透出及对应自动化回归单测。
+- 当前工作区基于 GitHub `main`（`85a3d24`）完成 Incus CPU 限额命令修复、内存阶梯升档死锁修复与未检测到协议时的假性阻断告警消除。
+- 本次根目录 `VERSION` 更新为 `1.7.196`。
+- 本次工作涵盖 Incus 命令行参数去重、内存高压自适应升档门槛、Alpine/Minimal 容器进程与监听回退机制闭环、前端卡片与详情假性协议告警过滤及对应自动化回归单测。
 
 ## 最近完成的工作
 
+- v1.7.196：修复 Incus CPU 限额命令执行、内存阶梯升档死锁与协议待核验误报：
+  1. 修复 `client/cpu_guard.py` 中 `_runtime_args` 重复前置 `runtime` 二进制导致 `subprocess.run` 拼接成 `incus incus ...` 并报错 `Error: unknown command "incus" for "incus"` 的缺陷，使 Incus 容器 CPU 配额读取、生效与自动阶梯防护闭环。
+  2. 修复 `client/memory_guard.py` 中进入第 2 阶（80%）后因实际内存受限（~81%）永远低于全局 `start_usage`（85%）导致升档计数器在每轮都被清零重置的死锁，增加按阶梯门槛自适应判断。
+  3. 修复前端 `ContainerStateBadges` 与 `ContainerCardCompact` 在未检出协议且无端点阻断时因单轮扫描不完整误显 `[VMess 阻断待核验]` / `[Trojan 阻断待核验]`，并在 `ContainerDrawer` 中明确区分 `阻断待核验` 与 `未检测到 (扫描待核验)`。
+  4. 补齐 Alpine/Minimal 容器内无标准 `ps -eo` 或 `ss` 时的宿主机 procfs 回退采集，准确关联监听端点并消除假性 `process_snapshot_unavailable`。
 - v1.7.195：增强 Trojan/VMess 阻断有效召回率与面板端点级诊断原因透出：
   1. 前端 `ContainerDrawer` 的 `ProtocolGuardCard` 为每个待核验端点显式标注具体阻断障碍原因（如 `共用监听端口 (防误杀)`、`实时监听未匹配`、`配置在进程启动后更新` 等），结合现有“按需触发一次性深度采样”功能，在面板上提供完整的可观测诊断视图。
   2. 修复 `client/agent.py` 中容器 procfs 不可读时的宿主机时钟代次回退闭环，当容器内 `/proc/{pid}/stat` 缺失但宿主机已核验进程稳定性时，采纳宿主机代次时钟，消除假性 `process_start_generation_unavailable`。

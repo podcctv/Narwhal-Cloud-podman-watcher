@@ -6581,9 +6581,18 @@ def collect_panel_pairing_indicators(
         ).split(",")
         if pattern.strip()
     ]
+    ps_cmd = "ps -eo pid=,stat=,comm=,args= 2>/dev/null || ps -o pid=,stat=,comm=,args= 2>/dev/null || ps -o pid=,comm=,args= 2>/dev/null || ps 2>/dev/null"
     process_output = run(
-        _runtime_exec_cmd(runtime, name, "ps -eo pid=,stat=,comm=,args= 2>/dev/null", project)
+        _runtime_exec_cmd(runtime, name, ps_cmd, project)
     )
+    if not process_output.strip() and init_pid > 1:
+        _, host_processes = _collect_host_proc_process_snapshot(init_pid, 100)
+        if host_processes:
+            process_output = "\n".join(
+                f"{p.get('pid', 0)} {p.get('state', '-')} {p.get('process', '')} {p.get('command', '')}".strip()
+                for p in host_processes
+                if p.get("pid")
+            )
     result['standalone_panels'] = socks_detector.standalone_panels(process_output)
     combined_identity = f"{name} {image}".lower()
     socks_process = _socks_process_evidence(process_output, combined_identity)
@@ -7797,13 +7806,18 @@ def collect_container(
     communication_sockets = communication.get("communication_sockets")
     if (
         runtime_name in {"incus", "podman"}
-        and expected_connection_count >= max(100, min(2000, int(_env_float("CONNECTION_EVIDENCE_PROC_FALLBACK_MIN", 500))))
-        and (not isinstance(communication_sockets, list) or not communication_sockets)
         and pid > 1
+        and (
+            (
+                expected_connection_count >= max(100, min(2000, int(_env_float("CONNECTION_EVIDENCE_PROC_FALLBACK_MIN", 500))))
+                and (not isinstance(communication_sockets, list) or not communication_sockets)
+            )
+            or communication.get("communication_detail_available") is not True
+            or (has_listening_ports and not communication.get("service_listeners"))
+        )
     ):
-        # Some minimal images have an ss binary that exits successfully but
-        # cannot see the target namespace's sockets. A high kernel socket count
-        # with an empty ss result is not a zero-connection forensic sample.
+        # When ss is unavailable, cannot read namespace sockets, or leaves listeners
+        # unmapped, fall back to kernel namespace /proc fd and socket inspection.
         host_process_snapshot, host_processes = _collect_host_proc_process_snapshot(pid, 200)
         host_communication = _collect_host_proc_socket_details(
             pid,
@@ -7814,7 +7828,7 @@ def collect_container(
             100,
             process_scope_complete=host_process_snapshot.get("scope_complete") is True,
         )
-        if host_communication.get("communication_sockets"):
+        if host_communication.get("communication_sockets") or host_communication.get("service_listeners"):
             communication = host_communication
     _enrich_communication_with_original_sources(
         communication,

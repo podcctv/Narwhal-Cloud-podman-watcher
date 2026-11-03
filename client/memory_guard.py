@@ -366,7 +366,12 @@ def observe(
             record.update(last_seen=timestamp, memory_current_bytes=current_bytes, memory_max_bytes=maximum,
                           host_psi_some_avg10=host_some, container_psi_some_avg10=cgroup_some)
             pressure_high = host_some >= host_pressure_threshold and cgroup_some >= container_pressure_threshold
-            if pressure_high and used_percent >= start_usage and tier < 3:
+            tier_usage_threshold = max(60.0, start_usage - (tier - 1) * 10.0)
+            is_memory_high_tier = used_percent >= tier_usage_threshold or (
+                bool(current_high and current_high != "max" and current_high.isdigit())
+                and current_bytes >= int(current_high) * 0.95
+            )
+            if pressure_high and is_memory_high_tier and tier < 3:
                 last_high = int(record.get("last_high") or 0)
                 if last_high <= 0 or timestamp <= last_high or timestamp - last_high > max_gap:
                     record["escalation_since"], record["escalation_samples"] = timestamp, 1
@@ -405,7 +410,7 @@ def observe(
                                                   last_error=output or "阶梯 memory.high 未改变；保留此前已确认的限额。")
                                 else:
                                     record.update(stage="escalating", last_error=output or "阶梯限额写入结果暂不可读；等待下一轮核验。")
-            elif not pressure_high or used_percent < start_usage:
+            elif not pressure_high or not is_memory_high_tier:
                 record["escalation_since"], record["escalation_samples"], record["last_high"] = 0, 0, 0
 
             low = host_some >= 0 and cgroup_some >= 0 and host_some < recovery_pressure and cgroup_some < recovery_pressure

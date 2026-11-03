@@ -1,10 +1,15 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.195**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.196**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
-### v1.7.195：增强 Trojan/VMess 阻断召回与面板端点级诊断原因展示
+### v1.7.196：修复 Incus CPU 限额命令执行、内存阶梯升档死锁与协议待核验误报
+
+- **Incus CPU 限额命令修复**：修复 `client/cpu_guard.py` 中 `_runtime_args` 重复携带 `runtime` 可执行文件名称导致 `subprocess.run` 拼接成 `incus incus ...` 并报错 `Error: unknown command "incus" for "incus"` 的缺陷。消除 CPU 原配置读取失败与 `持续高 CPU，保护需要检查` 黑盒，使 Incus 容器 CPU 配额设置与读回核验正常生效。
+- **内存保护阶梯自动升档修复**：修复 `client/memory_guard.py` 中当容器内存限额进入第 2 阶（80%）后，因使用率受限于 cgroup memory.high（如 ~81%）而始终无法达到全局 `start_usage`（默认 85%），导致升档计数器在每轮采样都被清零重置的死锁缺陷。引入按阶梯自适应的使用率门槛与 active_limit 相对上限检测，确保持续处于高 PSI 争用状态的容器能顺利自动升档至第 3 阶（70%）。
+- **无协议端点时的假性阻断告警消除**：修复前端 `ContainerStateBadges` 与 `ContainerCardCompact` 在容器未检测到 VMess / Trojan 且无阻断/待核验端点时，仅因单轮配置扫描未完成（unverified）而误打上 `[VMess 阻断待核验]` / `[Trojan 阻断待核验]` 警告标签的误导；并在 `ContainerDrawer` 中明确区分 `阻断待核验` 与 `未检测到 (扫描待核验)`。
+- **Alpine/Minimal 容器进程与监听采集补全**：当容器内缺少标准 `ps -eo` 或 `ss`（如 Alpine/Busybox）导致进程与连接清单返回空时，无缝回退至容器内兼容参数及宿主机内核 `/proc/{init_pid}` 进程树与 socket fd 深度提取，补齐监听端点归属并消除假性 `process_snapshot_unavailable`。
 
 - **面板端点级原因透出**：容器详情抽屉（ContainerDrawer）的 Trojan / VMess 管控卡片为待核验端点直接标注具体原因（如 `共用监听端口 (防误杀)`、`实时监听未匹配`、`配置在进程启动后更新` 等），结合现有“按需触发一次性深度采样”功能，可在面板上完整定性与诊断容器状态，消除黑盒。
 - **宿主机时钟代次回退补全**：在容器内 `/proc/{pid}/stat` 由于权限或命名空间限制无法读取时，采纳宿主机已核验的 `host_start_ticks` 与进程代次稳定性证据，修复假性 `process_start_generation_unavailable` 导致的阻断阻碍。

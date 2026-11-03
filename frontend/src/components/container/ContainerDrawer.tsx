@@ -136,7 +136,9 @@ const protocolGuardState = (summary?: ProtocolGuardSummary) => {
   switch (summary.state) {
     case 'blocked': return { label: '阻断已核验', tone: 'border-emerald-500/30 bg-emerald-950/20 text-emerald-200' };
     case 'partial': return { label: '部分阻断', tone: 'border-rose-500/40 bg-rose-950/30 text-rose-200' };
-    case 'unverified': return { label: '阻断待核验', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' };
+    case 'unverified': return summary.detected
+      ? { label: '阻断待核验', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' }
+      : { label: '未检测到 (扫描待核验)', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
     case 'release_pending': return { label: '放行待核验', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' };
     case 'not_detected': return summary.detected
       ? { label: '检测状态冲突', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' }

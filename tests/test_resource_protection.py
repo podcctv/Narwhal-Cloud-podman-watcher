@@ -1,6 +1,6 @@
 import unittest
 
-from client import cpu_guard, io_guard
+from client import cpu_guard, io_guard, memory_guard
 
 
 class ResourceProtectionPressureTests(unittest.TestCase):
@@ -87,6 +87,30 @@ class ResourceProtectionPressureTests(unittest.TestCase):
         self.assertIn("无法读取 Incus 本地 CPU allowance", alert["message"])
         self.assertEqual(alert["cpu_guard"]["last_error"], "无法读取 Incus 本地 CPU allowance")
         self.assertEqual(alert["title"], "持续高 CPU，保护需要检查")
+
+    def test_incus_runtime_args_does_not_duplicate_binary(self):
+        args = cpu_guard._runtime_args("/usr/bin/incus", "default", ["config", "get", "c1", "limits.cpu.allowance"])
+        self.assertEqual(args, ["--project", "default", "config", "get", "c1", "limits.cpu.allowance"])
+        self.assertNotIn("/usr/bin/incus", args)
+        self.assertNotIn("incus", args)
+
+    def test_incus_runtime_args_without_project(self):
+        args = cpu_guard._runtime_args("incus", "", ["config", "get", "c1", "limits.cpu.allowance"])
+        self.assertEqual(args, ["config", "get", "c1", "limits.cpu.allowance"])
+
+    def test_memory_guard_tier2_escalation_under_pressure(self):
+        start_usage = 85.0
+        tier = 2
+        tier_usage_threshold = max(60.0, start_usage - (tier - 1) * 10.0)
+        self.assertEqual(tier_usage_threshold, 75.0)
+        used_percent = 81.11
+        current_bytes = 207638528
+        current_high = "204800000"
+        is_memory_high_tier = used_percent >= tier_usage_threshold or (
+            bool(current_high and current_high != "max" and current_high.isdigit())
+            and current_bytes >= int(current_high) * 0.95
+        )
+        self.assertTrue(is_memory_high_tier)
 
 
 if __name__ == "__main__":

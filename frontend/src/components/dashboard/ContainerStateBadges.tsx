@@ -96,6 +96,12 @@ const resourceGuardSignal = (label: string, guard: GuardLike | undefined): Conta
 const protocolGuardSignal = (label: 'VMess' | 'Trojan', guard: GuardLike | undefined): ContainerSignal | null => {
   if (!guard || (!guard.detected && !guard.state)) return null;
   const state = String(guard.state || '');
+  const hasIncident = Boolean(
+    guard.detected ||
+    (Array.isArray(guard.blocked_endpoints) && guard.blocked_endpoints.length > 0) ||
+    (Array.isArray(guard.pending_endpoints) && guard.pending_endpoints.length > 0)
+  );
+  if (!hasIncident) return null;
   if (state === 'not_detected' && !guard.detected) return null;
 
   const presentation: Record<string, { summary: string; tone: SignalTone }> = {
@@ -129,7 +135,13 @@ export const hasContainerProtocolGuard = (container: ContainerItem): boolean => 
   if (!supportsContainerGuards(container)) return false;
   const security = container.security || {};
   return [security.vmess_guard, security.trojan_guard].some((guard) =>
-    Boolean(guard && (guard.detected || (guard.state && guard.state !== 'not_detected')))
+    Boolean(
+      guard && (
+        guard.detected ||
+        (Array.isArray(guard.blocked_endpoints) && guard.blocked_endpoints.length > 0) ||
+        (Array.isArray(guard.pending_endpoints) && guard.pending_endpoints.length > 0)
+      )
+    )
   );
 };
 
@@ -146,8 +158,8 @@ export const hasContainerProtocolGuardNeedsReview = (container: ContainerItem): 
   if (!supportsContainerGuards(container)) return false;
   const security = container.security || {};
   return [security.vmess_guard, security.trojan_guard].some((guard) =>
-    PROTOCOL_GUARD_REVIEW_STATES.includes(guard?.state || '') ||
-    Boolean(guard?.detected && guard.state !== 'blocked')
+    (Boolean(guard?.detected || (Array.isArray(guard?.blocked_endpoints) && guard.blocked_endpoints.length > 0) || (Array.isArray(guard?.pending_endpoints) && guard.pending_endpoints.length > 0)) && (PROTOCOL_GUARD_REVIEW_STATES.includes(guard?.state || '') || Boolean(guard?.detected && guard.state !== 'blocked')))
+
   );
 };
 
