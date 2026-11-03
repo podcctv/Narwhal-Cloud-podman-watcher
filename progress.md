@@ -4,19 +4,20 @@
 
 ## Runman Rust v2 兼容开发
 
-- 基于最新 fork `main`（`620bbf2` / v1.7.196）新增 Runman root-only Unix socket 适配：实例清单、代次、资源指标、TCP 连接证据、RFW 网卡识别与临时 TCP 限额。
+- 基于 fork `main`（`1cab7c4` / v1.7.197）维护 Runman root-only Unix socket 适配：实例清单、代次、资源指标、TCP 连接证据、RFW 网卡识别与临时 TCP 限额；本轮为非 POSIX 探测增加安全跳过。
 - 连接证据必须是新鲜、完整且实例代次匹配的 `/proc/<pid>/net` 采样；缺字段或解析不完整时只报告未核验，不下发限额。
 - Runman 不复用 Incus/Podman 进程、服务、隔离或带宽执行器；这些能力及容器网络字节统计仍不支持。
-- 本轮版本目标为 `1.7.197`。代码构建、GitHub Actions 和生产状态需分别记录，不能用构建成功替代生产验证。
+- 本轮版本目标为 `1.7.198`。代码构建、GitHub Actions 和生产状态需分别记录，不能用构建成功替代生产验证。
 
 ## 代码基线
 
-- 当前工作区基于最新 GitHub `main`（`620bbf2`）继续开发 Runman Rust v2 适配。
-- 本次根目录 `VERSION` 更新目标为 `1.7.197`。
+- 当前工作区基于 fork `main`（`1cab7c4` / v1.7.197）继续维护 Runman Rust v2 适配。
+- 本次根目录 `VERSION` 更新目标为 `1.7.198`。
 - 本次工作涵盖 Incus 命令行参数去重、内存高压自适应升档门槛、Alpine/Minimal 容器进程与监听回退机制闭环、前端卡片与详情假性协议告警过滤及对应自动化回归单测。
 
 ## 最近完成的工作
 
+- v1.7.198：在 Runman 清单与 bridge 只读探测前检查 Unix socket 平台能力；不支持 `AF_UNIX` 时返回不可用，保持 Windows 测试/工具环境可运行。Runman 连接限制、防火墙和 Linux 行为不变。
 - v1.7.196：修复 Incus CPU 限额命令执行、内存阶梯升档死锁与协议待核验误报：
   1. 修复 `client/cpu_guard.py` 中 `_runtime_args` 重复前置 `runtime` 二进制导致 `subprocess.run` 拼接成 `incus incus ...` 并报错 `Error: unknown command "incus" for "incus"` 的缺陷，使 Incus 容器 CPU 配额读取、生效与自动阶梯防护闭环。
   2. 修复 `client/memory_guard.py` 中进入第 2 阶（80%）后因实际内存受限（~81%）永远低于全局 `start_usage`（85%）导致升档计数器在每轮都被清零重置的死锁，增加按阶梯门槛自适应判断。
