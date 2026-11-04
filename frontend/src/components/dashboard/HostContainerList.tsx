@@ -22,6 +22,7 @@ import {
   FilterX,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, SecurityAlert } from '../../api/types';
+import { hasRemediationEvidence } from '../alerts/remediationEvidence';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { api, fmtBytes, fmtMbps } from '../../api/client';
@@ -119,20 +120,7 @@ export function evaluateContainerRisk(
       a.status === 'active'
   );
 
-  const isActionable = (alert: SecurityAlert) => {
-    if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
-    const details = alert.details || {};
-    if (alert.type === 'unauthorized_panel_pairing') {
-      return (details.process_patterns || []).length > 0 || (details.config_files || []).length > 0;
-    }
-    if (alert.type === 'socks_weak_auth') {
-      return ['no_auth', 'weak_password'].includes(details.socks_auth_mode) && (details.socks_processes || []).length > 0;
-    }
-    if (alert.type === 'malicious_process') {
-      return (details.malicious_processes || []).some((item: any) => item?.process === 'xmrig');
-    }
-    return false;
-  };
+  const isActionable = hasRemediationEvidence;
   const actionableAlert = matchingAlerts.find(isActionable) || null;
 
   for (const alert of matchingAlerts.filter((alert) => !alert.protection_only)) {

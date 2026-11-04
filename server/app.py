@@ -5612,7 +5612,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                 action, queued = _queue_security_action_row(
                     conn, alert, "allow_panel_domains", {"domains": domains}, requested_by
                 )
-        elif alert["alert_type"] == "socks_weak_auth" and alert["runtime"] in ("podman", "incus", "runman"):
+        elif alert["alert_type"] == "socks_weak_auth" and alert["runtime"] in ("podman", "incus"):
             action, queued = _queue_security_action_row(
                 conn, alert, "release_socks_auth", {}, requested_by
             )
@@ -5727,7 +5727,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
         conn.execute("UPDATE security_alerts SET status='active' WHERE id=?", (alert_id,))
         if (
             alert["alert_type"] == "unauthorized_panel_pairing"
-            and alert["runtime"] in ("podman", "incus")
+            and alert["runtime"] in ("podman", "incus", "runman")
         ):
             domains = _alert_action_evidence(alert).get("unapproved_domains") or []
             if domains:

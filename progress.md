@@ -2,7 +2,16 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
-## Runman Rust v2 兼容（v1.7.208）
+## Runman Rust v2 兼容（v1.7.210）
+
+- 当前新增适配：Admission 准入保护、受限磁盘清理、PasarGuard 精确服务清理；Runman 网络证据只在 UUID 代次、init PID、guest 地址和 host veth 逐项匹配后启用。
+- VMess、Trojan、测速规则的阻断/恢复状态现在生成 Runman 告警回执；面板/XMRig 的 UI 动作只接受 UUIDv4 代次及具体进程启动 tick 或文件指纹证据。
+- GFW 公网端点扫描纳入 Runman 新鲜报告，并继续要求已核对的直接公网地址或明确 Host DNAT、实时监听及唯一容器归属；管理员重新打开 Runman 面板告警时会排队撤销先前域名放行。
+- 遥测运行时选项和防火墙测速保护的默认选择已纳入 Runman。人工复核后的 SOCKS 指定 PID 停止保持可用，持久化自动停止策略仍明确关闭。
+- 新增回归覆盖 Runman Admission 网络身份/veth、代次拒绝、PasarGuard guest exec、磁盘清理目标及文件系统锚定、Server Admission/PasarGuard 收据身份校验。
+- 本机 `compileall`、全量单测（949 项，42 项按平台条件跳过）、前端生产构建均通过；待合入最新 fork `main` 后重新跑回归并核对 GitHub CI。没有执行生产节点部署或实机验证。
+
+### v1.7.208 兼容增量
 
 - 新增有界 upperdir/up allocated-block、普通文件逻辑字节及文件数指标，与 disk.img sparse 分配量分开上报；抽屉并列展示两种口径。遍历不完整、超出 50,000 项或实例代次变化时标记不可用。
 - 面板/XMRig 清理通过 Server 最新报告代次验证，再由 Agent 复核精确进程启动 tick、服务 cgroup 和普通文件指纹；旧告警、软链接及缺少证据的目标拒绝动作。

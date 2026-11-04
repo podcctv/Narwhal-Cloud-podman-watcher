@@ -4218,7 +4218,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         enforce_socks_auth_policy(container, socks_enforcement_entries)
         vmess = security.get("vmess_guard") if isinstance(security.get("vmess_guard"), dict) else {}
-        if container.get("runtime") in {"incus", "podman"} and vmess.get("state") == "release_pending":
+        if container.get("runtime") in {"incus", "podman", "runman"} and vmess.get("state") == "release_pending":
             pending = vmess.get("pending_endpoints") if isinstance(vmess.get("pending_endpoints"), list) else []
             labels = [label for label in (_vmess_endpoint_label(item, pending=True) for item in pending) if label]
             reason_labels = {
@@ -4245,7 +4245,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                                 instance_id=str(container.get("instance_id") or container.get("id") or "")[:200],
                                automatic_remediation={"attempted": True, "succeeded": False, "message": "未确认规则已移除，旧规则保留"})
             alerts.append(vmess_alert)
-        elif container.get("runtime") in {"incus", "podman"} and vmess.get("detected") and vmess.get("state") in {"blocked", "partial", "unverified"}:
+        elif container.get("runtime") in {"incus", "podman", "runman"} and vmess.get("detected") and vmess.get("state") in {"blocked", "partial", "unverified"}:
             blocked = vmess.get("blocked_endpoints") if isinstance(vmess.get("blocked_endpoints"), list) else []
             pending = vmess.get("pending_endpoints") if isinstance(vmess.get("pending_endpoints"), list) else []
             blocked_labels = [label for label in (_vmess_endpoint_label(item) for item in blocked) if label]
@@ -4357,7 +4357,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                                    instance_id=str(container.get("instance_id") or container.get("id") or "")[:200])
             alerts.append(vmess_alert)
         speedtest = security.get("speedtest_guard") if isinstance(security.get("speedtest_guard"), dict) else {}
-        if container.get("runtime") in {"incus", "podman"}:
+        if container.get("runtime") in {"incus", "podman", "runman"}:
             attempts = [item for item in speedtest.get("blocked_attempts", [])
                         if isinstance(item, dict)
                         and item.get("service") in speedtest_guard.SUPPORTED_SERVICES
@@ -4391,7 +4391,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 )
                 alerts.append(speedtest_alert)
         trojan = security.get("trojan_guard") if isinstance(security.get("trojan_guard"), dict) else {}
-        if container.get("runtime") in {"incus", "podman"} and trojan.get("state") == "release_pending":
+        if container.get("runtime") in {"incus", "podman", "runman"} and trojan.get("state") == "release_pending":
             pending = trojan.get("pending_endpoints") if isinstance(trojan.get("pending_endpoints"), list) else []
             labels = [label for label in (_vmess_endpoint_label(item, pending=True) for item in pending) if label]
             detail = (
@@ -4406,7 +4406,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                          instance_id=str(container.get("instance_id") or container.get("id") or "")[:200],
                          automatic_remediation={"attempted": True, "succeeded": False, "message": "未确认 Trojan 规则已移除，旧规则保留"})
             alerts.append(alert)
-        elif container.get("runtime") in {"incus", "podman"} and trojan.get("detected") and trojan.get("state") in {"blocked", "partial", "unverified"}:
+        elif container.get("runtime") in {"incus", "podman", "runman"} and trojan.get("detected") and trojan.get("state") in {"blocked", "partial", "unverified"}:
             blocked = trojan.get("blocked_endpoints") if isinstance(trojan.get("blocked_endpoints"), list) else []
             pending = trojan.get("pending_endpoints") if isinstance(trojan.get("pending_endpoints"), list) else []
             blocked_labels = [label for label in (_vmess_endpoint_label(item) for item in blocked) if label]
@@ -5284,7 +5284,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             })
             container_access_readable_files += int(container_access.get("readable_files") or 0)
             alerts.extend(_http_security_alerts(container_access, container))
-        if container.get('runtime') in {'incus','podman'}:
+        if container.get('runtime') in {'incus','podman','runman'}:
             alerts.extend(admission_guard.alerts(container))
             alerts.extend(pasarguard_guard.alerts(container))
             container.setdefault('security',{})['admission']=admission_guard.status(container)

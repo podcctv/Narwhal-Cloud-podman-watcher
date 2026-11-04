@@ -19,21 +19,7 @@ import { UserNoticeAction } from '../alerts/UserNoticeAction';
 import { isProtectionOnlySignal } from '../alerts/protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from '../alerts/connectionEvidence';
 import { ProtocolGuardEvidence } from '../alerts/ProtocolGuardEvidence';
-
-const hasActionEvidence = (alert: SecurityAlert): boolean => {
-  if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
-  const details = alert.details || {};
-  if (alert.type === 'unauthorized_panel_pairing') {
-    return (details.process_patterns || []).length > 0 || (details.config_files || []).length > 0;
-  }
-  if (alert.type === 'socks_weak_auth') {
-    return ['no_auth', 'weak_password'].includes(details.socks_auth_mode) && (details.socks_processes || []).length > 0;
-  }
-  if (alert.type === 'malicious_process') {
-    return (details.malicious_processes || []).some((item: any) => item?.process === 'xmrig');
-  }
-  return false;
-};
+import { hasRemediationEvidence } from '../alerts/remediationEvidence';
 
 interface SecurityAlertSectionProps {
   alerts: SecurityAlert[];
@@ -191,7 +177,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
             ? `${alert.runtime}/${alert.project}`
             : alert.runtime;
           const isActionFailed = alert.latest_action?.status === 'failed';
-          const canRemediate = hasActionEvidence(alert);
+          const canRemediate = hasRemediationEvidence(alert);
           const connlimitAction = alert.latest_action;
           const connlimitExpiresAt = Number(connlimitAction?.params?.lease_expires_at || 0);
           const connlimitActive = connlimitAction?.action_type === 'apply_container_connlimit'

@@ -96,6 +96,46 @@ class PolicyTests(unittest.TestCase):
 
 
 class LinuxTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'Runman admission requires Linux namespaces')
+    def test_runman_admission_proves_current_generation_pid_and_owned_veth(self):
+        vm_id = '11111111-2222-3333-4444-555555555555'
+        generation = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        container = {'runtime':'runman','project':'default','name':vm_id,'instance_id':generation,
+                     'pid':'4242','network_addresses':['10.9.0.2']}
+        live = mock.Mock()
+        live.inspect.return_value = {'running':True,'instance_id':generation,'init_pid':4242}
+        guest = [{'ifname':'eth0','ifindex':2,'link_index':7,
+                  'addr_info':[{'local':'10.9.0.2','scope':'global'}]}]
+        host = [{'ifname':'veth-rm123','ifindex':7}]
+        def command(args, **kwargs):
+            if args[:2] == ['nsenter','-t']:
+                value=guest
+            elif args == ['ip','-j','link','show']:
+                value=host
+            else:
+                value=[{'linkinfo':{'info_kind':'veth'}}]
+            return mock.Mock(returncode=0,stdout=json.dumps(value))
+        with mock.patch.object(observe.isolation,'RunmanIsolation',return_value=live), \
+             mock.patch.object(observe,'sockets',return_value=('boot:net:4242',set(),[])), \
+             mock.patch.object(observe,'incarnation',return_value='boot:net:4242'), \
+             mock.patch.object(observe.subprocess,'run',side_effect=command):
+            result=observe.snapshot(container,{},lambda *_:None)
+        self.assertEqual(result['instance_id'],generation)
+        self.assertEqual(result['pid'],4242)
+        self.assertEqual(result['ips'],['10.9.0.2'])
+        self.assertEqual(result['interfaces'],['veth-rm123'])
+
+    @unittest.skipUnless(os.name == 'posix', 'Runman admission requires Linux namespaces')
+    def test_runman_admission_rejects_replaced_generation_and_pid(self):
+        container = {'runtime':'runman','project':'default','name':'11111111-2222-3333-4444-555555555555',
+                     'instance_id':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee','pid':'4242',
+                     'network_addresses':['10.9.0.2']}
+        live=mock.Mock()
+        live.inspect.return_value={'running':True,'instance_id':'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff','init_pid':4242}
+        with mock.patch.object(observe.isolation,'RunmanIsolation',return_value=live):
+            with self.assertRaisesRegex(ValueError,'generation or init PID'):
+                observe.snapshot(container,{},lambda *_:None)
+
     def test_half_open_syn_recv_is_not_a_source_sample_or_concurrency_flow(self):
         import builtins
         import io
@@ -205,6 +245,32 @@ class LinuxTests(unittest.TestCase):
 
 
 class PasarTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'Runman guest exec requires POSIX')
+    def test_runman_native_service_cleanup_uses_generation_bound_guest_exec(self):
+        vm_id='11111111-2222-3333-4444-555555555555'
+        generation='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        container={'runtime':'runman','project':'default','name':vm_id}
+        snapshot={'instance_id':generation,'epoch':'boot:net:4242','pid':4242}
+        finding={'pid':77,'host_pid':9001,'start_ticks':'123456','executable':'/app/node',
+                 'unit':'pg-node.service','module':'github.com/pasarguard/node/cmd/node'}
+        thread_factory=mock.Mock()
+        emitted=[]
+        guest_exec=mock.Mock(return_value=(True,''))
+        with mock.patch.object(pasar,'_thread',None), \
+             mock.patch.object(pasar.threading,'Thread',thread_factory), \
+             mock.patch.object(pasar,'native_matches',side_effect=[[finding],[]]), \
+             mock.patch.object(pasar,'private_docker',return_value=False), \
+             mock.patch.object(pasar.time,'sleep',side_effect=StopIteration):
+            pasar.start(lambda:[container],lambda _c:snapshot,lambda _args:(False,''),lambda:{},guest_exec,
+                        lambda _container,event:emitted.append(event))
+            work=thread_factory.call_args.kwargs['target']
+            with self.assertRaises(StopIteration):work()
+        self.assertEqual(len(emitted),1)
+        self.assertEqual(emitted[0]['runtime'],'runman')
+        self.assertEqual(emitted[0]['instance_id'],generation)
+        self.assertTrue(emitted[0]['automatic_remediation']['succeeded'])
+        guest_exec.assert_called_once()
+
     @unittest.skipUnless(shutil.which('go'),'Go ELF identity integration')
     def test_actual_stripped_go_build_info_not_generic_main(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -286,6 +352,27 @@ class GuardAlertTests(unittest.TestCase):
         self.assertIn('防火墙应用/验证未通过',result['message'])
         self.assertIn('nftables/NFQUEUE',result['message'])
         self.assertNotIn('secret command output',json.dumps(result,ensure_ascii=False))
+
+    def test_runman_admission_receipts_require_canonical_default_generation(self):
+        value={'type':'admission_unverified','runtime':'runman','project':'default',
+               'container_name':'11111111-2222-3333-4444-555555555555',
+               'instance_id':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+               'admission':{'state':'unverified','observed_at':int(time.time()),'sources':[],'blocked':{}}}
+        self.assertEqual(admission_api.normalized_alert(value)['runtime'],'runman')
+        for key,bad in (('project','other'),('container_name','runman-1'),
+                        ('instance_id','not-a-generation')):
+            invalid={**value,key:bad}
+            with self.subTest(key=key),self.assertRaises(HTTPException):admission_api.normalized_alert(invalid)
+
+    def test_runman_pasarguard_receipt_requires_canonical_identity(self):
+        value={'type':'pasarguard_node_removed','runtime':'runman','project':'default',
+               'container_name':'11111111-2222-3333-4444-555555555555',
+               'instance_id':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+               'automatic_remediation':{'succeeded':True,'items':[{'kind':'service','target':'pg-node.service','status':'ok'}]}}
+        result=admission_api.normalized_alert(value)
+        self.assertTrue(result['automatic_remediation']['succeeded'])
+        value['instance_id']='not-a-generation'
+        with self.assertRaises(HTTPException):admission_api.normalized_alert(value)
 
 
 class APITests(unittest.TestCase):

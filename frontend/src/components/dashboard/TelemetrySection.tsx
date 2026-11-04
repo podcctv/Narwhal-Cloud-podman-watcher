@@ -752,7 +752,7 @@ const HostConfigDialog: React.FC<{
           </label>
 
           <label className="mt-3 block text-xs font-medium text-slate-300">
-            运行时 (auto / incus / podman / docker)
+            运行时 (auto / incus / podman / docker / runman)
             <input
               value={runtimes}
               onChange={(e) => setRuntimes(e.target.value)}

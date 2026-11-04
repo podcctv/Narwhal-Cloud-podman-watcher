@@ -109,6 +109,43 @@ class SchedulerTests(unittest.TestCase):
     def test_docker_and_management_services_excluded(self):
         self.assertEqual(len(self.c.targets([{'runtime':'docker','name':'business'}])),1)
         for name in client.q.PROTECTED:self.assertEqual(len(self.c.targets([{'runtime':'podman','name':name}])),1)
+    def test_runman_targets_bind_current_generation_and_pid(self):
+        vm_id='11111111-2222-3333-4444-555555555555'
+        generation='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        container={'runtime':'runman','project':'default','name':vm_id,'id':vm_id,'stable_id':vm_id,
+                   'instance_id':generation,'pid':'4242','pid_start_ticks':'123'}
+        target=self.c.targets([container])[1]
+        self.assertEqual(target['instance_id'],generation)
+        self.assertEqual(target['pid'],'4242')
+        self.assertIn(generation,self.c.key(target))
+
+    @unittest.skipUnless(os.name=='posix','Runman procfs cleanup requires Linux')
+    def test_runman_anchor_checks_generation_before_opening_procfs(self):
+        vm_id='11111111-2222-3333-4444-555555555555'
+        generation='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        target={'runtime':'runman','project':'default','name':vm_id,'instance_id':generation,'pid':'4242'}
+        live=mock.Mock()
+        live.inspect.return_value={'running':True,'instance_id':generation,'init_pid':4242}
+        def fake_stat(path,*args,**kwargs):
+            if path=='/proc/4242/ns/pid':return mock.Mock(st_ino=22)
+            if path=='/proc/1/ns/pid':return mock.Mock(st_ino=1)
+            return mock.Mock(st_dev=1,st_ino=2)
+        state=mock.Mock();state.read.return_value={}
+        with mock.patch.object(client.q,'RunmanIsolation',return_value=live), \
+             mock.patch.object(client.q,'Journal',return_value=state), \
+             mock.patch.object(client.os,'stat',side_effect=fake_stat), \
+             mock.patch.object(client.os,'open',return_value=71) as open_root, \
+             mock.patch.object(client.os,'fstat',return_value=mock.Mock(st_dev=3,st_ino=4)), \
+             mock.patch.object(client.os,'close'), \
+             mock.patch.object(client.worker,'start_ticks',return_value='987'), \
+             mock.patch.object(client.worker,'mount_id',return_value=6):
+            fd,validate,identity=self.c.anchor(target,lambda *_: (False,''))
+            validate()
+        self.assertEqual(fd,71)
+        self.assertEqual(identity,generation)
+        self.assertEqual(target['root_binding'],[4242,'987',3,4,6])
+        open_root.assert_called_once()
+
     def test_short_discovery_id_and_full_plan_share_cooldown(self):
         short={'runtime':'podman','name':'c','id':'a'*12}
         full={**short,'stable_id':'a'*64}

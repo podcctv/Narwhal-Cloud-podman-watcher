@@ -41,7 +41,7 @@ const cnRiskProtocolOptions: Array<{ protocol: CnRiskProtocol; label: string; no
   { protocol: 'openvpn', label: 'OpenVPN（仅入站）', note: 'VPN 协议命中不等于滥用' },
 ];
 
-const emptyAbuse: HostFirewallAbusePolicy = { speedtest: false, mining: false, bt: false, services: ['ookla', 'cloudflare', 'fast', 'tcpquality', 'iperf3_server', 'librespeed', 'openspeedtest', 'ookla_server'], interfaces: [], runtimes: [], service_runtimes: ['incus', 'podman'] };
+const emptyAbuse: HostFirewallAbusePolicy = { speedtest: false, mining: false, bt: false, services: ['ookla', 'cloudflare', 'fast', 'tcpquality', 'iperf3_server', 'librespeed', 'openspeedtest', 'ookla_server'], interfaces: [], runtimes: [], service_runtimes: ['incus', 'podman', 'runman'] };
 const speedtestServiceOptions: Array<{
   id: NonNullable<HostFirewallAbusePolicy['services']>[number];
   title: string;
@@ -1007,7 +1007,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
               </div>
               {host.container_protection_status.configured && host.container_protection_status.state !== 'active' && <div className="text-amber-300">待核验明细：修订未更新 {host.container_protection_status.containers_waiting_revision} · Agent 回执缺失/未确认 {host.container_protection_status.containers_unverified} · 采样过期 {host.container_protection_status.containers_stale} · {containerProtectionReasonLabel[host.container_protection_status.reason] || '检查 Agent 版本、策略动作回执和最新容器采样。'}</div>}
               <div className={host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? 'text-amber-300' : 'text-slate-400'}>
-                网卡清单{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '未就绪 / 过期' : '最新'} · Incus: <code className="text-slate-200">{host.container_interfaces.by_runtime.incus.join(', ') || '无'}</code> · Podman: <code className="text-slate-200">{host.container_interfaces.by_runtime.podman.join(', ') || '无'}</code>
+                网卡清单{host.container_interfaces.stale || host.container_interfaces.status !== 'ready' ? '未就绪 / 过期' : '最新'} · Incus: <code className="text-slate-200">{host.container_interfaces.by_runtime.incus.join(', ') || '无'}</code> · Podman: <code className="text-slate-200">{host.container_interfaces.by_runtime.podman.join(', ') || '无'}</code> · Runman: <code className="text-slate-200">{host.container_interfaces.by_runtime.runman.join(', ') || '无'}</code>
               </div>
               <div className="text-slate-400">Runman: <code className="text-slate-200">{host.container_interfaces.by_runtime.runman.join(', ') || '无'}</code></div>
               {host.last_action?.message && <p className="wrap-break-word leading-4 text-slate-400 sm:col-span-2">{host.last_action.message}</p>}

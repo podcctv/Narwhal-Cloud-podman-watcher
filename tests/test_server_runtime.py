@@ -2033,6 +2033,28 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(body["action"]["action_type"], "disallow_panel_domains")
         self.assertEqual(body["action"]["params"]["domains"], ["panel.example.net"])
 
+    def test_reopen_ignored_runman_panel_alert_removes_node_allowlist_entry(self):
+        vm_id="11111111-2222-3333-4444-555555555555"
+        alert={"type":"unauthorized_panel_pairing","severity":"critical","title":"panel","message":"panel",
+               "runtime":"runman","project":"default","container_name":vm_id,
+               "unapproved_domains":["panel.example.net"],"process_patterns":["xrayr"]}
+        conn=server.db();server.process_security_alerts(conn,"host1",100,[alert]);conn.commit()
+        alert_id=conn.execute("SELECT id FROM security_alerts").fetchone()["id"];conn.close()
+
+        class State:
+            dashboard_user="operator"
+        class Request:
+            state=State()
+            def __init__(self,decision):self.decision=decision
+            async def json(self):return {"decision":self.decision}
+
+        asyncio.run(server.set_security_alert_disposition(alert_id,Request("allow_silent")))
+        response=asyncio.run(server.set_security_alert_disposition(alert_id,Request("reopen")))
+        body=json.loads(response.body)
+        self.assertTrue(body["queued"])
+        self.assertEqual(body["action"]["action_type"],"disallow_panel_domains")
+        self.assertEqual(body["action"]["params"]["domains"],["panel.example.net"])
+
     def test_server_disposition_deny_allows_runman_remediation_with_instance_id(self):
         now = int(time.time())
         vm_id = "01234567-89ab-cdef-0123-456789abcdef"

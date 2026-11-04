@@ -103,6 +103,24 @@ def snapshot(container, runtime_bins, run, require_forward=True):
             raise UnsupportedNetwork(identity)
         pid=int(item.get('State',{}).get('Pid') or 0)
         ips=[v.get(k) for v in item.get('NetworkSettings',{}).get('Networks',{}).values() for k in ('IPAddress','GlobalIPv6Address') if v.get(k)]
+    elif runtime=='runman':
+        identity=str(container.get('instance_id') or '')
+        isolation.target(runtime,project,name,identity)
+        state=isolation.RunmanIsolation(name,identity).inspect()
+        if (state.get('running') is not True or state.get('instance_id')!=identity
+                or type(state.get('init_pid')) is not int or state['init_pid']<=1):
+            raise ValueError('Runman generation or init PID is unavailable')
+        pid=state['init_pid']
+        try:reported_pid=int(container.get('pid') or 0)
+        except (TypeError,ValueError):reported_pid=0
+        if reported_pid!=pid:
+            raise ValueError('Runman inventory PID changed')
+        raw_ips=container.get('network_addresses')
+        if not isinstance(raw_ips,list) or len(raw_ips)>32:
+            raise UnsupportedNetwork(identity)
+        ips=[policy.address(value) for value in raw_ips if isinstance(value,str) and value]
+        if not ips:
+            raise UnsupportedNetwork(identity)
     else:raise ValueError('unsupported runtime')
     isolation.target(runtime,project,name,identity)
     ips=sorted(set(policy.address(x) for x in ips))
@@ -123,9 +141,11 @@ def snapshot(container, runtime_bins, run, require_forward=True):
     interfaces=set()
     proven=set()
     internal=set()
+    actual_addresses=set()
     for dev in guest:
         addresses={policy.address(a['local']) for a in dev.get('addr_info',[])
                    if a.get('scope')=='global'}
+        actual_addresses.update(addresses)
         if not addresses.intersection(ips):continue
         if dev.get('linkinfo',{}).get('info_kind') in {'bridge','dummy','tun','wireguard','vxlan','ifb'}:
             internal.update(addresses.intersection(ips));continue
@@ -145,5 +165,6 @@ def snapshot(container, runtime_bins, run, require_forward=True):
                 raise UnsupportedNetwork(identity)
         interfaces.add(name);proven.update(addresses.intersection(ips))
     if epoch!=incarnation(pid):raise ValueError('container incarnation changed')
+    if runtime=='runman' and actual_addresses!=set(ips):raise UnsupportedNetwork(identity)
     if not proven or proven|internal!=set(ips):raise UnsupportedNetwork(identity)
     return {'instance_id':identity,'ips':sorted(proven),'interfaces':sorted(interfaces),'epoch':epoch,'flows':flows,'inbound':inbound,'pid':pid,'observed_at':int(time.time())}

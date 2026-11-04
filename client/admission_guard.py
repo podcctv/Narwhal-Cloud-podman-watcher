@@ -314,7 +314,7 @@ def start(inventory, provider, emit, emit_status=None):
         while True:
             started=time.monotonic()
             try:
-                targets=[c for c in inventory() if c.get('runtime') in {'incus','podman'} and c.get('name') not in isolation.PROTECTED]
+                targets=[c for c in inventory() if c.get('runtime') in {'incus','podman','runman'} and c.get('name') not in isolation.PROTECTED]
             except Exception:
                 time.sleep(10);continue
             if len(targets)>1000:

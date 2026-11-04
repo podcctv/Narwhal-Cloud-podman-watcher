@@ -32,10 +32,15 @@ def normalized_alert(value):
     if not isinstance(value,dict) or value.get('type') not in KINDS:
         raise HTTPException(400,'unsupported admission event')
     runtime,project,name,identity=(str(value.get(k) or '') for k in ('runtime','project','container_name','instance_id'))
-    if runtime not in {'incus','podman'} or not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}',name):
+    if runtime not in {'incus','podman','runman'} or not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}',name):
         raise HTTPException(400,'supported instance required')
     if project and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',project):raise HTTPException(400,'invalid project')
     if identity and not re.fullmatch(r'[A-Za-z0-9-]{12,100}',identity):raise HTTPException(400,'invalid identity')
+    if runtime=='runman':
+        if (project!='default'
+                or not re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}',name)
+                or (identity and not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',identity))):
+            raise HTTPException(400,'Runman requires default project, canonical VM UUID and UUID v4 generation')
     if not identity and value['type']!='admission_unverified':raise HTTPException(400,'stable identity required')
     kind=value['type']
     clean={'runtime':runtime,'project':project,'container_name':name,'instance_id':identity,'type':kind,

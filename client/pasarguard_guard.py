@@ -217,7 +217,7 @@ def start(inventory,provider,runner,runtime_bins,guest_exec,emit):
             try:targets=inventory()
             except Exception:time.sleep(30);continue
             for container in targets:
-                if container.get('runtime') not in {'incus','podman'} or container.get('name') in isolation.PROTECTED:continue
+                if container.get('runtime') not in {'incus','podman','runman'} or container.get('name') in isolation.PROTECTED:continue
                 key=(container['runtime'],container.get('project') or '',container['name'])
                 identity='';receipt=[];confirmed=False
                 try:

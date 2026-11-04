@@ -2182,6 +2182,21 @@ class SecurityTelemetryTests(unittest.TestCase):
         # no validated connection_metrics or sustained corroborating samples.
         self.assertNotIn("ddos_syn", types)
 
+    def test_runman_protocol_guards_emit_block_and_release_alerts(self):
+        container={
+            'name':'11111111-2222-3333-4444-555555555555','runtime':'runman','project':'default',
+            'instance_id':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            'security':{
+                'vmess_guard':{'detected':True,'state':'blocked','blocked_endpoints':[{'port':443,'protocol':'tcp'}]},
+                'trojan_guard':{'detected':True,'state':'blocked','blocked_endpoints':[{'port':8443,'protocol':'tcp'}]},
+                'speedtest_guard':{'blocked_attempts':[{'service':'fast','target':'fast.com','packets':3}]},
+            },
+        }
+        with mock.patch.dict(os.environ,{'SECURITY_MONITOR_ENABLED':'true','SECURITY_ACCESS_LOG_PATHS':''},clear=False):
+            result=agent.collect_security_summary([container],60)
+        types={item['type'] for item in result['alerts']}
+        self.assertTrue({'vmess_port_blocked','trojan_port_blocked','speedtest_attempt_blocked'}.issubset(types))
+
     def test_connection_count_alert_uses_warning_and_critical_thresholds(self):
         container = {"name": "node1", "runtime": "podman", "conn_count": 501, "security": {}}
         env = {

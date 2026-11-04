@@ -19,6 +19,7 @@ import { UserNoticeAction } from './UserNoticeAction';
 import { isProtectionOnlySignal } from './protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from './connectionEvidence';
 import { ProtocolGuardEvidence } from './ProtocolGuardEvidence';
+import { hasRemediationEvidence } from './remediationEvidence';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 
 const elapsed = (seconds: number): string => {
@@ -53,21 +54,6 @@ const inboundSignalLabel = (value?: string): string => ({
   unreplied_tcp_observed: '存在未应答 TCP 连接',
   insufficient_transport_evidence: '传输层证据不足',
 } as Record<string, string>)[value || ''] || '行为线索不足';
-
-const hasActionEvidence = (alert: SecurityAlert): boolean => {
-  if (alert.runtime !== 'incus' && alert.runtime !== 'podman') return false;
-  const details = alert.details || {};
-  if (alert.type === 'unauthorized_panel_pairing') {
-    return (details.process_patterns || []).length > 0 || (details.config_files || []).length > 0;
-  }
-  if (alert.type === 'socks_weak_auth') {
-    return ['no_auth', 'weak_password'].includes(details.socks_auth_mode) && (details.socks_processes || []).length > 0;
-  }
-  if (alert.type === 'malicious_process') {
-    return (details.malicious_processes || []).some((item: any) => item?.process === 'xmrig');
-  }
-  return false;
-};
 
 interface AlertHistoryViewProps {
   onToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -360,7 +346,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             const isHistorical = alert.status !== 'active';
             const isSubmitting = submittingAlertId === alert.id;
             const protectionOnly = isProtectionOnlySignal(alert);
-            const canRemediate = hasActionEvidence(alert);
+            const canRemediate = hasRemediationEvidence(alert);
             const attribution = alert.deep_evidence?.connection_attribution;
             const attributionUnavailable = connectionAttributionUnavailable(attribution, alert.deep_evidence?.connection_count);
             const inboundEvidence = alert.deep_evidence?.inbound_ips ||

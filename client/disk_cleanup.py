@@ -69,14 +69,15 @@ class Controller:
         result=[{'runtime':'host','name':'__host__','project':'','id':'host'}]
         if self.config['include_containers']:
             for c in containers[:500]:
-                if c.get('runtime') not in ('incus','podman') or c.get('name') in q.PROTECTED:continue
+                if c.get('runtime') not in ('incus','podman','runman') or c.get('name') in q.PROTECTED:continue
                 name=str(c.get('name') or '')
                 if not re.fullmatch(r'[A-Za-z0-9_.:@+-]{1,200}',name):continue
-                result.append({k:c.get(k) or '' for k in ('runtime','runtime_bin','project','name','id','stable_id')})
+                result.append({k:c.get(k) or '' for k in ('runtime','runtime_bin','project','name','id','stable_id','instance_id','pid','pid_start_ticks')})
         return result
 
     def key(self,target):
-        identity=str(target.get('stable_id') or target.get('id') or '')
+        if target['runtime']=='runman':identity=str(target.get('instance_id') or '')
+        else:identity=str(target.get('stable_id') or target.get('id') or '')
         # Podman discovery may use a short ID; full identity is still required by
         # the scan binding and driver before filesystem access, not by cooldown.
         if target['runtime']=='podman':identity=identity[:12]
@@ -97,6 +98,19 @@ class Controller:
             if 'lxc.net' in str(expanded.get('raw.lxc','')) or 'lxc.network' in str(expanded.get('raw.lxc','')):
                 raise worker.UnsafeTarget('custom namespace requires manual review')
             pid=int(api.request('GET','/1.0/instances/'+name+'/state')[0].get('pid') or 0)
+        elif runtime=='runman':
+            identity=str(target.get('instance_id') or '')
+            q.target(runtime,project,name,identity)
+            item=q.RunmanIsolation(name,identity).inspect()
+            if item.get('running') is not True or item.get('instance_id')!=identity:
+                raise worker.UnsafeTarget('Runman generation changed')
+            pid=item.get('init_pid')
+            if type(pid) is not int or pid<=1:
+                raise worker.UnsafeTarget('Runman init PID unavailable')
+            try:reported_pid=int(target.get('pid') or 0)
+            except (TypeError,ValueError):reported_pid=0
+            if reported_pid!=pid:
+                raise worker.UnsafeTarget('Runman inventory PID changed')
         else:
             expected=str(target.get('stable_id') or target.get('id') or '')
             item=q.PodmanIsolation(run_command,target['runtime_bin'],name,expected).inspect()

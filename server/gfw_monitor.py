@@ -515,7 +515,7 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
                 if address not in addresses:
                     addresses.append(address)
     latest = conn.execute(
-        "SELECT runtime,project,container_name,payload_json,ts FROM reports WHERE host_id=? AND runtime IN ('incus','podman') AND ts>=? ORDER BY ts DESC,id DESC LIMIT 1200",
+        "SELECT runtime,project,container_name,payload_json,ts FROM reports WHERE host_id=? AND runtime IN ('incus','podman','runman') AND ts>=? ORDER BY ts DESC,id DESC LIMIT 1200",
         (host_id, now - STALE_SECONDS),
     ).fetchall()
     newest, discovered = set(), {}
@@ -629,7 +629,7 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
             for ip in target_ips:
                 add_endpoint(ip, port, interface_by_ip.get(ip, ""), container, source, target_port)
 
-    # Public endpoints must map to one unambiguous Incus/Podman container before
+    # Public endpoints must map to one unambiguous Incus/Podman/Runman instance before
     # they can participate in a per-container sample.
     containers = {}
     eligible_endpoint_count = 0
@@ -796,7 +796,7 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
     elif sample["ambiguous_endpoints"]:
         reason = f"发现 {sample['ambiguous_endpoints']} 个 TCP 端点同时关联多个容器，无法安全确认归属"
         readiness = "ambiguous_container_mapping"
-        next_step = "检查重复的端口发布/代理映射，确保公网 IP:端口唯一指向一个 Incus 或 Podman 容器"
+        next_step = "检查重复的端口发布/代理映射，确保公网 IP:端口唯一指向一个 Incus、Podman 或 Runman 实例"
     elif discovery["mapping_target_not_listening"]:
         reason = f"发现 {discovery['mapping_target_not_listening']} 个端口映射，但容器目标端口当前没有 TCP 监听"
         readiness = "public_tcp_endpoint_missing"
@@ -810,9 +810,9 @@ def _targets_for_host(conn, host_id, node_id, now, pinned_endpoint_keys=None, da
         readiness = "public_address_missing"
         next_step = "若公网入口由上游 NAT 提供，需要 NAT 服务商 API 或主机可读的公网映射；系统不会猜测公网地址"
     else:
-        reason = "未发现可确认的公网容器 TCP 端口：缺少实际监听端口或明确的 Incus/Podman TCP 映射"
+        reason = "未发现可确认的公网容器 TCP 端口：缺少实际监听端口或明确的 Incus/Podman/Runman TCP 映射"
         readiness = "public_tcp_endpoint_missing"
-        next_step = "检查容器监听端口、Incus 代理/网络转发、Podman TCP 端口发布，以及容器公网地址与监听端口"
+        next_step = "检查容器监听端口、Incus 代理/网络转发、Podman TCP 端口发布、Runman 主机 DNAT，以及容器公网地址与监听端口"
     sample_metadata.update({"readiness": readiness, "reason": reason, "next_step": next_step})
     return [], reason, sample_metadata
 
@@ -1542,10 +1542,10 @@ def status_map(conn, now):
                     next_step = "检查 Agent 主机网卡清单采集与上报"
                 elif "多个容器" in cached_reason:
                     readiness = "ambiguous_container_mapping"
-                    next_step = "确保公网 IP:端口映射唯一指向一个 Incus 或 Podman 容器"
+                    next_step = "确保公网 IP:端口映射唯一指向一个 Incus、Podman 或 Runman 实例"
                 elif "公网容器 TCP 端口" in cached_reason:
                     readiness = "public_tcp_endpoint_missing"
-                    next_step = "检查容器监听端口和明确的 Incus/Podman TCP 映射"
+                    next_step = "检查容器监听端口和明确的 Incus/Podman/Runman TCP 映射"
                 else:
                     readiness = "awaiting_scheduler"
                     next_step = "等待服务端下一轮发现；持续无任务时检查服务端 GFW 调度日志"

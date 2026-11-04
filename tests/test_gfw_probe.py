@@ -217,6 +217,32 @@ class GfwCoverageDiagnosticTests(unittest.TestCase):
         self.assertEqual(health["roles"]["mainland"]["distinct_carriers"], 1)
         self.assertEqual(health["roles"]["overseas"]["online_missing_region"], 0)
 
+    def test_runman_host_dnat_requires_guest_ip_and_live_listener(self):
+        vm_id='11111111-2222-3333-4444-555555555555'
+        self.conn.execute(
+            "INSERT INTO host_security(host_id,ts,payload_json) VALUES(?,?,?)",
+            (self.target_host,self.now,json.dumps({'host_firewall':{'interface_inventory':{
+                'status':'ready','interfaces':[{'name':'ens3','addresses':['8.8.8.8/24']}],
+            }}})),
+        )
+        report={'id':vm_id,'stable_id':vm_id,'network_addresses':['10.0.0.2'],
+                'security':{'listening_ports':[8080],'listening_endpoints':['0.0.0.0:8080'],
+                    'network_exposure':[{'source':'host-dnat','listen':'tcp:0.0.0.0:80',
+                                         'target':'tcp:10.0.0.2:8080','nat':'true'}]}}
+        self.conn.execute(
+            "INSERT INTO reports(host_id,container_name,runtime,project,ts,payload_json) VALUES(?,?,?,?,?,?)",
+            (self.target_host,vm_id,'runman','default',self.now,json.dumps(report)),
+        )
+        self.conn.commit()
+        targets,reason,metadata=gfw_monitor._targets_for_host(
+            self.conn,self.target_host,self.target_node,self.now,probe_families={'ipv4'},
+        )
+        self.assertFalse(reason)
+        self.assertEqual([(item['ip'],item['port']) for item in targets],[('8.8.8.8',80)])
+        owner=metadata['endpoint_containers'][targets[0]['id']]
+        self.assertEqual(owner['runtime'],'runman')
+        self.assertEqual(owner['container_ports'],[8080])
+
     def test_status_map_explains_missing_public_tcp_listener(self):
         self.conn.execute(
             "INSERT INTO host_security(host_id,ts,payload_json) VALUES(?,?,?)",

@@ -1,12 +1,20 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.208**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.210**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.7.210：补齐 Runman 的准入保护与剩余运行时入口
+
+- Runman 接入本地 Admission：用当前实例代次和 init PID 读取连接，核对实例地址、Guest 网卡及 Host veth 后才创建保护规则；缺少 veth 证明时不降级为地址级规则。
+- Runman 接入受限磁盘清理和 PasarGuard 精确服务清理；磁盘清理继续遵循默认关闭、allowlist、文件/时间上限、挂载边界及实例代次/PID 校验。
+- 补齐 Runman VMess、Trojan、测速规则的告警回执；前端只有拿到有效 Runman UUIDv4 代次和精确进程/文件证据时才开放面板/XMRig 处置。
+- 遥测运行时选项和防火墙测速保护默认值纳入 Runman。
+- 人工复核 SOCKS 停止继续支持 Runman；不会自动创建持久弱认证停止策略。Podman `SizeRw` 精确语义和未知 service manager 仍有兼容边界。
 
 ### v1.7.208：扩展 Runman 可写层视图与 SysVinit 精准清理
 
