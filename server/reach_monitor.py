@@ -466,7 +466,12 @@ def parse_measurement_results(
             "verdict": "timeout",
             "verdict_label": "探针配额受限",
             "verdict_desc": "Globalping 公共探针免费配额已耗尽，请等待整点刷新或配置 GLOBALPING_API_KEY。",
-            "stats": {"total": 0, "success": 0, "ok": 0, "failed": 0, "cn_success": 0, "cn_total": 3},
+            "stats": {
+                "total": 0, "success": 0, "ok": 0, "failed": 0, "cn_success": 0, "cn_total": 3,
+                "cn_avg_ms": None, "cnAverageMs": None, "global_avg_ms": None, "globalAverageMs": None,
+                "min_ms": None, "max_ms": None, "cn_telecom_ms": None, "cnTelecomMs": None,
+                "cn_unicom_ms": None, "cnUnicomMs": None, "cn_mobile_ms": None, "cnMobileMs": None,
+            },
             "results": [],
             "checked_at": int(time.time()),
         }
