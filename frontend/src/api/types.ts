@@ -1243,6 +1243,15 @@ export interface ReachabilitySummaryItem {
   results?: any[];
 }
 
+export interface ReachabilityQuotaInfo {
+  remaining: number;
+  limit: number;
+  reset_seconds: number;
+  is_rate_limited: boolean;
+  api_key_configured: boolean;
+  pacing_seconds: number;
+}
+
 export interface ReachabilityClusterSummary {
   checked_at: number;
   total_hosts: number;
@@ -1250,4 +1259,5 @@ export interface ReachabilityClusterSummary {
   ok_hosts: number;
   blocked_hosts: number;
   items: ReachabilitySummaryItem[];
+  quota?: ReachabilityQuotaInfo;
 }

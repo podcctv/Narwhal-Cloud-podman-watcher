@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Globe, Shield, AlertTriangle, CheckCircle2, RefreshCw,
-  Zap, ArrowRight, HelpCircle, ChevronDown, ChevronUp, Copy, Check
+  Zap, ArrowRight, HelpCircle, ChevronDown, ChevronUp, Copy, Check,
+  Key, Clock, Sparkles
 } from 'lucide-react';
 import {
   RegionResult, ReachCheckSummary,
   executeReachCheck, validateTarget
 } from '../../utils/reachCheck';
 import { api } from '../../api/client';
-import { ReachabilityClusterSummary, ReachabilitySummaryItem } from '../../api/types';
+import { ReachabilityClusterSummary, ReachabilitySummaryItem, ReachabilityQuotaInfo } from '../../api/types';
 
 interface ReachCheckPanelProps {
   initialTarget?: string;
@@ -47,21 +48,57 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
 
   // Automated hourly cluster check state
   const [clusterData, setClusterData] = useState<ReachabilityClusterSummary | null>(null);
+  const [quota, setQuota] = useState<ReachabilityQuotaInfo | null>(null);
   const [loadingCluster, setLoadingCluster] = useState(false);
   const [triggeringCluster, setTriggeringCluster] = useState(false);
   const [triggerMessage, setTriggerMessage] = useState<string>('');
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [savingKey, setSavingKey] = useState(false);
+  const [keyFeedback, setKeyFeedback] = useState<string>('');
 
   const fetchClusterSummary = useCallback(async () => {
     setLoadingCluster(true);
     try {
       const data: ReachabilityClusterSummary = await api.getReachabilitySummary();
       setClusterData(data);
+      if (data.quota) {
+        setQuota(data.quota);
+      }
     } catch (err: any) {
       console.warn('Failed to load reachability cluster summary', err);
     } finally {
       setLoadingCluster(false);
     }
   }, []);
+
+  const handleSaveApiKey = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setSavingKey(true);
+    setKeyFeedback('');
+    try {
+      const trimmed = apiKeyInput.trim();
+      const res = await api.saveReachabilitySettings({ globalping_api_key: trimmed });
+      if (typeof window !== 'undefined') {
+        if (trimmed) {
+          localStorage.setItem('narwhal_globalping_key', trimmed);
+        } else {
+          localStorage.removeItem('narwhal_globalping_key');
+        }
+      }
+      if (res.quota) setQuota(res.quota);
+      setKeyFeedback(res.message || '配置已成功保存！');
+      setTimeout(() => {
+        setShowKeyModal(false);
+        setKeyFeedback('');
+        fetchClusterSummary();
+      }, 1200);
+    } catch (err: any) {
+      setKeyFeedback(`保存失败：${err.message || err}`);
+    } finally {
+      setSavingKey(false);
+    }
+  };
 
   useEffect(() => {
     fetchClusterSummary();
@@ -265,6 +302,18 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             )}
             <button
               type="button"
+              onClick={() => {
+                setApiKeyInput(localStorage.getItem('narwhal_globalping_key') || '');
+                setShowKeyModal(true);
+              }}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition"
+              title="配置 Globalping 探针 API Key"
+            >
+              <Key className="h-3.5 w-3.5 text-amber-400" />
+              <span>{quota?.api_key_configured ? 'API Key (已绑定)' : '配置 API Key'}</span>
+            </button>
+            <button
+              type="button"
               disabled={loadingCluster}
               onClick={fetchClusterSummary}
               className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition"
@@ -306,6 +355,48 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
           </div>
         </div>
 
+        {/* Quota & Pacing Intelligence Ribbon */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-amber-400" />
+              <span className="font-semibold text-slate-200">探针配额与规划调度</span>
+              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border ${
+                quota?.is_rate_limited
+                  ? 'border-purple-500/50 bg-purple-950/60 text-purple-300'
+                  : (quota?.remaining ?? 250) < 20
+                  ? 'border-amber-500/40 bg-amber-950/60 text-amber-300'
+                  : 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
+              }`}>
+                {quota?.is_rate_limited
+                  ? `探针配额受限 (${Math.ceil((quota.reset_seconds || 0) / 60)} 分钟后重置)`
+                  : (quota?.remaining ?? 250) < 20
+                  ? `额度紧张 (剩余 ${quota?.remaining ?? 250} / ${quota?.limit ?? 250} 点)`
+                  : `额度充裕 (剩余 ${quota?.remaining ?? 250} / ${quota?.limit ?? 250} 点)`}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 text-[11px] text-slate-400 font-sans">
+              {quota?.api_key_configured ? (
+                <span className="text-emerald-400 flex items-center gap-1">
+                  <Key className="h-3 w-3" /> 专属 API Key 额度
+                </span>
+              ) : (
+                <span className="text-slate-400 flex items-center gap-1">
+                  <Shield className="h-3 w-3 text-sky-400" /> 公共 IP 免费额度 (250/h)
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="text-[11px] text-slate-400 leading-relaxed font-sans border-t border-slate-800/60 pt-2 flex items-center gap-2">
+            <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+            <span>
+              <strong>平滑时序规划：</strong>集群 {clusterData?.total_hosts || availableHosts.length || 28} 台母机均匀分散至 1 小时时间轴（每约 {quota?.pacing_seconds || 128} 秒自动调度 1 台），每小时稳定消耗 ~224 点，严格受控于 250 点/小时上限内，杜绝突发 429 报错。
+            </span>
+          </div>
+        </div>
+
         {/* Cluster Results Table */}
         <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/50">
           <table className="w-full text-left text-xs text-slate-300">
@@ -333,6 +424,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                 clusterData.items.map((item: ReachabilitySummaryItem) => {
                   const isOk = item.verdict === 'ok';
                   const isBlocked = item.verdict === 'gfw_blocked';
+                  const isLimited = item.verdict_label === '探针配额受限';
                   return (
                     <tr key={item.host_id} className="hover:bg-slate-900/40 transition">
                       <td className="p-3 font-sans">
@@ -355,9 +447,11 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                             ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
                             : isBlocked
                             ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
+                            : isLimited
+                            ? 'border-purple-500/40 bg-purple-950/60 text-purple-300'
                             : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
                         }`}>
-                          {isOk ? <CheckCircle2 className="h-3 w-3 text-emerald-400" /> : <AlertTriangle className="h-3 w-3" />}
+                          {isOk ? <CheckCircle2 className="h-3 w-3 text-emerald-400" /> : isLimited ? <Clock className="h-3 w-3 text-purple-400" /> : <AlertTriangle className="h-3 w-3" />}
                           <span>{item.verdict_label}</span>
                         </span>
                       </td>
@@ -728,117 +822,240 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
           </div>
         </div>
 
-        {/* Results cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {filteredResults.map(item => {
-            const isOk = item.status === 'ok';
-            const isTesting = item.status === 'testing';
-            const isCn = item.region.group === 'cn';
-
-            return (
-              <div
-                key={item.region.id}
-                className={`rounded-xl border p-3.5 space-y-2.5 transition ${
-                  isTesting
-                    ? 'border-slate-800 bg-slate-900/40 animate-pulse'
-                    : isOk
-                    ? isCn
-                      ? 'border-sky-500/30 bg-slate-900/80 shadow-xs'
-                      : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
-                    : 'border-rose-900/40 bg-rose-950/10 hover:border-rose-800/60'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm shrink-0">{item.region.flag}</span>
-                      <h3 className="font-semibold text-xs text-slate-100 truncate" title={item.region.name}>
-                        {item.region.name}
-                      </h3>
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      {item.region.asn && (
-                        <span className="text-[10px] font-mono text-slate-400">
-                          AS{item.region.asn}
-                        </span>
-                      )}
-                      {item.ip && (
-                        <span className="text-[10px] font-mono text-slate-500 truncate" title={item.ip}>
-                          · {item.ip}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold ${
-                    isTesting
-                      ? 'border-sky-500/40 bg-sky-950/40 text-sky-400'
-                      : isOk
-                      ? latencyBadgeColor(item.timings.total)
-                      : item.status === 'timeout'
-                      ? 'border-rose-500/40 bg-rose-950/40 text-rose-300'
-                      : item.status === 'refused'
-                      ? 'border-amber-500/40 bg-amber-950/40 text-amber-300'
-                      : 'border-slate-700 bg-slate-800 text-slate-400'
-                  }`}>
-                    {isTesting
-                      ? '检测中...'
-                      : isOk
-                      ? `${item.timings.total} ms`
-                      : item.status === 'timeout'
-                      ? '连接超时'
-                      : item.status === 'refused'
-                      ? '端口拒绝'
-                      : item.status === 'dns_error'
-                      ? 'DNS失败'
-                      : item.status === 'tls_error'
-                      ? 'TLS错误'
-                      : '检测失败'}
-                  </span>
-                </div>
-
-                {/* Timings breakdown bar */}
-                {isOk && (
-                  <div className="space-y-1 pt-1 border-t border-slate-800/60 text-[10px] font-mono">
-                    <div className="flex items-center justify-between text-slate-400">
-                      <span>时延构成</span>
-                      <span className="text-slate-200 font-bold">{item.timings.total} ms</span>
-                    </div>
-                    <div className="flex gap-1.5 text-slate-400 flex-wrap">
-                      {item.timings.dns !== undefined && (
-                        <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                          DNS: {item.timings.dns}ms
-                        </span>
-                      )}
-                      {item.timings.tcp !== undefined && (
-                        <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                          TCP: {item.timings.tcp}ms
-                        </span>
-                      )}
-                      {item.timings.tls !== undefined && (
-                        <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                          TLS: {item.timings.tls}ms
-                        </span>
-                      )}
-                      {item.timings.ttfb !== undefined && (
-                        <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                          TTFB: {item.timings.ttfb}ms
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {!isOk && !isTesting && item.error && (
-                  <div className="pt-1 border-t border-slate-800/60 text-[10px] text-rose-300/80 font-mono truncate" title={item.error}>
-                    {item.error}
-                  </div>
-                )}
+        {/* Results cards or Empty / Quota Limited Notice */}
+        {liveResults.length === 0 ? (
+          summary?.verdictLabel === '探针配额受限' ? (
+            <div className="rounded-2xl border border-purple-900/60 bg-purple-950/20 p-6 text-xs text-purple-200 space-y-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-purple-300">
+                <Clock className="h-5 w-5 text-purple-400" />
+                <span>探针公共免费配额已达上限 (HTTP 429)</span>
               </div>
-            );
-          })}
-        </div>
+              <p className="text-purple-300/80 leading-relaxed font-sans">
+                Globalping 未认证公共 IP 每小时限额 250 点已在上一轮突发请求中耗尽。后台调度系统已自动切换为<strong>平滑时序分散调度</strong>（每约 {quota?.pacing_seconds || 128} 秒轮询 1 台母机），整点重置后将平稳刷新。
+              </p>
+              <p className="text-purple-400/80 font-sans">
+                历史上的有效快照已被服务端严格保护，绝不被空数据覆盖。建议配置专属 API Key 彻底解除限流。
+              </p>
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setApiKeyInput(localStorage.getItem('narwhal_globalping_key') || '');
+                    setShowKeyModal(true);
+                  }}
+                  className="rounded-lg bg-purple-600 hover:bg-purple-500 px-3.5 py-1.5 font-semibold text-white transition flex items-center gap-1.5 shadow-sm"
+                >
+                  <Key className="h-3.5 w-3.5" />
+                  <span>绑定免费 Globalping Key</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={fetchClusterSummary}
+                  className="rounded-lg border border-purple-800 bg-purple-900/40 hover:bg-purple-900/60 px-3 py-1.5 font-medium text-purple-200 transition flex items-center gap-1"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>刷新状态</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-8 text-center text-xs text-slate-400 space-y-2">
+              <Globe className="h-8 w-8 text-slate-600 mx-auto" />
+              <p className="font-semibold text-slate-300">暂无展开的区域明细</p>
+              <p className="text-slate-500 max-w-md mx-auto">
+                请在上方母机列表中点击「查看详情」载入历史巡检快照，或在自定义输入框输入目标并点击「开始可达性检测」。
+              </p>
+            </div>
+          )
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {filteredResults.map(item => {
+              const isOk = item.status === 'ok';
+              const isTesting = item.status === 'testing';
+              const isCn = item.region.group === 'cn';
+
+              return (
+                <div
+                  key={item.region.id}
+                  className={`rounded-xl border p-3.5 space-y-2.5 transition ${
+                    isTesting
+                      ? 'border-slate-800 bg-slate-900/40 animate-pulse'
+                      : isOk
+                      ? isCn
+                        ? 'border-sky-500/30 bg-slate-900/80 shadow-xs'
+                        : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
+                      : 'border-rose-900/40 bg-rose-950/10 hover:border-rose-800/60'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm shrink-0">{item.region.flag}</span>
+                        <h3 className="font-semibold text-xs text-slate-100 truncate" title={item.region.name}>
+                          {item.region.name}
+                        </h3>
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        {item.region.asn && (
+                          <span className="text-[10px] font-mono text-slate-400">
+                            AS{item.region.asn}
+                          </span>
+                        )}
+                        {item.ip && (
+                          <span className="text-[10px] font-mono text-slate-500 truncate" title={item.ip}>
+                            · {item.ip}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold ${
+                      isTesting
+                        ? 'border-sky-500/40 bg-sky-950/40 text-sky-400'
+                        : isOk
+                        ? latencyBadgeColor(item.timings.total)
+                        : item.status === 'timeout'
+                        ? 'border-rose-500/40 bg-rose-950/40 text-rose-300'
+                        : item.status === 'refused'
+                        ? 'border-amber-500/40 bg-amber-950/40 text-amber-300'
+                        : 'border-slate-700 bg-slate-800 text-slate-400'
+                    }`}>
+                      {isTesting
+                        ? '检测中...'
+                        : isOk
+                        ? `${item.timings.total} ms`
+                        : item.status === 'timeout'
+                        ? '连接超时'
+                        : item.status === 'refused'
+                        ? '端口拒绝'
+                        : item.status === 'dns_error'
+                        ? 'DNS失败'
+                        : item.status === 'tls_error'
+                        ? 'TLS错误'
+                        : '检测失败'}
+                    </span>
+                  </div>
+
+                  {/* Timings breakdown bar */}
+                  {isOk && (
+                    <div className="space-y-1 pt-1 border-t border-slate-800/60 text-[10px] font-mono">
+                      <div className="flex items-center justify-between text-slate-400">
+                        <span>时延构成</span>
+                        <span className="text-slate-200 font-bold">{item.timings.total} ms</span>
+                      </div>
+                      <div className="flex gap-1.5 text-slate-400 flex-wrap">
+                        {item.timings.dns !== undefined && (
+                          <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                            DNS: {item.timings.dns}ms
+                          </span>
+                        )}
+                        {item.timings.tcp !== undefined && (
+                          <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                            TCP: {item.timings.tcp}ms
+                          </span>
+                        )}
+                        {item.timings.tls !== undefined && (
+                          <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                            TLS: {item.timings.tls}ms
+                          </span>
+                        )}
+                        {item.timings.ttfb !== undefined && (
+                          <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                            TTFB: {item.timings.ttfb}ms
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {!isOk && !isTesting && item.error && (
+                    <div className="pt-1 border-t border-slate-800/60 text-[10px] text-rose-300/80 font-mono truncate" title={item.error}>
+                      {item.error}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
+
+      {/* API Key Modal */}
+      {showKeyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 animate-fade-in">
+          <div className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Key className="h-4 w-4 text-amber-400" />
+                <h3 className="text-sm font-semibold text-slate-100">配置 Globalping API Key</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setShowKeyModal(false); setKeyFeedback(''); }}
+                className="text-slate-400 hover:text-slate-200 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-400 space-y-2 leading-relaxed">
+              <p>
+                默认未认证公共 IP 探针额度为 250 点/小时。若需要测试全球全量 18 区域或频繁重测，可在{' '}
+                <a
+                  href="https://globalping.io"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-sky-400 underline hover:text-sky-300"
+                >
+                  globalping.io
+                </a>{' '}
+                免费注册账号并在个人面板创建 API Key。
+              </p>
+              <p className="text-slate-500">
+                免费账户额度通常为 500 ~ 2,500+ 点/小时。留空并保存可恢复为公共 IP 模式。
+              </p>
+            </div>
+
+            <form onSubmit={handleSaveApiKey} className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Globalping API Key / Token
+                </label>
+                <input
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="留空则使用公共 IP 额度"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 font-mono focus:border-sky-500 focus:outline-hidden"
+                />
+              </div>
+
+              {keyFeedback && (
+                <div className={`text-xs p-2 rounded ${keyFeedback.includes('失败') ? 'bg-rose-950/60 text-rose-300' : 'bg-emerald-950/60 text-emerald-300'}`}>
+                  {keyFeedback}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => { setShowKeyModal(false); setKeyFeedback(''); }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingKey}
+                  className="rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-1.5 text-xs font-semibold text-white transition disabled:opacity-50"
+                >
+                  {savingKey ? '保存中...' : '保存并同步'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

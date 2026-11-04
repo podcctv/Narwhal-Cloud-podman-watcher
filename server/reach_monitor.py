@@ -45,6 +45,15 @@ REACH_REGIONS = [
     {"id": "am-br", "name": "巴西圣保罗", "flag": "🇧🇷", "group": "am", "city": "Sao Paulo", "country": "BR", "loc": {"city": "Sao Paulo"}},
 ]
 
+_rate_limit_state: Dict[str, Any] = {
+    "remaining": 250,
+    "limit": 250,
+    "reset_seconds": 0,
+    "last_sync": 0.0,
+    "is_rate_limited": False,
+    "pacing_seconds": 128,
+}
+
 _ssl_context: Optional[ssl.SSLContext] = None
 
 def _get_ssl_context() -> ssl.SSLContext:
@@ -58,6 +67,74 @@ def _get_ssl_context() -> ssl.SSLContext:
             _ssl_context.check_hostname = False
             _ssl_context.verify_mode = ssl.CERT_NONE
     return _ssl_context
+
+
+def get_globalping_api_key(conn: Optional[sqlite3.Connection] = None) -> str:
+    """Retrieves Globalping API Key from environment or database system_settings."""
+    import os
+    env_key = str(os.environ.get("GLOBALPING_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+    if conn:
+        try:
+            row = conn.execute("SELECT value FROM system_settings WHERE key = 'globalping_api_key'").fetchone()
+            if row and row[0]:
+                return str(row[0]).strip()
+        except Exception:
+            pass
+    return ""
+
+
+def sync_rate_limits(api_key: str = "", force: bool = False) -> Dict[str, Any]:
+    """Queries Globalping /v1/limits endpoint to sync accurate credits and reset window."""
+    global _rate_limit_state
+    now = time.monotonic()
+    if not force and _rate_limit_state["last_sync"] > 0 and (now - _rate_limit_state["last_sync"] < 60):
+        return _rate_limit_state
+    try:
+        headers = {"User-Agent": "Narwhal-Watcher"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(f"{GLOBALPING_API_URL}/limits", headers=headers)
+        ctx = _get_ssl_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            create_lim = data.get("rateLimit", {}).get("measurements", {}).get("create", {})
+            _rate_limit_state["limit"] = int(create_lim.get("limit", 250))
+            _rate_limit_state["remaining"] = int(create_lim.get("remaining", 250))
+            _rate_limit_state["reset_seconds"] = int(create_lim.get("reset", 0))
+            _rate_limit_state["is_rate_limited"] = (_rate_limit_state["remaining"] <= 0)
+            _rate_limit_state["last_sync"] = now
+    except Exception as e:
+        logger.debug(f"Failed to sync Globalping limits: {e}")
+    return _rate_limit_state
+
+
+def _update_rate_limits_from_headers(headers: Any) -> None:
+    """Extracts X-Credits-Remaining, X-RateLimit-Reset, etc., from HTTP response headers."""
+    global _rate_limit_state
+    if not headers:
+        return
+    rem = headers.get("X-Credits-Remaining") or headers.get("X-RateLimit-Remaining")
+    reset = headers.get("X-RateLimit-Reset") or headers.get("Retry-After")
+    limit = headers.get("X-RateLimit-Limit")
+    if rem is not None:
+        try:
+            _rate_limit_state["remaining"] = int(rem)
+            _rate_limit_state["is_rate_limited"] = (_rate_limit_state["remaining"] <= 0)
+        except (ValueError, TypeError):
+            pass
+    if reset is not None:
+        try:
+            _rate_limit_state["reset_seconds"] = int(reset)
+        except (ValueError, TypeError):
+            pass
+    if limit is not None:
+        try:
+            _rate_limit_state["limit"] = int(limit)
+        except (ValueError, TypeError):
+            pass
+    _rate_limit_state["last_sync"] = time.monotonic()
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -90,6 +167,11 @@ def init_db(conn: sqlite3.Connection) -> None:
         host_id TEXT PRIMARY KEY,
         client_ip TEXT NOT NULL DEFAULT '',
         updated_at INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS system_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
     );
     """)
 
@@ -363,15 +445,38 @@ def execute_globalping_measurement(
     protocol: str = "TCP",
     regions: Optional[List[Dict[str, Any]]] = None,
     timeout_seconds: int = 25,
+    api_key: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, Any]:
     """Posts a measurement to Globalping and polls until completion. Supports TCP (HTTP probe) and ICMP (Ping probe)."""
-    import os
-    api_key = str(os.environ.get("GLOBALPING_API_KEY") or "").strip()
+    if api_key is None:
+        api_key = get_globalping_api_key(conn)
+
+    # Sync rate limits if never synced
+    if _rate_limit_state.get("last_sync", 0.0) == 0.0:
+        sync_rate_limits(api_key)
+
+    # Credit budget guard: if unauthenticated and remaining credits exhausted or < 3
+    if not api_key:
+        if _rate_limit_state.get("is_rate_limited") or _rate_limit_state.get("remaining", 250) < 3:
+            logger.warning(
+                f"Globalping rate limit guard active: remaining={_rate_limit_state.get('remaining')} credits, "
+                f"reset_seconds={_rate_limit_state.get('reset_seconds')}. Skipping request to avoid 429."
+            )
+            return {
+                "status": "rate_limited",
+                "results": [],
+                "active_regions": [],
+                "reset_seconds": _rate_limit_state.get("reset_seconds", 300),
+            }
 
     if regions is not None:
         active_regions = regions
     elif api_key:
         active_regions = REACH_REGIONS
+    elif _rate_limit_state.get("remaining", 250) < 8:
+        # Dynamic Budget Mode: remaining points low (<8), probe China 3 carriers only (cost: 3 credits)
+        active_regions = [r for r in REACH_REGIONS if r["id"] in {"cn-telecom", "cn-unicom", "cn-mobile"}]
     else:
         # Default core regions when unauthenticated: 8 key probes stay strictly within 250 free credits/hour across 28 cluster hosts
         core_ids = {"cn-telecom", "cn-unicom", "cn-mobile", "apac-hk", "apac-jp", "apac-sg", "emea-gb", "am-us-la"}
@@ -414,13 +519,21 @@ def execute_globalping_measurement(
     )
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=12) as resp:
+            _update_rate_limits_from_headers(resp.headers)
             post_data = json.loads(resp.read().decode("utf-8"))
             measurement_id = post_data["id"]
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            retry_after = e.headers.get("Retry-After") or e.headers.get("X-RateLimit-Reset") or "soon"
+            _update_rate_limits_from_headers(e.headers)
+            _rate_limit_state["is_rate_limited"] = True
+            _rate_limit_state["remaining"] = 0
+            retry_after = e.headers.get("Retry-After") or e.headers.get("X-RateLimit-Reset") or _rate_limit_state.get("reset_seconds") or 300
+            try:
+                _rate_limit_state["reset_seconds"] = int(retry_after)
+            except (ValueError, TypeError):
+                pass
             logger.warning(f"Globalping rate limit reached (HTTP 429, reset in {retry_after}s). Set GLOBALPING_API_KEY for higher quota.")
-            return {"status": "rate_limited", "results": [], "active_regions": active_regions}
+            return {"status": "rate_limited", "results": [], "active_regions": active_regions, "reset_seconds": _rate_limit_state.get("reset_seconds", 300)}
         raise
 
     # Poll for completion
@@ -436,6 +549,7 @@ def execute_globalping_measurement(
             headers=poll_headers,
         )
         with urllib.request.urlopen(poll_req, context=ctx, timeout=10) as poll_resp:
+            _update_rate_limits_from_headers(poll_resp.headers)
             m_data = json.loads(poll_resp.read().decode("utf-8"))
             m_data["active_regions"] = active_regions
             if m_data.get("status") == "finished":
@@ -673,9 +787,34 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
 
     logger.info(f"Running automated reach check for {host_id} -> {target}:{port} ({protocol}, from {len(open_ports)} open ports)")
     try:
-        m_data = execute_globalping_measurement(target, port, protocol)
-        summary = parse_measurement_results(m_data, target, port, protocol)
+        m_data = execute_globalping_measurement(target, port, protocol, conn=conn)
 
+        # Rate-limiting / Quota exhausted handling:
+        # CRITICAL: Preserve existing healthy host reachability records and avoid overwriting with blank/empty data!
+        if m_data.get("status") == "rate_limited":
+            logger.warning(f"Host {host_id} reach check rate limited; preserving historical records without overwriting")
+            existing = conn.execute(
+                "SELECT host_id, verdict_label, results_json FROM host_reachability WHERE host_id=?",
+                (host_id,),
+            ).fetchone()
+            # Only create an entry if host has never had any reachability record or existing was already rate_limited
+            if not existing or existing["results_json"] in ("[]", ""):
+                summary = parse_measurement_results(m_data, target, port, protocol)
+                now = int(time.time())
+                conn.execute("""
+                    INSERT INTO host_reachability(host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(host_id) DO UPDATE SET
+                        verdict=excluded.verdict, verdict_label=excluded.verdict_label,
+                        verdict_desc=excluded.verdict_desc, checked_at=excluded.checked_at
+                """, (
+                    host_id, target, port, summary["protocol"], summary["verdict"], summary["verdict_label"],
+                    summary["verdict_desc"], json.dumps(summary["stats"]), json.dumps(summary["results"]), now
+                ))
+                conn.commit()
+            return None
+
+        summary = parse_measurement_results(m_data, target, port, protocol)
         now = int(time.time())
         conn.execute("""
             INSERT INTO host_reachability(host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at)
@@ -699,25 +838,42 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
         return None
 
 
-async def run_hourly_reach_cycle(db_factory: Callable[[], sqlite3.Connection]) -> int:
-    """Executes reachability checks across all active cluster nodes with rate pacing."""
+async def run_hourly_reach_cycle(
+    db_factory: Callable[[], sqlite3.Connection],
+    pace_seconds_override: Optional[float] = None,
+) -> int:
+    """Executes reachability checks across active cluster nodes in an intelligently staggered schedule."""
     conn = db_factory()
     try:
         init_db(conn)
         now = int(time.time())
-        # Query active hosts from last 30 minutes
-        hosts = [
-            row["host_id"] for row in conn.execute(
-                "SELECT host_id FROM hosts WHERE last_seen > ? ORDER BY host_id",
-                (now - 1800,),
-            ).fetchall()
-        ]
+        api_key = get_globalping_api_key(conn)
+        sync_rate_limits(api_key)
+
+        # Query active hosts from last 30 minutes, ordered by least-recently-checked first (LRU priority)
+        query = """
+            SELECT h.host_id, COALESCE(hr.checked_at, 0) as last_checked
+            FROM hosts h
+            LEFT JOIN host_reachability hr ON h.host_id = hr.host_id
+            WHERE h.last_seen > ?
+            ORDER BY last_checked ASC, h.host_id ASC
+        """
+        rows = conn.execute(query, (now - 1800,)).fetchall()
+        hosts = [r["host_id"] for r in rows]
     finally:
         conn.close()
 
     if not hosts:
         logger.info("No active hosts found for automated reach check")
         return 0
+
+    # Staggered pacing: evenly distribute hosts across 3600 seconds
+    # e.g., 28 hosts -> 3600 / 28 = 128 seconds interval
+    if pace_seconds_override is not None:
+        pace_seconds = pace_seconds_override
+    else:
+        pace_seconds = max(10.0, min(180.0, 3600.0 / max(1, len(hosts))))
+    _rate_limit_state["pacing_seconds"] = int(pace_seconds)
 
     def _worker_check(db_f: Callable[[], sqlite3.Connection], h_id: str) -> Optional[Dict[str, Any]]:
         c = db_f()
@@ -728,33 +884,58 @@ async def run_hourly_reach_cycle(db_factory: Callable[[], sqlite3.Connection]) -
 
     checked = 0
     for host_id in hosts:
+        # If rate limited, sleep until reset
+        if _rate_limit_state.get("is_rate_limited") or _rate_limit_state.get("remaining", 250) < 3:
+            reset_wait = max(5, min(3600, int(_rate_limit_state.get("reset_seconds", 300))))
+            logger.info(f"Reachability cycle paused due to quota limit. Sleeping {reset_wait}s until reset.")
+            await asyncio.sleep(reset_wait)
+            # Resync limits after sleep
+            sync_rate_limits(api_key, force=True)
+            if _rate_limit_state.get("remaining", 0) < 3:
+                logger.warning("Quota still below minimum after reset wait; skipping remaining cycle hosts.")
+                break
+
         try:
             res = await asyncio.to_thread(_worker_check, db_factory, host_id)
             if res:
                 checked += 1
         except Exception as e:
             logger.error(f"Error in reach check cycle for {host_id}: {e}")
-        # Rate-limiting pause between hosts
-        await asyncio.sleep(2.5)
+
+        # Paced interval between hosts to prevent burst quota consumption
+        await asyncio.sleep(pace_seconds)
 
     return checked
 
 
 async def run_loop(db_factory: Callable[[], sqlite3.Connection]) -> None:
-    """Background loop executing reachability inspection every 1 hour (3600 seconds)."""
+    """Continuous background loop for cluster reachability scheduling."""
     await asyncio.sleep(45)  # Initial grace window after server startup
     while True:
         cycle_start = time.monotonic()
         try:
-            logger.info("Starting cluster hourly automated reach check cycle...")
+            logger.info("Starting cluster automated reach check cycle (staggered pacing)...")
             checked = await run_hourly_reach_cycle(db_factory)
             logger.info(f"Finished automated reach check cycle: {checked} hosts inspected")
         except Exception as e:
             logger.error(f"Automated reach check cycle crashed: {e}")
 
         elapsed = time.monotonic() - cycle_start
-        sleep_time = max(60.0, 3600.0 - elapsed)
+        sleep_time = max(15.0, 3600.0 - elapsed)
         await asyncio.sleep(sleep_time)
+
+
+def _get_quota_payload(conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
+    api_key = get_globalping_api_key(conn)
+    reset_sec = max(0, int(_rate_limit_state.get("reset_seconds", 0)))
+    return {
+        "remaining": int(_rate_limit_state.get("remaining", 250)),
+        "limit": int(_rate_limit_state.get("limit", 250)),
+        "reset_seconds": reset_sec,
+        "is_rate_limited": bool(_rate_limit_state.get("is_rate_limited", False)),
+        "api_key_configured": bool(api_key),
+        "pacing_seconds": int(_rate_limit_state.get("pacing_seconds", 128)),
+    }
 
 
 def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_signature: Any, signed_json_response: Any) -> None:
@@ -812,6 +993,46 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 "blocked_hosts": blocked_count,
                 "checked_at": max_checked,
                 "last_checked": max_checked,
+                "quota": _get_quota_payload(conn),
+            })
+        finally:
+            conn.close()
+
+    @app.get("/api/v1/reachability/quota")
+    def get_reachability_quota(request: Request) -> JSONResponse:
+        conn = db_factory()
+        try:
+            init_db(conn)
+            return JSONResponse(content=_get_quota_payload(conn))
+        finally:
+            conn.close()
+
+    @app.post("/api/v1/reachability/settings")
+    async def save_reachability_settings(request: Request) -> JSONResponse:
+        conn = db_factory()
+        try:
+            init_db(conn)
+            data = {}
+            try:
+                data = await request.json()
+            except Exception:
+                pass
+            api_key = str(data.get("globalping_api_key") or data.get("api_key") or "").strip()
+            now = int(time.time())
+            if api_key:
+                conn.execute(
+                    "INSERT INTO system_settings(key, value, updated_at) VALUES('globalping_api_key', ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    (api_key, now),
+                )
+            else:
+                conn.execute("DELETE FROM system_settings WHERE key = 'globalping_api_key'")
+            conn.commit()
+            sync_rate_limits(api_key, force=True)
+            return JSONResponse(content={
+                "ok": True,
+                "message": "Globalping API Key 配置已成功更新并同步配额",
+                "quota": _get_quota_payload(conn),
             })
         finally:
             conn.close()
@@ -847,5 +1068,26 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
 
     @app.post("/api/v1/reachability/trigger")
     async def trigger_reachability_check(request: Request) -> JSONResponse:
-        asyncio.create_task(run_hourly_reach_cycle(db_factory))
-        return JSONResponse(content={"ok": True, "message": "全集群可达性自动化巡检已在后台启动"})
+        conn = db_factory()
+        try:
+            init_db(conn)
+            data = {}
+            try:
+                data = await request.json()
+            except Exception:
+                pass
+            host_id = str(data.get("host_id") or "").strip()
+            if host_id:
+                def _worker_single():
+                    c = db_factory()
+                    try:
+                        return perform_host_reach_check(c, host_id)
+                    finally:
+                        c.close()
+                asyncio.create_task(asyncio.to_thread(_worker_single))
+                return JSONResponse(content={"ok": True, "message": f"主机 {host_id} 可达性测试已在后台触发"})
+            else:
+                asyncio.create_task(run_hourly_reach_cycle(db_factory))
+                return JSONResponse(content={"ok": True, "message": "全集群可达性自动化巡检已在后台启动（平滑时序调度）"})
+        finally:
+            conn.close()

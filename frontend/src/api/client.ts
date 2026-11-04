@@ -1,6 +1,7 @@
 import {
   ReachabilityClusterSummary,
   ReachabilitySummaryItem,
+  ReachabilityQuotaInfo,
   LatestResponse,
   SecurityAlert,
   SecurityStatusItem,
@@ -346,6 +347,8 @@ export const api = {
     } as StatsResponse;
   },
   getReachabilitySummary: () => request<ReachabilityClusterSummary>('/api/v1/reachability/summary'),
+  getReachabilityQuota: () => request<ReachabilityQuotaInfo>('/api/v1/reachability/quota'),
+  saveReachabilitySettings: (settings: { globalping_api_key?: string }) => request<{ ok: boolean; message: string; quota: ReachabilityQuotaInfo }>('/api/v1/reachability/settings', { method: 'POST', body: JSON.stringify(settings) }),
   getReachabilityHost: (hostId: string) => request<{ item: ReachabilitySummaryItem }>('/api/v1/reachability/host/' + encodeURIComponent(hostId)),
   triggerReachabilityCheck: (hostId?: string) => request<{ ok: boolean; message: string }>('/api/v1/reachability/trigger', { method: 'POST', body: JSON.stringify({ host_id: hostId }) }),
 };

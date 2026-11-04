@@ -358,14 +358,23 @@ export async function executeReachCheck(
   };
 
   let measurementId = '';
+  const storedApiKey = (typeof window !== 'undefined' ? localStorage.getItem('narwhal_globalping_key') || '' : '').trim();
+  const requestHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (storedApiKey) {
+    requestHeaders['Authorization'] = `Bearer ${storedApiKey}`;
+  }
+
   try {
     const postRes = await fetch(`${gpEndpoint}/measurements`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: requestHeaders,
       body: JSON.stringify(measurementBody)
     });
 
     if (!postRes.ok) {
+      if (postRes.status === 429) {
+        throw new Error('探针配额受限 (HTTP 429)：公共免费额度已耗尽，请稍候再试或配置 Globalping API Key。');
+      }
       const errText = await postRes.text().catch(() => '');
       throw new Error(`Globalping API 响应异常 (${postRes.status}): ${errText.slice(0, 100)}`);
     }
@@ -405,7 +414,9 @@ export async function executeReachCheck(
   for (let poll = 0; poll < maxPolls; poll++) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     try {
-      const pollRes = await fetch(`${gpEndpoint}/measurements/${measurementId}`);
+      const pollRes = await fetch(`${gpEndpoint}/measurements/${measurementId}`, {
+        headers: storedApiKey ? { 'Authorization': `Bearer ${storedApiKey}` } : {},
+      });
       if (!pollRes.ok) continue;
       const mData = await pollRes.json();
       const rawResults = mData.results || [];

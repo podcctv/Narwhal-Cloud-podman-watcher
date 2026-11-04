@@ -235,8 +235,9 @@ class TestReachMonitor(unittest.TestCase):
         init_conn.commit()
         init_conn.close()
 
-        with patch("server.reach_monitor.execute_globalping_measurement", return_value=mock_mdata):
-            checked = asyncio.run(reach_monitor.run_hourly_reach_cycle(db_factory))
+        with patch("server.reach_monitor.sync_rate_limits", return_value={"remaining": 250, "limit": 250, "reset_seconds": 0}), \
+             patch("server.reach_monitor.execute_globalping_measurement", return_value=mock_mdata):
+            checked = asyncio.run(reach_monitor.run_hourly_reach_cycle(db_factory, pace_seconds_override=0.01))
             self.assertEqual(checked, 1)
 
         # Verify host_reachability was saved in worker thread
@@ -247,6 +248,63 @@ class TestReachMonitor(unittest.TestCase):
         self.assertEqual(row["target"], "15.204.57.108")
         check_conn.close()
         os.unlink(db_path)
+
+    def test_perform_host_reach_check_preserves_history_on_rate_limit(self):
+        # When rate limit occurs, existing healthy results must NEVER be wiped or overwritten with []
+        host_id = "node-preserve-test"
+        import time
+        now = int(time.time())
+        self.conn.execute("INSERT INTO hosts(host_id, last_seen, agent_version) VALUES(?, ?, '1.7.219')", (host_id, now))
+        reach_monitor.record_client_ip(self.conn, host_id, "15.204.57.108", now)
+
+        # Populate pre-existing healthy test result
+        self.conn.execute("""
+            INSERT INTO host_reachability(host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at)
+            VALUES(?, '15.204.57.108', 443, 'TCP', 'ok', '三网通畅·全球可达', 'All good', '{"success":18}', '[{"region":{"id":"cn-telecom"},"status":"ok"}]', ?)
+        """, (host_id, now - 300))
+        self.conn.commit()
+
+        # Execute check that returns rate_limited
+        rate_limited_mdata = {"status": "rate_limited", "results": [], "active_regions": []}
+        with patch("server.reach_monitor.execute_globalping_measurement", return_value=rate_limited_mdata):
+            res = reach_monitor.perform_host_reach_check(self.conn, host_id)
+            self.assertIsNone(res)
+
+        # Confirm host_reachability row was preserved untouched
+        row = self.conn.execute("SELECT * FROM host_reachability WHERE host_id=?", (host_id,)).fetchone()
+        self.assertEqual(row["verdict"], "ok")
+        self.assertEqual(row["verdict_label"], "三网通畅·全球可达")
+        self.assertIn("cn-telecom", row["results_json"])
+        self.assertEqual(row["checked_at"], now - 300)
+
+    def test_budget_aware_region_pruning(self):
+        # Under low budget (<8 credits), probe China 3 carriers only (cost: 3 credits)
+        reach_monitor._rate_limit_state["remaining"] = 5
+        reach_monitor._rate_limit_state["limit"] = 250
+        reach_monitor._rate_limit_state["last_sync"] = 1000000.0  # skip sync
+
+        with patch("urllib.request.urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"id": "dummy-m-id"}).encode("utf-8")
+            mock_resp.headers = {"X-Credits-Remaining": "2"}
+            mock_url.return_value.__enter__.return_value = mock_resp
+
+            with patch("time.sleep"):
+                res = reach_monitor.execute_globalping_measurement("1.1.1.1", 443, "TCP", timeout_seconds=1)
+                # Active regions should only be China 3 carriers
+                self.assertEqual(len(res.get("active_regions", [])), 3)
+                ids = {r["id"] for r in res.get("active_regions", [])}
+                self.assertEqual(ids, {"cn-telecom", "cn-unicom", "cn-mobile"})
+
+        # Reset rate limit state
+        reach_monitor._rate_limit_state["remaining"] = 250
+
+    def test_globalping_api_key_system_settings(self):
+        # Verify API key reading from database system_settings
+        self.conn.execute("INSERT INTO system_settings(key, value, updated_at) VALUES('globalping_api_key', 'test-token-123', 1000)")
+        self.conn.commit()
+        key = reach_monitor.get_globalping_api_key(self.conn)
+        self.assertEqual(key, "test-token-123")
 
 if __name__ == "__main__":
     unittest.main()
