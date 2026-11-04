@@ -12364,6 +12364,27 @@ def main() -> None:
         action_poll_interval = 10
     last_action_poll = 0.0
 
+    try:
+        res_file = Path("/opt/narwhal-monitor/managed-update-result.json")
+        if res_file.exists():
+            u_info = json.loads(res_file.read_text())
+            u_aid = u_info.get("action_id")
+            if u_aid and u_info.get("status") == "installed":
+                signed_post_json(
+                    args.server,
+                    args.secret,
+                    "/api/v1/actions/result",
+                    {
+                        "action_id": int(u_aid),
+                        "host_id": args.host_id,
+                        "node_id": args.node_id,
+                        "status": "running",
+                        "message": f"update installed ({APP_VERSION}); starting container scan",
+                    },
+                )
+    except Exception:
+        pass
+
     while True:
         _unresponsive_exec_containers.clear()
         now_mono = time.monotonic()

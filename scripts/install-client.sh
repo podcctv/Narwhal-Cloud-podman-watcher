@@ -527,7 +527,9 @@ if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 || ! comm
   apt-get install -y nftables libnetfilter-queue1 iproute2 util-linux
 fi
 
-"$CLIENT_VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+if [[ "$MODE" != "update" ]]; then
+  "$CLIENT_VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+fi
 "$CLIENT_VENV_DIR/bin/pip" install -r "$CLIENT_APP_DIR/requirements.txt"
 
 cat >"$SYSTEMD_SERVICE_FILE" <<EOF_SERVICE

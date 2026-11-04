@@ -242,3 +242,34 @@ class FleetTests(unittest.TestCase):
         self.assertIn('释放调度名额', stale_row['result_message'])
         self.assertEqual(self.c.execute('SELECT status FROM security_actions WHERE id=?', (fresh,)).fetchone()[0], 'running')
         self.assertEqual(self.c.execute('SELECT status FROM security_actions WHERE id=?', (active_action,)).fetchone()[0], 'running')
+
+    def test_campaign_promotes_when_any_campaign_node_is_verified(self):
+        self.tick()
+        # Initial canary action dispatched to 'canary'
+        self.assertEqual(len(self.actions()), 1)
+        self.assertEqual(self.actions()[0]['host_id'], 'canary')
+        # Simulate canary action failing or timing out
+        self.c.execute("UPDATE security_actions SET status='failed',result_message='Client 未在 20 分钟内回报升级结果' WHERE host_id='canary'")
+        self.c.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE host_id='canary'")
+        
+        # Another node 'old' reported target version healthy
+        now = 1200
+        self.c.execute("UPDATE hosts SET agent_version='1.7.47',last_seen=? WHERE host_id='old'", (now,))
+        self.c.execute("UPDATE ops_upgrade_nodes SET status='verified' WHERE host_id='old'")
+        campaign = self.c.execute('SELECT * FROM ops_upgrades').fetchone()
+        meta = json.loads(campaign['payload'])
+        meta.setdefault('verification_sources', {})['old'] = {
+            'method': 'healthy_version_observation',
+            'node_id': 'old', 'version': '1.7.47', 'first_seen': now - 200,
+            'verified_at': now - 50, 'last_healthy_at': now
+        }
+        self.c.execute("UPDATE ops_upgrades SET payload=? WHERE id=?", (json.dumps(meta), campaign['id']))
+        self.c.commit()
+
+        fleet.reconcile(self.c, '1.7.47', 'a'*40, now)
+
+        updated_campaign = self.c.execute('SELECT * FROM ops_upgrades').fetchone()
+        self.assertEqual(updated_campaign['status'], 'rollout')
+        updated_meta = json.loads(updated_campaign['payload'])
+        self.assertEqual(updated_meta['canary'], 'old')
+        self.assertEqual(updated_meta['canary_history'][-1]['to'], 'old')

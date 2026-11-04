@@ -2,6 +2,23 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 灰度多源晋级、升级即时回执与 pip 免探测提速（v1.7.216）
+
+- **灰度发布多源验证与卡死根因修复**：
+  - 现象：生产环境 Campaign 150 锁定灰度节点 RFC JINX，因该节点升级动作超时失败后仍持续上报心跳（`canary_fresh == True`），协调器既不轮换灰度角色，又因未校验集群中已有已验证节点（ZaoZhuang-BGP-NAT、MiaoYun-NAT 均已成功运行 v1.7.215 并达到 `verified`），导致 Campaign 长期卡在 `canary` 状态，拒绝向其余 25 台节点派发波次更新。
+  - 修复：
+    1. 在 `server/fleet_updates.py` 中重构晋级判定：当指定灰度节点尚未 verified 时，主动遍历本活动中所有达到 `status='verified'` 且通过健康观察期（`observed_healthy_version`）的候选节点，一旦存在任何已验证健康的节点，立即将灰度角色迁移至该节点并直接晋级至 `rollout`，解除全集群升级被单一慢节点阻断的死锁。
+    2. 将动作超时回收阈值从 600 秒扩展至 1200 秒（20 分钟），充分对齐 systemd 的 15 分钟超时窗口并为多容器母机的首次全量采样预留裕度。
+- **Client 启动即时心跳回执与 PyPI 免探测**：
+  - 现象：客户端在完成升级脚本重启后，须等待首轮数十个容器采集完整遍历后才上报 `/api/v1/report`，在复杂母机上耗时偏长，容易超出服务端动作等待窗口。
+  - 修复：
+    1. 在 `client/agent.py` 启动阶段检测 `/opt/narwhal-monitor/managed-update-result.json`，若状态为 `installed` 则在容器采集循环启动前立即发送 `/api/v1/actions/result` 刷新 `running` 进度与当前版本，保活动作窗口。
+    2. 在 `scripts/install-client.sh` 中优化常规 `update` 流程，避免在每次常规升级时重复执行 `pip install --upgrade pip`，消灭受限网络环境下的额外 PyPI 网络阻塞风险。
+- **验证结论**：
+  - Python `compileall` 无报错。
+  - 新增 `test_campaign_promotes_when_any_campaign_node_is_verified` 覆盖多源灰度晋级场景。
+  - 全量 956 项单元测试全部通过（0 失败，43 项按环境正常跳过）。
+
 ## 舰队波次升级死锁修复与容器采集并发/时延优化（v1.7.215）
 
 - **舰队波次升级死锁根因修复**：

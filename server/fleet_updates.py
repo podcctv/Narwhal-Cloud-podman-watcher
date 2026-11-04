@@ -177,11 +177,11 @@ def reconcile(conn, version, revision, now=None):
         if n['status'] not in {'dispatched','failed'}:
             continue
         a = conn.execute('SELECT status,created_at,result_message FROM security_actions WHERE id=?', (n['action_id'],)).fetchone()
-        if a and (a['status'] == 'failed' or now-a['created_at'] > 600):
+        if a and (a['status'] == 'failed' or now-a['created_at'] > 1200):
             conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (ident, n['host_id']))
             reason = str(a['result_message'] or 'fleet upgrade timed out')[:400]
             if a['status'] != 'failed':
-                reason = 'Client 未在 10 分钟内回报升级结果'
+                reason = 'Client 未在 20 分钟内回报升级结果'
                 conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=? AND status IN ('queued','dispatched','running')", (reason, now, n['action_id']))
             if int(meta['attempts'].get(n['host_id'], 0)) >= 3:
                 meta.update(paused_at=now, paused_host=n['host_id'], pause_kind='install_failure', paused_from_status=campaign['status'], paused_reason=reason)
@@ -286,6 +286,27 @@ def reconcile(conn, version, revision, now=None):
         automatic and canary and canary['status'] == 'verified' and h
         and (canary_action_healthy or canary_observation_healthy)
     )
+    if not promote and automatic and campaign['status'] == 'canary':
+        for vrow in conn.execute(
+            "SELECT host_id FROM ops_upgrade_nodes WHERE campaign=? AND status='verified'",
+            (ident,),
+        ).fetchall():
+            vhost = vrow['host_id']
+            vh = eligible.get(vhost)
+            if not vh:
+                continue
+            vnode_id = meta.get('nodes', {}).get(vhost, vh['node_id'])
+            if observed_healthy_version(meta, vhost, vnode_id, version, now):
+                meta.setdefault('canary_history', []).append({
+                    'from': canary_host,
+                    'to': vhost,
+                    'at': now,
+                    'reason': 'campaign candidate node verified healthy on target build',
+                })
+                meta['canary'] = vhost
+                canary_host = vhost
+                promote = True
+                break
     if promote:
         conn.execute("UPDATE ops_upgrades SET status='rollout' WHERE id=?", (ident,))
     campaign_status = 'rollout' if promote else campaign['status']
