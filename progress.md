@@ -2,25 +2,34 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
-## Runman Rust v2 兼容（v1.7.206）
+## Runman Rust v2 兼容（v1.7.207）
 
-- Runman Rust v2 新增 root-only `/v1/stop-overload`；它在生命周期锁内复核同一 UUID 代次、运行状态及实时连接阈值，再写入 Stopped desired state 并停止实例。
-- Watcher 连续过载策略开始支持 Runman，队列动作携带实例代次；Agent 不使用通用容器 CLI，目标替换、恢复或证据过期均安全取消。
-- 修复 UDP socket 未计入 Runman 总连接数造成样本被连接策略拒绝的缺陷。
-- 新增有界 `upperdir/up` allocated-block 指标，与 `disk.img` sparse 分配量分开上报；遍历不完整、超出 50,000 项或实例代次变化时标记不可用。
+- 新增有界 upperdir/up allocated-block 指标，与 disk.img sparse 分配量分开上报；遍历不完整、超出 50,000 项或实例代次变化时标记不可用。
 - 面板/XMRig 清理通过 Server 最新报告代次验证，再由 Agent 复核精确进程启动 tick、服务 cgroup 和普通文件指纹；旧告警、软链接及缺少证据的目标拒绝动作。
-- Runman upperdir allocated-block 与 Podman `SizeRw` 保持不同来源语义，不承诺逐字节一致；清理覆盖仍限于本地 allowlist 和 systemd/OpenRC 可确认停止的目标。
+- Runman upperdir allocated-block 与 Podman SizeRw 保持不同来源语义，不承诺逐字节一致；清理覆盖仍限于本地 allowlist 和 systemd/OpenRC 可确认停止的目标。
+- 本次完成源码与静态检查，未在生产 Runman 节点部署或实机验证；未运行测试。Runman Rust 编译与格式校验因本地未安装 cargo 未完成。
+
+## 上游 Runman 适配（v1.7.206）
+
+- 上游修复估算测试跨北京时间午夜时的日桶不稳定问题，并更新 GitHub Actions Node.js Action。
+- 上游为 Runman 加入恶意进程（如 XMRig）和控制面板处置入口，绑定实例代次并通过 guest exec 执行，不停止整个客机；服务端告警动作队列与前端资源防护状态也纳入 Runman。
+- 无策略时的母机防火墙默认服务策略纳入 Runman，启用默认测速拦截与协议规则。
+- 上游进展记录当时报告 936 项测试通过；这不代表本次 v1.7.207 改动已运行测试。
+
+## Runman Rust v2 兼容历史（v1.7.205）
+
+- Runman Rust v2 新增 root-only /v1/stop-overload；它在生命周期锁内复核同一 UUID 代次、运行状态及实时连接阈值，再写入 Stopped desired state 并停止实例。
+- Watcher 连续过载策略支持 Runman，队列动作携带实例代次；Agent 不使用通用容器 CLI，目标替换、恢复或证据过期均安全取消。
+- 修复 UDP socket 未计入 Runman 总连接数造成样本被连接策略拒绝的缺陷。
+- v1.7.205 时，Runman 尚未提供独立 upperdir 指标，也未具备端到端进程/文件代次校验的清理；相关能力现已补齐，但指标口径和 allowlist 范围仍有明确边界。
 - 兼容性为源码与自动化验证，不代表已在生产 Runman 节点部署或实机验证。
 
-- 基于 fork `origin/main` v1.7.202 完成 guest exec、代次绑定扫描与网络隔离、交互 shell 卡片/MOTD、单实例手动/自动限速、磁盘 I/O 和网络指标适配。
-- 补齐自动滥用检测：需要两次新鲜相关证据并复核实例 UUID 代次和进程启动代次后，才隔离 Runman 自有 veth；服务端只接受 `default` 项目、规范 VM UUID 和 v4 实例代次。
-- 本轮补齐 SSH 认证前 Banner（含 sshd 配置/读回/重载校验）、guest UDP socket 计数与进程引用归因、CPU offender 采样、Runman 专属 cgroup-v2 CPU/内存/I/O guards、VMess/Trojan 与测速策略接入，以及管理员复核后的 SOCKS 指定 PID 停止。
-- 补上按需与告警触发的 Runman 深度快照入口；Server 与 Agent 均以实例 UUID 代次绑定请求，实例替换后旧快照任务不会落到新实例。
-- 容器连接证据时间线和运维历史回放接入 Runman，只汇总当前已知实例代次；回放仍只读。
-- 用户定向登录提醒支持 Runman，预览、重试与写入回执都核对告警和最新报告中的同一实例代次。
-- Runman 分开报告 sparse `disk.img` 已分配块和 overlay `upperdir/up` 已分配块；不宣称等同 Podman writable layer。受限的面板/XMRig 服务、配置与二进制清理已接入精确进程/文件代次核验。
-- 持续连接过载自动停止当时保持关闭；现已由 v1.7.205 与 Runman 2.0.2 增加原子代次条件 API。
-- 前端从合并后的最新 `main` 重建静态资源；生产节点没有在本次源代码发布中升级或验证。
+- 基于 fork origin/main v1.7.202 完成 guest exec、代次绑定扫描与网络隔离、交互 shell 卡片/MOTD、单实例手动/自动限速、磁盘 I/O 和网络指标适配。
+- 补齐自动滥用检测：需要两次新鲜相关证据并复核实例 UUID 代次和进程启动代次后，才隔离 Runman 自有 veth；服务端只接受 default 项目、规范 VM UUID 和 v4 实例代次。
+- 补齐 SSH 认证前 Banner（含 sshd 配置/读回/重载校验）、guest UDP socket 计数与进程引用归因、CPU offender 采样、Runman 专属 cgroup-v2 CPU/内存/I/O guards、VMess/Trojan 与测速策略接入，以及管理员复核后的 SOCKS 指定 PID 停止。
+- 按需与告警触发的 Runman 深度快照、容器连接证据时间线与运维历史回放、管理员定向用户登录提醒均绑定报告代次。
+- Runman 分开报告 sparse disk.img 已分配块和 overlay upperdir/up 已分配块；不宣称等同 Podman writable layer。
+- 前端从合并后的最新 main 重建静态资源；生产节点没有在本次源代码发布中升级或验证。
 
 ## Incus 卡住实例巡检与测试回归修复（v1.7.202）
 

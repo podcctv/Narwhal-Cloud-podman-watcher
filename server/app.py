@@ -2424,7 +2424,7 @@ def _empty_host_firewall_policy() -> Dict[str, Any]:
                 "cloudflare", "fast", "iperf3_server", "librespeed",
                 "ookla", "ookla_server", "openspeedtest", "tcpquality",
             ],
-            "service_runtimes": ["incus", "podman"],
+            "service_runtimes": ["incus", "podman", "runman"],
             "interfaces": [],
             "runtimes": [],
         },
@@ -5584,14 +5584,14 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
             (alert["fingerprint"], requested_by, now, now),
         )
         conn.execute("UPDATE security_alerts SET status='suppressed' WHERE id=?", (alert_id,))
-        if alert["alert_type"] == "unauthorized_panel_pairing" and alert["runtime"] in ("podman", "incus"):
+        if alert["alert_type"] == "unauthorized_panel_pairing" and alert["runtime"] in ("podman", "incus", "runman"):
             details = _alert_action_evidence(alert)
             domains = details.get("unapproved_domains") or []
             if domains:
                 action, queued = _queue_security_action_row(
                     conn, alert, "allow_panel_domains", {"domains": domains}, requested_by
                 )
-        elif alert["alert_type"] == "socks_weak_auth" and alert["runtime"] in ("podman", "incus"):
+        elif alert["alert_type"] == "socks_weak_auth" and alert["runtime"] in ("podman", "incus", "runman"):
             action, queued = _queue_security_action_row(
                 conn, alert, "release_socks_auth", {}, requested_by
             )

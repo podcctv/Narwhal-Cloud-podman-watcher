@@ -73,8 +73,15 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(tuple(self.usage())[:2],(100,200))
 
     def test_estimation_is_explicit(self):
-        self.ingest(self.now,self.data(available=False))
-        self.ingest(self.now+300,self.data(rate=10,available=False))
+        # Keep the estimated interval within one local day so this assertion
+        # measures the estimation flag, not the number of daily buckets. The
+        # separate midnight-split test covers intervals that cross day edges.
+        local_midnight = (self.now + 28800) // 86400 * 86400 - 28800
+        start = local_midnight + 12 * 3600
+        if start > self.now:
+            start -= 86400
+        self.ingest(start,self.data(available=False))
+        self.ingest(start+300,self.data(rate=10,available=False))
         self.assertEqual(self.usage()[0],3000)
         self.assertEqual(self.conn.execute("SELECT SUM(estimated) FROM ops_rollups WHERE period='day'").fetchone()[0],1)
 

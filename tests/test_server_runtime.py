@@ -2033,6 +2033,53 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(body["action"]["action_type"], "disallow_panel_domains")
         self.assertEqual(body["action"]["params"]["domains"], ["panel.example.net"])
 
+    def test_server_disposition_deny_allows_runman_remediation_with_instance_id(self):
+        alert = {
+            "type": "unauthorized_panel_pairing",
+            "severity": "critical",
+            "title": "panel",
+            "message": "panel",
+            "runtime": "runman",
+            "project": "default",
+            "container_name": "01234567-89ab-cdef-0123-456789abcdef",
+            "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+            "unapproved_domains": ["panel.example.net"],
+            "process_patterns": ["v2bx"],
+            "config_files": ["/etc/V2bX/config.json"],
+        }
+        conn = server.db()
+        server.process_security_alerts(conn, "host1", 100, [alert])
+        conn.commit()
+        alert_id = conn.execute("SELECT id FROM security_alerts WHERE runtime='runman'").fetchone()["id"]
+        conn.close()
+
+        class State:
+            dashboard_user = "operator"
+
+        class Request:
+            state = State()
+
+            def __init__(self, decision):
+                self.decision = decision
+
+            async def json(self):
+                return {"decision": self.decision}
+
+        response = asyncio.run(
+            server.set_security_alert_disposition(alert_id, Request("deny"))
+        )
+        body = json.loads(response.body)
+        self.assertTrue(body["queued"])
+        self.assertEqual(body["action"]["action_type"], "remediate_panel_pairing")
+        self.assertEqual(body["action"]["runtime"], "runman")
+        self.assertEqual(body["action"]["params"]["instance_id"], "550e8400-e29b-41d4-a716-446655440000")
+
+    def test_empty_host_firewall_policy_includes_runman_in_default_service_runtimes(self):
+        empty_policy = server._empty_host_firewall_policy()
+        self.assertIn("runman", empty_policy["abuse"]["service_runtimes"])
+        self.assertIn("incus", empty_policy["abuse"]["service_runtimes"])
+        self.assertIn("podman", empty_policy["abuse"]["service_runtimes"])
+
     def test_alert_history_page_is_responsive_and_linked_from_dashboard(self):
         history_html = server.security_alert_history_page()
         self.assertIn("安全告警历史", history_html)

@@ -1,6 +1,6 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.206**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.207**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
@@ -8,11 +8,18 @@ Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
 
-### v1.7.206：补齐 Runman 可写层指标和代次绑定安全清理
+### v1.7.207：补齐 Runman 可写层指标和代次绑定安全清理
 
 - Runman inventory 新增 overlay `upperdir/up` 已分配块采样，与 sparse `disk.img` 宿主分配量、客户机文件系统用量分开呈现；遍历有上限，读不全时保持不可用。
 - 面板与 XMRig 清理动作现在端到端携带实例 UUID、进程启动 tick 和文件指纹；Server 验证最新报告代次，Agent 再核验 PID、服务 cgroup 和每个普通文件后才执行清理。
 - UI 仅在具备相应代次证据时开放 Runman 面板/XMRig 处置；旧告警、软链接、证据变化或不支持的服务管理器都会拒绝自动清理。
+
+### v1.7.206：实现 Runman 泛化恶意进程/服务精准处置与全局默认测速拦截
+
+- 补齐 Runman 容器的恶意挖矿/恶意进程（如 xmrig）及控制面板精准停止与配置处置；通过绑定 UUIDv4 实例代次并经由 /run/narwhal-agent/connlimit.sock 发起 guest exec，实现不关机精确停止并读回核验。
+- 服务端告警处置与动作队列全面支持 Runman，严格核对实例 UUID 与代次，防止实例替换或过期导致误杀。
+- 全局无策略时母机防火墙默认服务策略自动纳入 Runman，默认测速拦截与协议规则即开即用。
+- 前端容器状态徽章与详情抽屉全面放行 Runman 资源防护卡片与防护状态透出。
 
 ### v1.7.205：为 Runman 增加代次安全的过载停机
 
