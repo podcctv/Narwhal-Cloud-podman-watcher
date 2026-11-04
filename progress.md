@@ -7,9 +7,9 @@
 - 新增有界 upperdir/up allocated-block、普通文件逻辑字节及文件数指标，与 disk.img sparse 分配量分开上报；抽屉并列展示两种口径。遍历不完整、超出 50,000 项或实例代次变化时标记不可用。
 - 面板/XMRig 清理通过 Server 最新报告代次验证，再由 Agent 复核精确进程启动 tick、服务 cgroup 和普通文件指纹；旧告警、软链接及缺少证据的目标拒绝动作。
 - Runman upperdir 指标仍不承诺与 Podman SizeRw 逐字节一致；清理新增精确 SysVinit 脚本支持，仍限于本地 allowlist 和能安全停止/禁用的目标。
-- 本次实现的源码验证和 GitHub CI 结果待完成；未在生产 Runman 节点部署或实机验证。
-- 本机未安装 cargo，未做本地 Rust 编译/格式校验；Runman 提交 `2fb149d` 后 CI、Rust v2 Release 与滚动 Release 均通过。
-- Watcher 提交 `c17aa7e` 后，Python 3.11/3.12 兼容检查、936 项单测/Linux/OpenRC 集成、浏览器回归、amd64/arm64 镜像冒烟、隔离网络准入和 GHCR 镜像构建均通过。
+- Runman `edd4983` 与 Watcher `7be3e40` 已推送 fork `main`。Runman 格式/Clippy/单元与运行时集成检查、Rust v2 amd64/arm64 构建及 `continuous-rs` 发布、Agent/RFW amd64/arm64 测试和滚动 Release 均通过。
+- Watcher `7be3e40` 的 Python 3.11/3.12 兼容、939 项单测（1 项跳过）、Linux/OpenRC 集成、前端构建与 Chromium 浏览器回归、隔离网络准入、amd64/arm64 镜像冒烟和 GHCR 构建均通过。
+- 本机 `compileall`、Python 全量单测（939 项，38 项跳过）和 Vite 前端构建通过；Windows 环境无 cargo/rustfmt，因此 Rust 编译与格式结论来自 GitHub CI。
 - 未在生产 Runman 节点部署或实机验证。
 
 ## 上游 Runman 适配（v1.7.206）
