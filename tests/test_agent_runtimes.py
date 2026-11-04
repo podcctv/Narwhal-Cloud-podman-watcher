@@ -3043,6 +3043,39 @@ class SecurityTelemetryTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertFalse(agent._hy2_throttle_states[key]["is_throttled"])
 
+    def test_collect_container_execution_safety(self):
+        result = agent.collect_container(
+            name="safe-container",
+            container_id="safe-id-123",
+            runtime="podman",
+            runtime_name="podman",
+            instance_id="inst-456",
+        )
+        self.assertEqual(result.get("name"), "safe-container")
+        self.assertEqual(result.get("id"), "safe-id-123")
+
+    def test_security_summary_hy2_traffic_direction_safety(self):
+        container = {
+            "name": "hy2-box",
+            "runtime": "podman",
+            "project": "",
+            "net_rx_bps": 25000000.0,
+            "net_tx_bps": 5000000.0,
+            "security": {
+                "hy2_protocol": {
+                    "detected": True,
+                    "confidence": "high",
+                    "udp_concurrency": 200,
+                    "unique_remote_ips": 150,
+                },
+                "socket_security": {},
+            },
+        }
+        # Should not raise NameError for traffic_direction
+        summary = agent.collect_security_summary([container], 60.0)
+        self.assertIsInstance(summary, dict)
+
+
 
 if __name__ == "__main__":
     unittest.main()

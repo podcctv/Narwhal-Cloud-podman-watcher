@@ -2,6 +2,25 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 容器采集 NameError 崩溃与节点长期停报快照根因修复（v1.7.218）
+
+- **容器采集 NameError 与循环崩溃根因排查修复**：
+  - 现象：生产环境全集群 26 台拥有容器的母机持续处于“仅保留过期历史快照”（容器采样停留于 15~17 小时前），母机心跳正常（v1.7.203）但容器数据全无上报，升级波次超时（`status: failed, Client 未在 20 分钟内回报升级结果`）。仅有无容器的纯 NAT 节点（MiaoYun-NAT、ZaoZhuang-BGP-NAT）升级成功并上报正常。
+  - 根因分析：
+    1. 在 `client/agent.py` 的 `collect_container()` 函数内（第 8886 行），调用 `_refine_socks_listener_evidence(..., instance_id=str(container.get('instance_id') or ''))` 时，直接引用了未在作用域内定义的变量 `container`，导致运行任意容器采集时直接抛出 `NameError: name 'container' is not defined`。
+    2. 主循环 `for c in containers:` 缺少独立的异常捕获保护，单容器采集抛错直接穿透终止主进程，触发 systemd 每 5 秒重启并陷入无休止崩溃循环，`/api/v1/report` 完全无法发出。
+    3. `client/agent.py` 顶层缺少 `from pathlib import Path` 导入，导致启动读取 `managed-update-result.json` 静默报错。
+    4. `collect_security_summary()` 在 Hysteria 2 流量评估时存在未定义的 `traffic_direction` 隐患。
+  - 修复：
+    1. 在 `collect_container()` 签名中增加 `instance_id: str = ""` 参数，并将其传递至 `_refine_socks_listener_evidence`（兼容 `instance_id or container_id`）。
+    2. 在 `main()` 的容器采集循环中传入 `instance_id`，并使用独立 `try...except` 块包裹容器扫描，捕获异常后生成降级存活快照，坚决不因单容器异常导致全量采集与上报中断。
+    3. 修复 `client/agent.py` 顶层 `from pathlib import Path` 导入。
+    4. 修复 `collect_security_summary` 中的 `traffic_direction` 流量偏向变量计算。
+- **验证结论**：
+  - 本地 Python 复现 `collect_container` 触发 `NameError`，修复后测试通过。
+  - 新增 `test_collect_container_execution_safety` 与 `test_security_summary_hy2_traffic_direction_safety` 自动化回归用例。
+  - 全量 958 项单元测试全部通过。
+
 ## 客户端更新免 apt/Podman 重复探测与错误诊断增强（v1.7.217）
 
 - **无运行时/NAT 探针节点更新免 Podman/apt 检查修复**：

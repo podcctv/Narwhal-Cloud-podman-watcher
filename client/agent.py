@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
 from urllib.parse import quote, urlparse
@@ -4668,6 +4669,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             max_traffic = max(rx_bps, tx_bps)
             is_bandwidth_enough = (max_traffic >= throttle_min_bps)
 
+            traffic_direction = "outbound_heavy" if tx_bps > rx_bps else "inbound_heavy"
             direction_matches = (
                 throttle_direction == "any"
                 or (throttle_direction == "outbound_heavy" and traffic_direction == "outbound_heavy")
@@ -8420,6 +8422,7 @@ def collect_container(
     precomputed_network_addresses: List[str] | None = None,
     host_conntrack: Dict[str, object] | None = None,
     precomputed_runman_resources: Dict[str, object] | None = None,
+    instance_id: str = "",
 ) -> Dict:
     runtime = "runman" if runtime_name == "runman" else runtime or get_container_bin()
     runtime_name = runtime_name or _runtime_kind(runtime)
@@ -8883,7 +8886,7 @@ def collect_container(
                                   runtime, name, project, pid,
                                   scope_complete=communication.get('communication_detail_available') is True
                                       and not communication.get('communication_snapshot_truncated'),
-                                  instance_id=str(container.get('instance_id') or ''))
+                                  instance_id=str(instance_id or container_id or ''))
     auto_block_vmess = os.getenv("SECURITY_AUTO_BLOCK_VMESS", "true").strip().lower() not in ("0", "false", "no", "off")
     host_or_shared_network = network_mode == "host" or network_mode.startswith(("container:", "ns:"))
     vmess_listener_inventory_complete = vmess_target_inventory_complete
@@ -12438,19 +12441,20 @@ def main() -> None:
                     )
                 except Exception as action_error:
                     print(f"security action poll failed: {action_error}")
-            if c.get("runtime") == "runman" and c.get("status") != "running":
-                container_report = collect_runman_report(c)
-                container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
-                collected.append(container_report)
-                continue
-            if c.get("runtime") == "docker" and docker_mode == "notice":
-                collected.append(collect_docker_notice(c))
-                continue
             try:
-                pid_hint = int(c.get("pid", "") or 0)
-            except ValueError:
-                pid_hint = 0
-            container_report = collect_container(
+                if c.get("runtime") == "runman" and c.get("status") != "running":
+                    container_report = collect_runman_report(c)
+                    container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
+                    collected.append(container_report)
+                    continue
+                if c.get("runtime") == "docker" and docker_mode == "notice":
+                    collected.append(collect_docker_notice(c))
+                    continue
+                try:
+                    pid_hint = int(c.get("pid", "") or 0)
+                except ValueError:
+                    pid_hint = 0
+                container_report = collect_container(
                     c["name"],
                     c.get("id", ""),
                     c.get("runtime_bin", ""),
@@ -12466,32 +12470,56 @@ def main() -> None:
                     c.get("network_addresses") if isinstance(c.get("network_addresses"), list) else None,
                     host_conntrack,
                     c.get("runman_resources") if c.get("runtime") == "runman" and isinstance(c.get("runman_resources"), dict) else None,
+                    instance_id=str(c.get("instance_id") or c.get("stable_id") or c.get("id") or ""),
                 )
-            if c.get("runtime") == "runman":
-                container_report = collect_runman_report(c, container_report)
-            container_security = container_report.get("security")
-            container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
-            if security_enabled and isinstance(container_security, dict):
-                container_security["access_log"] = _collect_container_access_log_stats(c, security_interval)
-            pending_deep_sample = _pending_deep_sample_for(c)
-            if c.get("runtime") == "runman" and c.get("status") != "running":
-                pending_deep_sample = None
-            if pending_deep_sample is not None:
-                try:
-                    container_report["deep_sample"] = collect_container_deep_sample(
-                        c["name"],
-                        str(c.get("runtime_bin") or ""),
-                        str(c.get("runtime") or ""),
-                        str(c.get("project") or ""),
-                        pid_hint,
-                        pending_deep_sample,
-                        container_report,
-                        host_conntrack,
-                    )
-                    included_deep_sample_ids.append(int(pending_deep_sample.get("id") or 0))
-                except Exception as deep_error:
-                    print(f"deep sample failed for {c.get('name')}: {deep_error}")
-            collected.append(container_report)
+                if c.get("runtime") == "runman":
+                    container_report = collect_runman_report(c, container_report)
+                container_security = container_report.get("security")
+                container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
+                if security_enabled and isinstance(container_security, dict):
+                    container_security["access_log"] = _collect_container_access_log_stats(c, security_interval)
+                pending_deep_sample = _pending_deep_sample_for(c)
+                if c.get("runtime") == "runman" and c.get("status") != "running":
+                    pending_deep_sample = None
+                if pending_deep_sample is not None:
+                    try:
+                        container_report["deep_sample"] = collect_container_deep_sample(
+                            c["name"],
+                            str(c.get("runtime_bin") or ""),
+                            str(c.get("runtime") or ""),
+                            str(c.get("project") or ""),
+                            pid_hint,
+                            pending_deep_sample,
+                            container_report,
+                            host_conntrack,
+                        )
+                        included_deep_sample_ids.append(int(pending_deep_sample.get("id") or 0))
+                    except Exception as deep_error:
+                        print(f"deep sample failed for {c.get('name')}: {deep_error}")
+                collected.append(container_report)
+            except Exception as container_err:
+                print(f"collect_container error for {c.get('name')}: {container_err}")
+                collected.append({
+                    "id": c.get("id", ""),
+                    "name": c.get("name", "unknown"),
+                    "runtime": c.get("runtime", ""),
+                    "project": c.get("project", ""),
+                    "status": c.get("status", "running"),
+                    "stable_id": c.get("stable_id") or c.get("id") or "",
+                    "instance_id": str(c.get("instance_id") or c.get("stable_id") or c.get("id") or ""),
+                    "cpu_percent": 0.0,
+                    "mem_bytes": 0,
+                    "mem_limit_bytes": 0,
+                    "mem_percent": 0.0,
+                    "net_rx_bps": 0.0,
+                    "net_tx_bps": 0.0,
+                    "conn_count": 0,
+                    "tcp_country_stats": [],
+                    "udp_country_stats": [],
+                    "disk": collect_disk_alert(),
+                    "container_disk": {"rw_bytes": 0, "rootfs_bytes": 0},
+                    "collection_error": str(container_err),
+                })
         incus_runtime_health = _collect_incus_runtime_health()
         security = collect_security_summary(collected, security_interval, incus_runtime_health)
         # The init PID and its kernel start tick are local procfs write guards;
