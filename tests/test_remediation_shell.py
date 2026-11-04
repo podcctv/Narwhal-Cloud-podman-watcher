@@ -100,6 +100,32 @@ class RemediationShellTests(unittest.TestCase):
         self.assertEqual((matched, killed, errors), (1, 1, 0), output)
         self.assertNotIn("fixture_signal=-TERM:446", output)
 
+    def test_runman_sysvinit_cleanup_script_is_valid_posix_shell(self):
+        vm_id = "01234567-89ab-cdef-0123-456789abcdef"
+        instance_id = "550e8400-e29b-41d4-a716-446655440000"
+        params = {
+            "instance_id": instance_id,
+            "process_targets": [
+                {"pid": 1234, "process": "xmrig", "pattern": "xmrig", "start_ticks": "987654"}
+            ],
+            "file_targets": [
+                {"path": "/etc/init.d/xmrig", "generation": "1:2:3:4:5:755", "kind": "service"}
+            ],
+        }
+        with mock.patch.object(
+            agent, "_runman_service_file_candidates", return_value=["/etc/init.d/xmrig"]
+        ), mock.patch.object(
+            agent, "_runman_exec_request", return_value=(True, "removed_services=1")
+        ) as runner, mock.patch.dict(
+            agent._runman_instance_generations, {vm_id: instance_id}, clear=True
+        ):
+            ok, _ = agent._runman_guarded_cleanup(vm_id, "default", params, {"xmrig"}, set())
+
+        self.assertTrue(ok)
+        script = runner.call_args.args[2]
+        parsed = subprocess.run([SHELL, "-n", "-c", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(parsed.returncode, 0, parsed.stdout + parsed.stderr)
+
     def test_zero_changes_keep_diagnostics_and_verify_remaining_supervisor(self):
         self.process(446, "supervise-daemo", ["supervise-daemon", "flyair-reality-tokyo",
                      "/opt/flyair-reality-tokyo/xboard-node"])

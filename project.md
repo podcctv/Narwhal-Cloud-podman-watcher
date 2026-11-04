@@ -1,10 +1,10 @@
 # 项目概览
 
-更新基线：本次合并 fork `origin/main` 的 v1.7.206，并发布 Runman Rust v2 兼容更新 `1.7.207`（2026-11-04）。提交历史与主要功能索引见 [README.md](README.md)。
+更新基线：在 fork `origin/main` 的 v1.7.207 上实现 Runman upperdir 双口径可写层视图和 SysVinit 精准服务清理，当前版本 `1.7.208`（2026-11-04）。提交历史与主要功能索引见 [README.md](README.md)。
 
 ## 项目目标
 
-Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus、Docker 与 Runman Rust v2 实例及主机状态，并提供告警、调查、受控保护和运维工作流。Incus 实例状态巡检、生命周期操作卡死告警与 stop 前二次核验见 [Incus 运行时健康手册](docs/incus-runtime-health.md)。Runman 支持代次绑定的受限 guest exec、只读进程/监听/协议扫描与深度快照、连接来源时间线/历史回放、shell 卡片/MOTD/按用户定向登录提醒/条件式 SSH 认证前 Banner、主机 RFW、TCP 限额、自动滥用检测与 veth 隔离、手动/自动限速、CPU offender 采样、UDP socket/进程引用指标、cgroup v2 CPU/内存/I/O guards、明确选择或全局默认策略下的 VMess/Trojan/测速保护、人工复核后的 SOCKS 指定进程停止，以及带连续新鲜证据和 UUID 代次条件的过载自动停止。Runman 另外上报 overlay `upperdir/up` 分配块，并通过进程启动 tick/文件指纹支持 allowlist 范围内的面板与 XMRig 清理；两者均不承诺与 Podman `SizeRw` 或广义递归清理逐项等价。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
+Narwhal Cloud Container Watcher 由 Server、Client Agent 和 Web 界面组成，用于监测 Podman、Incus、Docker 与 Runman Rust v2 实例及主机状态，并提供告警、调查、受控保护和运维工作流。Incus 实例状态巡检、生命周期操作卡死告警与 stop 前二次核验见 [Incus 运行时健康手册](docs/incus-runtime-health.md)。Runman 支持代次绑定的受限 guest exec、只读进程/监听/协议扫描与深度快照、连接来源时间线/历史回放、shell 卡片/MOTD/按用户定向登录提醒/条件式 SSH 认证前 Banner、主机 RFW、TCP 限额、自动滥用检测与 veth 隔离、手动/自动限速、CPU offender 采样、UDP socket/进程引用指标、cgroup v2 CPU/内存/I/O guards、明确选择或全局默认策略下的 VMess/Trojan/测速保护、人工复核后的 SOCKS 指定进程停止，以及带连续新鲜证据和 UUID 代次条件的过载自动停止。Runman 上报 overlay `upperdir/up` 普通文件逻辑字节和已分配块，并通过进程启动 tick/文件指纹支持 allowlist 面板与 XMRig 清理、systemd/OpenRC/SysVinit 精确服务停止。upperdir 指标不承诺与 Podman `SizeRw` 逐字节等价，清理也不执行任意递归删除。部署状态、采样新鲜度、策略回执和实际生效状态需要分开判断。
 
 ## 组件与入口
 

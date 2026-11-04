@@ -70,6 +70,8 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
                     "source": "runman_overlay_upperdir_allocated",
                     "sampled_at": 100,
                     "allocated_bytes": 12 * 1024 * 1024,
+                    "logical_file_bytes": 10 * 1024 * 1024,
+                    "regular_files": 7,
                 },
                 "traffic_in_bytes": 1000000,
                 "traffic_out_bytes": 2000000,
@@ -94,6 +96,9 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
         self.assertTrue(r1["container_disk"]["rw_available"])
         self.assertEqual(r1["container_disk"]["rw_bytes"], 12 * 1024 * 1024)
         self.assertEqual(r1["container_disk"]["rw_source"], "runman_overlay_upperdir_allocated")
+        self.assertTrue(r1["container_disk"]["rw_logical_available"])
+        self.assertEqual(r1["container_disk"]["rw_logical_file_bytes"], 10 * 1024 * 1024)
+        self.assertEqual(r1["container_disk"]["rw_regular_files"], 7)
         self.assertEqual(r1["container_disk"]["fs"]["root"]["total_bytes"], 40 * 1024 * 1024 * 1024)
 
         # Second cycle after 10 seconds with 500,000 extra bytes rx and 1,000,000 extra bytes tx
@@ -109,6 +114,62 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(r2["net_tx_bps"], 100000.0, delta=1.0)
         self.assertEqual(r2["traffic_counters"]["rx"], 1500000)
         self.assertEqual(r2["traffic_counters"]["tx"], 3000000)
+
+    def test_latest_exposes_only_fresh_runman_writable_layer_metrics(self):
+        vm_id = "11111111-2222-3333-4444-555555555555"
+        now = int(time.time())
+        payload = {
+            "id": vm_id,
+            "stable_id": vm_id,
+            "runtime": "runman",
+            "container_disk": {
+                "rw_available": True,
+                "rw_source": "runman_overlay_upperdir_allocated",
+                "rw_bytes": 8192,
+                "rw_sampled_at": now,
+                "rw_logical_available": True,
+                "rw_logical_source": "runman_overlay_upperdir_logical_file_bytes",
+                "rw_logical_file_bytes": 4096,
+                "rw_regular_files": 3,
+            },
+        }
+        conn = server.db()
+        try:
+            conn.execute("INSERT INTO hosts(host_id,last_seen,node_id) VALUES('runman-host',?,'runman-node')", (now,))
+            conn.execute(
+                """
+                INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,
+                  net_rx_bps,net_tx_bps,conn_count,disk_file,disk_used_percent,podman_network_ok_v4,
+                  podman_network_ok_v6,ts,payload_json)
+                VALUES('runman-host',?,'runman','default',0,0,0,0,0,0,'',0,1,1,?,?)
+                """,
+                (vm_id, now, json.dumps(payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        fresh = next(item for item in json.loads(server.latest().body.decode())["items"] if item["container_name"] == vm_id)
+        self.assertTrue(fresh["container_disk_rw_available"])
+        self.assertTrue(fresh["container_disk_rw_logical_available"])
+        self.assertEqual(fresh["container_disk_rw_bytes"], 8192)
+        self.assertEqual(fresh["container_disk_rw_logical_file_bytes"], 4096)
+        self.assertEqual(fresh["container_disk_rw_regular_files"], 3)
+
+        payload["container_disk"]["rw_sampled_at"] = now - 301
+        conn = server.db()
+        try:
+            conn.execute(
+                "UPDATE reports SET payload_json=? WHERE host_id='runman-host' AND container_name=?",
+                (json.dumps(payload), vm_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        stale = next(item for item in json.loads(server.latest().body.decode())["items"] if item["container_name"] == vm_id)
+        self.assertFalse(stale["container_disk_rw_available"])
+        self.assertFalse(stale["container_disk_rw_logical_available"])
+        self.assertIsNone(stale["container_disk_rw_logical_file_bytes"])
 
     def test_runman_report_preserves_guest_security_scans_and_fresh_io_metrics(self):
         container = {

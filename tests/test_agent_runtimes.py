@@ -2480,6 +2480,43 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertIn("/etc/V2bX/config.json", args[2])
         self.assertIn("1:2:3:4:5:644", args[2])
 
+    def test_runman_guarded_cleanup_supports_sysvinit_with_exact_file_identity(self):
+        vm_id = "01234567-89ab-cdef-0123-456789abcdef"
+        instance_id = "550e8400-e29b-41d4-a716-446655440000"
+        action_params = {
+            "instance_id": instance_id,
+            "process_targets": [
+                {"pid": 1234, "process": "xmrig", "pattern": "xmrig", "start_ticks": "987654"}
+            ],
+            "file_targets": [
+                {"path": "/etc/init.d/xmrig", "generation": "1:2:3:4:5:755", "kind": "service"}
+            ],
+        }
+        with mock.patch.object(
+            agent, "_runman_service_file_candidates", return_value=["/etc/init.d/xmrig"]
+        ), mock.patch.object(
+            agent, "_runman_exec_request", return_value=(True, "removed_services=1")
+        ) as runner, mock.patch.dict(
+            agent._runman_instance_generations, {vm_id: instance_id}, clear=True
+        ):
+            ok, _ = agent._runman_guarded_cleanup(
+                vm_id, "default", action_params, {"xmrig"}, set()
+            )
+
+        self.assertTrue(ok)
+        script = runner.call_args.args[2]
+        self.assertIn(
+            "file_identity /etc/init.d/xmrig 1:2:3:4:5:755 && [ -x /etc/init.d/xmrig ] && ( (command -v update-rc.d",
+            script,
+        )
+        self.assertIn("update-rc.d -f xmrig remove", script)
+        self.assertIn("chkconfig --del xmrig", script)
+        self.assertIn("file_identity /etc/init.d/xmrig 1:2:3:4:5:755 && /etc/init.d/xmrig stop", script)
+        self.assertIn(
+            "file_identity /etc/init.d/xmrig 1:2:3:4:5:755 && rm -f -- /etc/init.d/xmrig",
+            script,
+        )
+
     def test_docker_xmrig_is_notice_only_and_never_auto_remediated(self):
         container = {
             "name": "customer-helper",

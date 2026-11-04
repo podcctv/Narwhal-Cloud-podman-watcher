@@ -1,12 +1,18 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.207**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.208**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.7.208：扩展 Runman 可写层视图与 SysVinit 精准清理
+
+- Runman inventory 在 upperdir 已分配块之外增加普通文件逻辑字节与文件数；抽屉明确展示两种口径，不把它们标成 Podman `SizeRw` 等价值。
+- Runman 服务清理增加 SysVinit：只有由 allowlist 进程名精确推导、指纹未变化的普通 `/etc/init.d/<name>` 文件，且 `update-rc.d` 或 `chkconfig` 成功禁用、服务脚本成功停止后，才移除该文件。
+- systemd、OpenRC 与 SysVinit 服务动作在停止或删除前再次核验文件指纹；软链接、证据变化和未支持的管理器仍保留待人工处理。
 
 ### v1.7.207：补齐 Runman 可写层指标和代次绑定安全清理
 

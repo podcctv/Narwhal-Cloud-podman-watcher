@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import re
 import sqlite3
 import threading
@@ -4204,6 +4205,18 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             rw_available = container_disk.get("rw_available") is True or (
                 type(rw_bytes) is int and rw_bytes >= 0
             )
+        rw_logical_file_bytes = container_disk.get("rw_logical_file_bytes")
+        rw_regular_files = container_disk.get("rw_regular_files")
+        rw_logical_available = (
+            r["runtime"] == "runman"
+            and rw_available
+            and container_disk.get("rw_logical_available") is True
+            and container_disk.get("rw_logical_source") == "runman_overlay_upperdir_logical_file_bytes"
+            and type(rw_logical_file_bytes) is int
+            and rw_logical_file_bytes >= 0
+            and type(rw_regular_files) is int
+            and 0 <= rw_regular_files <= 50_000
+        )
         top_cpu_process = payload.get("top_cpu_process", {})
         offline_hours = stale_seconds // 3600
         rx_bps = float(r["net_rx_bps"] or 0)
@@ -4276,6 +4289,14 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "container_disk_rw_available": rw_available,
             "container_disk_rw_source": container_disk.get("rw_source", "runtime_size_rw"),
             "container_disk_rw_sampled_at": rw_sampled_at if rw_available else 0,
+            "container_disk_rw_logical_available": rw_logical_available,
+            "container_disk_rw_logical_source": (
+                container_disk.get("rw_logical_source", "") if rw_logical_available else ""
+            ),
+            "container_disk_rw_logical_file_bytes": (
+                rw_logical_file_bytes if rw_logical_available else None
+            ),
+            "container_disk_rw_regular_files": rw_regular_files if rw_logical_available else None,
             "container_disk_rootfs_bytes": container_disk.get("rootfs_bytes", 0),
             "container_disk_backing_image_available": backing_image_available,
             "container_disk_backing_image_logical_bytes": backing_image.get("logical_bytes") if backing_image_available else None,
@@ -5059,7 +5080,7 @@ def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
             if (
                 isinstance(path, str) and len(path) <= 256
                 and re.fullmatch(r"/[A-Za-z0-9_./@:+-]{1,255}", path)
-                and os.path.normpath(path) == path
+                and posixpath.normpath(path) == path
                 and isinstance(generation, str)
                 and re.fullmatch(r"[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-7]{3,4}", generation)
                 and isinstance(kind, str)

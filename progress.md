@@ -2,11 +2,12 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
-## Runman Rust v2 兼容（v1.7.207）
+## Runman Rust v2 兼容（v1.7.208）
 
-- 新增有界 upperdir/up allocated-block 指标，与 disk.img sparse 分配量分开上报；遍历不完整、超出 50,000 项或实例代次变化时标记不可用。
+- 新增有界 upperdir/up allocated-block、普通文件逻辑字节及文件数指标，与 disk.img sparse 分配量分开上报；抽屉并列展示两种口径。遍历不完整、超出 50,000 项或实例代次变化时标记不可用。
 - 面板/XMRig 清理通过 Server 最新报告代次验证，再由 Agent 复核精确进程启动 tick、服务 cgroup 和普通文件指纹；旧告警、软链接及缺少证据的目标拒绝动作。
-- Runman upperdir allocated-block 与 Podman SizeRw 保持不同来源语义，不承诺逐字节一致；清理覆盖仍限于本地 allowlist 和 systemd/OpenRC 可确认停止的目标。
+- Runman upperdir 指标仍不承诺与 Podman SizeRw 逐字节一致；清理新增精确 SysVinit 脚本支持，仍限于本地 allowlist 和能安全停止/禁用的目标。
+- 本次实现的源码验证和 GitHub CI 结果待完成；未在生产 Runman 节点部署或实机验证。
 - 本机未安装 cargo，未做本地 Rust 编译/格式校验；Runman 提交 `2fb149d` 后 CI、Rust v2 Release 与滚动 Release 均通过。
 - Watcher 提交 `c17aa7e` 后，Python 3.11/3.12 兼容检查、936 项单测/Linux/OpenRC 集成、浏览器回归、amd64/arm64 镜像冒烟、隔离网络准入和 GHCR 镜像构建均通过。
 - 未在生产 Runman 节点部署或实机验证。

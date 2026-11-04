@@ -35,6 +35,12 @@ export interface ContainerItem {
   agent_version?: string;
   cpu_effective_cpus?: number;
   container_disk_rw_bytes?: number;
+  container_disk_rw_available?: boolean;
+  container_disk_rw_source?: string;
+  container_disk_rw_logical_available?: boolean;
+  container_disk_rw_logical_source?: string;
+  container_disk_rw_logical_file_bytes?: number | null;
+  container_disk_rw_regular_files?: number | null;
   container_disk_backing_image_available?: boolean;
   container_disk_backing_image_logical_bytes?: number | null;
   container_disk_backing_image_allocated_bytes?: number | null;

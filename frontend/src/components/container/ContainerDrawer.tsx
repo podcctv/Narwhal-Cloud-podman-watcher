@@ -717,6 +717,25 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
             </div>
 
             {identity.runtime === 'runman' && (
+              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4" aria-label="Runman 可写层占用">
+                <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                  <HardDrive className="h-4 w-4 text-sky-300" />
+                  Runman 可写层占用
+                </div>
+                <p className="mt-2 text-sm tabular-nums text-slate-200">
+                  {container?.container_disk_rw_available
+                    ? container.container_disk_rw_logical_available
+                      ? `${formatMetricBytes(container.container_disk_rw_logical_file_bytes)} / ${formatMetricBytes(container.container_disk_rw_bytes)}`
+                      : `逻辑文件量不可用 · ${formatMetricBytes(container.container_disk_rw_bytes)}`
+                    : '当前样本不可用'}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  普通文件逻辑内容 / upperdir 已分配块；不含目录、符号链接、xattr 和 whiteout 归档开销，与 Podman SizeRw 不保证逐字节等价。
+                </p>
+              </section>
+            )}
+
+            {identity.runtime === 'runman' && (
               <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4" aria-label="Runman 磁盘镜像占用">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
                   <HardDrive className="h-4 w-4 text-emerald-300" />

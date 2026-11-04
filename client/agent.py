@@ -8159,6 +8159,26 @@ def collect_runman_report(
         'rw_available': writable_layer_available,
         'rw_source': 'runman_overlay_upperdir_allocated',
         'rw_sampled_at': writable_layer.get('sampled_at') if writable_layer_available else 0,
+        'rw_logical_file_bytes': (
+            writable_layer.get('logical_file_bytes')
+            if writable_layer_available
+            and type(writable_layer.get('logical_file_bytes')) is int
+            and writable_layer.get('logical_file_bytes') >= 0
+            else None
+        ),
+        'rw_logical_available': (
+            writable_layer_available
+            and type(writable_layer.get('logical_file_bytes')) is int
+            and writable_layer.get('logical_file_bytes') >= 0
+        ),
+        'rw_logical_source': 'runman_overlay_upperdir_logical_file_bytes',
+        'rw_regular_files': (
+            writable_layer.get('regular_files')
+            if writable_layer_available
+            and type(writable_layer.get('regular_files')) is int
+            and 0 <= writable_layer.get('regular_files') <= 50_000
+            else None
+        ),
         'rootfs_bytes': disk_bytes,
         'fs': container_fs,
         'available': resources.get('container_fs_available') is True or disk_bytes > 0,
@@ -8187,7 +8207,11 @@ def collect_runman_report(
             merged_fs[fs_name] = existing_fs[fs_name]
     container_disk.update({
         key: value for key, value in existing_disk.items()
-        if key not in {'rw_bytes', 'rw_available', 'rw_source', 'rw_sampled_at', 'rootfs_bytes', 'fs', 'io', 'available', 'backing_image'}
+        if key not in {
+            'rw_bytes', 'rw_available', 'rw_source', 'rw_sampled_at',
+            'rw_logical_file_bytes', 'rw_logical_available', 'rw_regular_files',
+            'rootfs_bytes', 'fs', 'io', 'available', 'backing_image',
+        }
     })
     container_disk['fs'] = merged_fs
     report.update({
@@ -11380,7 +11404,7 @@ def _runman_guarded_cleanup(
     script_parts = [
         "set -u",
         _cleanup_receipt_shell().rstrip(" ;"),
-        f"killed_processes=0; removed_services=0; removed_configs=0; removed_binaries=0; cleanup_errors=0; matched_processes=0; signal_errors=0; checked_configs=0; no_process_targets={1 if not process_targets else 0}; remaining_processes=0;",
+        f"killed_processes=0; removed_services=0; removed_configs=0; removed_binaries=0; cleanup_errors=0; matched_processes=0; signal_errors=0; checked_configs=0; no_process_targets={1 if not process_targets else 0}; remaining_processes=0",
         "process_identity() { p=$1; ticks=$2; expected=$3; pattern=$4; stat=/proc/$p/stat; [ -r \"$stat\" ] || return 1; start=$(sed 's/^.*) //' \"$stat\" 2>/dev/null | awk '{print $20}'); [ \"$start\" = \"$ticks\" ] || return 1; comm=$(cat /proc/$p/comm 2>/dev/null || true); argv0=$(tr '\\000' '\\n' < /proc/$p/cmdline 2>/dev/null | head -n 1); exe=$(readlink /proc/$p/exe 2>/dev/null || true); for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do lower=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); [ \"$lower\" = \"$expected\" ] && return 0; case \"$lower\" in *\"$pattern\"*) return 0;; esac; done; return 1; }",
         "file_identity() { path=$1; expected=$2; [ -f \"$path\" ] && [ ! -L \"$path\" ] || return 1; current=$(stat -c '%d:%i:%s:%Y:%Z:%a' \"$path\" 2>/dev/null) || return 1; [ \"$current\" = \"$expected\" ]; }",
     ]
@@ -11402,11 +11426,11 @@ def _runman_guarded_cleanup(
         unit = posixpath.basename(path)
         if path.startswith(("/etc/systemd/system/", "/lib/systemd/system/", "/usr/lib/systemd/system/", "/run/systemd/system/")):
             script_parts.append(
-                f"svc_stopped=0; if command -v systemctl >/dev/null 2>&1 && systemctl disable --now {q(unit)} >/dev/null 2>&1; then svc_stopped=1; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; if [ \"$svc_stopped\" -eq 1 ]; then if file_identity {q(path)} {q(target['generation'])} && rm -f -- {q(path)}; then removed_services=$((removed_services+1)); nw_receipt service {q(path)} ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; fi"
+                f"svc_stopped=0; if file_identity {q(path)} {q(target['generation'])} && command -v systemctl >/dev/null 2>&1 && systemctl disable --now {q(unit)} >/dev/null 2>&1; then svc_stopped=1; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; if [ \"$svc_stopped\" -eq 1 ]; then if file_identity {q(path)} {q(target['generation'])} && rm -f -- {q(path)}; then removed_services=$((removed_services+1)); nw_receipt service {q(path)} ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; fi"
             )
         else:
             script_parts.append(
-                f"svc_stopped=0; if command -v rc-service >/dev/null 2>&1 && rc-service {q(unit)} stop >/dev/null 2>&1; then svc_stopped=1; command -v rc-update >/dev/null 2>&1 && rc-update del {q(unit)} >/dev/null 2>&1 || true; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; if [ \"$svc_stopped\" -eq 1 ]; then if file_identity {q(path)} {q(target['generation'])} && rm -f -- {q(path)}; then removed_services=$((removed_services+1)); nw_receipt service {q(path)} ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; fi"
+                f"svc_stopped=0; if file_identity {q(path)} {q(target['generation'])} && command -v rc-service >/dev/null 2>&1 && rc-service {q(unit)} stop >/dev/null 2>&1; then svc_stopped=1; command -v rc-update >/dev/null 2>&1 && rc-update del {q(unit)} >/dev/null 2>&1 || true; elif file_identity {q(path)} {q(target['generation'])} && [ -x {q(path)} ] && ( (command -v update-rc.d >/dev/null 2>&1 && update-rc.d -f {q(unit)} remove >/dev/null 2>&1) || (command -v chkconfig >/dev/null 2>&1 && chkconfig --del {q(unit)} >/dev/null 2>&1) ) && file_identity {q(path)} {q(target['generation'])} && {q(path)} stop >/dev/null 2>&1; then svc_stopped=1; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; if [ \"$svc_stopped\" -eq 1 ]; then if file_identity {q(path)} {q(target['generation'])} && rm -f -- {q(path)}; then removed_services=$((removed_services+1)); nw_receipt service {q(path)} ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; fi"
             )
 
     for target in process_targets:
