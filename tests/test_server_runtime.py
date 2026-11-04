@@ -2610,6 +2610,86 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(body_apply["action"]["params"]["rate_mbps"], 10)
 
 
+    def test_report_handles_null_disk_payload_and_updates_last_seen(self):
+        now = int(time.time())
+        payload = {
+            "host_id": "null-disk-host",
+            "agent_version": "1.0.0",
+            "timestamp": now,
+            "container_network": {"ipv4_ok": True, "ipv6_ok": False},
+            "disk": None,
+            "security": {
+                "enabled": True,
+                "total_rx_bps": 100,
+                "total_rx_pps": 1,
+                "syn_recv_count": 0,
+                "access_log": {"enabled": False},
+                "alerts": [],
+            },
+            "containers": [
+                {
+                    "id": "c-null-disk",
+                    "name": "null-disk-app",
+                    "runtime": "podman",
+                    "project": "default",
+                    "cpu_percent": 1.0,
+                    "disk": None,
+                }
+            ],
+        }
+        body = json.dumps(payload).encode()
+
+        class Request:
+            async def body(self):
+                return body
+
+        timestamp = str(now)
+        signature = hmac.new(
+            server.SHARED_SECRET.encode(), body + timestamp.encode(), hashlib.sha256
+        ).hexdigest()
+        result = asyncio.run(server.report(Request(), timestamp, signature))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["records"], 1)
+
+        conn = sqlite3.connect(server.DB_PATH)
+        row = conn.execute("SELECT last_seen FROM hosts WHERE host_id = 'null-disk-host'").fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], now)
+
+        latest_body = json.loads(server.latest().body)
+        items = [i for i in latest_body["items"] if i["host_id"] == "null-disk-host"]
+        self.assertEqual(len(items), 1)
+        self.assertIsNone(items[0]["disk_used_percent"])
+
+    def test_poll_security_actions_updates_host_last_seen(self):
+        now = int(time.time())
+        old_seen = now - 500
+        conn = sqlite3.connect(server.DB_PATH)
+        conn.execute(
+            "INSERT OR REPLACE INTO hosts (host_id, last_seen, agent_version) VALUES (?, ?, ?)",
+            ("poll-touch-host", old_seen, "1.0.0"),
+        )
+        conn.commit()
+        conn.close()
+
+        payload = json.dumps({"host_id": "poll-touch-host"}).encode()
+        class PollRequest:
+            async def body(self):
+                return payload
+
+        ts = str(now)
+        sig = hmac.new(server.SHARED_SECRET.encode(), payload + ts.encode(), hashlib.sha256).hexdigest()
+        resp = asyncio.run(server.poll_security_actions(PollRequest(), ts, sig))
+        data = json.loads(resp.body)
+        self.assertIn("actions", data)
+
+        conn = sqlite3.connect(server.DB_PATH)
+        row = conn.execute("SELECT last_seen FROM hosts WHERE host_id = 'poll-touch-host'").fetchone()
+        conn.close()
+        self.assertEqual(row[0], now)
+
+
 if __name__ == "__main__":
     unittest.main()
 

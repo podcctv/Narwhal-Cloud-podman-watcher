@@ -113,6 +113,7 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
         try:
             host=conn.execute('SELECT node_id FROM hosts WHERE host_id=?',(host_id,)).fetchone()
             if not host or not node_id or host['node_id']!=node_id:raise HTTPException(403,'wrong node identity')
+            conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?',(now,host_id))
             for value in items:
                 data=value['admission'];stamp=data.get('observed_at',0)
                 if not now-90<=stamp<=now+30:continue
@@ -150,6 +151,7 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
             conn.execute('BEGIN IMMEDIATE')
             host=conn.execute('SELECT node_id FROM hosts WHERE host_id=?',(host_id,)).fetchone()
             if not host or not node_id or host['node_id']!=node_id:raise HTTPException(403,'wrong node identity')
+            conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?',(now,host_id))
             process_alerts(conn,host_id,now,[alert],partial=True)
             reconcile(conn,host_id,now)
             conn.commit()
