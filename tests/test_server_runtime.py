@@ -2034,6 +2034,9 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(body["action"]["params"]["domains"], ["panel.example.net"])
 
     def test_server_disposition_deny_allows_runman_remediation_with_instance_id(self):
+        now = int(time.time())
+        vm_id = "01234567-89ab-cdef-0123-456789abcdef"
+        generation = "550e8400-e29b-41d4-a716-446655440000"
         alert = {
             "type": "unauthorized_panel_pairing",
             "severity": "critical",
@@ -2041,14 +2044,25 @@ class ServerRuntimeTests(unittest.TestCase):
             "message": "panel",
             "runtime": "runman",
             "project": "default",
-            "container_name": "01234567-89ab-cdef-0123-456789abcdef",
-            "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+            "container_name": vm_id,
+            "instance_id": generation,
             "unapproved_domains": ["panel.example.net"],
             "process_patterns": ["v2bx"],
             "config_files": ["/etc/V2bX/config.json"],
+            "process_targets": [
+                {"pid": 4321, "process": "v2bx", "pattern": "v2bx", "start_ticks": "123456"}
+            ],
+            "file_targets": [
+                {"path": "/etc/V2bX/config.json", "generation": "1:2:3:4:5:644", "kind": "config"}
+            ],
         }
         conn = server.db()
-        server.process_security_alerts(conn, "host1", 100, [alert])
+        payload = {"id": vm_id, "stable_id": vm_id, "instance_id": generation}
+        conn.execute(
+            "INSERT INTO reports(host_id,container_name,runtime,project,cpu_percent,mem_bytes,mem_percent,net_rx_bps,net_tx_bps,conn_count,podman_network_ok_v4,podman_network_ok_v6,ts,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("host1", vm_id, "runman", "default", 1, 1, 1, 1, 1, 1, 1, 1, now, json.dumps(payload)),
+        )
+        server.process_security_alerts(conn, "host1", now, [alert])
         conn.commit()
         alert_id = conn.execute("SELECT id FROM security_alerts WHERE runtime='runman'").fetchone()["id"]
         conn.close()
@@ -2072,7 +2086,9 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertTrue(body["queued"])
         self.assertEqual(body["action"]["action_type"], "remediate_panel_pairing")
         self.assertEqual(body["action"]["runtime"], "runman")
-        self.assertEqual(body["action"]["params"]["instance_id"], "550e8400-e29b-41d4-a716-446655440000")
+        self.assertEqual(body["action"]["params"]["instance_id"], generation)
+        self.assertEqual(body["action"]["params"]["process_targets"], alert["process_targets"])
+        self.assertEqual(body["action"]["params"]["file_targets"], alert["file_targets"])
 
     def test_empty_host_firewall_policy_includes_runman_in_default_service_runtimes(self):
         empty_policy = server._empty_host_firewall_policy()

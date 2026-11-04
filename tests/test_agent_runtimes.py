@@ -1089,7 +1089,10 @@ class SecurityTelemetryTests(unittest.TestCase):
         self.assertTrue(result["detected"])
         self.assertEqual(result["panel_domains"], ["panel.example.net"])
         self.assertEqual(result["unapproved_domains"], ["panel.example.net"])
-        self.assertEqual(result["process_matches"], [{"pid": 123, "pattern": "xboard-node"}])
+        self.assertEqual(
+            result["process_matches"],
+            [{"pid": 123, "pattern": "xboard-node", "process": "xboard-node"}],
+        )
         self.assertNotIn("secret", json.dumps(result))
         evidence_command = next(item for item in commands if "scan_panel_env" in item)
         self.assertIn("env_scan_max=32", evidence_command)
@@ -2396,22 +2399,27 @@ class SecurityTelemetryTests(unittest.TestCase):
                 "process_names": ["xmrig"],
                 "process_pids": [1234],
                 "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+                "process_targets": [
+                    {"pid": 1234, "process": "xmrig", "pattern": "xmrig", "start_ticks": "987654"}
+                ],
+                "file_targets": [],
             },
         }
-        with mock.patch.object(agent, "get_runtime_bins", return_value={"runman": "runman"}), \
-             mock.patch.object(
+        with mock.patch.object(
                  agent,
-                 "_run_action_command",
+                 "_runman_exec_request",
                  return_value=(True, "killed_processes=1 removed_services=0 removed_configs=0 cleanup_errors=0 matched_processes=1 signal_errors=0 remaining_processes=0"),
              ) as runner, \
              mock.patch.dict(agent._runman_instance_generations, {"01234567-89ab-cdef-0123-456789abcdef": "550e8400-e29b-41d4-a716-446655440000"}, clear=True):
             ok, output = agent.remediate_malicious_process(action)
         self.assertTrue(ok)
         self.assertIn("killed_processes=1", output)
-        command = runner.call_args_list[0].args[0]
-        self.assertEqual(command[0], agent._RUNMAN_EXEC_SENTINEL)
-        self.assertEqual(command[1], "01234567-89ab-cdef-0123-456789abcdef")
-        self.assertEqual(command[2], "550e8400-e29b-41d4-a716-446655440000")
+        args = runner.call_args.args
+        self.assertEqual(args[:2], (
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ))
+        self.assertIn("process_identity 1234 987654 xmrig xmrig", args[2])
 
     def test_remediate_malicious_process_runman_refuses_generation_mismatch(self):
         action = {
@@ -2438,6 +2446,16 @@ class SecurityTelemetryTests(unittest.TestCase):
                 "process_pids": [4321],
                 "config_files": ["/etc/V2bX/config.json"],
                 "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+                "process_targets": [
+                    {"pid": 4321, "process": "v2bx", "pattern": "v2bx", "start_ticks": "123456"}
+                ],
+                "file_targets": [
+                    {
+                        "path": "/etc/V2bX/config.json",
+                        "generation": "1:2:3:4:5:644",
+                        "kind": "config",
+                    }
+                ],
             },
         }
         env = {
@@ -2445,20 +2463,22 @@ class SecurityTelemetryTests(unittest.TestCase):
             "SECURITY_PANEL_CONFIG_PATHS": "/etc/V2bX/config.json",
         }
         with mock.patch.dict(os.environ, env, clear=False), \
-             mock.patch.object(agent, "get_runtime_bins", return_value={"runman": "runman"}), \
              mock.patch.object(
                  agent,
-                 "_run_action_command",
+                 "_runman_exec_request",
                  return_value=(True, "killed_processes=1 removed_services=0 removed_configs=1 cleanup_errors=0 matched_processes=1 signal_errors=0 remaining_processes=0"),
              ) as runner, \
              mock.patch.dict(agent._runman_instance_generations, {"01234567-89ab-cdef-0123-456789abcdef": "550e8400-e29b-41d4-a716-446655440000"}, clear=True):
             ok, _ = agent.remediate_panel_pairing(action)
         self.assertTrue(ok)
-        command = runner.call_args_list[0].args[0]
-        self.assertEqual(command[0], agent._RUNMAN_EXEC_SENTINEL)
-        self.assertEqual(command[1], "01234567-89ab-cdef-0123-456789abcdef")
-        self.assertEqual(command[2], "550e8400-e29b-41d4-a716-446655440000")
-        self.assertIn("/etc/V2bX/config.json", command[3])
+        args = runner.call_args.args
+        self.assertEqual(args[:2], (
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ))
+        self.assertIn("process_identity 4321 123456 v2bx v2bx", args[2])
+        self.assertIn("/etc/V2bX/config.json", args[2])
+        self.assertIn("1:2:3:4:5:644", args[2])
 
     def test_docker_xmrig_is_notice_only_and_never_auto_remediated(self):
         container = {
