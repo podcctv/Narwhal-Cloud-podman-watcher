@@ -189,7 +189,7 @@ detected_runtimes=()
 [[ $has_runman -eq 1 ]] && detected_runtimes+=("runman (rust)")
 
 if [[ ${#detected_runtimes[@]} -eq 0 ]]; then
-  if is_truthy "${NARWHAL_ALLOW_NO_RUNTIME:-0}"; then
+  if [[ "$MODE" == "update" ]] || is_truthy "${NARWHAL_ALLOW_NO_RUNTIME:-0}" || [[ "${NARWHAL_MANAGED_UPDATE:-0}" == "1" ]] || [[ "$(load_kv_from_file "$CLIENT_ENV_FILE" CONTAINER_RUNTIMES || true)" == "none" ]]; then
     echo "[INFO] No container runtime found; continuing without installing Podman."
     echo "[INFO] Set Container runtimes to 'none' when prompted for a host-only probe."
   else
@@ -201,37 +201,39 @@ else
   echo "[INFO] 检测到本机容器运行时: ${detected_runtimes[*]}"
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Installing python3..."
-  apt-get update
-  apt-get install -y python3 python3-venv
-fi
-
-if ! python3 -m venv -h >/dev/null 2>&1; then
-  echo "Installing python3-venv..."
-  apt-get update
-  apt-get install -y python3-venv
-fi
-
-ensure_python_venv_ready() {
-  local tmp_venv
-  tmp_venv="$(mktemp -d /tmp/narwhal-venv-check-XXXXXX)"
-
-  if python3 -m venv "$tmp_venv" >/dev/null 2>&1; then
-    rm -rf "$tmp_venv"
-    return 0
+if [[ "$MODE" != "update" ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Installing python3..."
+    apt-get update
+    apt-get install -y python3 python3-venv
   fi
 
-  rm -rf "$tmp_venv"
-  local py_minor
-  py_minor="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  if ! python3 -m venv -h >/dev/null 2>&1; then
+    echo "Installing python3-venv..."
+    apt-get update
+    apt-get install -y python3-venv
+  fi
 
-  echo "Detected missing ensurepip for python${py_minor}, installing venv packages..."
-  apt-get update
-  apt-get install -y "python${py_minor}-venv" python3-venv
-}
+  ensure_python_venv_ready() {
+    local tmp_venv
+    tmp_venv="$(mktemp -d /tmp/narwhal-venv-check-XXXXXX)"
 
-ensure_python_venv_ready
+    if python3 -m venv "$tmp_venv" >/dev/null 2>&1; then
+      rm -rf "$tmp_venv"
+      return 0
+    fi
+
+    rm -rf "$tmp_venv"
+    local py_minor
+    py_minor="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+
+    echo "Detected missing ensurepip for python${py_minor}, installing venv packages..."
+    apt-get update
+    apt-get install -y "python${py_minor}-venv" python3-venv
+  }
+
+  ensure_python_venv_ready
+fi
 
 ensure_client_venv() {
   if [[ -d "$CLIENT_VENV_DIR" && -x "$CLIENT_VENV_DIR/bin/python" && -x "$CLIENT_VENV_DIR/bin/pip" ]]; then
@@ -522,9 +524,11 @@ chmod 0700 "$SELF_UNINSTALL_SCRIPT"
 
 ensure_client_venv
 
-if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 || ! command -v nsenter >/dev/null 2>&1 || ! ldconfig -p 2>/dev/null | grep libnetfilter_queue >/dev/null; then
-  apt-get update
-  apt-get install -y nftables libnetfilter-queue1 iproute2 util-linux
+if [[ "$MODE" != "update" ]]; then
+  if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 || ! command -v nsenter >/dev/null 2>&1 || ! ldconfig -p 2>/dev/null | grep libnetfilter_queue >/dev/null; then
+    apt-get update
+    apt-get install -y nftables libnetfilter-queue1 iproute2 util-linux
+  fi
 fi
 
 if [[ "$MODE" != "update" ]]; then

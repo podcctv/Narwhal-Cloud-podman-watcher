@@ -2,6 +2,16 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 客户端更新免 apt/Podman 重复探测与错误诊断增强（v1.7.217）
+
+- **无运行时/NAT 探针节点更新免 Podman/apt 检查修复**：
+  - 现象：纯探针/NAT 节点（如 ZaoZhuang-BGP-NAT 等未安装 Docker/Podman/Incus 运行时的母机）在执行 `install-client.sh update` 时，由于脚本前置运行时探测命中 0，误触发 `apt-get update && apt-get install -y podman` 与 python-venv apt 安装，在旧系统或无外网源环境下直接抛出非零退出码导致更新回滚失败（`status: failed`）。
+  - 修复：在 `scripts/install-client.sh` 中对 `MODE == "update"` 严格跳过 Podman、python3-venv、nftables 等系统级包管理器重复检查与安装。节点已有运行中的 python3-venv 与系统依赖，仅需安全替换 client agent 源码与 requirements；在 `scripts/managed-client-update.sh` 中增加异常退出码捕获，确保 `failure_message` 不为空。
+- **验证结论**：
+  - Python `compileall` 无报错。
+  - `tests/test_managed_upgrade.py` 覆盖更新流水线全部通过。
+  - 全量 956 项单元测试全部通过。
+
 ## 灰度多源晋级、升级即时回执与 pip 免探测提速（v1.7.216）
 
 - **灰度发布多源验证与卡死根因修复**：

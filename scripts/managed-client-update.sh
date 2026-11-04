@@ -94,6 +94,9 @@ restore() {
 on_error() {
   local result=$?
   trap - ERR
+  if [[ -z "$failure_message" ]]; then
+    failure_message="update command failed with exit code $result"
+  fi
   if [[ "$deployment_started" == 1 && "$snapshot_ready" == 1 ]]; then
     restore || echo 'automatic rollback failed; inspect the retained snapshot'
   fi
