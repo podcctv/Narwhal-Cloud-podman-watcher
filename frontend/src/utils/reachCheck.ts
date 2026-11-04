@@ -337,7 +337,9 @@ export async function executeReachCheck(
   const browserPromise = probeFromBrowser(host, port, protocol);
 
   const gpEndpoint = 'https://api.globalping.io/v1';
-  const measurementType = protocol === 'TCP' ? 'tcp' : 'http';
+  // Globalping API requires type in ['ping', 'traceroute', 'dns', 'mtr', 'http'].
+  // For TCP connect timings on any port, type 'http' tests TCP handshake latency.
+  const measurementType = 'http';
 
   const locationsPayload = REACH_REGIONS.map(r => ({
     ...r.loc,
@@ -351,7 +353,7 @@ export async function executeReachCheck(
     locations: locationsPayload,
     measurementOptions: {
       port: port,
-      ...(protocol === 'HTTPS' ? { protocol: 'HTTPS' } : protocol === 'HTTP' ? { protocol: 'HTTP' } : {})
+      protocol: protocol === 'HTTPS' ? 'HTTPS' : 'HTTP',
     }
   };
 

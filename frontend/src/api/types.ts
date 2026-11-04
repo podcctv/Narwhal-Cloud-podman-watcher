@@ -28,6 +28,7 @@ export interface ContainerItem {
   host_last_seen?: number;
   host_last_seen_iso_utc8?: string;
   host_offline_seconds?: number;
+  host_report_timestamp?: number;
   timestamp?: number;
   timestamp_iso_utc8?: string;
   offline_seconds?: number;
@@ -1207,4 +1208,34 @@ export interface InvestigationResponse {
   summary: { observed: number; affected: number; protection_signals: number; users: number; unknown: number; attributed: number; legacy: number };
   coverage: { from: number | null; retention_days: number; complete_window: boolean; note: string };
   window: { start: number; end: number }; host_id: string; days: number;
+}
+
+export interface ReachabilitySummaryItem {
+  host_id: string;
+  target: string;
+  port: number;
+  protocol: string;
+  verdict: string;
+  verdict_label: string;
+  verdict_desc: string;
+  checked_at: number;
+  checked_at_iso_utc8?: string;
+  stats: {
+    total: number;
+    ok: number;
+    cnAverageMs: number;
+    globalAverageMs: number;
+    cnTelecomMs: number;
+    cnUnicomMs: number;
+    cnMobileMs: number;
+  };
+}
+
+export interface ReachabilityClusterSummary {
+  checked_at: number;
+  total_hosts: number;
+  checked_hosts: number;
+  ok_hosts: number;
+  blocked_hosts: number;
+  items: ReachabilitySummaryItem[];
 }

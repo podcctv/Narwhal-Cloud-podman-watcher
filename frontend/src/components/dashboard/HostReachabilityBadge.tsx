@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Globe, X } from 'lucide-react';
 import { ReachCheckSummary } from '../../utils/reachCheck';
 import { ReachCheckPanel } from '../tcping/ReachCheckPanel';
+import { api } from '../../api/client';
 
 interface HostReachabilityBadgeProps {
   hostId: string;
@@ -15,23 +16,62 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
   className = '',
 }) => {
   const [summary, setSummary] = useState<ReachCheckSummary | null>(null);
+  const [testedPort, setTestedPort] = useState<number>(443);
   const [modalOpen, setModalOpen] = useState(false);
 
   const target = ip || hostId;
 
-  // Check sessionStorage for cached reachability results
+  // 1. Check sessionStorage
   useEffect(() => {
     try {
-      // Check port 443 then port 22 or other common ports
-      for (const p of [443, 80, 22]) {
+      for (const p of [testedPort, 443, 80, 22]) {
         const cached = sessionStorage.getItem(`reach:${target}:${p}`);
         if (cached) {
-          setSummary(JSON.parse(cached));
-          break;
+          const parsed = JSON.parse(cached);
+          setSummary(parsed);
+          setTestedPort(p);
+          return;
         }
       }
     } catch {}
-  }, [target]);
+
+    // 2. Fetch latest automated check result from server
+    let active = true;
+    api.getReachabilityHost(hostId)
+      .then((res: any) => {
+        if (!active || !res?.item) return;
+        const item = res.item;
+        setTestedPort(item.port || 443);
+        setSummary({
+          target: item.target,
+          port: item.port,
+          protocol: item.protocol,
+          verdict: item.verdict,
+          verdictLabel: item.verdict_label,
+          verdictDescription: item.verdict_desc || item.verdict_description || '',
+          stats: {
+            total: item.stats?.total || 18,
+            success: item.stats?.ok || 0,
+            failed: (item.stats?.total || 18) - (item.stats?.ok || 0),
+            cnSuccess: item.stats?.ok || 0,
+            cnTotal: 3,
+            cnAverageMs: item.stats?.cnAverageMs || null,
+            globalAverageMs: item.stats?.globalAverageMs || null,
+            minLatencyMs: null,
+            maxLatencyMs: null,
+          },
+          advice: [],
+
+          results: item.results || [],
+          checkedAt: item.checked_at * 1000,
+        });
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [hostId, target]);
 
   const badgeStyle = !summary
     ? 'border-slate-700 bg-slate-800/80 text-slate-300 hover:border-slate-600'
@@ -44,12 +84,12 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
   const badgeText = !summary
     ? '可达性检测'
     : summary.verdict === 'ok'
-    ? `三网可达 ${summary.stats.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : ''}`
+    ? `三网可达 ${summary.stats?.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : ''} (: ${testedPort})`
     : summary.verdict === 'gfw_blocked'
-    ? '国内受阻'
+    ? `国内受阻 (: ${testedPort})`
     : summary.verdict === 'partial'
-    ? '部分受阻'
-    : '连接异常';
+    ? `部分受阻 (: ${testedPort})`
+    : `连接异常 (: ${testedPort})`;
 
   return (
     <>
@@ -60,7 +100,7 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
           setModalOpen(true);
         }}
         className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium transition cursor-pointer ${badgeStyle} ${className}`}
-        title="点击查看全球 18 区域与国内三网可达性"
+        title={`全球与三网可达性 (随机端口: ${testedPort}) - 点击查看详情`}
       >
         <Globe className="h-3 w-3 shrink-0" />
         <span>{badgeText}</span>
@@ -88,8 +128,8 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
             </button>
 
             <ReachCheckPanel
-              initialTarget={target}
-              initialPort={443}
+              initialTarget={summary?.target || target}
+              initialPort={testedPort}
               availableHosts={[{ id: hostId, name: hostId, ip }]}
             />
           </div>

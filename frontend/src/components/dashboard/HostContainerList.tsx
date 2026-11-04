@@ -1008,7 +1008,8 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
             const hostIsOffline = items.length > 0 && items.every((item) => item.alerts?.host_stale === true);
             const hostIsOnline = items.some((item) => item.alerts?.host_stale === false);
             const sampleIsStale = items.some((item) => item.alerts?.stale === true);
-            const newerHostReportExists = Number(latestHeartbeat.host_last_seen || 0) > Number(latestSample.timestamp || 0);
+            const hostReportTime = Number(latestSample.host_report_timestamp || latestSample.timestamp || 0);
+            const newerHostReportExists = hostReportTime > Number(latestSample.timestamp || 0);
             const hostStateLabel = hostIsOffline ? '主机离线' : hostIsOnline ? '主机在线' : '主机心跳未知';
             const hostStateColor = hostIsOnline
               ? 'border-emerald-700/70 bg-emerald-950/40 text-emerald-300'

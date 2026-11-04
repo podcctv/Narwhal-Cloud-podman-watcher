@@ -2,6 +2,26 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 自动化三网可达性巡检与容器上线/舰队升级修复（v1.7.212）
+
+- **容器列表全部被判定为旧快照未出现在最新清单根因与修复**：
+  - 现象：仪表盘全集群 28 台主机均显示在“没有新鲜容器数据的主机”，展开提示“旧快照未出现在最新清单”，全部容器被隐藏。
+  - 根因：此前为保活在线主机，在 `/api/v1/actions/poll` 与 `/api/v1/admission/` 中每 5~30 秒刷新 `hosts.last_seen`。但容器报告周期为 300 秒，前端 `containerFreshness.ts` 与 `HostContainerList.tsx` 之前将 `sample.timestamp` 与 `host.last_seen` 做强一致对比，导致心跳刷新后立即将 300 秒内上报的全部健康容器判定为“被更新报告遗漏的旧快照”并剔除。
+  - 修复：服务端 `/api/v1/latest` 聚合 `SELECT host_id, MAX(ts) FROM reports GROUP BY host_id`，精确返回 `host_report_timestamp`；前端 `isCurrentContainerInventoryItem` 与 `newerHostReportExists` 严格比对真实的容器报告时间戳，彻底解决容器假性下线/隐藏问题。
+- **舰队升级死锁修复**：
+  - 现象：生产环境 25 台节点停留在旧版本（v1.7.203 等），由于历史 null-disk 异常曾导致 reports 中断，`ops_hosts.ts` 超过 900 秒，`server/fleet_updates.py` 严格校验 `0 <= now - ops_ts <= 900` 导致拒绝向活跃节点分发升级。
+  - 修复：放宽节点升级候选门禁，只要 `now - last_seen <= 900` 即可接收更新；修复 `server/fleet_updates.py` 中对 `sqlite3.Row` 误调 `.get()` 导致的 `AttributeError`；解开全集群升级卡顿。
+- **全球 18 区域与国内三网自动化每小时巡检与展示**：
+  - 服务端新增 `server/reach_monitor.py`，后台每小时自动遍历集群节点，随机选取本机当前开放监听端口，调用 Globalping 发起 18 核心区域（含中国电信 AS4134、联通 AS4837、移动 AS9808）可达性与时延测试。
+  - 新增专用表 `host_reachability`、`host_reachability_history` 与 `host_client_ips`，完全不破坏原有 `hosts` 表 5 列契约，避免影响现有单测与向下兼容性。
+  - 提供 `GET /api/v1/reachability/summary`、`GET /api/v1/reachability/host/{host_id}` 与 `POST /api/v1/reachability/trigger` 接口。
+  - **TCPPING 页面**：新增集群每小时自动化巡检总览卡片、国内三网时延对比、状态分布、一键重测及每台母机历史结果展开。
+  - **宿主机卡片**：`<HostReachabilityBadge>` 支持从自动化数据库动态加载最新检测成果，展示所测端口、三网状态及平均时延。
+- **验证结论**：
+  - 前端 Vite 生产构建顺利通过（产物输出至 `server/static/`）。
+  - Python `compileall` 无报错。
+  - 全量 951 项单测全部通过（43 项按环境正常跳过）。
+
 ## Runman Rust v2 兼容（v1.7.211）
 
 - 当前新增适配：Admission 准入保护、受限磁盘清理、PasarGuard 精确服务清理；Runman 网络证据只在 UUID 代次、init PID、guest 地址和 host veth 逐项匹配后启用。

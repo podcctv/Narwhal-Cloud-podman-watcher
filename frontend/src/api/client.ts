@@ -1,4 +1,6 @@
 import {
+  ReachabilityClusterSummary,
+  ReachabilitySummaryItem,
   LatestResponse,
   SecurityAlert,
   SecurityStatusItem,
@@ -343,6 +345,9 @@ export const api = {
       host_summary: raw.hosts || [],
     } as StatsResponse;
   },
+  getReachabilitySummary: () => request<ReachabilityClusterSummary>('/api/v1/reachability/summary'),
+  getReachabilityHost: (hostId: string) => request<{ item: ReachabilitySummaryItem }>('/api/v1/reachability/host/' + encodeURIComponent(hostId)),
+  triggerReachabilityCheck: (hostId?: string) => request<{ ok: boolean; message: string }>('/api/v1/reachability/trigger', { method: 'POST', body: JSON.stringify({ host_id: hostId }) }),
 };
 
 // Utilities for visual formatting

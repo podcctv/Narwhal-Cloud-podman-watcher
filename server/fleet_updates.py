@@ -206,7 +206,7 @@ def reconcile(conn, version, revision, now=None):
     canary_fresh = bool(
         current_canary
         and now - int(current_canary['last_seen'] or 0) <= 900
-        and 0 <= now - int(current_canary['ops_ts'] or 0) <= 900
+        and (not current_canary['ops_ts'] or 0 <= now - int(current_canary['ops_ts'] or 0) <= 86400)
         and canary_host not in cfg['holds']
     )
     if (
@@ -227,7 +227,7 @@ def reconcile(conn, version, revision, now=None):
             status = node_rows.get(host)
             if host == canary_host or status != 'pending':
                 continue
-            if now - int(candidate['last_seen'] or 0) > 900 or not 0 <= now - int(candidate['ops_ts'] or 0) <= 900:
+            if now - int(candidate['last_seen'] or 0) > 900 or (candidate['ops_ts'] and not 0 <= now - int(candidate['ops_ts'] or 0) <= 86400):
                 continue
             if not re.fullmatch(r'\d+\.\d+\.\d+', candidate['agent_version'] or ''):
                 continue
@@ -341,7 +341,7 @@ def reconcile(conn, version, revision, now=None):
         if n['status']=='failed' and host not in meta['retry_at']:
             meta['retry_at'][host]=now+300
         if (running >= 3 or not h or now-int(h['last_seen'] or 0) > 900
-                or not 0 <= now-int(h['ops_ts'] or 0) <= 900
+                or (h['ops_ts'] and not 0 <= now-int(h['ops_ts'] or 0) <= 86400)
                 or n['status'] not in {'pending', 'failed'}):
             continue
         if not permitted and host != canary_host:

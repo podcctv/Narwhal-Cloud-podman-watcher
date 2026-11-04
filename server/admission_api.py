@@ -113,7 +113,14 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
         try:
             host=conn.execute('SELECT node_id FROM hosts WHERE host_id=?',(host_id,)).fetchone()
             if not host or not node_id or host['node_id']!=node_id:raise HTTPException(403,'wrong node identity')
-            conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?',(now,host_id))
+            forwarded = request.headers.get('x-forwarded-for')
+            client_ip = forwarded.split(',')[0].strip() if forwarded else (request.client.host if request.client else '')
+            conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?', (now, host_id))
+            if client_ip:
+                try:
+                    conn.execute("INSERT INTO host_client_ips(host_id, client_ip, updated_at) VALUES(?,?,?) ON CONFLICT(host_id) DO UPDATE SET client_ip=excluded.client_ip, updated_at=excluded.updated_at", (host_id, client_ip, now))
+                except Exception:
+                    pass
             for value in items:
                 data=value['admission'];stamp=data.get('observed_at',0)
                 if not now-90<=stamp<=now+30:continue

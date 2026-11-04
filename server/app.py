@@ -150,10 +150,11 @@ except ImportError:
     import control_reconciliation
 
 try:
-    from server import abuse_api, admission_api
+    from server import abuse_api, admission_api, reach_monitor
 except ImportError:
     import abuse_api
     import admission_api
+    import reach_monitor
 
 _AGENT_ONLY_PATHS = {
     "/api/v1/abuse/events",
@@ -495,6 +496,7 @@ def init_db() -> None:
     admission_api.initialize(conn)
     ip_reputation.initialize(conn)
     database_telemetry.initialize(conn)
+    reach_monitor.init_db(conn)
     conn.commit()
     conn.close()
 
@@ -525,6 +527,7 @@ async def startup() -> None:
     asyncio.create_task(fleet_updates.run(db, lambda: APP_VERSION))
     asyncio.create_task(_buyer_background_loop())
     asyncio.create_task(_cleanup_background_loop())
+    asyncio.create_task(reach_monitor.run_loop(db))
     if not PUBLIC_BASE_URL:
         asyncio.create_task(_telegram_polling_loop())
 
@@ -3724,7 +3727,7 @@ def _host_container_protection_status(
     return result
 
 
-def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any]) -> str:
+def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any], client_ip: str = "") -> str:
     host_id = host_id[:200] or "unknown"
     node_id = node_id[:128]
     if node_id:
@@ -3769,6 +3772,8 @@ def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: in
         "node_id=CASE WHEN excluded.node_id<>'' THEN excluded.node_id ELSE hosts.node_id END,config_json=excluded.config_json",
         (host_id, ts, agent_version, node_id, json.dumps(config, ensure_ascii=False)),
     )
+    if client_ip:
+        reach_monitor.record_client_ip(conn, host_id, client_ip, ts)
     tcping.reconcile_host(conn, host_id, node_id, ts)
     return host_id
 
@@ -3811,7 +3816,11 @@ async def report(
     automatic_stops_queued = 0
     automatic_deep_samples_queued = 0
     try:
-        host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config)
+        headers = getattr(request, "headers", None)
+        forwarded = headers.get("x-forwarded-for") if headers else None
+        client_obj = getattr(request, "client", None)
+        client_ip = forwarded.split(",")[0].strip() if forwarded else (client_obj.host if client_obj else "")
+        host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config, client_ip)
         _maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, int(time.time()))
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers, incus_runtime_health)
         for c in containers:
@@ -4089,6 +4098,12 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             str(row["host_id"]): int(row["last_seen"])
             for row in conn.execute("SELECT host_id, last_seen FROM hosts").fetchall()
         }
+        host_report_timestamps = {
+            str(row["host_id"]): int(row["max_ts"])
+            for row in conn.execute(
+                "SELECT host_id, MAX(ts) AS max_ts FROM reports GROUP BY host_id"
+            ).fetchall()
+        }
         rows = conn.execute(
             """
             SELECT r.* FROM reports r
@@ -4316,6 +4331,7 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "timestamp": r["ts"],
             "timestamp_iso": datetime.fromtimestamp(r["ts"], tz=timezone.utc).isoformat(),
             "timestamp_iso_utc8": format_utc8(r["ts"]),
+            "host_report_timestamp": host_report_timestamps.get(str(r["host_id"]), int(r["ts"])),
             "host_last_seen": host_last_seen,
             "host_last_seen_iso_utc8": format_utc8(host_last_seen),
             "host_offline_seconds": max(0, now - host_last_seen),
@@ -6452,7 +6468,13 @@ async def poll_security_actions(
     conn = db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        headers = getattr(request, "headers", None)
+        forwarded = headers.get("x-forwarded-for") if headers else None
+        client_obj = getattr(request, "client", None)
+        client_ip = forwarded.split(",")[0].strip() if forwarded else (client_obj.host if client_obj else "")
         conn.execute("UPDATE hosts SET last_seen=? WHERE host_id=?", (now, host_id))
+        if client_ip:
+            reach_monitor.record_client_ip(conn, host_id, client_ip, now)
         conn.execute(
             """
             UPDATE security_actions
@@ -6638,6 +6660,7 @@ gfw_monitor.attach(app, db, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)
 admission_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, buyer_notifications.reconcile)
 ip_reputation.attach(app, db, lambda: DB_PATH, commerce.cipher)
+reach_monitor.attach(app, db, verify_signature, signed_json_response)
 
 
 @app.get("/api/v1/security/actions")

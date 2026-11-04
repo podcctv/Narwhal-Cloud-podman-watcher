@@ -7,7 +7,7 @@ import type { ContainerItem } from '../api/types';
  */
 export const isCurrentContainerInventoryItem = (container: ContainerItem): boolean => {
   const sampleTimestamp = Number(container.timestamp || 0);
-  const hostReportTimestamp = Number(container.host_last_seen || 0);
+  const hostReportTimestamp = Number(container.host_report_timestamp || container.timestamp || 0);
   return sampleTimestamp > 0
     && sampleTimestamp === hostReportTimestamp
     && !container.alerts?.stale

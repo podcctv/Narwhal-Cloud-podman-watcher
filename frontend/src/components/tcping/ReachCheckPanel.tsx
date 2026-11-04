@@ -7,6 +7,8 @@ import {
   RegionResult, ReachCheckSummary,
   executeReachCheck, validateTarget
 } from '../../utils/reachCheck';
+import { api } from '../../api/client';
+import { ReachabilityClusterSummary, ReachabilitySummaryItem } from '../../api/types';
 
 interface ReachCheckPanelProps {
   initialTarget?: string;
@@ -42,6 +44,47 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   const [copied, setCopied] = useState(false);
   const [showAdvice, setShowAdvice] = useState(true);
   const [filterGroup, setFilterGroup] = useState<'all' | 'cn' | 'apac' | 'emea' | 'am'>('all');
+
+  // Automated hourly cluster check state
+  const [clusterData, setClusterData] = useState<ReachabilityClusterSummary | null>(null);
+  const [loadingCluster, setLoadingCluster] = useState(false);
+  const [triggeringCluster, setTriggeringCluster] = useState(false);
+  const [triggerMessage, setTriggerMessage] = useState<string>('');
+
+  const fetchClusterSummary = useCallback(async () => {
+    setLoadingCluster(true);
+    try {
+      const data: ReachabilityClusterSummary = await api.getReachabilitySummary();
+      setClusterData(data);
+    } catch (err: any) {
+      console.warn('Failed to load reachability cluster summary', err);
+    } finally {
+      setLoadingCluster(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchClusterSummary();
+    const timer = setInterval(fetchClusterSummary, 60000);
+    return () => clearInterval(timer);
+  }, [fetchClusterSummary]);
+
+  const handleTriggerCluster = async (hostId?: string) => {
+    setTriggeringCluster(true);
+    setTriggerMessage('');
+    try {
+      const res: any = await api.triggerReachabilityCheck(hostId);
+      setTriggerMessage(res?.message || '巡检已触发，正在后台异步探测...');
+      setTimeout(() => {
+        fetchClusterSummary();
+        setTriggerMessage('');
+      }, 5000);
+    } catch (err: any) {
+      setTriggerMessage(`触发失败：${err.message || err}`);
+    } finally {
+      setTriggeringCluster(false);
+    }
+  };
 
   // Load cached result from sessionStorage if available
   useEffect(() => {
@@ -83,6 +126,9 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
       );
       setSummary(res);
       setLiveResults(res.results);
+      try {
+        sessionStorage.setItem(`reach:${tHost}:${tPort}`, JSON.stringify(res));
+      } catch {}
     } catch (err: any) {
       setError(err?.message || '可达性检测失败');
     } finally {
@@ -98,16 +144,10 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
       `目标: ${summary.target}:${summary.port} (${summary.protocol})`,
       `结论: ${summary.verdictLabel}`,
       `说明: ${summary.verdictDescription}`,
-      `国内三网: 成功 ${summary.stats.cnSuccess}/${summary.stats.cnTotal} 节点, 平均延迟: ${summary.stats.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : '—'}`,
-      `全球综合: 成功 ${summary.stats.success}/${summary.stats.total} 节点, 平均延迟: ${summary.stats.globalAverageMs ? `${summary.stats.globalAverageMs}ms` : '—'}`,
-      `检测时间: ${new Date(summary.checkedAt).toLocaleString('zh-CN', { hour12: false })}`,
-      ``,
-      `【节点详情】`,
-      ...summary.results.map(r => `${r.region.flag} ${r.region.name}: ${r.status === 'ok' ? `${r.timings.total}ms` : r.error || '失败'}`),
+      `国内三网: 电信 ${summary.results.find(r => r.region.id === 'cn-telecom')?.status === 'ok' ? `${summary.results.find(r => r.region.id === 'cn-telecom')?.timings.total}ms` : '不可达'} · 联通 ${summary.results.find(r => r.region.id === 'cn-unicom')?.status === 'ok' ? `${summary.results.find(r => r.region.id === 'cn-unicom')?.timings.total}ms` : '不可达'} · 移动 ${summary.results.find(r => r.region.id === 'cn-mobile')?.status === 'ok' ? `${summary.results.find(r => r.region.id === 'cn-mobile')?.timings.total}ms` : '不可达'}`,
+      `国内平均: ${summary.stats.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : '异常'} | 全球平均: ${summary.stats.globalAverageMs ? `${summary.stats.globalAverageMs}ms` : '异常'}`,
+      `检测时间: ${new Date(summary.checkedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
     ];
-    if (summary.browserResult) {
-      lines.push(`${summary.browserResult.region.flag} ${summary.browserResult.region.name}: ${summary.browserResult.status === 'ok' ? `${summary.browserResult.timings.total}ms` : summary.browserResult.error || '失败'}`);
-    }
     navigator.clipboard.writeText(lines.join('\n'));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -119,25 +159,23 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   }, [liveResults, filterGroup]);
 
   const latencyBadgeColor = (ms: number) => {
-    if (ms <= 80) return 'text-emerald-400 border-emerald-500/30 bg-emerald-950/40';
-    if (ms <= 160) return 'text-sky-400 border-sky-500/30 bg-sky-950/40';
-    if (ms <= 260) return 'text-amber-400 border-amber-500/30 bg-amber-950/40';
-    return 'text-rose-400 border-rose-500/30 bg-rose-950/40';
+    if (ms <= 60) return 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300';
+    if (ms <= 150) return 'border-sky-500/40 bg-sky-950/40 text-sky-300';
+    if (ms <= 260) return 'border-amber-500/40 bg-amber-950/40 text-amber-300';
+    return 'border-rose-500/40 bg-rose-950/40 text-rose-300';
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header bar */}
+    <div className="space-y-6 animate-fade-in" aria-label="全球与三网可达性检测面板">
+      {/* Top Banner & Return button */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
           <div className="flex items-center gap-2">
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/20 text-sky-400 border border-sky-500/30">
-              <Globe className="h-4 w-4" />
-            </span>
-            <h1 className="text-xl font-bold tracking-tight text-slate-100">全球与三网可达性 (Reach Check)</h1>
+            <Globe className="h-5 w-5 text-sky-400" />
+            <h1 className="text-lg font-bold text-slate-100">全球与三网可达性 (Reach Check)</h1>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            参考开源标准，从全球 18 个核心区域（含中国电信、联通、移动三大运营商）及本地浏览器同步发起实时 TCP/HTTP 可达性与时延剖析。
+            参考开源标准，系统每小时自动获取母机开放端口并随机选测，支持全球 18 个核心节点（含国内三大运营商）实时可达性与时延剖析。
           </p>
         </div>
 
@@ -145,7 +183,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
           <button
             type="button"
             onClick={onBackToTcping}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 transition"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition"
           >
             <span>返回省份测速</span>
             <ArrowRight className="h-3.5 w-3.5" />
@@ -153,46 +191,235 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
         )}
       </div>
 
-      {/* Target input & Controls */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-4">
+      {/* CLUSTER AUTOMATED HOURLY INSPECTION SECTION */}
+      <section className="rounded-2xl border border-sky-900/50 bg-slate-900/70 p-5 shadow-xl space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+          <div className="flex items-center gap-2">
+            <div className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
+            <h2 className="text-sm font-semibold text-slate-200">
+              集群母机定时巡检结果 (1 小时定时自动测试 · 随机开放端口)
+            </h2>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {triggerMessage && (
+              <span className="text-xs text-sky-300 font-mono animate-fade-in">{triggerMessage}</span>
+            )}
+            <button
+              type="button"
+              disabled={loadingCluster}
+              onClick={fetchClusterSummary}
+              className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition"
+              title="刷新最新巡检数据"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${loadingCluster ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              type="button"
+              disabled={triggeringCluster}
+              onClick={() => handleTriggerCluster()}
+              className="flex items-center gap-1.5 rounded-lg bg-sky-600/90 hover:bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition disabled:opacity-50"
+            >
+              <Zap className={`h-3.5 w-3.5 ${triggeringCluster ? 'animate-spin' : ''}`} />
+              <span>立即全量巡检</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Cluster Stats Ribbon */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+            <span className="text-slate-400 block font-sans text-[11px]">纳入巡检母机</span>
+            <span className="text-lg font-bold text-slate-100">{clusterData?.total_hosts || availableHosts.length || 0} 台</span>
+          </div>
+          <div className="rounded-xl border border-emerald-900/40 bg-emerald-950/20 p-3">
+            <span className="text-emerald-400 block font-sans text-[11px]">三网全通畅母机</span>
+            <span className="text-lg font-bold text-emerald-300">{clusterData?.ok_hosts || 0} 台</span>
+          </div>
+          <div className="rounded-xl border border-rose-900/40 bg-rose-950/20 p-3">
+            <span className="text-rose-400 block font-sans text-[11px]">疑似受阻 / 异常</span>
+            <span className="text-lg font-bold text-rose-300">{clusterData?.blocked_hosts || 0} 台</span>
+          </div>
+          <div className="rounded-xl border border-sky-900/40 bg-sky-950/20 p-3">
+            <span className="text-sky-400 block font-sans text-[11px]">巡检状态</span>
+            <span className="text-sm font-semibold text-sky-300 mt-1 block">
+              {clusterData?.items?.length ? '每小时自动轮询中' : '等待初次巡检'}
+            </span>
+          </div>
+        </div>
+
+        {/* Cluster Results Table */}
+        <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/50">
+          <table className="w-full text-left text-xs text-slate-300">
+            <thead className="bg-slate-900/80 text-[11px] font-semibold text-slate-400 border-b border-slate-800 uppercase tracking-wider">
+              <tr>
+                <th className="p-3">宿主机 / 目标</th>
+                <th className="p-3">随机开放端口</th>
+                <th className="p-3">可达性判定</th>
+                <th className="p-3">中国电信 (4134)</th>
+                <th className="p-3">中国联通 (4837)</th>
+                <th className="p-3">中国移动 (9808)</th>
+                <th className="p-3">全球均延</th>
+                <th className="p-3">巡检时间</th>
+                <th className="p-3 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60 font-mono">
+              {(!clusterData?.items || clusterData.items.length === 0) ? (
+                <tr>
+                  <td colSpan={9} className="p-8 text-center text-slate-500 font-sans">
+                    暂无母机巡检数据。点击右上角“立即全量巡检”启动首轮测试，或等待下一次整点自动测试。
+                  </td>
+                </tr>
+              ) : (
+                clusterData.items.map((item: ReachabilitySummaryItem) => {
+                  const isOk = item.verdict === 'ok';
+                  const isBlocked = item.verdict === 'gfw_blocked';
+                  return (
+                    <tr key={item.host_id} className="hover:bg-slate-900/40 transition">
+                      <td className="p-3 font-sans">
+                        <div className="font-semibold text-slate-100 truncate max-w-[200px]" title={item.host_id}>
+                          {item.host_id}
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-500 truncate max-w-[200px]">
+                          {item.target}
+                        </div>
+                      </td>
+                      <td className="p-3">
+                        <span className="rounded bg-slate-800/80 px-2 py-0.5 text-sky-300 font-bold">
+                          {item.port}
+                        </span>
+                        <span className="text-[10px] text-slate-500 ml-1">{item.protocol}</span>
+                      </td>
+                      <td className="p-3 font-sans">
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border ${
+                          isOk
+                            ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
+                            : isBlocked
+                            ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
+                            : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
+                        }`}>
+                          {isOk ? <CheckCircle2 className="h-3 w-3 text-emerald-400" /> : <AlertTriangle className="h-3 w-3" />}
+                          <span>{item.verdict_label}</span>
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        {item.stats?.cnTelecomMs ? (
+                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats.cnTelecomMs)}`}>
+                            {item.stats.cnTelecomMs} ms
+                          </span>
+                        ) : (
+                          <span className="text-slate-600">—</span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        {item.stats?.cnUnicomMs ? (
+                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats.cnUnicomMs)}`}>
+                            {item.stats.cnUnicomMs} ms
+                          </span>
+                        ) : (
+                          <span className="text-slate-600">—</span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        {item.stats?.cnMobileMs ? (
+                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats.cnMobileMs)}`}>
+                            {item.stats.cnMobileMs} ms
+                          </span>
+                        ) : (
+                          <span className="text-slate-600">—</span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        <span className="text-slate-300">
+                          {item.stats?.globalAverageMs ? `${item.stats.globalAverageMs} ms` : '—'}
+                        </span>
+                      </td>
+                      <td className="p-3 text-[11px] text-slate-400">
+                        {item.checked_at_iso_utc8 || '刚刚'}
+                      </td>
+                      <td className="p-3 text-right font-sans">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTarget(item.target);
+                              setPort(item.port);
+                              setProtocol(item.protocol as any || 'TCP');
+                              handleStartCheck(item.target, item.port);
+                            }}
+                            className="rounded-lg border border-slate-700 bg-slate-800/80 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700 transition"
+                            title="以此机为目标启动 18 区域即时探测"
+                          >
+                            详细探测
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleTriggerCluster(item.host_id)}
+                            className="rounded-lg border border-slate-700 bg-slate-800/80 p-1 text-slate-400 hover:text-slate-100 hover:bg-slate-700 transition"
+                            title="单独重新检测此机"
+                          >
+                            <RefreshCw className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* INTERACTIVE SINGLE-TARGET TEST PANEL */}
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 shadow-xl space-y-5">
+        <div className="border-b border-slate-800 pb-3">
+          <h2 className="text-sm font-semibold text-slate-200">
+            自定义目标实时探测 (18 核心节点与访客浏览器同步发起)
+          </h2>
+        </div>
+
+        {/* Target Input form */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-          {/* Target Host */}
-          <div className="md:col-span-5 space-y-1.5">
+          <div className="md:col-span-6 space-y-1.5">
             <label className="block text-xs font-medium text-slate-300">
               检测目标 (域名或公网 IP)
             </label>
             <div className="flex gap-2">
+              {availableHosts.length > 0 && (
+                <div className="relative shrink-0">
+                  <select
+                    aria-label="快速选机"
+                    onChange={(e) => {
+                      const sel = availableHosts.find(h => h.id === e.target.value);
+                      if (sel) {
+                        setTarget(sel.ip || sel.name || sel.id);
+                      }
+                    }}
+                    className="h-10 rounded-lg border border-slate-700 bg-slate-800/90 px-2.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition cursor-pointer"
+                    defaultValue=""
+                  >
+                    <option value="" disabled>快速选机</option>
+                    {availableHosts.map(h => (
+                      <option key={h.id} value={h.id}>
+                        {h.name} {h.ip ? `(${h.ip})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <input
                 type="text"
-                placeholder="例如: example.com 或 15.204.57.108"
+                placeholder="例如: 15.204.57.108 或 narwhal.example.com"
                 value={target}
-                onChange={e => setTarget(e.target.value)}
-                disabled={running}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-sky-500 focus:outline-hidden font-mono"
+                onChange={(e) => setTarget(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleStartCheck()}
+                className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 text-sm text-slate-100 placeholder-slate-500 font-mono focus:border-sky-500 focus:outline-hidden transition"
               />
-              {availableHosts.length > 0 && (
-                <select
-                  aria-label="快速选择集群节点"
-                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-300 focus:border-sky-500 focus:outline-hidden max-w-[130px]"
-                  onChange={e => {
-                    if (e.target.value) {
-                      setTarget(e.target.value);
-                    }
-                  }}
-                  value=""
-                >
-                  <option value="" disabled>快速选机</option>
-                  {availableHosts.map(h => (
-                    <option key={h.id} value={h.ip || h.name}>
-                      {h.name}
-                    </option>
-                  ))}
-                </select>
-              )}
             </div>
           </div>
 
-          {/* Target Port */}
           <div className="md:col-span-2 space-y-1.5">
             <label className="block text-xs font-medium text-slate-300">
               端口 (1-65535)
@@ -202,36 +429,33 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
               min={1}
               max={65535}
               value={port}
-              onChange={e => setPort(Number(e.target.value))}
-              disabled={running}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-sky-500 focus:outline-hidden font-mono"
+              onChange={(e) => setPort(Number(e.target.value))}
+              onKeyDown={(e) => e.key === 'Enter' && handleStartCheck()}
+              className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 text-sm text-slate-100 font-mono focus:border-sky-500 focus:outline-hidden transition"
             />
           </div>
 
-          {/* Protocol */}
           <div className="md:col-span-2 space-y-1.5">
             <label className="block text-xs font-medium text-slate-300">
               测试协议
             </label>
             <select
               value={protocol}
-              onChange={e => setProtocol(e.target.value as any)}
-              disabled={running}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-hidden"
+              onChange={(e) => setProtocol(e.target.value as any)}
+              className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-2.5 text-xs text-slate-200 font-medium focus:border-sky-500 focus:outline-hidden transition cursor-pointer"
             >
               <option value="TCP">TCP (全端口推荐)</option>
               <option value="HTTPS">HTTPS (443)</option>
-              <option value="HTTP">HTTP (80)</option>
+              <option value="HTTP">HTTP (80/Web)</option>
             </select>
           </div>
 
-          {/* Action Button */}
-          <div className="md:col-span-3">
+          <div className="md:col-span-2">
             <button
               type="button"
               disabled={running || !target.trim()}
               onClick={() => handleStartCheck()}
-              className="w-full flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-xs hover:bg-sky-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-xs hover:bg-sky-500 transition disabled:opacity-50 disabled:cursor-not-allowed h-10"
             >
               {running ? (
                 <>
@@ -350,58 +574,56 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             </div>
 
             <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
-              <span className="text-[11px] text-slate-400 block font-sans">全球节点平均时延</span>
+              <span className="text-[11px] text-slate-400 block font-sans">海外区域平均时延</span>
+              <span className="text-base font-bold text-emerald-300">
+                {(() => {
+                  const ovs = summary.results.filter(r => r.region.group !== 'cn' && r.status === 'ok');
+                  return ovs.length ? `${Math.round(ovs.reduce((a, b) => a + b.timings.total, 0) / ovs.length)} ms` : '—';
+                })()}
+              </span>
+              <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
+                可达: {summary.results.filter(r => r.region.group !== 'cn' && r.status === 'ok').length} / {summary.results.filter(r => r.region.group !== 'cn').length} 区域
+              </span>
+            </div>
+
+            <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
+              <span className="text-[11px] text-slate-400 block font-sans">全球核心可达率</span>
               <span className="text-base font-bold text-slate-100">
-                {summary.stats.globalAverageMs ? `${summary.stats.globalAverageMs} ms` : '—'}
+                {Math.round((summary.stats.success / (summary.stats.total || 1)) * 100)}%
               </span>
               <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                成功率: {Math.round((summary.stats.success / summary.stats.total) * 100)}% ({summary.stats.success}/{summary.stats.total})
+                成功: {summary.stats.success} / {summary.stats.total} 节点
               </span>
             </div>
 
             <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
-              <span className="text-[11px] text-slate-400 block font-sans">最低 / 最高往返</span>
-              <span className="text-sm font-semibold text-emerald-400">
-                {summary.stats.minLatencyMs ?? '—'} <span className="text-xs text-slate-500 font-sans">/</span> <span className="text-amber-400">{summary.stats.maxLatencyMs ?? '—'} ms</span>
-              </span>
-              <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                抖动范围: {(summary.stats.maxLatencyMs && summary.stats.minLatencyMs) ? `${summary.stats.maxLatencyMs - summary.stats.minLatencyMs} ms` : '—'}
-              </span>
-            </div>
-
-            <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
-              <span className="text-[11px] text-slate-400 block font-sans">本地访客直连时延</span>
+              <span className="text-[11px] text-slate-400 block font-sans">访客本地直连时延</span>
               <span className="text-base font-bold text-indigo-300">
-                {summary.browserResult?.status === 'ok'
-                  ? `${summary.browserResult.timings.total} ms`
-                  : summary.browserResult?.status === 'skipped'
-                  ? '已跳过'
-                  : '连接失败'}
+                {summary.browserResult?.status === 'ok' ? `${summary.browserResult.timings.total} ms` : '跳过/受限'}
               </span>
               <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                当前客户端浏览器视角
+                本地浏览器 Performance API
               </span>
             </div>
           </div>
 
-          {/* Actionable Advice Section */}
-          {summary.advice.length > 0 && (
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs space-y-1.5">
-              <button
-                type="button"
+          {/* Actionable troubleshooting advice */}
+          {summary.advice && summary.advice.length > 0 && (
+            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 space-y-1.5 text-xs">
+              <div
+                className="flex items-center justify-between text-slate-300 cursor-pointer font-semibold"
                 onClick={() => setShowAdvice(!showAdvice)}
-                className="flex items-center justify-between w-full font-semibold text-slate-200"
               >
-                <span className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5">
                   <HelpCircle className="h-3.5 w-3.5 text-sky-400" />
-                  <span>下一步排查与处置建议 (What to check next)</span>
-                </span>
-                {showAdvice ? <ChevronUp className="h-3.5 w-3.5 text-slate-400" /> : <ChevronDown className="h-3.5 w-3.5 text-slate-400" />}
-              </button>
+                  <span>排错指引与建议措施</span>
+                </div>
+                {showAdvice ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              </div>
               {showAdvice && (
-                <ul className="list-disc list-inside space-y-1 text-slate-300 pl-1 pt-1 leading-relaxed">
-                  {summary.advice.map((adv, idx) => (
-                    <li key={idx}>{adv}</li>
+                <ul className="list-disc list-inside space-y-1 text-slate-400 pl-1 pt-1 leading-relaxed">
+                  {summary.advice.map((item, idx) => (
+                    <li key={idx}>{item}</li>
                   ))}
                 </ul>
               )}
@@ -410,83 +632,43 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
         </div>
       )}
 
-      {/* 18-Region Vantage Points Grid */}
+      {/* 18-Region Results Grid */}
       <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-bold text-slate-200">各区域及运营商探测结果</h2>
-            <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-mono text-slate-400">
-              {filteredResults.length} 节点
+            <h2 className="text-sm font-semibold text-slate-200">各区域及运营商探测结果</h2>
+            <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-400 font-mono">
+              {liveResults.length} 节点
             </span>
           </div>
 
-          {/* Filter tabs */}
-          <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 text-xs">
-            {(
-              [
-                ['all', '全部'],
-                ['cn', '中国大陆三网'],
-                ['apac', '亚太'],
-                ['emea', '欧洲/中东/非洲'],
-                ['am', '美洲'],
-              ] as const
-            ).map(([key, label]) => (
+          {/* Region Tabs */}
+          <div className="flex items-center gap-1 text-xs">
+            {[
+              { id: 'all', label: '全部' },
+              { id: 'cn', label: '中国大陆三网' },
+              { id: 'apac', label: '亚太' },
+              { id: 'emea', label: '欧洲/中东/非洲' },
+              { id: 'am', label: '美洲' },
+            ].map(tab => (
               <button
-                key={key}
+                key={tab.id}
                 type="button"
-                onClick={() => setFilterGroup(key)}
-                className={`rounded-md px-2.5 py-1 text-xs transition ${
-                  filterGroup === key
-                    ? 'bg-sky-600 text-white font-semibold'
-                    : 'text-slate-400 hover:text-slate-200'
+                onClick={() => setFilterGroup(tab.id as any)}
+                className={`rounded-lg px-2.5 py-1 transition font-medium ${
+                  filterGroup === tab.id
+                    ? 'bg-sky-600 text-white shadow-xs'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
                 }`}
               >
-                {label}
+                {tab.label}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Results grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {/* Visitor browser card first if present */}
-          {summary?.browserResult && filterGroup === 'all' && (
-            <div className="rounded-xl border border-indigo-500/30 bg-slate-900/60 p-3.5 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="flex items-center gap-1.5 font-semibold text-xs text-indigo-300">
-                    <span>🌐</span>
-                    <span>访客本地浏览器 (Your Browser)</span>
-                  </div>
-                  <span className="text-[10px] text-slate-400 block mt-0.5">
-                    从当前浏览器客户端直接请求
-                  </span>
-                </div>
-                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold ${
-                  summary.browserResult.status === 'ok'
-                    ? 'text-emerald-400 border-emerald-500/30 bg-emerald-950/40'
-                    : summary.browserResult.status === 'skipped'
-                    ? 'text-slate-400 border-slate-700 bg-slate-800/40'
-                    : 'text-rose-400 border-rose-500/30 bg-rose-950/40'
-                }`}>
-                  {summary.browserResult.status === 'ok' ? '连通正常' : summary.browserResult.status === 'skipped' ? '已跳过' : '连接失败'}
-                </span>
-              </div>
-              <div className="flex items-baseline justify-between font-mono pt-1 border-t border-slate-800/60">
-                <span className="text-[11px] text-slate-400 font-sans">本地往返耗时:</span>
-                <span className="text-sm font-bold text-indigo-300">
-                  {summary.browserResult.status === 'ok' ? `${summary.browserResult.timings.total} ms` : '—'}
-                </span>
-              </div>
-              {summary.browserResult.error && (
-                <p className="text-[10px] text-amber-400/90 font-mono truncate" title={summary.browserResult.error}>
-                  {summary.browserResult.error}
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* 18 External Regions */}
+        {/* Results cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {filteredResults.map(item => {
             const isOk = item.status === 'ok';
             const isTesting = item.status === 'testing';
@@ -495,7 +677,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             return (
               <div
                 key={item.region.id}
-                className={`rounded-xl border p-3.5 space-y-2 transition ${
+                className={`rounded-xl border p-3.5 space-y-2.5 transition ${
                   isTesting
                     ? 'border-slate-800 bg-slate-900/40 animate-pulse'
                     : isOk
