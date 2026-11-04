@@ -9,7 +9,7 @@
 - GFW 公网端点扫描纳入 Runman 新鲜报告，并继续要求已核对的直接公网地址或明确 Host DNAT、实时监听及唯一容器归属；管理员重新打开 Runman 面板告警时会排队撤销先前域名放行。
 - 遥测运行时选项和防火墙测速保护的默认选择已纳入 Runman。人工复核后的 SOCKS 指定 PID 停止保持可用，持久化自动停止策略仍明确关闭。
 - 新增回归覆盖 Runman Admission 网络身份/veth、代次拒绝、PasarGuard guest exec、磁盘清理目标及文件系统锚定、Server Admission/PasarGuard 收据身份校验。
-- 合并 fork `main` 的 `a908a87` 后，本机 `compileall`、全量单测（951 项，42 项按平台/环境条件跳过）、TypeScript 检查和 Vite 生产构建（2237 个模块）均通过。GitHub Actions 的 Python 3.11/3.12 兼容、浏览器回归、Python/Linux/OpenRC 测试及 amd64/arm64 镜像冒烟全部通过；首次 GHCR job 因合并提交触发版本门禁而失败，现已将版本递增至 1.7.211，等待最终发布工作流核验。没有执行生产节点部署或实机验证。
+- 合并 fork `main` 的 `a908a87` 后，本机 `compileall`、全量单测（951 项，42 项按平台/环境条件跳过）、TypeScript 检查和 Vite 生产构建（2237 个模块）均通过。GitHub Actions [41766673744](https://github.com/podcctv/Narwhal-Cloud-podman-watcher/actions/runs/41766673744)（提交 `67029fb`）全绿：Python 3.11/3.12 兼容、浏览器回归、Python/Linux/OpenRC 测试、隔离网络准入、amd64/arm64 镜像冒烟及 GHCR 构建推送均通过。早先提交 `bbb46a7` 的 GHCR job 因合并版本门禁失败；版本已递增至 1.7.211，并由最终工作流验证通过。没有执行生产节点部署或实机验证。
 
 ## 全球三网可达性检测与节点心跳修复（v1.7.209）
 
