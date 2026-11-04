@@ -39,31 +39,30 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
     let active = true;
     api.getReachabilityHost(hostId)
       .then((res: any) => {
-        if (!active || !res?.item) return;
-        const item = res.item;
-        setTestedPort(item.port || 443);
+        const item = res?.item || res;
+        if (!active || !item || !item.target) return;
+        setTestedPort(item.port || 0);
         setSummary({
           target: item.target,
-          port: item.port,
-          protocol: item.protocol,
+          port: item.port || 0,
+          protocol: item.protocol || 'TCP',
           verdict: item.verdict,
           verdictLabel: item.verdict_label,
           verdictDescription: item.verdict_desc || item.verdict_description || '',
           stats: {
             total: item.stats?.total || 18,
-            success: item.stats?.ok || 0,
-            failed: (item.stats?.total || 18) - (item.stats?.ok || 0),
-            cnSuccess: item.stats?.ok || 0,
-            cnTotal: 3,
-            cnAverageMs: item.stats?.cnAverageMs || null,
-            globalAverageMs: item.stats?.globalAverageMs || null,
-            minLatencyMs: null,
-            maxLatencyMs: null,
+            success: item.stats?.success ?? item.stats?.ok ?? 0,
+            failed: item.stats?.failed ?? ((item.stats?.total || 18) - (item.stats?.success ?? item.stats?.ok ?? 0)),
+            cnSuccess: item.stats?.cn_success ?? item.stats?.cnSuccess ?? 0,
+            cnTotal: item.stats?.cn_total ?? item.stats?.cnTotal ?? 3,
+            cnAverageMs: item.stats?.cnAverageMs ?? item.stats?.cn_avg_ms ?? null,
+            globalAverageMs: item.stats?.globalAverageMs ?? item.stats?.global_avg_ms ?? null,
+            minLatencyMs: item.stats?.min_ms ?? null,
+            maxLatencyMs: item.stats?.max_ms ?? null,
           },
           advice: [],
-
           results: item.results || [],
-          checkedAt: item.checked_at * 1000,
+          checkedAt: (item.checked_at || 0) * 1000,
         });
       })
       .catch(() => {});
@@ -81,15 +80,18 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
     ? 'border-rose-500/50 bg-rose-950/70 text-rose-300 hover:border-rose-400 animate-pulse'
     : 'border-amber-500/40 bg-amber-950/60 text-amber-300 hover:border-amber-400';
 
+  const isPing = summary?.protocol === 'PING' || testedPort <= 0;
+  const portLabel = isPing ? 'ICMP' : `:${testedPort}`;
+
   const badgeText = !summary
     ? '可达性检测'
     : summary.verdict === 'ok'
-    ? `三网可达 ${summary.stats?.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : ''} (: ${testedPort})`
+    ? `三网可达 ${summary.stats?.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : ''} (${portLabel})`
     : summary.verdict === 'gfw_blocked'
-    ? `国内受阻 (: ${testedPort})`
+    ? `国内受阻 (${portLabel})`
     : summary.verdict === 'partial'
-    ? `部分受阻 (: ${testedPort})`
-    : `连接异常 (: ${testedPort})`;
+    ? `部分受阻 (${portLabel})`
+    : `连接异常 (${portLabel})`;
 
   return (
     <>

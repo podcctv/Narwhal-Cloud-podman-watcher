@@ -2,6 +2,26 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 节点 Ping / 全球三网可达性全链路评估与完善修复（v1.7.219）
+
+- **节点 Ping 与自动化巡检根因评估与修复**：
+  - 现象：生产环境 13 台已测母机中，多达 7 台报告 `timeout: 全网连接超时/端口未放行`；NAT 节点（ZaoZhuang-BGP-NAT、MiaoYun-NAT）被错误记录为 Cloudflare Anycast IP 并导致探测失败；母机卡片与 TCPPING 页面部分时延数据显示为空白或破折号（—）；巡检单机执行耗时过长。
+  - 根因分析：
+    1. **Cloudflare CDN 代理 IP 污染**：母机通过 Caddy 反代或 Cloudflare 域名连接服务端时，`server/app.py` 之前直接读取 `x-forwarded-for`，未优先读取 `cf-connecting-ip`、`x-real-ip` 与 `x-narwhal-proxy-peer`。同时 `server/reach_monitor.py` 的 `is_public_ip` 未过滤 Cloudflare Anycast 网段（如 `104.16.0.0/13`, `162.158.0.0/15`, `172.64.0.0/13`），导致 Cloudflare 节点代理 IP 误被作为目标写入 `host_client_ips`，外部探测 Cloudflare 代理节点端口自然超时。
+    2. **全表扫描磁盘 I/O 阻塞与历史陈旧端口污染**：`discover_host_open_ports()` 之前执行 `SELECT payload_json FROM reports WHERE host_id=?` 全表扫描，在 1.7GB 数据库中遍历数万条历史报告，单节点耗时达数十秒，导致循环卡死；同时收集了数月前的已关闭瞬态端口（如 33508、4443、11111）。
+    3. **探测协议与端口服务类型不匹配**：Globalping 仅支持 `[ping, traceroute, dns, mtr, http]`，旧版对所有端口一律发 `type: "http"`。在探测 22 (SSH) 等非 HTTP 端口时，虽然 TCP 三次握手成功，但后续 HTTP 应用层解析抛出协议不匹配异常导致误报超时。此外对于 0 开放端口的主机缺乏 ICMP Ping 探测能力。
+    4. **前后端字段命名契约不一致**：`server/reach_monitor.py` 在 `stats` 中仅提供 snake_case，缺少 `cnTelecomMs`、`cnUnicomMs`、`cnMobileMs`，导致前端详细表格中的电信、联通、移动时延全部显示为破折号（—），聚合卡片显示 0。
+  - 修复：
+    1. 在 `server/reach_monitor.py` 引入完整 Cloudflare 网段过滤与 `extract_client_ip()` 智能提取器，在 `server/app.py` 统一接入，杜绝 CDN 代理 IP 作为节点目标。
+    2. 将 `discover_host_open_ports()` 优化为仅查询最新单条报告与最新 `host_security`，将端口发现耗时从 30s 缩减至 0.07s，并彻底过滤已关闭历史端口。
+    3. 实现 TCP 握手（根据 `timings.tcp` 精确研判建连时延）与 ICMP Ping 双模自适应探针，对无开放公网端口的主机自适应切换为 `type: "ping"`，准确度量 18 区域丢包率与 RTT。
+    4. 对齐前后端数据模型，`stats` 输出双格式并补充三大运营商独立毫秒数；`/api/v1/reachability/summary` 补充聚合统计字段；前端 `HostReachabilityBadge` 与 `ReachCheckPanel` 完善 ICMP 协议标识与数据水合。
+- **验证结论**：
+  - 前端 TypeScript / Vite 生产构建顺利通过，静态产物完整更新。
+  - `python -m compileall` 零报错通过。
+  - `tests/test_reach_monitor.py` 新增 SSRF/Cloudflare 过滤、真实 IP 提取、PING/TCP 解析全量通过。
+  - 核心单测套件通过（155 测试全部 OK）。
+
 ## 容器采集 NameError 崩溃与节点长期停报快照根因修复（v1.7.218）
 
 - **容器采集 NameError 与循环崩溃根因排查修复**：

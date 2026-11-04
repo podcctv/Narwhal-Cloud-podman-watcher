@@ -3816,10 +3816,7 @@ async def report(
     automatic_stops_queued = 0
     automatic_deep_samples_queued = 0
     try:
-        headers = getattr(request, "headers", None)
-        forwarded = headers.get("x-forwarded-for") if headers else None
-        client_obj = getattr(request, "client", None)
-        client_ip = forwarded.split(",")[0].strip() if forwarded else (client_obj.host if client_obj else "")
+        client_ip = reach_monitor.extract_client_ip(request)
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config, client_ip)
         _maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, int(time.time()))
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers, incus_runtime_health)
@@ -6468,10 +6465,7 @@ async def poll_security_actions(
     conn = db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        headers = getattr(request, "headers", None)
-        forwarded = headers.get("x-forwarded-for") if headers else None
-        client_obj = getattr(request, "client", None)
-        client_ip = forwarded.split(",")[0].strip() if forwarded else (client_obj.host if client_obj else "")
+        client_ip = reach_monitor.extract_client_ip(request)
         conn.execute("UPDATE hosts SET last_seen=? WHERE host_id=?", (now, host_id))
         if client_ip:
             reach_monitor.record_client_ip(conn, host_id, client_ip, now)

@@ -68,7 +68,7 @@ export type ReachVerdict = 'ok' | 'gfw_blocked' | 'cn_only' | 'partial' | 'timeo
 export interface ReachCheckSummary {
   target: string;
   port: number;
-  protocol: 'TCP' | 'HTTP' | 'HTTPS';
+  protocol: 'TCP' | 'HTTP' | 'HTTPS' | 'PING';
   verdict: ReachVerdict;
   verdictLabel: string;
   verdictDescription: string;

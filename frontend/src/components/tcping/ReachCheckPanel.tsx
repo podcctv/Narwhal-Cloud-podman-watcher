@@ -108,14 +108,14 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
         results: item.results,
         stats: {
           total: item.stats?.total || 18,
-          success: item.stats?.ok || item.results.filter((r: any) => r.status === 'ok').length,
-          failed: (item.stats?.total || 18) - (item.stats?.ok || item.results.filter((r: any) => r.status === 'ok').length),
-          cnSuccess: item.results.filter((r: any) => r.region?.group === 'cn' && r.status === 'ok').length,
-          cnTotal: item.results.filter((r: any) => r.region?.group === 'cn').length || 3,
-          cnAverageMs: item.stats?.cnAverageMs || null,
-          globalAverageMs: item.stats?.globalAverageMs || null,
-          minLatencyMs: null,
-          maxLatencyMs: null,
+          success: item.stats?.success ?? item.stats?.ok ?? item.results.filter((r: any) => r.status === 'ok').length,
+          failed: item.stats?.failed ?? ((item.stats?.total || 18) - (item.stats?.success ?? item.stats?.ok ?? item.results.filter((r: any) => r.status === 'ok').length)),
+          cnSuccess: item.stats?.cn_success ?? item.results.filter((r: any) => r.region?.group === 'cn' && r.status === 'ok').length,
+          cnTotal: item.stats?.cn_total ?? (item.results.filter((r: any) => r.region?.group === 'cn').length || 3),
+          cnAverageMs: item.stats?.cnAverageMs ?? (item.stats as any)?.cn_avg_ms ?? null,
+          globalAverageMs: item.stats?.globalAverageMs ?? (item.stats as any)?.global_avg_ms ?? null,
+          minLatencyMs: item.stats?.min_ms ?? null,
+          maxLatencyMs: item.stats?.max_ms ?? null,
         },
         checkedAt: (item.checked_at || Math.floor(Date.now() / 1000)) * 1000,
       });
@@ -345,7 +345,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                       </td>
                       <td className="p-3">
                         <span className="rounded bg-slate-800/80 px-2 py-0.5 text-sky-300 font-bold">
-                          {item.port}
+                          {item.port <= 0 || item.protocol === 'PING' ? 'PING' : item.port}
                         </span>
                         <span className="text-[10px] text-slate-500 ml-1">{item.protocol}</span>
                       </td>
@@ -362,27 +362,27 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                         </span>
                       </td>
                       <td className="p-3">
-                        {item.stats?.cnTelecomMs ? (
-                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats.cnTelecomMs)}`}>
-                            {item.stats.cnTelecomMs} ms
+                        {(item.stats?.cnTelecomMs ?? (item.stats as any)?.cn_telecom_ms) ? (
+                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats?.cnTelecomMs ?? (item.stats as any).cn_telecom_ms)}`}>
+                            {item.stats?.cnTelecomMs ?? (item.stats as any).cn_telecom_ms} ms
                           </span>
                         ) : (
                           <span className="text-slate-600">—</span>
                         )}
                       </td>
                       <td className="p-3">
-                        {item.stats?.cnUnicomMs ? (
-                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats.cnUnicomMs)}`}>
-                            {item.stats.cnUnicomMs} ms
+                        {(item.stats?.cnUnicomMs ?? (item.stats as any)?.cn_unicom_ms) ? (
+                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats?.cnUnicomMs ?? (item.stats as any).cn_unicom_ms)}`}>
+                            {item.stats?.cnUnicomMs ?? (item.stats as any).cn_unicom_ms} ms
                           </span>
                         ) : (
                           <span className="text-slate-600">—</span>
                         )}
                       </td>
                       <td className="p-3">
-                        {item.stats?.cnMobileMs ? (
-                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats.cnMobileMs)}`}>
-                            {item.stats.cnMobileMs} ms
+                        {(item.stats?.cnMobileMs ?? (item.stats as any)?.cn_mobile_ms) ? (
+                          <span className={`px-1.5 py-0.5 rounded ${latencyBadgeColor(item.stats?.cnMobileMs ?? (item.stats as any).cn_mobile_ms)}`}>
+                            {item.stats?.cnMobileMs ?? (item.stats as any).cn_mobile_ms} ms
                           </span>
                         ) : (
                           <span className="text-slate-600">—</span>

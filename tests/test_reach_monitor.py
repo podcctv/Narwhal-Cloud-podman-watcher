@@ -73,6 +73,37 @@ class TestReachMonitor(unittest.TestCase):
         self.assertTrue(reach_monitor.is_public_ip("1.1.1.1"))
         self.assertTrue(reach_monitor.is_public_ip("8.8.8.8"))
 
+    def test_cloudflare_ip_filtering(self):
+        # Cloudflare edge IPs must be detected and rejected as host targets
+        self.assertTrue(reach_monitor.is_cloudflare_ip("104.23.251.79"))
+        self.assertTrue(reach_monitor.is_cloudflare_ip("104.16.1.1"))
+        self.assertTrue(reach_monitor.is_cloudflare_ip("162.158.187.57"))
+        self.assertTrue(reach_monitor.is_cloudflare_ip("172.71.182.123"))
+        self.assertFalse(reach_monitor.is_cloudflare_ip("15.204.57.108"))
+        self.assertFalse(reach_monitor.is_cloudflare_ip("8.8.8.8"))
+
+        self.assertFalse(reach_monitor.is_public_ip("104.23.251.79"))
+        self.assertFalse(reach_monitor.is_public_ip("162.158.187.57"))
+
+    def test_extract_client_ip(self):
+        # 1. CF-Connecting-IP takes highest precedence
+        class Req1:
+            headers = {"cf-connecting-ip": "119.28.1.1", "x-forwarded-for": "104.23.251.79"}
+            client = None
+        self.assertEqual(reach_monitor.extract_client_ip(Req1), "119.28.1.1")
+
+        # 2. X-Real-IP takes precedence when cf-connecting-ip is Cloudflare or missing
+        class Req2:
+            headers = {"cf-connecting-ip": "104.23.251.79", "x-real-ip": "119.28.1.2"}
+            client = None
+        self.assertEqual(reach_monitor.extract_client_ip(Req2), "119.28.1.2")
+
+        # 3. X-Forwarded-For filters out Cloudflare proxy IPs
+        class Req3:
+            headers = {"x-forwarded-for": "104.23.251.79, 119.28.1.3"}
+            client = None
+        self.assertEqual(reach_monitor.extract_client_ip(Req3), "119.28.1.3")
+
     def test_discover_target_and_open_ports(self):
         # Insert host reports and security
         host_id = "test-node-1"
@@ -106,7 +137,7 @@ class TestReachMonitor(unittest.TestCase):
         self.assertIn(selected_port, ports)
 
     def test_parse_measurement_results_verdict_all_ok(self):
-        # Mock results from globalping
+        # Mock results from globalping HTTP probe
         raw_results = []
         for i, reg in enumerate(reach_monitor.REACH_REGIONS):
             raw_results.append({
@@ -122,11 +153,38 @@ class TestReachMonitor(unittest.TestCase):
             })
 
         m_data = {"status": "finished", "results": raw_results}
-        summary = reach_monitor.parse_measurement_results(m_data, "1.1.1.1", 443)
+        summary = reach_monitor.parse_measurement_results(m_data, "1.1.1.1", 443, "TCP")
         self.assertEqual(summary["verdict"], "ok")
         self.assertEqual(summary["verdict_label"], "三网通畅·全球可达")
         self.assertEqual(summary["stats"]["success"], 18)
         self.assertEqual(summary["stats"]["cn_success"], 3)
+        self.assertEqual(summary["stats"]["cnAverageMs"], summary["stats"]["cn_avg_ms"])
+        self.assertIsNotNone(summary["stats"]["cnTelecomMs"])
+
+    def test_parse_measurement_ping_results(self):
+        # Mock results from globalping ICMP ping probe
+        raw_results = []
+        for i, reg in enumerate(reach_monitor.REACH_REGIONS):
+            raw_results.append({
+                "probe": {
+                    "asn": reg.get("asn", 10000 + i),
+                    "country": reg.get("country", "US"),
+                    "city": reg.get("city", f"City-{i}"),
+                },
+                "result": {
+                    "rawOutput": "3 packets transmitted, 3 received, 0% packet loss",
+                    "stats": {"avg": 35.5, "loss": 0, "rcv": 3, "min": 35.0, "max": 36.0},
+                },
+            })
+
+        m_data = {"status": "finished", "type": "ping", "results": raw_results}
+        summary = reach_monitor.parse_measurement_results(m_data, "1.1.1.1", 0, "PING")
+        self.assertEqual(summary["protocol"], "PING")
+        self.assertEqual(summary["verdict"], "ok")
+        self.assertEqual(summary["verdict_label"], "三网通畅·全球可达")
+        self.assertEqual(summary["stats"]["success"], 18)
+        self.assertEqual(summary["stats"]["cn_success"], 3)
+        self.assertEqual(summary["stats"]["cnAverageMs"], 35.5)
 
     def test_run_hourly_reach_cycle_thread_safety(self):
         # Verify that run_hourly_reach_cycle runs without SQLite cross-thread errors
@@ -144,8 +202,12 @@ class TestReachMonitor(unittest.TestCase):
         mock_raw = []
         for reg in reach_monitor.REACH_REGIONS:
             mock_raw.append({
-                "probe": {"asn": reg.get("asn", 1234), "country": reg.get("country", "US")},
-                "result": {"statusCode": 200, "timings": {"total": 50, "tcp": 20}},
+                "probe": {"asn": reg.get("asn", 1234), "country": reg.get("country", "US"), "city": reg.get("city", "")},
+                "result": {
+                    "statusCode": 200,
+                    "stats": {"avg": 50, "loss": 0, "rcv": 3},
+                    "timings": {"total": 50, "tcp": 20},
+                },
             })
         mock_mdata = {"status": "finished", "results": mock_raw}
 

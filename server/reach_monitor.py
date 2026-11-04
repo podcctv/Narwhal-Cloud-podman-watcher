@@ -112,14 +112,58 @@ def record_client_ip(conn: sqlite3.Connection, host_id: str, client_ip: str, ts:
 
 _CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 
+CLOUDFLARE_NETWORKS = [
+    ipaddress.ip_network(net) for net in [
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22",
+        "2400:cb00::/32",
+        "2606:4700::/32",
+        "2803:f800::/32",
+        "2405:b500::/32",
+        "2405:8100::/32",
+        "2a06:98c0::/29",
+        "2c0f:f248::/32",
+    ]
+]
+
+
+def is_cloudflare_ip(ip_val: Any) -> bool:
+    """Checks whether an IP address belongs to Cloudflare's Anycast CDN proxy ranges."""
+    if not ip_val:
+        return False
+    try:
+        if isinstance(ip_val, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            ip = ip_val
+        else:
+            ip = ipaddress.ip_address(str(ip_val).split("/")[0].strip())
+        return any(ip in net for net in CLOUDFLARE_NETWORKS)
+    except ValueError:
+        return False
+
+
 def is_public_ip(ip_str: str) -> bool:
-    """SSRF & Bogon protection: ensures target is not RFC 1918, CGNAT, loopback, link-local, multicast."""
+    """SSRF & Bogon protection: ensures target is not RFC 1918, CGNAT, loopback, link-local, multicast, or CDN edge."""
     if not ip_str or not isinstance(ip_str, str):
         return False
     clean = ip_str.split("/")[0].strip()
     try:
         ip = ipaddress.ip_address(clean)
         if ip in _CGNAT_NET:
+            return False
+        if is_cloudflare_ip(ip):
             return False
         return not (
             ip.is_private
@@ -131,6 +175,42 @@ def is_public_ip(ip_str: str) -> bool:
         )
     except ValueError:
         return False
+
+
+def extract_client_ip(request: Any) -> str:
+    """Extracts the true ingress client IP, prioritizing CF-Connecting-IP, X-Real-IP, and X-Narwhal-Proxy-Peer while rejecting CDN/proxy edge IPs."""
+    headers = getattr(request, "headers", None)
+    if headers:
+        # 1. Cloudflare provided client IP
+        cf_ip = str(headers.get("cf-connecting-ip") or "").strip()
+        if cf_ip and is_public_ip(cf_ip):
+            return cf_ip
+
+        # 2. X-Real-IP
+        real_ip = str(headers.get("x-real-ip") or "").strip()
+        if real_ip and is_public_ip(real_ip):
+            return real_ip
+
+        # 3. Caddy authenticated peer header
+        proxy_peer = str(headers.get("x-narwhal-proxy-peer") or "").strip()
+        if proxy_peer and is_public_ip(proxy_peer):
+            return proxy_peer
+
+        # 4. X-Forwarded-For: find the first public non-Cloudflare IP
+        forwarded = headers.get("x-forwarded-for")
+        if forwarded:
+            for part in str(forwarded).split(","):
+                cand = part.strip()
+                if cand and is_public_ip(cand):
+                    return cand
+
+    client_obj = getattr(request, "client", None)
+    if client_obj and client_obj.host:
+        host = str(client_obj.host).strip()
+        if host and is_public_ip(host):
+            return host
+
+    return ""
 
 
 def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
@@ -145,6 +225,10 @@ def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
             p = json.loads(sec["payload_json"])
             ii = p.get("host_firewall", {}).get("interface_inventory", {})
             for iface in ii.get("interfaces", []):
+                # Filter out container/virtual interfaces
+                name = str(iface.get("name") or "")
+                if name.startswith(("docker", "br-", "veth", "tailscale", "wg", "zt")):
+                    continue
                 for addr in iface.get("addresses", []):
                     clean_ip = str(addr or "").split("/")[0].strip()
                     if is_public_ip(clean_ip) and "." in clean_ip:
@@ -156,7 +240,7 @@ def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
         except Exception:
             pass
 
-    # 2. From reports network_addresses
+    # 2. From reports network_addresses (latest row only)
     rep = conn.execute(
         "SELECT payload_json FROM reports WHERE host_id=? ORDER BY ts DESC LIMIT 1",
         (host_id,),
@@ -210,33 +294,10 @@ def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
 
 
 def discover_host_open_ports(conn: sqlite3.Connection, host_id: str) -> List[int]:
-    """Finds all open listening ports for this machine from reports and host_security."""
+    """Finds all currently open listening ports for this machine from the latest report and host_security."""
     ports: Set[int] = set()
-    # From reports
-    rows = conn.execute("SELECT payload_json FROM reports WHERE host_id=?", (host_id,)).fetchall()
-    for r in rows:
-        try:
-            p = json.loads(r["payload_json"])
-            sec = p.get("security", {})
-            for lp in sec.get("listening_ports", []) or []:
-                try:
-                    port = int(lp)
-                    if 1 <= port <= 65535 and port not in {25, 53}:
-                        ports.add(port)
-                except (ValueError, TypeError):
-                    continue
-            for exp in sec.get("network_exposure", []) or []:
-                if isinstance(exp, dict) and exp.get("host_port"):
-                    try:
-                        hp = int(exp["host_port"])
-                        if 1 <= hp <= 65535 and hp not in {25, 53}:
-                            ports.add(hp)
-                    except (ValueError, TypeError):
-                        continue
-        except Exception:
-            pass
 
-    # From host_security
+    # 1. From host_security latest row only
     sec = conn.execute(
         "SELECT payload_json FROM host_security WHERE host_id=? ORDER BY ts DESC LIMIT 1",
         (host_id,),
@@ -248,10 +309,37 @@ def discover_host_open_ports(conn: sqlite3.Connection, host_id: str) -> List[int
             for lp in hf.get("listening_ports", []) or []:
                 try:
                     port = int(lp)
-                    if 1 <= port <= 65535 and port not in {25, 53}:
+                    if 1 <= port <= 65535 and port not in {25, 53, 5355}:
                         ports.add(port)
                 except (ValueError, TypeError):
                     continue
+        except Exception:
+            pass
+
+    # 2. From reports latest row only
+    rep = conn.execute(
+        "SELECT payload_json FROM reports WHERE host_id=? ORDER BY ts DESC LIMIT 1",
+        (host_id,),
+    ).fetchone()
+    if rep:
+        try:
+            p = json.loads(rep["payload_json"])
+            sec_p = p.get("security", {})
+            for lp in sec_p.get("listening_ports", []) or []:
+                try:
+                    port = int(lp)
+                    if 1 <= port <= 65535 and port not in {25, 53, 5355}:
+                        ports.add(port)
+                except (ValueError, TypeError):
+                    continue
+            for exp in sec_p.get("network_exposure", []) or []:
+                if isinstance(exp, dict) and exp.get("host_port"):
+                    try:
+                        hp = int(exp["host_port"])
+                        if 1 <= hp <= 65535 and hp not in {25, 53, 5355}:
+                            ports.add(hp)
+                    except (ValueError, TypeError):
+                        continue
         except Exception:
             pass
 
@@ -259,24 +347,42 @@ def discover_host_open_ports(conn: sqlite3.Connection, host_id: str) -> List[int
 
 
 def choose_random_port(ports: List[int]) -> int:
-    """Randomly selects an open port on the target machine, or falls back to standard ports."""
-    if ports:
-        return random.choice(ports)
-    return random.choice([443, 80, 22])
+    """Randomly selects an open port on the target machine, or returns 0 if no ports are open."""
+    if not ports:
+        return 0
+    # Prefer non-internal ports if multiple are open
+    filtered = [p for p in ports if p not in {25, 53, 5355}]
+    if filtered:
+        return random.choice(filtered)
+    return random.choice(ports)
 
 
-def execute_globalping_measurement(target: str, port: int, timeout_seconds: int = 25) -> Dict[str, Any]:
-    """Posts a measurement to Globalping and polls until completion."""
-    protocol = "HTTPS" if port == 443 else "HTTP"
-    measurement_body = {
-        "type": "http",
-        "target": target,
-        "locations": [{"limit": 1, **r["loc"]} for r in REACH_REGIONS],
-        "measurementOptions": {
-            "port": port,
-            "protocol": protocol,
-        },
-    }
+def execute_globalping_measurement(target: str, port: int, protocol: str = "TCP", timeout_seconds: int = 25) -> Dict[str, Any]:
+    """Posts a measurement to Globalping and polls until completion. Supports TCP (HTTP probe) and ICMP (Ping probe)."""
+    locations = [{"limit": 1, **r["loc"]} for r in REACH_REGIONS]
+    is_ping = (protocol.upper() == "PING" or port <= 0)
+
+    if is_ping:
+        measurement_body = {
+            "type": "ping",
+            "target": target,
+            "locations": locations,
+            "measurementOptions": {
+                "packets": 3,
+            },
+        }
+    else:
+        http_proto = "HTTPS" if port == 443 else "HTTP"
+        measurement_body = {
+            "type": "http",
+            "target": target,
+            "locations": locations,
+            "measurementOptions": {
+                "port": port,
+                "protocol": http_proto,
+            },
+        }
+
     body_bytes = json.dumps(measurement_body).encode("utf-8")
     ctx = _get_ssl_context()
     req = urllib.request.Request(
@@ -290,6 +396,7 @@ def execute_globalping_measurement(target: str, port: int, timeout_seconds: int 
 
     # Poll for completion
     deadline = time.time() + timeout_seconds
+    m_data: Dict[str, Any] = {"results": []}
     while time.time() < deadline:
         time.sleep(1.5)
         poll_req = urllib.request.Request(
@@ -304,14 +411,15 @@ def execute_globalping_measurement(target: str, port: int, timeout_seconds: int 
             if results and all(r.get("result", {}).get("status") in {"finished", "failed"} for r in results):
                 return m_data
 
-    return m_data if "m_data" in locals() else {"results": []}
+    return m_data
 
 
-def parse_measurement_results(m_data: Dict[str, Any], target: str, port: int) -> Dict[str, Any]:
+def parse_measurement_results(m_data: Dict[str, Any], target: str, port: int, protocol: str = "TCP") -> Dict[str, Any]:
     """Processes Globalping raw output into verdicts, latency stats, and 18-region breakdown."""
     raw_results = m_data.get("results", [])
     region_results = []
     matched = set()
+    is_ping = (protocol.upper() == "PING" or port <= 0 or m_data.get("type") == "ping")
 
     for item in REACH_REGIONS:
         # Match from raw results
@@ -335,41 +443,72 @@ def parse_measurement_results(m_data: Dict[str, Any], target: str, port: int) ->
                 break
 
         res_obj = matched_res.get("result", {}) if matched_res else {}
-        timings = res_obj.get("timings") or {}
-        raw_output = str(res_obj.get("rawOutput") or "")
-        tcp_ms = timings.get("tcp")
-        total_ms = timings.get("total") or 0
 
-        # Status classification
-        if tcp_ms is not None and tcp_ms >= 0:
-            status = "ok"
-            latency = tcp_ms
-            err_msg = ""
-        elif res_obj.get("statusCode") is not None:
-            status = "ok"
-            latency = total_ms
-            err_msg = ""
-        elif "timed out" in raw_output.lower():
-            status = "timeout"
-            latency = 0
-            err_msg = "连接超时 (TCP Timeout)"
-        elif "refused" in raw_output.lower():
-            status = "refused"
-            latency = 0
-            err_msg = "端口拒绝 (Connection Refused)"
+        if is_ping:
+            # Parse Globalping ping probe
+            ping_stats = res_obj.get("stats") or {}
+            raw_output = str(res_obj.get("rawOutput") or "")
+            loss = ping_stats.get("loss", 100)
+            rcv = ping_stats.get("rcv", 0)
+            avg_ms = ping_stats.get("avg")
+
+            if (rcv > 0 or loss < 100) and avg_ms is not None:
+                status = "ok"
+                latency = round(float(avg_ms), 1)
+                err_msg = ""
+            elif "100% packet loss" in raw_output or loss == 100 or rcv == 0:
+                status = "timeout"
+                latency = 0
+                err_msg = "Ping 超时 (100% Packet Loss)"
+            else:
+                status = "failed"
+                latency = 0
+                err_msg = raw_output[:120] if raw_output else "Ping 探测失败"
+
+            tcp_ms = latency if status == "ok" else None
+            dns_ms = None
+            tls_ms = None
+            ttfb_ms = latency if status == "ok" else None
+            total_ms = latency
         else:
-            status = "failed"
-            latency = 0
-            err_msg = raw_output[:120] if raw_output else "连接未完成"
+            # Parse Globalping http/tcp probe
+            timings = res_obj.get("timings") or {}
+            raw_output = str(res_obj.get("rawOutput") or "")
+            tcp_ms = timings.get("tcp")
+            total_ms = timings.get("total") or 0
+            dns_ms = timings.get("dns")
+            tls_ms = timings.get("tls")
+            ttfb_ms = timings.get("firstByte")
+
+            if tcp_ms is not None and tcp_ms >= 0:
+                status = "ok"
+                latency = tcp_ms
+                err_msg = ""
+            elif res_obj.get("statusCode") is not None:
+                status = "ok"
+                latency = total_ms
+                err_msg = ""
+            elif "timed out" in raw_output.lower():
+                status = "timeout"
+                latency = 0
+                err_msg = "连接超时 (TCP Timeout)"
+            elif "refused" in raw_output.lower():
+                status = "refused"
+                latency = 0
+                err_msg = "端口拒绝 (Connection Refused)"
+            else:
+                status = "failed"
+                latency = 0
+                err_msg = raw_output[:120] if raw_output else "连接未完成"
 
         region_results.append({
             "region": item,
             "status": status,
             "timings": {
                 "tcp": tcp_ms,
-                "dns": timings.get("dns"),
-                "tls": timings.get("tls"),
-                "ttfb": timings.get("firstByte"),
+                "dns": dns_ms,
+                "tls": tls_ms,
+                "ttfb": ttfb_ms,
                 "total": latency or total_ms,
             },
             "error": err_msg,
@@ -386,19 +525,29 @@ def parse_measurement_results(m_data: Dict[str, Any], target: str, port: int) ->
     min_lat = min(latencies) if latencies else None
     max_lat = max(latencies) if latencies else None
 
+    # Carrier specific breakdown
+    cn_telecom = next((r for r in region_results if r["region"]["id"] == "cn-telecom" and r["status"] == "ok"), None)
+    cn_unicom = next((r for r in region_results if r["region"]["id"] == "cn-unicom" and r["status"] == "ok"), None)
+    cn_mobile = next((r for r in region_results if r["region"]["id"] == "cn-mobile" and r["status"] == "ok"), None)
+
+    cn_telecom_ms = cn_telecom["timings"]["total"] if cn_telecom else None
+    cn_unicom_ms = cn_unicom["timings"]["total"] if cn_unicom else None
+    cn_mobile_ms = cn_mobile["timings"]["total"] if cn_mobile else None
+
     # Verdict diagnosis
     total_count = len(region_results)
     success_count = len(ok_results)
     cn_success_count = len(cn_ok)
 
+    proto_label = "Ping" if is_ping else "TCP"
     if cn_success_count == 3 and success_count >= 14:
         verdict = "ok"
         verdict_label = "三网通畅·全球可达"
-        verdict_desc = "中国电信、联通、移动及全球各主要区域均可顺畅建立连接。"
+        verdict_desc = f"中国电信、联通、移动及全球各主要区域均可顺畅建立 {proto_label} 连接。"
     elif cn_success_count == 0 and success_count >= 8:
         verdict = "gfw_blocked"
         verdict_label = "国内受阻·疑似GFW阻断"
-        verdict_desc = "海外节点完全通畅，但中国大陆三大运营商探针均连接超时或握手被中断。"
+        verdict_desc = f"海外节点完全通畅，但中国大陆三大运营商探针均连接超时或握手被中断。"
     elif cn_success_count >= 1 and success_count < 6:
         verdict = "cn_only"
         verdict_label = "仅国内可达·海外受阻"
@@ -406,28 +555,38 @@ def parse_measurement_results(m_data: Dict[str, Any], target: str, port: int) ->
     elif success_count == 0:
         verdict = "timeout"
         verdict_label = "全网连接超时/端口未放行"
-        verdict_desc = "所有探针均无法建立 TCP 握手，请检查防火墙或服务监听状态。"
+        verdict_desc = f"所有探针均无法建立 {proto_label} 握手，请检查防火墙或服务监听状态。"
     else:
         verdict = "partial"
         verdict_label = "部分区域受阻"
         verdict_desc = f"{success_count}/{total_count} 个区域可达，部分运营商或地区连接异常。"
 
+    effective_proto = "PING" if is_ping else "TCP"
     stats = {
         "total": total_count,
         "success": success_count,
+        "ok": success_count,
         "failed": total_count - success_count,
         "cn_success": cn_success_count,
         "cn_total": cn_total,
         "cn_avg_ms": cn_avg,
+        "cnAverageMs": cn_avg,
         "global_avg_ms": global_avg,
+        "globalAverageMs": global_avg,
         "min_ms": min_lat,
         "max_ms": max_lat,
+        "cn_telecom_ms": cn_telecom_ms,
+        "cnTelecomMs": cn_telecom_ms,
+        "cn_unicom_ms": cn_unicom_ms,
+        "cnUnicomMs": cn_unicom_ms,
+        "cn_mobile_ms": cn_mobile_ms,
+        "cnMobileMs": cn_mobile_ms,
     }
 
     return {
         "target": target,
         "port": port,
-        "protocol": "TCP",
+        "protocol": effective_proto,
         "verdict": verdict,
         "verdict_label": verdict_label,
         "verdict_desc": verdict_desc,
@@ -438,19 +597,24 @@ def parse_measurement_results(m_data: Dict[str, Any], target: str, port: int) ->
 
 
 def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional[Dict[str, Any]]:
-    """Runs reachability check for a single host with a randomly selected open port."""
+    """Runs reachability check for a single host with a randomly selected open port or ICMP ping."""
     target = discover_host_target(conn, host_id)
     if not target or not is_public_ip(target):
-        logger.info(f"Skipping reach check for {host_id}: no public target discovered")
+        logger.info(f"Skipping reach check for {host_id}: no public target discovered (target={target!r})")
         return None
 
     open_ports = discover_host_open_ports(conn, host_id)
-    port = choose_random_port(open_ports)
-    logger.info(f"Running automated reach check for {host_id} -> {target}:{port} (from {len(open_ports)} open ports)")
+    if open_ports:
+        port = choose_random_port(open_ports)
+        protocol = "TCP"
+    else:
+        port = 0
+        protocol = "PING"
 
+    logger.info(f"Running automated reach check for {host_id} -> {target}:{port} ({protocol}, from {len(open_ports)} open ports)")
     try:
-        m_data = execute_globalping_measurement(target, port)
-        summary = parse_measurement_results(m_data, target, port)
+        m_data = execute_globalping_measurement(target, port, protocol)
+        summary = parse_measurement_results(m_data, target, port, protocol)
 
         now = int(time.time())
         conn.execute("""
@@ -471,7 +635,7 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
         conn.commit()
         return summary
     except Exception as e:
-        logger.error(f"Failed automated reach check for {host_id} ({target}:{port}): {e}")
+        logger.error(f"Failed automated reach check for {host_id} ({target}:{port} {protocol}): {e}")
         return None
 
 
@@ -541,31 +705,54 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
         conn = db_factory()
         try:
             init_db(conn)
+            now = int(time.time())
+            total_active_row = conn.execute("SELECT count(*) FROM hosts WHERE last_seen > ?", (now - 1800,)).fetchone()
+            total_active = total_active_row[0] if total_active_row else 0
+
             rows = conn.execute("SELECT * FROM host_reachability ORDER BY checked_at DESC").fetchall()
             items = []
             max_checked = 0
+            ok_count = 0
+            blocked_count = 0
+
             for r in rows:
                 checked_at = int(r["checked_at"] or 0)
                 if checked_at > max_checked:
                     max_checked = checked_at
+                verdict = str(r["verdict"] or "")
+                if verdict == "ok":
+                    ok_count += 1
+                elif verdict in ("gfw_blocked", "timeout", "partial"):
+                    blocked_count += 1
+
                 try:
                     stats = json.loads(r["stats_json"] or "{}")
                     results = json.loads(r["results_json"] or "[]")
                 except Exception:
                     stats, results = {}, []
+
                 items.append({
                     "host_id": r["host_id"],
                     "target": r["target"],
                     "port": r["port"],
                     "protocol": r["protocol"],
-                    "verdict": r["verdict"],
+                    "verdict": verdict,
                     "verdict_label": r["verdict_label"],
                     "verdict_desc": r["verdict_desc"],
                     "stats": stats,
                     "results": results,
                     "checked_at": checked_at,
                 })
-            return JSONResponse(content={"items": items, "last_checked": max_checked})
+
+            return JSONResponse(content={
+                "items": items,
+                "total_hosts": total_active or len(items),
+                "checked_hosts": len(items),
+                "ok_hosts": ok_count,
+                "blocked_hosts": blocked_count,
+                "checked_at": max_checked,
+                "last_checked": max_checked,
+            })
         finally:
             conn.close()
 
@@ -582,7 +769,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 results = json.loads(r["results_json"] or "[]")
             except Exception:
                 stats, results = {}, []
-            return JSONResponse(content={
+            item = {
                 "host_id": r["host_id"],
                 "target": r["target"],
                 "port": r["port"],
@@ -593,7 +780,8 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 "stats": stats,
                 "results": results,
                 "checked_at": int(r["checked_at"] or 0),
-            })
+            }
+            return JSONResponse(content={"item": item, **item})
         finally:
             conn.close()
 

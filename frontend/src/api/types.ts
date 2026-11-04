@@ -1223,11 +1223,22 @@ export interface ReachabilitySummaryItem {
   stats: {
     total: number;
     ok: number;
+    success?: number;
+    failed?: number;
+    cn_success?: number;
+    cn_total?: number;
+    cn_avg_ms?: number | null;
+    global_avg_ms?: number | null;
+    min_ms?: number | null;
+    max_ms?: number | null;
     cnAverageMs: number;
     globalAverageMs: number;
     cnTelecomMs: number;
     cnUnicomMs: number;
     cnMobileMs: number;
+    cn_telecom_ms?: number | null;
+    cn_unicom_ms?: number | null;
+    cn_mobile_ms?: number | null;
   };
   results?: any[];
 }
