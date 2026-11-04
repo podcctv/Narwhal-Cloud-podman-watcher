@@ -1,12 +1,18 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.210**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.211**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.7.211：合并 fork main 更新并完成 Runman 兼容
+
+- 在保留 Runman Admission、受限磁盘清理、PasarGuard、协议回执、GFW 端点及前端证据动作适配的同时，整合 fork `main` 的 Reach Check 与 null-disk/心跳修复。
+- 合并后的 Python 3.11/3.12 兼容、浏览器回归、amd64/arm64 镜像冒烟及完整 Linux/OpenRC/隔离网络 CI 已通过；发布结果见 [progress.md](progress.md)。
+- 没有在生产 Runman 节点部署或实机验证。
 
 ### v1.7.210：补齐 Runman 的准入保护与剩余运行时入口
 
