@@ -357,9 +357,27 @@ def choose_random_port(ports: List[int]) -> int:
     return random.choice(ports)
 
 
-def execute_globalping_measurement(target: str, port: int, protocol: str = "TCP", timeout_seconds: int = 25) -> Dict[str, Any]:
+def execute_globalping_measurement(
+    target: str,
+    port: int,
+    protocol: str = "TCP",
+    regions: Optional[List[Dict[str, Any]]] = None,
+    timeout_seconds: int = 25,
+) -> Dict[str, Any]:
     """Posts a measurement to Globalping and polls until completion. Supports TCP (HTTP probe) and ICMP (Ping probe)."""
-    locations = [{"limit": 1, **r["loc"]} for r in REACH_REGIONS]
+    import os
+    api_key = str(os.environ.get("GLOBALPING_API_KEY") or "").strip()
+
+    if regions is not None:
+        active_regions = regions
+    elif api_key:
+        active_regions = REACH_REGIONS
+    else:
+        # Default core regions when unauthenticated: 8 key probes stay strictly within 250 free credits/hour across 28 cluster hosts
+        core_ids = {"cn-telecom", "cn-unicom", "cn-mobile", "apac-hk", "apac-jp", "apac-sg", "emea-gb", "am-us-la"}
+        active_regions = [r for r in REACH_REGIONS if r["id"] in core_ids]
+
+    locations = [{"limit": 1, **r["loc"]} for r in active_regions]
     is_ping = (protocol.upper() == "PING" or port <= 0)
 
     if is_ping:
@@ -385,26 +403,41 @@ def execute_globalping_measurement(target: str, port: int, protocol: str = "TCP"
 
     body_bytes = json.dumps(measurement_body).encode("utf-8")
     ctx = _get_ssl_context()
+    headers = {"Content-Type": "application/json", "User-Agent": "Narwhal-Watcher"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     req = urllib.request.Request(
         f"{GLOBALPING_API_URL}/measurements",
         data=body_bytes,
-        headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Watcher"},
+        headers=headers,
     )
-    with urllib.request.urlopen(req, context=ctx, timeout=12) as resp:
-        post_data = json.loads(resp.read().decode("utf-8"))
-        measurement_id = post_data["id"]
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=12) as resp:
+            post_data = json.loads(resp.read().decode("utf-8"))
+            measurement_id = post_data["id"]
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            retry_after = e.headers.get("Retry-After") or e.headers.get("X-RateLimit-Reset") or "soon"
+            logger.warning(f"Globalping rate limit reached (HTTP 429, reset in {retry_after}s). Set GLOBALPING_API_KEY for higher quota.")
+            return {"status": "rate_limited", "results": [], "active_regions": active_regions}
+        raise
 
     # Poll for completion
     deadline = time.time() + timeout_seconds
-    m_data: Dict[str, Any] = {"results": []}
+    m_data: Dict[str, Any] = {"results": [], "active_regions": active_regions}
     while time.time() < deadline:
         time.sleep(1.5)
+        poll_headers = {"User-Agent": "Narwhal-Watcher"}
+        if api_key:
+            poll_headers["Authorization"] = f"Bearer {api_key}"
         poll_req = urllib.request.Request(
             f"{GLOBALPING_API_URL}/measurements/{measurement_id}",
-            headers={"User-Agent": "Narwhal-Watcher"},
+            headers=poll_headers,
         )
         with urllib.request.urlopen(poll_req, context=ctx, timeout=10) as poll_resp:
             m_data = json.loads(poll_resp.read().decode("utf-8"))
+            m_data["active_regions"] = active_regions
             if m_data.get("status") == "finished":
                 return m_data
             results = m_data.get("results") or []
@@ -414,14 +447,36 @@ def execute_globalping_measurement(target: str, port: int, protocol: str = "TCP"
     return m_data
 
 
-def parse_measurement_results(m_data: Dict[str, Any], target: str, port: int, protocol: str = "TCP") -> Dict[str, Any]:
-    """Processes Globalping raw output into verdicts, latency stats, and 18-region breakdown."""
+def parse_measurement_results(
+    m_data: Dict[str, Any],
+    target: str,
+    port: int,
+    protocol: str = "TCP",
+    regions: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Processes Globalping raw output into verdicts, latency stats, and region breakdown."""
+    active_regions = regions or m_data.get("active_regions") or REACH_REGIONS
+    effective_proto = "PING" if (protocol.upper() == "PING" or port <= 0 or m_data.get("type") == "ping") else "TCP"
+
+    if m_data.get("status") == "rate_limited":
+        return {
+            "target": target,
+            "port": port,
+            "protocol": effective_proto,
+            "verdict": "timeout",
+            "verdict_label": "探针配额受限",
+            "verdict_desc": "Globalping 公共探针免费配额已耗尽，请等待整点刷新或配置 GLOBALPING_API_KEY。",
+            "stats": {"total": 0, "success": 0, "ok": 0, "failed": 0, "cn_success": 0, "cn_total": 3},
+            "results": [],
+            "checked_at": int(time.time()),
+        }
+
     raw_results = m_data.get("results", [])
     region_results = []
     matched = set()
-    is_ping = (protocol.upper() == "PING" or port <= 0 or m_data.get("type") == "ping")
+    is_ping = (effective_proto == "PING")
 
-    for item in REACH_REGIONS:
+    for item in active_regions:
         # Match from raw results
         matched_res = None
         for r in raw_results:
