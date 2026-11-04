@@ -31,6 +31,7 @@ import { ContainerTableView } from './ContainerTableView';
 import { HostDiskPressure, hostDiskPressure } from './HostDiskPressure';
 import { AdmissionStatus } from '../container/AdmissionStatus';
 import { HostBandwidthPanel } from './HostBandwidthPanel';
+import { HostReachabilityBadge } from './HostReachabilityBadge';
 import { ContainerStateBadges, hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard, hasContainerResourceAlert, hasContainerResourceGuardFailure, hasContainerProtocolGuardNeedsReview } from './ContainerStateBadges';
 import { isCurrentContainerInventoryItem } from '../../utils/containerFreshness';
 
@@ -584,6 +585,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                       >
                         v{agentVersion}
                       </span>
+                      <HostReachabilityBadge hostId={hostId} />
                     </div>
                     <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5">
                       <span>
@@ -1041,6 +1043,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                     <span className={`rounded-full border px-2 py-0.5 text-[11px] ${hostStateColor}`}>{hostStateLabel}</span>
                     <span className="rounded-full border border-amber-700/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">{sampleStateLabel}</span>
                     <span className="font-mono text-[11px] text-slate-400">v{latestHeartbeat.agent_version || '未知'}</span>
+                    <HostReachabilityBadge hostId={hostId} />
                   </span>
                   <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
                     <span>主机心跳：{latestHeartbeat.host_last_seen_iso_utc8 || '未知'} · {formatSnapshotAge(hostHeartbeatAge)}</span>

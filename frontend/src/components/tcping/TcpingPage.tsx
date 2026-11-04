@@ -1,3 +1,4 @@
+import { ReachCheckPanel } from './ReachCheckPanel';
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDown, ArrowRight, Check, ChevronDown, CircleCheck, Clock3,
@@ -25,6 +26,10 @@ const productNameKey = (value: string) => value.replace(/\s+/g, ' ').trim().toLo
 const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
 export const TcpingPage: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'tcping' | 'reach'>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('tab') === 'reach' ? 'reach' : 'tcping';
+  });
   const [directory, setDirectory] = useState<Directory>();
   const [sources, setSources] = useState<Source[]>([]), [enabled, setEnabled] = useState(false);
   const [selected, setSelected] = useState(''), [scope, setScope] = useState<Scope>('province');
@@ -173,9 +178,70 @@ export const TcpingPage: React.FC = () => {
       <a className="tcp-r-brand" href="/tcping" aria-label="Narwhal Network Lab 首页">
         <span className="tcp-r-mark"><Activity size={20} /></span><span>NARWHAL<small>NETWORK LAB</small></span>
       </a>
-      <nav aria-label="页面导航"><a className="is-current" href="/tcping"><Globe2 size={15} />全国 TCP Ping</a><a href="#tcp-r-guide">探测说明</a><a href="/tcping/manage">测速配置 <ArrowRight size={14} /></a></nav>
+      <nav aria-label="页面导航">
+        <a
+          className={activeTab === 'tcping' ? 'is-current' : ''}
+          href="/tcping"
+          onClick={e => {
+            e.preventDefault();
+            setActiveTab('tcping');
+            const url = new URL(window.location.href);
+            url.searchParams.delete('tab');
+            window.history.replaceState(null, '', url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : ''));
+          }}
+        >
+          <Globe2 size={15} />全国 TCP Ping
+        </a>
+        <a
+          className={activeTab === 'reach' ? 'is-current' : ''}
+          href="/tcping?tab=reach"
+          onClick={e => {
+            e.preventDefault();
+            setActiveTab('reach');
+            const url = new URL(window.location.href);
+            url.searchParams.set('tab', 'reach');
+            window.history.replaceState(null, '', url.pathname + '?' + url.searchParams.toString());
+          }}
+        >
+          <ShieldCheck size={15} />全球三网可达性
+        </a>
+        <a href="#tcp-r-guide">探测说明</a>
+        <a href="/tcping/manage">测速配置 <ArrowRight size={14} /></a>
+      </nav>
     </header>
 
+    {activeTab === 'reach' ? (
+      <>
+        <section className="tcp-r-hero">
+          <div className="tcp-r-hero-copy">
+            <p className="tcp-r-eyebrow">GLOBAL & CHINA 3-CARRIERS REACHABILITY / DNS · TCP · TLS TIMINGS</p>
+            <h1>全球与国内三网可达性检测</h1>
+            <p>参考开源 reach-check 核心逻辑，通过 18 个全球节点与国内电信/联通/移动三网实时探测可达性、建连时延与 GFW 阻断诊断。</p>
+            <div className="tcp-r-direction"><Info size={15} /><span>轻量化无侵入架构：纯前端直连 Globalping 探针网络与浏览器本地探测，不占用母机后台守护进程。</span></div>
+          </div>
+          <div className="tcp-r-catalog" aria-label="探测网络规模">
+            <div><b>18+</b><span>全球区域</span></div>
+            <div><b>3 网</b><span>电信/联通/移动</span></div>
+            <div><b>4 阶</b><span>DNS/TCP/TLS/首包</span></div>
+            <div><b>0</b><span>后台资源开销</span></div>
+          </div>
+        </section>
+
+        <div className="max-w-6xl mx-auto px-4 py-6 w-full">
+          <ReachCheckPanel
+            availableHosts={sources.map(s => ({ id: s.id, name: s.name, ip: undefined }))}
+            initialTarget={new URLSearchParams(window.location.search).get('reach_target') || (source?.name || sources[0]?.name || '')}
+            onBackToTcping={() => {
+              setActiveTab('tcping');
+              const url = new URL(window.location.href);
+              url.searchParams.delete('tab');
+              window.history.replaceState(null, '', url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : ''));
+            }}
+          />
+        </div>
+      </>
+    ) : (
+      <>
     <section className="tcp-r-hero">
       <div className="tcp-r-hero-copy">
         <p className="tcp-r-eyebrow">PUBLIC NETWORK MEASUREMENT / TCP CONNECT</p>
@@ -336,6 +402,9 @@ export const TcpingPage: React.FC = () => {
     </div><p className="tcp-r-directory-note">大陆节点目录由 <a href="https://www.zstaticcdn.com/" target="_blank" rel="noopener noreferrer">Zstatic</a> 提供；台湾为用户指定目标。结果反映测试时刻的单向 TCP 连接情况，不代表 SLA、吞吐量或购买承诺。目录更新：{directory?.updated_at || '—'}</p></section>
 
     <div className="tcp-r-mobile-run"><div><b>{source?.name || '选择测试来源'}</b><small>{scope === 'province' ? '省级范围' : scope === 'city' ? '市级范围' : '全部节点'} · {active(job) ? `${progress}% 已返回` : countdown ? `冷却 ${Math.ceil(countdown / 60)} 分钟` : '准备就绪'}</small></div><button disabled={!canStart} onClick={start}>{busy || active(job) ? <Loader2 className="tcp-spin" size={17} /> : <Play size={17} />}{active(job) ? '查看进度' : '开始测试'}</button></div>
+
+      </>
+    )}
 
     {selectedNode && <div className="tcp-r-modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedNode(null); }}><section ref={nodeModalRef} className="tcp-r-node-modal" role="dialog" aria-modal="true" aria-labelledby="tcp-r-node-title" tabIndex={-1}>
       <header><div><span className="tcp-r-step-tag">TARGET DETAIL</span><h2 id="tcp-r-node-title">{selectedNode.province}{selectedNode.city ? ` · ${selectedNode.city}` : ' · 省级运营商'}</h2></div><button aria-label="关闭节点详情" onClick={() => setSelectedNode(null)}><X size={18} /></button></header>

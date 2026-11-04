@@ -3836,9 +3836,9 @@ async def report(
                     float(c.get("net_rx_bps", 0)),
                     float(c.get("net_tx_bps", 0)),
                     int(c.get("conn_count", 0)),
-                    c.get("disk", {}).get("file"),
-                    c.get("disk", {}).get("size_bytes"),
-                    c.get("disk", {}).get("used_percent"),
+                    (c.get("disk") or {}).get("file") if isinstance(c.get("disk"), dict) else None,
+                    (c.get("disk") or {}).get("size_bytes") if isinstance(c.get("disk"), dict) else None,
+                    (c.get("disk") or {}).get("used_percent") if isinstance(c.get("disk"), dict) else None,
                     podman_v4,
                     podman_v6,
                     ts,
@@ -4148,7 +4148,7 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             security=payload.setdefault('security',{})
             if admission['observed_at']>security.get('admission',{}).get('observed_at',0):
                 security['admission']=json.loads(admission['payload'])
-        disk = payload.get("disk", {})
+        disk = payload.get("disk") if isinstance(payload.get("disk"), dict) else {}
         host_disk = host_disk_map.get(r["host_id"], {})
         alert_disk = (r["disk_used_percent"] or 0) >= ALERT_DISK_THRESHOLD_PERCENT
         alert_cpu = float(r["cpu_percent"] or 0) >= ALERT_CPU_THRESHOLD_PERCENT
@@ -6452,6 +6452,7 @@ async def poll_security_actions(
     conn = db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE hosts SET last_seen=? WHERE host_id=?", (now, host_id))
         conn.execute(
             """
             UPDATE security_actions
