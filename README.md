@@ -1,6 +1,6 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.205**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.7.206**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
@@ -8,12 +8,18 @@ Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
 
+### v1.7.206：补齐 Runman 可写层指标和代次绑定安全清理
+
+- Runman inventory 新增 overlay `upperdir/up` 已分配块采样，与 sparse `disk.img` 宿主分配量、客户机文件系统用量分开呈现；遍历有上限，读不全时保持不可用。
+- 面板与 XMRig 清理动作现在端到端携带实例 UUID、进程启动 tick 和文件指纹；Server 验证最新报告代次，Agent 再核验 PID、服务 cgroup 和每个普通文件后才执行清理。
+- UI 仅在具备相应代次证据时开放 Runman 面板/XMRig 处置；旧告警、软链接、证据变化或不支持的服务管理器都会拒绝自动清理。
+
 ### v1.7.205：为 Runman 增加代次安全的过载停机
 
 - Runman Rust v2 新增 root-only `/v1/stop-overload`，在实例生命周期锁内核验 UUID 代次、运行状态和实时连接数，确认仍超阈值后才停止；实例已替换、负载恢复或 PID 变化时拒绝动作。
 - Watcher 持续过载策略现在可对 Runman 排队停机动作，并携带期望实例代次；Agent 只调用 Runman 条件式接口，不走通用容器 CLI stop。
 - 修正 Runman UDP socket 没有计入连接总数的问题，TCP 总数与 UDP 数现在保持分项和合计一致，连接策略可正确校验样本。
-- Podman writable-layer 大小仍使用 Runman sparse `disk.img` 分配量单独呈现；广义服务/配置/二进制清理仍关闭，直至目标进程与文件有端到端代次证据。
+- 当时 Runman 只上报 sparse `disk.img` 分配量，广义清理因缺少进程/文件代次证据保持关闭；这两项在 v1.7.206 补齐。
 
 ### v1.7.204：补齐 Runman 深度快照与剩余安全适配
 

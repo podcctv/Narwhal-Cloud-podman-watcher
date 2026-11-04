@@ -1354,16 +1354,30 @@ def _telegram_active_alerts(severity: str = "all", offset: int = 0, limit: int =
 
 
 def _telegram_actionable(alert: sqlite3.Row) -> bool:
-    if alert["runtime"] not in ("podman", "incus"):
+    if alert["runtime"] not in ("podman", "incus", "runman"):
         return False
     if alert["alert_type"] not in ("unauthorized_panel_pairing", "socks_weak_auth", "malicious_process"):
         return False
     details = _alert_action_evidence(alert)
+    if alert["runtime"] == "runman":
+        if (
+            alert["alert_type"] not in ("unauthorized_panel_pairing", "malicious_process")
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", details.get("instance_id", ""))
+            or not (details.get("process_targets") or details.get("file_targets"))
+        ):
+            return False
     if alert["alert_type"] == "unauthorized_panel_pairing":
         return bool(details.get("process_patterns") or details.get("config_files"))
     if alert["alert_type"] == "socks_weak_auth":
         return details.get("socks_auth_mode") in ("no_auth", "weak_password") and bool(details.get("socks_processes"))
-    return any(isinstance(item, dict) and item.get("process") == "xmrig" for item in details.get("malicious_processes", []))
+    has_xmrig = any(isinstance(item, dict) and item.get("process") == "xmrig" for item in details.get("malicious_processes", []))
+    if alert["runtime"] == "runman":
+        has_xmrig = has_xmrig and any(
+            item.get("process") == "xmrig" and item.get("pattern") == "xmrig"
+            and re.fullmatch(r"[0-9]{1,24}", item.get("start_ticks", ""))
+            for item in details.get("process_targets", [])
+        )
+    return has_xmrig
 
 
 def _telegram_menu() -> tuple[str, Dict[str, Any]]:
@@ -4159,7 +4173,8 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         if host_stale and not include_stale:
             continue
         container_disk = payload.get("container_disk", {})
-        backing_image = container_disk.get("backing_image", {}) if isinstance(container_disk, dict) else {}
+        container_disk = container_disk if isinstance(container_disk, dict) else {}
+        backing_image = container_disk.get("backing_image", {})
         backing_image = backing_image if isinstance(backing_image, dict) else {}
         backing_image_available = (
             r["runtime"] == "runman"
@@ -4173,6 +4188,22 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             and 0 < backing_image["sampled_at"] <= now + 30
             and now - backing_image["sampled_at"] <= 300
         )
+        rw_bytes = container_disk.get("rw_bytes") if isinstance(container_disk, dict) else None
+        rw_sampled_at = container_disk.get("rw_sampled_at") if isinstance(container_disk, dict) else None
+        if r["runtime"] == "runman":
+            rw_available = (
+                container_disk.get("rw_available") is True
+                and container_disk.get("rw_source") == "runman_overlay_upperdir_allocated"
+                and type(rw_bytes) is int
+                and rw_bytes >= 0
+                and type(rw_sampled_at) is int
+                and 0 < rw_sampled_at <= now + 30
+                and now - rw_sampled_at <= 180
+            )
+        else:
+            rw_available = container_disk.get("rw_available") is True or (
+                type(rw_bytes) is int and rw_bytes >= 0
+            )
         top_cpu_process = payload.get("top_cpu_process", {})
         offline_hours = stale_seconds // 3600
         rx_bps = float(r["net_rx_bps"] or 0)
@@ -4242,6 +4273,9 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             "disk_data_requested_path": host_disk.get("data_requested_path") or disk.get("data_requested_path", "/"),
             "disk_data_mountpoint": host_disk.get("data_mountpoint") or disk.get("data_mountpoint", "/"),
             "container_disk_rw_bytes": container_disk.get("rw_bytes", 0),
+            "container_disk_rw_available": rw_available,
+            "container_disk_rw_source": container_disk.get("rw_source", "runtime_size_rw"),
+            "container_disk_rw_sampled_at": rw_sampled_at if rw_available else 0,
             "container_disk_rootfs_bytes": container_disk.get("rootfs_bytes", 0),
             "container_disk_backing_image_available": backing_image_available,
             "container_disk_backing_image_logical_bytes": backing_image.get("logical_bytes") if backing_image_available else None,
@@ -4965,8 +4999,14 @@ def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 pid = 0
             if process == "xmrig":
+                start_ticks = str(item.get("start_ticks") or "").strip()
                 malicious_processes.append(
-                    {"process": process, "pid": pid if 1 < pid <= 4194304 else 0}
+                    {
+                        "process": process,
+                        "pid": pid if 1 < pid <= 4194304 else 0,
+                        "start_ticks": start_ticks if re.fullmatch(r"[0-9]{1,24}", start_ticks) else "",
+                        "pattern": str(item.get("pattern") or "")[:120],
+                    }
                 )
     if not malicious_processes and alert["alert_type"] == "malicious_process":
         legacy_match = re.search(
@@ -4983,7 +5023,84 @@ def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
                 }
             )
     details["malicious_processes"] = malicious_processes[:20]
+
+    process_targets = []
+    raw_process_targets = details.get("process_targets")
+    if isinstance(raw_process_targets, list):
+        for item in raw_process_targets[:64]:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("pid")
+            process = str(item.get("process") or "").strip().lower()
+            pattern = str(item.get("pattern") or "").strip().lower()
+            start_ticks = str(item.get("start_ticks") or "").strip()
+            if (
+                type(pid) is int and 1 < pid <= 4194304
+                and re.fullmatch(r"[a-zA-Z0-9_.@+-]{1,80}", process)
+                and re.fullmatch(r"[a-zA-Z0-9_.@-]{2,80}", pattern)
+                and re.fullmatch(r"[0-9]{1,24}", start_ticks)
+                and int(start_ticks) > 0
+            ):
+                process_targets.append({
+                    "pid": pid, "process": process, "pattern": pattern,
+                    "start_ticks": start_ticks,
+                })
+    details["process_targets"] = process_targets
+
+    file_targets = []
+    raw_file_targets = details.get("file_targets")
+    if isinstance(raw_file_targets, list):
+        for item in raw_file_targets[:128]:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            generation = item.get("generation")
+            kind = item.get("kind")
+            if (
+                isinstance(path, str) and len(path) <= 256
+                and re.fullmatch(r"/[A-Za-z0-9_./@:+-]{1,255}", path)
+                and os.path.normpath(path) == path
+                and isinstance(generation, str)
+                and re.fullmatch(r"[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-7]{3,4}", generation)
+                and isinstance(kind, str)
+                and kind in {"config", "service", "binary"}
+            ):
+                file_targets.append({"path": path, "generation": generation, "kind": kind})
+    details["file_targets"] = file_targets
+    details["instance_id"] = str(details.get("instance_id") or "").strip().lower()[:36]
     return details
+
+
+def _runman_alert_generation_current(
+    conn: sqlite3.Connection, alert: sqlite3.Row, details: Dict[str, Any], now: int | None = None,
+) -> tuple[bool, str]:
+    """Require a fresh latest report with the alert's exact Runman identity."""
+    now = int(time.time()) if now is None else int(now)
+    vm_uuid = str(alert["container_name"] or "").lower()
+    instance_id = str(details.get("instance_id") or "").lower()
+    if (
+        alert["runtime"] != "runman" or alert["project"] != "default"
+        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", vm_uuid)
+        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", instance_id)
+    ):
+        return False, "Runman alert target identity is invalid"
+    latest = conn.execute(
+        "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='runman' AND project='default' AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
+        (alert["host_id"], alert["container_name"]),
+    ).fetchone()
+    try:
+        payload = json.loads(latest["payload_json"] or "{}") if latest is not None else {}
+    except (TypeError, ValueError):
+        payload = {}
+    stable_id = str(payload.get("stable_id") or payload.get("id") or "").lower() if isinstance(payload, dict) else ""
+    current_id = str(payload.get("instance_id") or "").lower() if isinstance(payload, dict) else ""
+    report_at = int(latest["ts"] or 0) if latest is not None else 0
+    if (
+        stable_id != vm_uuid or current_id != instance_id
+        or report_at <= 0 or report_at > now + 30 or now - report_at > STALE_SECONDS
+    ):
+        return False, "Runman instance generation is stale or has changed"
+    return True, instance_id
 
 
 @app.post("/api/v1/update/version")
@@ -5137,6 +5254,9 @@ def _refresh_remediation_process_pids(
         params = {}
     if action["action_type"] != "remediate_panel_pairing" or not isinstance(params, dict):
         return params if isinstance(params, dict) else {}
+    if action["runtime"] == "runman":
+        # Preserve the exact process start ticks and file fingerprints from the alert.
+        return params
     alert = conn.execute(
         "SELECT * FROM security_alerts WHERE id=?", (action["alert_id"],)
     ).fetchone()
@@ -5185,7 +5305,7 @@ async def queue_security_action(alert_id: int, request: Request) -> JSONResponse
     if alert["alert_type"] != "unauthorized_panel_pairing":
         conn.close()
         raise HTTPException(status_code=400, detail="this action only supports panel-pairing alerts")
-    if alert["runtime"] not in ("podman", "incus"):
+    if alert["runtime"] not in ("podman", "incus", "runman"):
         conn.close()
         raise HTTPException(status_code=400, detail="Docker and unknown runtimes are notice-only")
     if not alert["container_name"]:
@@ -5224,6 +5344,21 @@ async def queue_security_action(alert_id: int, request: Request) -> JSONResponse
             "process_pids": process_pids,
             "config_files": sorted(set(config_files)),
         }
+        if alert["runtime"] == "runman":
+            identity_ok, instance_id = _runman_alert_generation_current(conn, alert, details)
+            if not identity_ok:
+                conn.close()
+                raise HTTPException(status_code=409, detail=instance_id)
+            process_targets = details.get("process_targets") or []
+            file_targets = details.get("file_targets") or []
+            if not process_targets and not file_targets:
+                conn.close()
+                raise HTTPException(status_code=409, detail="Runman alert has no generation-bound process or file targets")
+            params.update({
+                "instance_id": instance_id,
+                "process_targets": process_targets,
+                "file_targets": file_targets,
+            })
 
     requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
     row, queued = _queue_security_action_row(conn, alert, action_type, params, requested_by)
@@ -5323,7 +5458,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                     "and exact XMRig alerts"
                 ),
             )
-        if alert["runtime"] not in ("podman", "incus"):
+        if alert["runtime"] not in ("podman", "incus", "runman"):
             conn.close()
             raise HTTPException(status_code=400, detail="Docker is notice-only and cannot be denied")
         if not alert["container_name"]:
@@ -5335,6 +5470,15 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
         )
         conn.execute("UPDATE security_alerts SET status='active' WHERE id=?", (alert_id,))
         details = _alert_action_evidence(alert)
+        runman_instance_id = ""
+        if alert["runtime"] == "runman":
+            if alert["alert_type"] not in ("unauthorized_panel_pairing", "malicious_process"):
+                conn.close()
+                raise HTTPException(status_code=400, detail="Runman deny supports only generation-bound panel or XMRig remediation")
+            identity_ok, runman_instance_id = _runman_alert_generation_current(conn, alert, details, now)
+            if not identity_ok:
+                conn.close()
+                raise HTTPException(status_code=409, detail=runman_instance_id)
         if alert["alert_type"] == "socks_weak_auth":
             if details.get("socks_auth_mode") not in ("no_auth", "weak_password"):
                 conn.close()
@@ -5368,6 +5512,17 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                 "process_pids": process_pids,
                 "config_files": config_files,
             }
+            if alert["runtime"] == "runman":
+                process_targets = details.get("process_targets") or []
+                file_targets = details.get("file_targets") or []
+                if not process_targets and not file_targets:
+                    conn.close()
+                    raise HTTPException(status_code=409, detail="Runman alert has no generation-bound process or file targets")
+                params.update({
+                    "instance_id": runman_instance_id,
+                    "process_targets": process_targets,
+                    "file_targets": file_targets,
+                })
             action, queued = _queue_security_action_row(
                 conn, alert, "remediate_panel_pairing", params, requested_by
             )
@@ -5391,10 +5546,28 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
                     continue
                 if 1 < process_pid <= 4194304:
                     process_pids.append(process_pid)
+            process_targets = [
+                item for item in (details.get("process_targets") or [])
+                if item.get("process") == "xmrig" and item.get("pattern") == "xmrig"
+                and any(
+                    malware.get("pid") == item.get("pid")
+                    and malware.get("start_ticks") == item.get("start_ticks")
+                    for malware in exact_xmrig
+                )
+            ]
+            if alert["runtime"] == "runman" and not process_targets:
+                conn.close()
+                raise HTTPException(status_code=409, detail="Runman XMRig alert lacks exact process-start evidence")
             params = {
                 "process_names": ["xmrig"],
                 "process_pids": sorted(set(process_pids)),
             }
+            if alert["runtime"] == "runman":
+                params.update({
+                    "instance_id": runman_instance_id,
+                    "process_targets": process_targets,
+                    "file_targets": details.get("file_targets") or [],
+                })
             action, queued = _queue_security_action_row(
                 conn, alert, "remediate_malicious_process", params, requested_by
             )
@@ -7151,7 +7324,7 @@ const labels={active:'活动',suppressed:'允许且不再提醒',dismissed:'本�
 const decisions={deny:'禁止/处理',allow_silent:'允许且不再提醒',dismiss_once:'本次取消提醒',reopen:'恢复提醒'};
 function esc(value){return String(value??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
 function showToast(message,error=false){const toast=document.getElementById('toast');toast.textContent=message;toast.className=`toast${error?' error':''}`;toast.hidden=false;setTimeout(()=>{toast.hidden=true},4500)}
-function actionable(alert){const details=alert.details||{};const supported=alert.runtime==='incus'||alert.runtime==='podman';if(!supported)return false;if(alert.type==='unauthorized_panel_pairing')return (details.process_patterns||[]).length>0||(details.config_files||[]).length>0;if(alert.type==='socks_weak_auth')return ['no_auth','weak_password'].includes(details.socks_auth_mode)&&(details.socks_processes||[]).length>0;if(alert.type==='malicious_process')return (details.malicious_processes||[]).some(x=>x.process==='xmrig');return false;}
+function actionable(alert){const details=alert.details||{};const runmanReady=alert.runtime==='runman'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(details.instance_id||'')&&((details.process_targets||[]).length>0||(details.file_targets||[]).length>0);const supported=alert.runtime==='incus'||alert.runtime==='podman'||runmanReady;if(!supported)return false;if(alert.type==='unauthorized_panel_pairing')return ((details.process_patterns||[]).length>0||(details.config_files||[]).length>0)&&(alert.runtime!=='runman'||runmanReady);if(alert.type==='socks_weak_auth')return alert.runtime!=='runman'&&['no_auth','weak_password'].includes(details.socks_auth_mode)&&(details.socks_processes||[]).length>0;if(alert.type==='malicious_process')return (details.malicious_processes||[]).some(x=>x.process==='xmrig')&&(alert.runtime!=='runman'||(details.process_targets||[]).some(x=>x.process==='xmrig'&&x.pattern==='xmrig'&&/^\\d+$/.test(x.start_ticks||'')));return false;}
 function evidenceText(alert){const d=alert.details||{};if(alert.type==='unauthorized_panel_pairing')return [`域名：${(d.unapproved_domains||[]).join(', ')||'-'}`,`进程：${(d.process_patterns||[]).join(', ')||'-'}`,`配置：${(d.config_files||[]).join(', ')||'-'}`];if(alert.type==='socks_weak_auth')return [`认证：${d.socks_auth_mode||'unknown'}`,`进程：${(d.socks_processes||[]).join(', ')||'-'}`,`配置：${(d.socks_config_files||[]).join(', ')||'-'}`];if(alert.type==='malicious_process')return [`进程：${(d.malicious_processes||[]).map(x=>x.process).join(', ')||'-'}`,`PID：${(d.malicious_processes||[]).map(x=>x.pid||'-').join(', ')||'-'}`,'策略：仅精确匹配 XMRig'];return [`指标：${alert.value||0}`,`阈值：${alert.threshold||0}`,`类型：${alert.type}`];}
 function resultText(alert){const automatic=alert.details?.automatic_remediation;const action=alert.latest_action;const decision=alert.latest_decision;const parts=[];if(automatic?.attempted)parts.push(`自动处置：${automatic.succeeded?'成功':'失败'} · ${automatic.message||'-'}`);if(action)parts.push(`节点操作：${action.status} · ${action.result_message||action.action_type}`);if(decision)parts.push(`人工决定：${decisions[decision.decision]||decision.decision} · ${decision.requested_by} · ${decision.created_at_utc8}`);return parts.join('<br>');}
 function card(alert){const runtime=alert.project?`${alert.runtime}/${alert.project}`:(alert.runtime||'-');const evidence=evidenceText(alert);const canAct=actionable(alert);const historical=alert.status!=='active';const controls=[];if(canAct)controls.push(`<button class='btn btn-danger' type='button' data-action-id='${alert.id}' onclick="decide(${alert.id},'deny')">${historical?'重新禁止/处理':'禁止/处理'}</button>`);if(alert.status==='suppressed'||alert.status==='dismissed')controls.push(`<button class='btn btn-secondary' type='button' data-action-id='${alert.id}' onclick="decide(${alert.id},'reopen')">恢复提醒</button>`);const result=resultText(alert);return `<article class='alert-card ${esc(alert.severity)}'><div class='alert-top'><div class='alert-title'><h3>${esc(alert.title||alert.type)}</h3><div class='meta'><span class='pill ${esc(alert.status)}'>${esc(labels[alert.status]||alert.status)}</span><span class='pill'>${esc(alert.severity)}</span><span class='pill'>${esc(alert.host_id)}</span><span class='pill'>${esc(runtime)}</span><span class='pill'>${esc(alert.container_name||'-')}</span></div></div><span class='pill'>出现 ${Number(alert.occurrence_count||0)} 次</span></div><p class='message'>${esc(alert.message)}</p><div class='evidence'>${evidence.map((x,i)=>`<div class='evidence-block'><span>${['关键证据','关联对象','处置范围'][i]||'证据'}</span><strong>${esc(x)}</strong></div>`).join('')}</div>${result?`<div class='result'>${result}</div>`:''}<footer class='card-footer'><div class='timestamps'>首次 ${esc(alert.first_seen_utc8)} · 最近 ${esc(alert.last_seen_utc8)}</div><div class='actions'>${controls.join('')}</div></footer></article>`;}
@@ -7448,10 +7621,11 @@ async function loadAlerts(){
     alertsById.set(Number(alert.id),alert);
     const tr=document.createElement('tr');
     const runtime=alert.project?`${alert.runtime}/${alert.project}`:(alert.runtime||'-');
-    const supportedRuntime=alert.runtime==='podman'||alert.runtime==='incus';
-    const canPanelRemediate=supportedRuntime&&alert.type==='unauthorized_panel_pairing'&&((alert.details?.process_patterns||[]).length>0||(alert.details?.config_files||[]).length>0);
-    const canSocksRemediate=supportedRuntime&&alert.type==='socks_weak_auth'&&['no_auth','weak_password'].includes(alert.details?.socks_auth_mode)&&(alert.details?.socks_processes||[]).length>0;
-    const canMaliciousRemediate=supportedRuntime&&alert.type==='malicious_process'&&(alert.details?.malicious_processes||[]).some(item=>item.process==='xmrig');
+    const supportedRuntime=alert.runtime==='podman'||alert.runtime==='incus'||alert.runtime==='runman';
+    const runmanEvidenceReady=alert.runtime!=='runman'||(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(alert.details?.instance_id||'')&&((alert.details?.process_targets||[]).length>0||(alert.details?.file_targets||[]).length>0));
+    const canPanelRemediate=supportedRuntime&&runmanEvidenceReady&&alert.type==='unauthorized_panel_pairing'&&((alert.details?.process_patterns||[]).length>0||(alert.details?.config_files||[]).length>0);
+    const canSocksRemediate=supportedRuntime&&alert.runtime!=='runman'&&alert.type==='socks_weak_auth'&&['no_auth','weak_password'].includes(alert.details?.socks_auth_mode)&&(alert.details?.socks_processes||[]).length>0;
+    const canMaliciousRemediate=supportedRuntime&&runmanEvidenceReady&&alert.type==='malicious_process'&&(alert.details?.malicious_processes||[]).some(item=>item.process==='xmrig')&&(alert.runtime!=='runman'||(alert.details?.process_targets||[]).some(item=>item.process==='xmrig'&&item.pattern==='xmrig'&&/^\\d+$/.test(item.start_ticks||'')));
     const pending=alert.latest_action&&(alert.latest_action.status==='queued'||alert.latest_action.status==='dispatched');
     const lastRemediation=['remediate_panel_pairing','remediate_malicious_process'].includes(alert.latest_action?.action_type)?alert.latest_action:null;
     const lastSocksEnforcement=alert.latest_action?.action_type==='enforce_socks_auth'?alert.latest_action:null;
@@ -7845,7 +8019,8 @@ function drawChart(id,series){const svg=document.getElementById(id);const values
   const suspicious=Array.isArray(sec.suspicious_processes)?sec.suspicious_processes:[];const top=current?.top_cpu_process_command?`PID ${Number(current.top_cpu_process_pid||0)} · CPU ${num(current.top_cpu_process_cpu_percent)}% · ${esc(current.top_cpu_process_command)}`:'未采集到高 CPU 进程';document.getElementById('processes').innerHTML=`<div>${top}</div>`+listHtml(suspicious,'未发现可疑进程',x=>`<li>PID ${Number(x.pid||0)} · ${esc(x.command||x.pattern||'')}</li>`);
   const countries=(arr)=>(Array.isArray(arr)&&arr.length?arr.slice(0,5).map(x=>`${x.country||'UN'} (${Number(x.connections||0)})`).join('、'):'-');const exposure=Array.isArray(sec.network_exposure)?sec.network_exposure:[];const inboundMode=sec.inbound_ip_observation==='host_conntrack'?'宿主机 NAT/conntrack 还原':'容器 socket 观察';const inboundTop=Array.isArray(sec.inbound_top_ips)?sec.inbound_top_ips:[];document.getElementById('network').innerHTML=`<dt>监听端口</dt><dd>${esc((sec.listening_ports||[]).join(', ')||'-')}</dd><dt>NAT/代理</dt><dd>${esc(exposure.map(x=>`${x.listen||'?'} → ${x.target||'?'}`).join(', ')||'-')}</dd><dt>入站去重 IP</dt><dd class='${inboundAlert?'bad-text':''}'>${inboundUniqueIps} / 阈值 ${inboundThreshold}</dd><dt>入站来源口径</dt><dd>${esc(inboundMode)}</dd><dt>主要入站来源</dt><dd>${esc(inboundTop.slice(0,10).map(x=>`${x.ip||'?'} (${Number(x.connections||0)})`).join('、')||'-')}</dd><dt>入站连接</dt><dd>${Number(sec.incoming_established||0)}</dd><dt>出站去重 IP</dt><dd>${Number(sec.outbound_unique_ips||0)}</dd><dt>TCP 来源</dt><dd>${esc(countries(current?.tcp_country_stats))}</dd><dt>UDP 来源</dt><dd>${esc(countries(current?.udp_country_stats))}</dd><dt>RX pps</dt><dd>${num(sec.net_rx_pps,1)}</dd><dt>SYN_RECV</dt><dd>${Number(sec.syn_recv_count||0)}</dd>`;
   const risks=Array.isArray(sec.configuration_risks)?sec.configuration_risks:[],pair=sec.panel_pairing||{},socks=sec.socks_proxy||{};const socksAuth={no_auth:'无认证',weak_password:'弱密码',configured:'已配置认证',unknown:'认证未知'}[socks.auth_mode||'unknown'];document.getElementById('security').innerHTML=`<div>面板对接：<strong class='${pair.detected&&!pair.approved?'bad-text':'ok'}'>${pair.detected?(pair.approved?'已放行':'检测到特征'):'未发现'}</strong></div><div>SOCKS 代理：<strong class='${socks.detected&&['no_auth','weak_password'].includes(socks.auth_mode)?'bad-text':'ok'}'>${socks.detected?`已识别 · ${esc(socksAuth)}${socks.public_exposure?' · 公网/NAT 暴露':''}`:'未发现'}</strong></div>`+listHtml(risks,'未发现配置风险',x=>`<li>${esc(x.message||x.code||'配置风险')}</li>`);
-  document.getElementById('filesystem').innerHTML=`<dt>根盘 已用/总量</dt><dd>${fmtBytes(Math.max(0,rootTotal-rootAvail))} / ${fmtBytes(rootTotal)}</dd><dt>根盘可用</dt><dd>${fmtBytes(rootAvail)}</dd><dt>镜像可写层</dt><dd>${fmtBytes(current?.container_disk_rw_bytes)}</dd>`;
+  const writableLayer=current?.container_disk_rw_available===true?fmtBytes(current?.container_disk_rw_bytes):'暂不可用';
+  document.getElementById('filesystem').innerHTML=`<dt>根盘 已用/总量</dt><dd>${fmtBytes(Math.max(0,rootTotal-rootAvail))} / ${fmtBytes(rootTotal)}</dd><dt>根盘可用</dt><dd>${fmtBytes(rootAvail)}</dd><dt title="Podman 按存储驱动提供可写层大小；Runman 按 overlay upperdir 文件分配块统计，不包含只读镜像层">镜像可写层已分配</dt><dd>${writableLayer}</dd>`;
    const communicationProcesses=Array.isArray(sec.communication_processes)?sec.communication_processes:[],communicationSockets=Array.isArray(sec.communication_sockets)?sec.communication_sockets:[];
    const processCards=communicationProcesses.length?`<div class='comm-process-grid'>${communicationProcesses.map(x=>`<article class='comm-process'><strong>${esc(x.process||'unknown')} · PID ${Number(x.pid||0)||'-'}</strong><div class='comm-meta'>入站 ${Number(x.inbound_connections||0)} · 出站 ${Number(x.outbound_connections||0)} · 远端 IP ${Number(x.unique_remote_ips||0)}</div></article>`).join('')}</div>`:`<div class='ok'>${sec.communication_detail_available?'当前没有可归属的活动通信':'容器内缺少 ss，暂时无法归属到具体进程'}</div>`;
    const originName=x=>x.origin==='local_process'?'本机进程发起':x.origin==='remote_peer'?'远端发起':'发起方未知',originConfidence=x=>({confirmed:'已确认',probable:'推定',mixed:'证据冲突',unknown:'未知'})[x.origin_confidence]||'未知';

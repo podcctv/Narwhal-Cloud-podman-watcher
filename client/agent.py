@@ -4989,11 +4989,27 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 if isinstance(item, dict)
                 and str(item.get("process") or "").strip().lower() == "xmrig"
             ]
+            xmrig_process_targets = [
+                {
+                    "pid": int(item.get("pid") or 0),
+                    "process": str(item.get("process") or "")[:80],
+                    "pattern": str(item.get("pattern") or "")[:80],
+                    "start_ticks": str(item.get("start_ticks") or ""),
+                }
+                for item in confirmed_xmrig
+                if int(item.get("pid") or 0) > 1 and str(item.get("start_ticks") or "").isdigit()
+            ]
+            xmrig_file_targets = {
+                str(target.get("path")): target
+                for item in confirmed_xmrig
+                for target in (item.get("file_targets") if isinstance(item.get("file_targets"), list) else [])
+                if isinstance(target, dict) and isinstance(target.get("path"), str)
+            }
             automatic_result: Dict[str, object] = {}
             if (
                 auto_remediate_xmrig
                 and confirmed_xmrig
-                and str(container.get("runtime") or "").lower() in ("podman", "incus")
+                and str(container.get("runtime") or "").lower() in ("podman", "incus", "runman")
             ):
                 auto_ok, auto_message = remediate_malicious_process(
                     {
@@ -5007,6 +5023,9 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                                 for item in confirmed_xmrig
                                 if int(item.get("pid") or 0) > 1
                             ],
+                            "instance_id": str(container.get("instance_id") or ""),
+                            "process_targets": xmrig_process_targets,
+                            "file_targets": list(xmrig_file_targets.values()),
                         },
                     }
                 )
@@ -5036,10 +5055,13 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                             "pid": int(item.get("pid") or 0),
                             "process": str(item.get("process") or "")[:80],
                             "pattern": str(item.get("pattern") or "")[:120],
+                            "start_ticks": str(item.get("start_ticks") or "")[:32],
                         }
                         for item in suspicious_processes[:20]
                         if isinstance(item, dict)
                     ],
+                    "process_targets": xmrig_process_targets,
+                    "file_targets": list(xmrig_file_targets.values()),
                     "automatic_remediation": automatic_result,
                 }
             )
@@ -5074,6 +5096,14 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             panel_pairing.get("identity_patterns") if isinstance(panel_pairing.get("identity_patterns"), list) else []
         )
         config_files = panel_pairing.get("config_files") if isinstance(panel_pairing.get("config_files"), list) else []
+        panel_process_targets = (
+            panel_pairing.get("remediation_process_targets")
+            if isinstance(panel_pairing.get("remediation_process_targets"), list) else []
+        )
+        panel_file_targets = (
+            panel_pairing.get("remediation_file_targets")
+            if isinstance(panel_pairing.get("remediation_file_targets"), list) else []
+        )
         auto_domains = set(_configured_auto_remediate_panel_domains())
         normalized_unapproved = [str(item).strip().lower().rstrip(".") for item in unapproved_domains]
         auto_matched_domains = sorted(set(normalized_unapproved) & auto_domains)
@@ -5083,28 +5113,62 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         xrayr_auto_result: Dict[str, object] = {}
         confirmed_patterns = sorted(set(process_patterns) & set(_configured_panel_process_patterns()))
         auto_panel = os.getenv("SECURITY_AUTO_REMEDIATE_PANEL", "true").lower() not in ("0", "false", "no", "off")
+        remediation_patterns = (
+            confirmed_patterns if auto_panel else
+            ["xrayr"] if auto_remediate_xrayr and "xrayr" in confirmed_patterns else []
+        )
         if (
             panel_detection_enabled
-            and (auto_panel or (auto_remediate_xrayr and "xrayr" in confirmed_patterns))
-            and confirmed_patterns
+            and remediation_patterns
             and not bool(panel_pairing.get("approved"))
-            and str(container.get("runtime") or "").lower() in ("podman", "incus")
+            and str(container.get("runtime") or "").lower() in ("podman", "incus", "runman")
         ):
+            remediation_process_targets = [
+                item for item in panel_process_targets
+                if isinstance(item, dict) and str(item.get("pattern") or "").lower() in remediation_patterns
+            ]
+            remediation_process_pids = [
+                int(item.get("pid") or 0)
+                for item in remediation_process_targets
+                if int(item.get("pid") or 0) > 1
+            ]
+            if str(container.get("runtime") or "").lower() != "runman":
+                remediation_process_pids = [
+                    int(item.get("pid") or 0)
+                    for item in process_matches[:20]
+                    if isinstance(item, dict)
+                    and str(item.get("pattern") or "").lower() in remediation_patterns
+                    and int(item.get("pid") or 0) > 1
+                ]
+            remediation_config_files = (
+                config_files if auto_panel else
+                [path for path in config_files if "xrayr" in str(path).lower()]
+            )
+            remediation_file_targets = panel_file_targets
+            if str(container.get("runtime") or "").lower() == "runman":
+                service_paths = set(_runman_service_file_candidates(
+                    "runman", str(container.get("name") or ""), "default",
+                    remediation_process_pids, remediation_patterns,
+                ))
+                remediation_file_targets = [
+                    item for item in panel_file_targets
+                    if isinstance(item, dict) and (
+                        item.get("kind") == "service" and item.get("path") in service_paths
+                        or item.get("kind") == "config" and item.get("path") in remediation_config_files
+                    )
+                ]
             xrayr_ok, xrayr_message = remediate_panel_pairing(
                 {
                     "runtime": container.get("runtime"),
                     "project": container.get("project"),
                     "container_name": container.get("name"),
                     "params": {
-                        "process_patterns": confirmed_patterns,
-                        "process_pids": [
-                            int(item.get("pid") or 0)
-                            for item in process_matches[:20]
-                            if isinstance(item, dict)
-                            and str(item.get("pattern") or "").lower() in confirmed_patterns
-                            and int(item.get("pid") or 0) > 1
-                        ],
-                        "config_files": config_files,
+                        "process_patterns": remediation_patterns,
+                        "process_pids": remediation_process_pids,
+                        "config_files": remediation_config_files,
+                        "instance_id": str(container.get("instance_id") or ""),
+                        "process_targets": remediation_process_targets,
+                        "file_targets": remediation_file_targets,
                     },
                 }
             )
@@ -5138,6 +5202,9 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                             if isinstance(item, dict) and int(item.get("pid") or 0) > 1
                         ],
                         "config_files": config_files,
+                        "instance_id": str(container.get("instance_id") or ""),
+                        "process_targets": panel_process_targets,
+                        "file_targets": panel_file_targets,
                     },
                 }
             )
@@ -5190,6 +5257,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                     "service_listeners": panel_pairing.get('service_listeners', []),
                     "identity_patterns": [str(item) for item in identity_patterns[:20]],
                     "config_files": [str(item) for item in config_files[:20]],
+                    "process_targets": panel_process_targets[:20],
+                    "file_targets": panel_file_targets[:128],
                     "automatic_remediation": xrayr_auto_result,
                 }
             )
@@ -5366,6 +5435,49 @@ def collect_suspicious_processes(name: str, runtime: str = "", project: str = ""
         )
         if len(matches) >= 20:
             break
+    if _runtime_kind(runtime) == "runman" and matches:
+        pids = [int(item.get("pid") or 0) for item in matches if int(item.get("pid") or 0) > 1]
+        starts = _runman_process_start_generations(runtime, name, project, pids)
+        for item in matches:
+            start_ticks = starts.get(int(item.get("pid") or 0), "")
+            if start_ticks:
+                item["start_ticks"] = start_ticks
+        names = sorted({
+            str(item.get("pattern") or "").lower()
+            for item in matches
+            if str(item.get("pattern") or "").lower() in _AUTO_REMEDIATE_MALWARE_NAMES
+        })
+        malware_paths = []
+        for process_name in names:
+            malware_paths.extend((
+                f"/etc/{process_name}.json",
+                f"/etc/{process_name}/config.json",
+                f"/usr/local/etc/{process_name}.json",
+                f"/opt/{process_name}/config.json",
+                f"/root/.{process_name}.json",
+                f"/usr/bin/{process_name}",
+                f"/usr/local/bin/{process_name}",
+                f"/opt/{process_name}/{process_name}",
+                f"/tmp/{process_name}",
+                f"/var/tmp/{process_name}",
+            ))
+        service_paths = _runman_service_file_candidates(runtime, name, project, pids, names)
+        file_generations = _runman_file_generations(
+            runtime, name, project, malware_paths + service_paths,
+        )
+        malware_path_set = set(malware_paths)
+        file_targets = [
+            {
+                "path": path,
+                "generation": generation,
+                "kind": "binary" if path in malware_path_set and path.rsplit("/", 1)[-1] in names else
+                        "config" if path in malware_path_set else "service",
+            }
+            for path, generation in sorted(file_generations.items())
+        ]
+        for item in matches:
+            if item.get("pattern") in names:
+                item["file_targets"] = file_targets
     return matches
 
 
@@ -6176,6 +6288,101 @@ def _protocol_process_start_ticks(runtime: str, name: str, project: str, pid: in
     return _proc_stat_start_ticks(output)
 
 
+def _runman_process_start_generations(
+    runtime: str, name: str, project: str, pids: List[int],
+) -> Dict[int, str]:
+    """Read one exact process start tick per PID through the generation-bound guest API."""
+    if _runtime_kind(runtime) != "runman":
+        return {}
+    safe_pids = sorted({pid for pid in pids if type(pid) is int and 1 < pid <= 4194304})[:64]
+    if not safe_pids:
+        return {}
+    pid_args = " ".join(str(pid) for pid in safe_pids)
+    script = (
+        f"for pid in {pid_args}; do [ -r /proc/$pid/stat ] || continue; "
+        "start=$(sed 's/^.*) //' /proc/$pid/stat 2>/dev/null | awk '{print $20}'); "
+        "case \"$start\" in ''|*[!0-9]*) continue;; esac; "
+        "printf '%s\\t%s\\n' \"$pid\" \"$start\"; done"
+    )
+    output = run(_runtime_exec_cmd(runtime, name, script, project), timeout=6)
+    result: Dict[int, str] = {}
+    allowed = set(safe_pids)
+    for line in output.splitlines()[:64]:
+        fields = line.split("\t", 1)
+        if len(fields) != 2 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        pid, ticks = int(fields[0]), fields[1]
+        if pid in allowed and int(ticks) > 0:
+            result[pid] = ticks
+    return result
+
+
+def _runman_service_file_candidates(
+    runtime: str, name: str, project: str, pids: List[int], patterns: List[str],
+) -> List[str]:
+    """Map observed process cgroups to a small set of exact service-file paths."""
+    if _runtime_kind(runtime) != "runman":
+        return []
+    safe_pids = sorted({pid for pid in pids if type(pid) is int and 1 < pid <= 4194304})[:64]
+    units = {f"{pattern}.service" for pattern in patterns if re.fullmatch(r"[a-zA-Z0-9_.@:-]{1,100}", pattern)}
+    openrc_names = {pattern for pattern in patterns if re.fullmatch(r"[a-zA-Z0-9_.@:-]{1,100}", pattern)}
+    if safe_pids:
+        pid_args = " ".join(str(pid) for pid in safe_pids)
+        script = (
+            f"for pid in {pid_args}; do [ -r /proc/$pid/cgroup ] || continue; "
+            "while IFS= read -r line; do printf '%s\\t%s\\n' \"$pid\" \"$line\"; done < /proc/$pid/cgroup; done"
+        )
+        output = run(_runtime_exec_cmd(runtime, name, script, project), timeout=6)
+        for line in output.splitlines()[:256]:
+            _, separator, cgroup = line.partition("\t")
+            if not separator:
+                continue
+            unit = re.search(r"(?:^|/)([A-Za-z0-9_.@:-]{1,120}\.service)(?:/|$)", cgroup)
+            if unit:
+                units.add(unit.group(1))
+            openrc = re.search(r"(?:^|/)openrc[./]([A-Za-z0-9_.@:-]{1,100})(?:/|$)", cgroup)
+            if openrc:
+                openrc_names.add(openrc.group(1))
+    paths = {
+        f"{root}/{unit}"
+        for unit in units
+        for root in ("/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system", "/run/systemd/system")
+    }
+    paths.update(f"/etc/init.d/{service}" for service in openrc_names)
+    return sorted(paths)[:256]
+
+
+def _runman_file_generations(
+    runtime: str, name: str, project: str, paths: List[str],
+) -> Dict[str, str]:
+    """Capture regular-file fingerprints; symlinks and incomplete reads are excluded."""
+    if _runtime_kind(runtime) != "runman":
+        return {}
+    safe_paths = sorted({
+        posixpath.normpath(path)
+        for path in paths
+        if isinstance(path, str) and re.fullmatch(r"/[A-Za-z0-9_./@:+-]{1,250}", path)
+        and posixpath.normpath(path) == path
+    })[:256]
+    if not safe_paths:
+        return {}
+    quoted = " ".join(shlex.quote(path) for path in safe_paths)
+    script = (
+        f"for path in {quoted}; do [ -f \"$path\" ] && [ ! -L \"$path\" ] || continue; "
+        "generation=$(stat -c '%d:%i:%s:%Y:%Z:%a' \"$path\" 2>/dev/null) || continue; "
+        "printf '%s\\t%s\\n' \"$path\" \"$generation\"; done"
+    )
+    output = run(_runtime_exec_cmd(runtime, name, script, project), timeout=8)
+    result: Dict[str, str] = {}
+    generation_pattern = re.compile(r"\d+:\d+:\d+:\d+:\d+:[0-7]+")
+    allowed = set(safe_paths)
+    for line in output.splitlines()[:256]:
+        path, separator, generation = line.partition("\t")
+        if separator and path in allowed and generation_pattern.fullmatch(generation):
+            result[path] = generation
+    return result
+
+
 def _protocol_config_predates_process(metadata: str, process_start_bound: float | None) -> bool:
     if process_start_bound is None:
         return False
@@ -6850,7 +7057,7 @@ def collect_panel_pairing_indicators(
             if pattern not in candidates:
                 continue
             process_patterns_set.add(pattern)
-            process_matches.append({"pid": int(parts[0]), "pattern": pattern})
+            process_matches.append({"pid": int(parts[0]), "pattern": pattern, "process": parts[2][:80]})
             break
         if len(process_matches) >= 20:
             break
@@ -6938,6 +7145,40 @@ def collect_panel_pairing_indicators(
                     found_url = True
             if current_file and found_url:
                 config_files.add(current_file)
+    remediation_process_targets: List[Dict[str, object]] = []
+    remediation_file_targets: List[Dict[str, str]] = []
+    if _runtime_kind(runtime) == "runman":
+        process_starts = _runman_process_start_generations(
+            runtime, name, project, panel_process_pids,
+        )
+        for item in process_matches:
+            pid = int(item.get("pid") or 0)
+            start_ticks = process_starts.get(pid, "")
+            if not start_ticks:
+                continue
+            item["start_ticks"] = start_ticks
+            remediation_process_targets.append({
+                "pid": pid,
+                "process": str(item.get("process") or "")[:80],
+                "pattern": str(item.get("pattern") or "")[:80],
+                "start_ticks": start_ticks,
+            })
+        service_paths = _runman_service_file_candidates(
+            runtime, name, project, panel_process_pids, process_patterns,
+        )
+        approved_config_paths = sorted(set(config_files) & set(_configured_panel_config_paths()))
+        file_generations = _runman_file_generations(
+            runtime, name, project, approved_config_paths + service_paths,
+        )
+        config_path_set = set(approved_config_paths)
+        remediation_file_targets = [
+            {
+                "path": path,
+                "generation": generation,
+                "kind": "config" if path in config_path_set else "service",
+            }
+            for path, generation in sorted(file_generations.items())
+        ]
     allowed_domains = _configured_allowed_panel_domains()
     unapproved_domains = sorted(domain for domain in domains if not _panel_domain_allowed(domain, allowed_domains))
     detected = bool(process_patterns or identity_patterns or config_files or credential_markers or domains)
@@ -6948,6 +7189,8 @@ def collect_panel_pairing_indicators(
             "process_matches": process_matches,
             "identity_patterns": identity_patterns,
             "config_files": sorted(config_files),
+            "remediation_process_targets": remediation_process_targets,
+            "remediation_file_targets": remediation_file_targets,
             "credential_markers": sorted(credential_markers),
             "panel_domains": sorted(domains),
             "unapproved_domains": unapproved_domains,
@@ -7599,6 +7842,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
     if not isinstance(body, dict) or body.get('schema') != 1 or not isinstance(body.get('items'), list):
         return []
 
+    inventory_now = int(time.time())
     items: List[Dict[str, str]] = []
     generations: Dict[str, str] = {}
     for raw_item in body['items'][:4096]:
@@ -7633,7 +7877,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             and metrics.get('epoch') == generation
             and type(sampled_at) is int
             and sampled_at > 0
-            and sampled_at <= int(time.time()) + 30
+            and sampled_at <= inventory_now + 30
         )
         total_connections = raw_total + udp_sockets if metrics_valid else 0
         traffic_in = raw_item.get('traffic_in_bytes')
@@ -7652,8 +7896,8 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             and monitor.get('valid') is True
             and type(monitor_at) is int
             and monitor_at > 0
-            and monitor_at <= int(time.time()) + 30
-            and int(time.time()) - monitor_at <= 180
+            and monitor_at <= inventory_now + 30
+            and inventory_now - monitor_at <= 180
             and type(monitor.get('samples')) is int
             and monitor.get('samples') > 0
         )
@@ -7702,11 +7946,24 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             and raw_disk_image.get('available') is True
             and type(raw_disk_image.get('sampled_at')) is int
             and raw_disk_image['sampled_at'] > 0
-            and raw_disk_image['sampled_at'] <= int(time.time()) + 30
+            and raw_disk_image['sampled_at'] <= inventory_now + 30
             and type(raw_disk_image.get('logical_bytes')) is int
             and raw_disk_image['logical_bytes'] >= 0
             and type(raw_disk_image.get('allocated_bytes')) is int
             and 0 <= raw_disk_image['allocated_bytes'] <= raw_disk_image['logical_bytes']
+        )
+        raw_writable_layer = raw_item.get('writable_layer') if isinstance(raw_item.get('writable_layer'), dict) else {}
+        writable_layer_valid = (
+            raw_item.get('running') is True
+            and raw_writable_layer.get('source') == 'runman_overlay_upperdir_allocated'
+            and raw_writable_layer.get('available') is True
+            and type(raw_writable_layer.get('sampled_at')) is int
+            and 0 < raw_writable_layer['sampled_at'] <= inventory_now + 30
+            and inventory_now - raw_writable_layer['sampled_at'] <= 180
+            and type(raw_writable_layer.get('allocated_bytes')) is int
+            and raw_writable_layer['allocated_bytes'] >= 0
+            and disk_image_valid
+            and raw_writable_layer['allocated_bytes'] <= raw_disk_image['logical_bytes']
         )
         pid = raw_item.get('init_pid') if raw_item.get('running') is True else None
         proc_snapshot = _runman_proc_snapshot(pid) if type(pid) is int and pid > 1 else {}
@@ -7750,6 +8007,12 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
                     'sampled_at': raw_disk_image.get('sampled_at') if disk_image_valid else 0,
                     'logical_bytes': raw_disk_image.get('logical_bytes') if disk_image_valid else None,
                     'allocated_bytes': raw_disk_image.get('allocated_bytes') if disk_image_valid else None,
+                },
+                'writable_layer': {
+                    'available': writable_layer_valid,
+                    'source': 'runman_overlay_upperdir_allocated',
+                    'sampled_at': raw_writable_layer.get('sampled_at') if writable_layer_valid else 0,
+                    'allocated_bytes': raw_writable_layer.get('allocated_bytes') if writable_layer_valid else None,
                 },
                 'monitor_metrics': monitor_metrics,
                 'container_fs': proc_snapshot.get('container_fs', {
@@ -7882,8 +8145,20 @@ def collect_runman_report(
         'read_iops': raw_metrics.get('disk_read_iops') if metrics_available else None,
         'write_iops': raw_metrics.get('disk_write_iops') if metrics_available else None,
     }
+    writable_layer = resources.get('writable_layer') if isinstance(resources.get('writable_layer'), dict) else {}
+    writable_layer_available = (
+        writable_layer.get('available') is True
+        and writable_layer.get('source') == 'runman_overlay_upperdir_allocated'
+        and type(writable_layer.get('allocated_bytes')) is int
+        and writable_layer.get('allocated_bytes') >= 0
+        and type(writable_layer.get('sampled_at')) is int
+        and writable_layer.get('sampled_at') > 0
+    )
     container_disk = {
-        'rw_bytes': int(resources.get('disk_used_bytes') or 0),
+        'rw_bytes': writable_layer.get('allocated_bytes') if writable_layer_available else 0,
+        'rw_available': writable_layer_available,
+        'rw_source': 'runman_overlay_upperdir_allocated',
+        'rw_sampled_at': writable_layer.get('sampled_at') if writable_layer_available else 0,
         'rootfs_bytes': disk_bytes,
         'fs': container_fs,
         'available': resources.get('container_fs_available') is True or disk_bytes > 0,
@@ -7912,7 +8187,7 @@ def collect_runman_report(
             merged_fs[fs_name] = existing_fs[fs_name]
     container_disk.update({
         key: value for key, value in existing_disk.items()
-        if key not in {'rw_bytes', 'rootfs_bytes', 'fs', 'io', 'available', 'backing_image'}
+        if key not in {'rw_bytes', 'rw_available', 'rw_source', 'rw_sampled_at', 'rootfs_bytes', 'fs', 'io', 'available', 'backing_image'}
     })
     container_disk['fs'] = merged_fs
     report.update({
@@ -11007,17 +11282,177 @@ def enforce_socks_auth_policy(
     return result
 
 
+def _runman_guarded_cleanup(
+    container_name: str,
+    project: str,
+    params: Dict,
+    allowed_patterns: set[str],
+    allowed_config_paths: set[str],
+    allowed_malware_names: set[str] | None = None,
+) -> Tuple[bool, str]:
+    """Apply only the exact Runman process/file generations observed by this Agent."""
+    instance_id = str(params.get("instance_id") or "").strip().lower()
+    current_generation = _runman_instance_generations.get(container_name, "").strip().lower()
+    if (
+        project != "default"
+        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", container_name)
+        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", instance_id)
+        or current_generation != instance_id
+    ):
+        return False, "Runman UUID generation is missing, stale, or changed; remediation refused"
+
+    raw_process_targets = params.get("process_targets")
+    if not isinstance(raw_process_targets, list) or len(raw_process_targets) > 64:
+        return False, "Runman process-generation evidence is missing or invalid"
+    process_targets: List[Dict[str, object]] = []
+    for item in raw_process_targets:
+        if not isinstance(item, dict):
+            return False, "Runman process-generation evidence is invalid"
+        pid = item.get("pid")
+        process = str(item.get("process") or "").strip().lower()
+        pattern = str(item.get("pattern") or "").strip().lower()
+        start_ticks = str(item.get("start_ticks") or "").strip()
+        if (
+            type(pid) is not int or not 1 < pid <= 4_194_304
+            or not re.fullmatch(r"[a-zA-Z0-9_.@+-]{1,80}", process)
+            or pattern not in allowed_patterns
+            or not re.fullmatch(r"[0-9]{1,24}", start_ticks)
+            or int(start_ticks) <= 0
+            or (allowed_malware_names is not None and (process not in allowed_malware_names or pattern != process))
+        ):
+            return False, "Runman process-generation evidence does not match the local allowlist"
+        process_targets.append({"pid": pid, "process": process, "pattern": pattern, "start_ticks": start_ticks})
+    if len({item["pid"] for item in process_targets}) != len(process_targets):
+        return False, "Runman process-generation evidence contains duplicate PIDs"
+
+    patterns = sorted({str(item["pattern"]) for item in process_targets})
+    service_candidates = set(_runman_service_file_candidates(
+        "runman", container_name, "default", [int(item["pid"]) for item in process_targets], patterns,
+    )) if process_targets else set()
+    malware_paths: set[str] = set()
+    if allowed_malware_names is not None:
+        for name in allowed_malware_names:
+            malware_paths.update((
+                f"/etc/{name}.json", f"/etc/{name}/config.json",
+                f"/usr/local/etc/{name}.json", f"/opt/{name}/config.json",
+                f"/root/.{name}.json", f"/usr/bin/{name}",
+                f"/usr/local/bin/{name}", f"/opt/{name}/{name}",
+                f"/tmp/{name}", f"/var/tmp/{name}",
+            ))
+
+    raw_file_targets = params.get("file_targets")
+    if not isinstance(raw_file_targets, list) or len(raw_file_targets) > 128:
+        return False, "Runman file-generation evidence is missing or invalid"
+    file_targets: List[Dict[str, str]] = []
+    generation_re = re.compile(r"[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-7]{3,4}")
+    for item in raw_file_targets:
+        if not isinstance(item, dict):
+            return False, "Runman file-generation evidence is invalid"
+        path = item.get("path")
+        generation = item.get("generation")
+        kind = item.get("kind")
+        if (
+            not isinstance(path, str) or len(path) > 256
+            or not re.fullmatch(r"/[A-Za-z0-9_./@:+-]{1,255}", path)
+            or posixpath.normpath(path) != path
+            or not isinstance(generation, str) or not generation_re.fullmatch(generation)
+            or not isinstance(kind, str)
+            or kind not in {"config", "service", "binary"}
+        ):
+            return False, "Runman file-generation evidence is malformed"
+        if kind == "config" and path not in (allowed_config_paths | malware_paths):
+            return False, "Runman config target is outside the local allowlist"
+        if kind == "binary" and (allowed_malware_names is None or path not in malware_paths or posixpath.basename(path) not in allowed_malware_names):
+            return False, "Runman binary target is outside the malware allowlist"
+        if kind == "service" and path not in service_candidates:
+            return False, "Runman service target is not bound to an observed process cgroup"
+        file_targets.append({"path": path, "generation": generation, "kind": str(kind)})
+    if len({item["path"] for item in file_targets}) != len(file_targets):
+        return False, "Runman file-generation evidence contains duplicate paths"
+    if not process_targets and not file_targets:
+        return False, "Runman remediation has no exact process or file targets"
+
+    def q(value: str) -> str:
+        return shlex.quote(value)
+
+    script_parts = [
+        "set -u",
+        _cleanup_receipt_shell().rstrip(" ;"),
+        f"killed_processes=0; removed_services=0; removed_configs=0; removed_binaries=0; cleanup_errors=0; matched_processes=0; signal_errors=0; checked_configs=0; no_process_targets={1 if not process_targets else 0}; remaining_processes=0;",
+        "process_identity() { p=$1; ticks=$2; expected=$3; pattern=$4; stat=/proc/$p/stat; [ -r \"$stat\" ] || return 1; start=$(sed 's/^.*) //' \"$stat\" 2>/dev/null | awk '{print $20}'); [ \"$start\" = \"$ticks\" ] || return 1; comm=$(cat /proc/$p/comm 2>/dev/null || true); argv0=$(tr '\\000' '\\n' < /proc/$p/cmdline 2>/dev/null | head -n 1); exe=$(readlink /proc/$p/exe 2>/dev/null || true); for candidate in \"$comm\" \"${argv0##*/}\" \"${exe##*/}\"; do lower=$(printf '%s' \"$candidate\" | tr '[:upper:]' '[:lower:]'); [ \"$lower\" = \"$expected\" ] && return 0; case \"$lower\" in *\"$pattern\"*) return 0;; esac; done; return 1; }",
+        "file_identity() { path=$1; expected=$2; [ -f \"$path\" ] && [ ! -L \"$path\" ] || return 1; current=$(stat -c '%d:%i:%s:%Y:%Z:%a' \"$path\" 2>/dev/null) || return 1; [ \"$current\" = \"$expected\" ]; }",
+    ]
+    for target in process_targets:
+        script_parts.append(
+            f"process_identity {target['pid']} {q(str(target['start_ticks']))} {q(str(target['process']))} {q(str(target['pattern']))} || {{ printf 'target_process_changed=%s\\n' {target['pid']}; exit 41; }}; matched_processes=$((matched_processes+1))"
+        )
+    for target in file_targets:
+        if target["kind"] == "config":
+            script_parts.append("checked_configs=$((checked_configs+1))")
+        script_parts.append(
+            f"file_identity {q(target['path'])} {q(target['generation'])} || {{ printf 'target_file_changed=%s\\n' {q(target['path'])}; exit 42; }}"
+        )
+
+    for target in file_targets:
+        if target["kind"] != "service":
+            continue
+        path = target["path"]
+        unit = posixpath.basename(path)
+        if path.startswith(("/etc/systemd/system/", "/lib/systemd/system/", "/usr/lib/systemd/system/", "/run/systemd/system/")):
+            script_parts.append(
+                f"svc_stopped=0; if command -v systemctl >/dev/null 2>&1 && systemctl disable --now {q(unit)} >/dev/null 2>&1; then svc_stopped=1; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; if [ \"$svc_stopped\" -eq 1 ]; then if file_identity {q(path)} {q(target['generation'])} && rm -f -- {q(path)}; then removed_services=$((removed_services+1)); nw_receipt service {q(path)} ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; fi"
+            )
+        else:
+            script_parts.append(
+                f"svc_stopped=0; if command -v rc-service >/dev/null 2>&1 && rc-service {q(unit)} stop >/dev/null 2>&1; then svc_stopped=1; command -v rc-update >/dev/null 2>&1 && rc-update del {q(unit)} >/dev/null 2>&1 || true; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; if [ \"$svc_stopped\" -eq 1 ]; then if file_identity {q(path)} {q(target['generation'])} && rm -f -- {q(path)}; then removed_services=$((removed_services+1)); nw_receipt service {q(path)} ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt service {q(path)} failed; fi; fi"
+            )
+
+    for target in process_targets:
+        pid = int(target["pid"])
+        process = str(target["process"])
+        pattern = str(target["pattern"])
+        ticks = str(target["start_ticks"])
+        script_parts.append(
+            f"if process_identity {pid} {q(ticks)} {q(process)} {q(pattern)}; then if kill -TERM {pid} 2>/dev/null; then sleep 1; if process_identity {pid} {q(ticks)} {q(process)} {q(pattern)}; then kill -KILL {pid} 2>/dev/null || {{ signal_errors=$((signal_errors+1)); cleanup_errors=$((cleanup_errors+1)); nw_receipt process {q(process + ':' + str(pid))} failed; }}; fi; else signal_errors=$((signal_errors+1)); cleanup_errors=$((cleanup_errors+1)); nw_receipt process {q(process + ':' + str(pid))} failed; fi; fi; if process_identity {pid} {q(ticks)} {q(process)} {q(pattern)}; then cleanup_errors=$((cleanup_errors+1)); nw_receipt process {q(process + ':' + str(pid))} failed; else killed_processes=$((killed_processes+1)); nw_receipt process {q(process + ':' + str(pid))} ok; fi"
+        )
+
+    for target in process_targets:
+        script_parts.append(
+            f"if process_identity {target['pid']} {q(str(target['start_ticks']))} {q(str(target['process']))} {q(str(target['pattern']))}; then remaining_processes=$((remaining_processes+1)); fi"
+        )
+
+    for target in file_targets:
+        if target["kind"] == "service":
+            continue
+        category = "binary" if target["kind"] == "binary" else "config"
+        counter = "removed_binaries" if category == "binary" else "removed_configs"
+        script_parts.append(
+            f"if file_identity {q(target['path'])} {q(target['generation'])} && rm -f -- {q(target['path'])}; then {counter}=$(({counter}+1)); nw_receipt {category} {q(target['path'])} ok; else cleanup_errors=$((cleanup_errors+1)); nw_receipt {category} {q(target['path'])} failed; fi"
+        )
+    script_parts.extend([
+        "command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true",
+        "printf 'killed_processes=%s removed_services=%s removed_configs=%s removed_binaries=%s cleanup_errors=%s matched_processes=%s signal_errors=%s checked_configs=%s no_process_targets=%s remaining_processes=%s\\n' \"$killed_processes\" \"$removed_services\" \"$removed_configs\" \"$removed_binaries\" \"$cleanup_errors\" \"$matched_processes\" \"$signal_errors\" \"$checked_configs\" \"$no_process_targets\" \"$remaining_processes\"",
+        "[ \"$cleanup_errors\" -eq 0 ] && [ \"$remaining_processes\" -eq 0 ] && [ $((killed_processes+removed_services+removed_configs+removed_binaries)) -gt 0 ]",
+    ])
+    ok, output = _runman_exec_request(container_name, instance_id, "; ".join(script_parts), 90.0)
+    return ok, output or ("Runman generation-bound remediation failed" if not ok else "Runman remediation completed")
+
+
 def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
     """Remove an exact allowlisted malware process without stopping its container."""
     runtime_kind = str(action.get("runtime") or "").strip().lower()
     container_name = str(action.get("container_name") or "").strip()
     project = str(action.get("project") or "").strip()
-    if runtime_kind not in ("podman", "incus"):
+    if runtime_kind not in ("podman", "incus", "runman"):
         return False, "Docker and unknown runtimes are notice-only"
-    if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
-        return False, "invalid container target"
-    if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
-        return False, "invalid Incus project"
+    if runtime_kind == "runman":
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", container_name) or project != "default":
+            return False, "invalid Runman VM target"
+    else:
+        if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
+            return False, "invalid container target"
+        if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
+            return False, "invalid Incus project"
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
     requested_names = params.get("process_names") if isinstance(params.get("process_names"), list) else []
     process_names = sorted(
@@ -11030,6 +11465,13 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
     )
     if not process_names:
         return False, "no exact allowlisted malware target"
+    if runtime_kind == "runman":
+        process_targets = params.get("process_targets")
+        if not isinstance(process_targets, list) or not process_targets:
+            return False, "Runman malware remediation requires exact process-start evidence"
+        return _runman_guarded_cleanup(
+            container_name, project, params, set(process_names), set(), set(process_names),
+        )
     runtime_bin = get_runtime_bins().get(runtime_kind, "")
     if not runtime_bin:
         return False, f"runtime {runtime_kind} is unavailable"
@@ -11142,14 +11584,18 @@ def remediate_malicious_process(action: Dict) -> Tuple[bool, str]:
 
 def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     runtime_kind = str(action.get("runtime") or "").lower()
-    if runtime_kind not in ("podman", "incus"):
+    if runtime_kind not in ("podman", "incus", "runman"):
         return False, "Docker and unknown runtimes are notice-only"
     container_name = str(action.get("container_name") or "")
     project = str(action.get("project") or "")
-    if not container_name or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
-        return False, "invalid container target"
-    if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
-        return False, "invalid Incus project"
+    if runtime_kind == "runman":
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", container_name) or project != "default":
+            return False, "invalid Runman VM target"
+    else:
+        if not container_name or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,200}", container_name):
+            return False, "invalid container target"
+        if project and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", project):
+            return False, "invalid Incus project"
     params = action.get("params") if isinstance(action.get("params"), dict) else {}
     requested_patterns = params.get("process_patterns") if isinstance(params.get("process_patterns"), list) else []
     requested_pids = params.get("process_pids") if isinstance(params.get("process_pids"), list) else []
@@ -11179,6 +11625,10 @@ def remediate_panel_pairing(action: Dict) -> Tuple[bool, str]:
     )
     if not patterns and not config_files:
         return False, "no locally approved remediation targets"
+    if runtime_kind == "runman":
+        return _runman_guarded_cleanup(
+            container_name, project, params, set(patterns), set(config_files),
+        )
 
     safe_pids = " ".join(str(p) for p in process_pids if p > 1)
     script_parts = [

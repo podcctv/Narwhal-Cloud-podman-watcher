@@ -65,6 +65,12 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
                 "mem_bytes": 1024 * 1024 * 512,
                 "mem_limit_bytes": 1024 * 1024 * 1024,
                 "disk_gb": 40,
+                "writable_layer": {
+                    "available": True,
+                    "source": "runman_overlay_upperdir_allocated",
+                    "sampled_at": 100,
+                    "allocated_bytes": 12 * 1024 * 1024,
+                },
                 "traffic_in_bytes": 1000000,
                 "traffic_out_bytes": 2000000,
                 "ips": ["10.0.0.2", "192.168.1.100"],
@@ -85,6 +91,9 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
         self.assertEqual(r1["network_addresses"], ["10.0.0.2", "192.168.1.100"])
         self.assertTrue(r1["container_disk"]["available"])
         self.assertEqual(r1["container_disk"]["rootfs_bytes"], 40 * 1024 * 1024 * 1024)
+        self.assertTrue(r1["container_disk"]["rw_available"])
+        self.assertEqual(r1["container_disk"]["rw_bytes"], 12 * 1024 * 1024)
+        self.assertEqual(r1["container_disk"]["rw_source"], "runman_overlay_upperdir_allocated")
         self.assertEqual(r1["container_disk"]["fs"]["root"]["total_bytes"], 40 * 1024 * 1024 * 1024)
 
         # Second cycle after 10 seconds with 500,000 extra bytes rx and 1,000,000 extra bytes tx
