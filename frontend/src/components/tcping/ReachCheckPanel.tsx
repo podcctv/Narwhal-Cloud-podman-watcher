@@ -16,7 +16,10 @@ interface ReachCheckPanelProps {
   initialPort?: number;
   availableHosts?: Array<{ id: string; name: string; ip?: string }>;
   onBackToTcping?: () => void;
+  isLoggedIn?: boolean;
 }
+
+const isIpString = (val?: string) => !!val && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(val.trim());
 
 const PORT_PRESETS = [
   { label: 'Web (443 HTTPS)', port: 443, protocol: 'HTTPS' as const },
@@ -33,8 +36,25 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   initialPort = 443,
   availableHosts = [],
   onBackToTcping,
+  isLoggedIn,
 }) => {
-  const [target, setTarget] = useState(initialTarget);
+  const [authed, setAuthed] = useState<boolean>(isLoggedIn ?? false);
+
+  useEffect(() => {
+    if (isLoggedIn !== undefined) {
+      setAuthed(isLoggedIn);
+      return;
+    }
+    let alive = true;
+    api.getAuthStatus().then(s => {
+      if (alive) setAuthed(!!s?.authenticated);
+    }).catch(() => {
+      if (alive) setAuthed(false);
+    });
+    return () => { alive = false; };
+  }, [isLoggedIn]);
+
+  const [target, setTarget] = useState(() => (authed ? initialTarget : (isIpString(initialTarget) ? '' : initialTarget)));
   const [port, setPort] = useState(initialPort);
   const [protocol, setProtocol] = useState<'TCP' | 'HTTP' | 'HTTPS'>('TCP');
   const [running, setRunning] = useState(false);
@@ -107,6 +127,10 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   }, [fetchClusterSummary]);
 
   const handleTriggerCluster = async (hostId?: string) => {
+    if (!authed) {
+      setTriggerMessage('需管理员登录后触发巡检');
+      return;
+    }
     setTriggeringCluster(true);
     setTriggerMessage('');
     try {
@@ -124,14 +148,19 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   };
 
   const handleSelectClusterItem = useCallback((item: ReachabilitySummaryItem) => {
-    if (item.target) setTarget(item.target);
+    if (item.target && authed) {
+      setTarget(item.target);
+    } else if (!authed) {
+      setTarget(item.host_id || '');
+    }
     if (item.port) setPort(item.port);
     if (item.protocol) setProtocol(item.protocol as any || 'TCP');
     if (item.results && item.results.length > 0) {
       setLiveResults(item.results);
       const isOk = item.verdict === 'ok';
+      const displayTarget = authed ? (item.target || item.host_id) : (item.host_id || '已脱敏目标');
       setSummary({
-        target: item.target || item.host_id,
+        target: displayTarget,
         port: item.port || 443,
         protocol: (item.protocol as any) || 'TCP',
         verdict: (item.verdict as any) || 'ok',
@@ -157,7 +186,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
         checkedAt: (item.checked_at || Math.floor(Date.now() / 1000)) * 1000,
       });
     }
-  }, []);
+  }, [authed]);
 
   // Automatically hydrate summary and 18-region breakdown from cluster hourly data
   useEffect(() => {
@@ -195,6 +224,10 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   }, [target, port]);
 
   const handleStartCheck = useCallback(async (customTarget?: string, customPort?: number) => {
+    if (!authed) {
+      setError('实时测速与主动探测仅对管理员开放，请先登录');
+      return;
+    }
     const tHost = (customTarget ?? target).trim();
     const tPort = customPort ?? port;
 
@@ -229,14 +262,15 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
     } finally {
       setRunning(false);
     }
-  }, [target, port, protocol]);
+  }, [authed, target, port, protocol]);
 
   // Copy report summary to clipboard
   const handleCopyReport = () => {
     if (!summary) return;
+    const targetDisplay = authed ? `${summary.target}:${summary.port}` : `${isIpString(summary.target) ? '已脱敏目标' : summary.target}:${summary.port}`;
     const lines = [
       `【全球与三网可达性检测报告】`,
-      `目标: ${summary.target}:${summary.port} (${summary.protocol})`,
+      `目标: ${targetDisplay} (${summary.protocol})`,
       `结论: ${summary.verdictLabel}`,
       `说明: ${summary.verdictDescription}`,
       `国内三网: 电信 ${summary.results.find(r => r.region.id === 'cn-telecom')?.status === 'ok' ? `${summary.results.find(r => r.region.id === 'cn-telecom')?.timings.total}ms` : '不可达'} · 联通 ${summary.results.find(r => r.region.id === 'cn-unicom')?.status === 'ok' ? `${summary.results.find(r => r.region.id === 'cn-unicom')?.timings.total}ms` : '不可达'} · 移动 ${summary.results.find(r => r.region.id === 'cn-mobile')?.status === 'ok' ? `${summary.results.find(r => r.region.id === 'cn-mobile')?.timings.total}ms` : '不可达'}`,
@@ -300,18 +334,20 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             {triggerMessage && (
               <span className="text-xs text-sky-300 font-mono animate-fade-in">{triggerMessage}</span>
             )}
-            <button
-              type="button"
-              onClick={() => {
-                setApiKeyInput(localStorage.getItem('narwhal_globalping_key') || '');
-                setShowKeyModal(true);
-              }}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition"
-              title="配置 Globalping 探针 API Key"
-            >
-              <Key className="h-3.5 w-3.5 text-amber-400" />
-              <span>{quota?.api_key_configured ? 'API Key (已绑定)' : '配置 API Key'}</span>
-            </button>
+            {authed && (
+              <button
+                type="button"
+                onClick={() => {
+                  setApiKeyInput(localStorage.getItem('narwhal_globalping_key') || '');
+                  setShowKeyModal(true);
+                }}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition"
+                title="配置 Globalping 探针 API Key"
+              >
+                <Key className="h-3.5 w-3.5 text-amber-400" />
+                <span>{quota?.api_key_configured ? 'API Key (已绑定)' : '配置 API Key'}</span>
+              </button>
+            )}
             <button
               type="button"
               disabled={loadingCluster}
@@ -321,15 +357,17 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             >
               <RefreshCw className={`h-3.5 w-3.5 ${loadingCluster ? 'animate-spin' : ''}`} />
             </button>
-            <button
-              type="button"
-              disabled={triggeringCluster}
-              onClick={() => handleTriggerCluster()}
-              className="flex items-center gap-1.5 rounded-lg bg-sky-600/90 hover:bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition disabled:opacity-50"
-            >
-              <Zap className={`h-3.5 w-3.5 ${triggeringCluster ? 'animate-spin' : ''}`} />
-              <span>立即全量巡检</span>
-            </button>
+            {authed && (
+              <button
+                type="button"
+                disabled={triggeringCluster}
+                onClick={() => handleTriggerCluster()}
+                className="flex items-center gap-1.5 rounded-lg bg-sky-600/90 hover:bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition disabled:opacity-50"
+              >
+                <Zap className={`h-3.5 w-3.5 ${triggeringCluster ? 'animate-spin' : ''}`} />
+                <span>立即全量巡检</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -431,9 +469,11 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                         <div className="font-semibold text-slate-100 truncate max-w-[200px]" title={item.host_id}>
                           {item.host_id}
                         </div>
-                        <div className="text-[11px] font-mono text-slate-500 truncate max-w-[200px]">
-                          {item.target}
-                        </div>
+                        {authed && item.target ? (
+                          <div className="text-[11px] font-mono text-slate-500 truncate max-w-[200px]">
+                            {item.target}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="p-3">
                         <span className="rounded bg-slate-800/80 px-2 py-0.5 text-sky-300 font-bold">
@@ -503,14 +543,16 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                           >
                             查看详情
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleTriggerCluster(item.host_id)}
-                            className="rounded-lg border border-slate-700 bg-slate-800/80 p-1 text-slate-400 hover:text-slate-100 hover:bg-slate-700 transition"
-                            title="单独重新检测此机"
-                          >
-                            <RefreshCw className="h-3 w-3" />
-                          </button>
+                          {authed && (
+                            <button
+                              type="button"
+                              onClick={() => handleTriggerCluster(item.host_id)}
+                              className="rounded-lg border border-slate-700 bg-slate-800/80 p-1 text-slate-400 hover:text-slate-100 hover:bg-slate-700 transition"
+                              title="单独重新检测此机"
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -541,6 +583,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                 <div className="relative shrink-0">
                   <select
                     aria-label="快速选机"
+                    disabled={!authed}
                     onChange={(e) => {
                       const sel = availableHosts.find(h => h.id === e.target.value);
                       if (sel) {
@@ -548,17 +591,17 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                         if (clusterItem) {
                           handleSelectClusterItem(clusterItem);
                         } else {
-                          setTarget(sel.ip || sel.name || sel.id);
+                          setTarget(authed ? (sel.ip || sel.name || sel.id) : (sel.name || sel.id));
                         }
                       }
                     }}
-                    className="h-10 rounded-lg border border-slate-700 bg-slate-800/90 px-2.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition cursor-pointer"
+                    className="h-10 rounded-lg border border-slate-700 bg-slate-800/90 px-2.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition cursor-pointer disabled:opacity-60"
                     defaultValue=""
                   >
                     <option value="" disabled>快速选机</option>
                     {availableHosts.map(h => (
                       <option key={h.id} value={h.id}>
-                        {h.name} {h.ip ? `(${h.ip})` : ''}
+                        {h.name} {authed && h.ip ? `(${h.ip})` : ''}
                       </option>
                     ))}
                   </select>
@@ -566,11 +609,12 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
               )}
               <input
                 type="text"
-                placeholder="例如: 15.204.57.108 或 narwhal.example.com"
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleStartCheck()}
-                className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 text-sm text-slate-100 placeholder-slate-500 font-mono focus:border-sky-500 focus:outline-hidden transition"
+                placeholder={authed ? "例如: 15.204.57.108 或 narwhal.example.com" : "例如: narwhal.example.com (需登录测速)"}
+                value={authed ? target : (isIpString(target) ? '' : target)}
+                onChange={(e) => authed && setTarget(e.target.value)}
+                disabled={!authed}
+                onKeyDown={(e) => e.key === 'Enter' && authed && handleStartCheck()}
+                className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 text-sm text-slate-100 placeholder-slate-500 font-mono focus:border-sky-500 focus:outline-hidden transition disabled:opacity-60"
               />
             </div>
           </div>
@@ -584,9 +628,10 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
               min={1}
               max={65535}
               value={port}
+              disabled={!authed}
               onChange={(e) => setPort(Number(e.target.value))}
-              onKeyDown={(e) => e.key === 'Enter' && handleStartCheck()}
-              className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 text-sm text-slate-100 font-mono focus:border-sky-500 focus:outline-hidden transition"
+              onKeyDown={(e) => e.key === 'Enter' && authed && handleStartCheck()}
+              className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 text-sm text-slate-100 font-mono focus:border-sky-500 focus:outline-hidden transition disabled:opacity-60"
             />
           </div>
 
@@ -596,8 +641,9 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             </label>
             <select
               value={protocol}
+              disabled={!authed}
               onChange={(e) => setProtocol(e.target.value as any)}
-              className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-2.5 text-xs text-slate-200 font-medium focus:border-sky-500 focus:outline-hidden transition cursor-pointer"
+              className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-2.5 text-xs text-slate-200 font-medium focus:border-sky-500 focus:outline-hidden transition cursor-pointer disabled:opacity-60"
             >
               <option value="TCP">TCP (全端口推荐)</option>
               <option value="HTTPS">HTTPS (443)</option>
@@ -606,24 +652,35 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
           </div>
 
           <div className="md:col-span-2">
-            <button
-              type="button"
-              disabled={running || !target.trim()}
-              onClick={() => handleStartCheck()}
-              className="w-full flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-xs hover:bg-sky-500 transition disabled:opacity-50 disabled:cursor-not-allowed h-10"
-            >
-              {running ? (
-                <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span>探测中 ({progress.finished}/{progress.total})</span>
-                </>
-              ) : (
-                <>
-                  <Zap className="h-4 w-4" />
-                  <span>开始可达性检测</span>
-                </>
-              )}
-            </button>
+            {authed ? (
+              <button
+                type="button"
+                disabled={running || !target.trim()}
+                onClick={() => handleStartCheck()}
+                className="w-full flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-xs hover:bg-sky-500 transition disabled:opacity-50 disabled:cursor-not-allowed h-10"
+              >
+                {running ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>探测中 ({progress.finished}/{progress.total})</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="h-4 w-4" />
+                    <span>开始可达性检测</span>
+                  </>
+                )}
+              </button>
+            ) : (
+              <a
+                href="/login"
+                className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-950/40 px-3 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-900/50 hover:text-sky-200 transition h-10 text-center"
+                title="登录后可使用实时探测与测速功能"
+              >
+                <Shield className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+                <span>登录后测速</span>
+              </a>
+            )}
           </div>
         </div>
 
@@ -635,12 +692,12 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
               <button
                 key={p.label}
                 type="button"
-                disabled={running}
+                disabled={running || !authed}
                 onClick={() => {
                   setPort(p.port);
                   setProtocol(p.protocol);
                 }}
-                className={`rounded border px-2 py-0.5 transition font-mono ${
+                className={`rounded border px-2 py-0.5 transition font-mono disabled:opacity-50 ${
                   port === p.port && protocol === p.protocol
                     ? 'border-sky-500 bg-sky-950/60 text-sky-300 font-semibold'
                     : 'border-slate-800 bg-slate-950/60 hover:border-slate-700 text-slate-300'
@@ -693,7 +750,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                   <span>{summary.verdictLabel}</span>
                 </span>
                 <span className="font-mono text-sm font-semibold text-slate-100">
-                  {summary.target}:{summary.port}
+                  {authed ? `${summary.target}:${summary.port}` : `${isIpString(summary.target) ? '目标节点' : summary.target}:${summary.port}`}
                 </span>
                 <span className="text-xs text-slate-400 font-mono">
                   ({summary.protocol} 探测 · 18 节点 + 访客浏览器)
@@ -863,7 +920,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
               <Globe className="h-8 w-8 text-slate-600 mx-auto" />
               <p className="font-semibold text-slate-300">暂无展开的区域明细</p>
               <p className="text-slate-500 max-w-md mx-auto">
-                请在上方母机列表中点击「查看详情」载入历史巡检快照，或在自定义输入框输入目标并点击「开始可达性检测」。
+                请在上方母机列表中点击「查看详情」载入历史巡检快照{authed ? '，或在自定义输入框输入目标并点击「开始可达性检测」' : ''}。
               </p>
             </div>
           )
@@ -901,7 +958,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                             AS{item.region.asn}
                           </span>
                         )}
-                        {item.ip && (
+                        {authed && item.ip && (
                           <span className="text-[10px] font-mono text-slate-500 truncate" title={item.ip}>
                             · {item.ip}
                           </span>

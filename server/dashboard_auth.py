@@ -172,7 +172,7 @@ def attach(app, db, credentials, agent_paths, callback_prefix, static_dir):
             return await call_next(request)
         if path in agent_paths or path.startswith(callback_prefix):
             return await call_next(request)
-        if (path in {"/login", "/api/v1/auth/login", "/api/v1/auth/logout"}
+        if (path in {"/login", "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/auth/status"}
                 or (path.startswith("/assets/") and request.method in {"GET", "HEAD"})):
             return await call_next(request)
         token = request.cookies.get(COOKIE, "")
@@ -189,7 +189,18 @@ def attach(app, db, credentials, agent_paths, callback_prefix, static_dir):
                         account = found[0][0], found[1]
                 except (ValueError, UnicodeError):
                     pass
+        is_reach_public = (
+            request.method in SAFE_METHODS and (
+                path in {"/api/v1/reachability/summary", "/api/v1/reachability/quota"}
+                or path.startswith("/api/v1/reachability/host/")
+            )
+        )
         if not account:
+            if is_reach_public:
+                request.state.dashboard_user, request.state.dashboard_role = None, None
+                response = await call_next(request)
+                response.headers["Cache-Control"] = "no-store"
+                return response
             if request.method in {"GET", "HEAD"} and not path.startswith("/api/"):
                 target = safe_next(path + ("?" + request.url.query if request.url.query else ""))
                 return RedirectResponse("/login?next=" + quote(target, safe=""), status_code=303,
@@ -219,6 +230,14 @@ def attach(app, db, credentials, agent_paths, callback_prefix, static_dir):
             return RedirectResponse(safe_next(request.query_params.get("next", "/")), status_code=303,
                                     headers={"Cache-Control": "no-store"})
         return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/auth/status")
+    async def auth_status(request: Request):
+        token = request.cookies.get(COOKIE, "")
+        account = validate(token)
+        if account:
+            return JSONResponse({"authenticated": True, "username": account[0], "role": account[1]}, headers={"Cache-Control": "no-store"})
+        return JSONResponse({"authenticated": False}, headers={"Cache-Control": "no-store"})
 
     @app.post("/api/v1/auth/login")
     async def login(request: Request):

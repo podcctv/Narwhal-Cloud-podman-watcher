@@ -346,6 +346,17 @@ export const api = {
       host_summary: raw.hosts || [],
     } as StatsResponse;
   },
+  getAuthStatus: async (): Promise<{ authenticated: boolean; username?: string; role?: string }> => {
+    try {
+      const res = await fetch('/api/v1/auth/status', { credentials: 'include' });
+      if (res.ok) {
+        return await res.json();
+      }
+      return { authenticated: false };
+    } catch {
+      return { authenticated: false };
+    }
+  },
   getReachabilitySummary: () => request<ReachabilityClusterSummary>('/api/v1/reachability/summary'),
   getReachabilityQuota: () => request<ReachabilityQuotaInfo>('/api/v1/reachability/quota'),
   saveReachabilitySettings: (settings: { globalping_api_key?: string }) => request<{ ok: boolean; message: string; quota: ReachabilityQuotaInfo }>('/api/v1/reachability/settings', { method: 'POST', body: JSON.stringify(settings) }),

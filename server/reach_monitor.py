@@ -955,6 +955,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
             max_checked = 0
             ok_count = 0
             blocked_count = 0
+            is_auth = bool(getattr(request.state, "dashboard_user", None))
 
             for r in rows:
                 checked_at = int(r["checked_at"] or 0)
@@ -972,9 +973,17 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 except Exception:
                     stats, results = {}, []
 
+                # IP masking for unauthenticated public visitors
+                target_val = r["target"]
+                if not is_auth:
+                    target_val = ""
+                    for res_item in results:
+                        if isinstance(res_item, dict) and "ip" in res_item:
+                            res_item["ip"] = ""
+
                 items.append({
                     "host_id": r["host_id"],
-                    "target": r["target"],
+                    "target": target_val,
                     "port": r["port"],
                     "protocol": r["protocol"],
                     "verdict": verdict,
@@ -1009,6 +1018,8 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
 
     @app.post("/api/v1/reachability/settings")
     async def save_reachability_settings(request: Request) -> JSONResponse:
+        if not getattr(request.state, "dashboard_user", None):
+            raise HTTPException(status_code=401, detail="请登录后再修改配置")
         conn = db_factory()
         try:
             init_db(conn)
@@ -1050,9 +1061,17 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 results = json.loads(r["results_json"] or "[]")
             except Exception:
                 stats, results = {}, []
+
+            is_auth = bool(getattr(request.state, "dashboard_user", None))
+            target_val = r["target"] if is_auth else ""
+            if not is_auth:
+                for res_item in results:
+                    if isinstance(res_item, dict) and "ip" in res_item:
+                        res_item["ip"] = ""
+
             item = {
                 "host_id": r["host_id"],
-                "target": r["target"],
+                "target": target_val,
                 "port": r["port"],
                 "protocol": r["protocol"],
                 "verdict": r["verdict"],
@@ -1068,6 +1087,8 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
 
     @app.post("/api/v1/reachability/trigger")
     async def trigger_reachability_check(request: Request) -> JSONResponse:
+        if not getattr(request.state, "dashboard_user", None):
+            raise HTTPException(status_code=401, detail="请登录后再触发测试")
         conn = db_factory()
         try:
             init_db(conn)

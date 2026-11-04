@@ -306,5 +306,87 @@ class TestReachMonitor(unittest.TestCase):
         key = reach_monitor.get_globalping_api_key(self.conn)
         self.assertEqual(key, "test-token-123")
 
+    def test_reachability_api_unauthenticated_sanitization(self):
+        # Populate a sample host reachability result with real IP
+        now = 1700000000
+        self.conn.execute("""
+            INSERT INTO host_reachability(host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at)
+            VALUES('node-shanghai', '15.204.57.108', 443, 'TCP', 'ok', '全通', 'ok', '{"ok":1}', '[{"region":{"id":"cn-telecom"},"ip":"15.204.57.108","status":"ok"}]', ?)
+        """, (now,))
+        self.conn.commit()
+
+        class UnclosableConnection:
+            def __init__(self, conn):
+                self._conn = conn
+            def __getattr__(self, name):
+                if name == "close":
+                    return lambda: None
+                return getattr(self._conn, name)
+
+        from fastapi import FastAPI, HTTPException
+        app = FastAPI()
+        reach_monitor.attach(app, lambda: UnclosableConnection(self.conn), None, None)
+
+        # 1. Unauthenticated Request (request.state.dashboard_user is None)
+        class MockUnauthRequest:
+            class state:
+                dashboard_user = None
+
+        routes = {r.path: r for r in app.routes}
+        summary_route = routes["/api/v1/reachability/summary"].endpoint
+        res_unauth = summary_route(MockUnauthRequest())
+        body_unauth = json.loads(res_unauth.body.decode("utf-8"))
+        item_unauth = body_unauth["items"][0]
+
+        # Target IP must be omitted / empty
+        self.assertEqual(item_unauth["target"], "")
+        # Probe result IP must be omitted / empty
+        self.assertEqual(item_unauth["results"][0]["ip"], "")
+
+        # 2. Authenticated Request (request.state.dashboard_user = 'admin')
+        class MockAuthRequest:
+            class state:
+                dashboard_user = "admin"
+
+        res_auth = summary_route(MockAuthRequest())
+        body_auth = json.loads(res_auth.body.decode("utf-8"))
+        item_auth = body_auth["items"][0]
+
+        # Target IP and result IP must be preserved for logged-in admin
+        self.assertEqual(item_auth["target"], "15.204.57.108")
+        self.assertEqual(item_auth["results"][0]["ip"], "15.204.57.108")
+
+    def test_reachability_api_mutation_requires_auth(self):
+        class UnclosableConnection:
+            def __init__(self, conn):
+                self._conn = conn
+            def __getattr__(self, name):
+                if name == "close":
+                    return lambda: None
+                return getattr(self._conn, name)
+
+        from fastapi import FastAPI, HTTPException
+        app = FastAPI()
+        reach_monitor.attach(app, lambda: UnclosableConnection(self.conn), None, None)
+
+        class MockUnauthRequest:
+            class state:
+                dashboard_user = None
+
+        routes = {r.path: r for r in app.routes}
+        trigger_route = routes["/api/v1/reachability/trigger"].endpoint
+        settings_route = routes["/api/v1/reachability/settings"].endpoint
+
+        async def _test():
+            with self.assertRaises(HTTPException) as cm:
+                await trigger_route(MockUnauthRequest())
+            self.assertEqual(cm.exception.status_code, 401)
+
+            with self.assertRaises(HTTPException) as cm2:
+                await settings_route(MockUnauthRequest())
+            self.assertEqual(cm2.exception.status_code, 401)
+
+        asyncio.run(_test())
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 import { ReachCheckPanel } from './ReachCheckPanel';
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api } from '../../api/client';
 import {
   Activity, ArrowDown, ArrowRight, Check, ChevronDown, CircleCheck, Clock3,
   Download, ExternalLink, Globe2, Info, Loader2, MapPin, Play, RotateCw,
@@ -30,6 +31,7 @@ export const TcpingPage: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     return params.get('tab') === 'reach' ? 'reach' : 'tcping';
   });
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [directory, setDirectory] = useState<Directory>();
   const [sources, setSources] = useState<Source[]>([]), [enabled, setEnabled] = useState(false);
   const [selected, setSelected] = useState(''), [scope, setScope] = useState<Scope>('province');
@@ -53,6 +55,16 @@ export const TcpingPage: React.FC = () => {
     const result = await publicRequest<Job>('jobs/' + encodeURIComponent(id));
     if (epoch.current === generation && selectedRef.current === sourceId && result.source_id === sourceId) setJob(result);
     return result;
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    api.getAuthStatus().then(res => {
+      if (alive) setIsLoggedIn(!!res?.authenticated);
+    }).catch(() => {
+      if (alive) setIsLoggedIn(false);
+    });
+    return () => { alive = false; };
   }, []);
 
   useEffect(() => {
@@ -231,6 +243,7 @@ export const TcpingPage: React.FC = () => {
           <ReachCheckPanel
             availableHosts={sources.map(s => ({ id: s.id, name: s.name, ip: undefined }))}
             initialTarget={new URLSearchParams(window.location.search).get('reach_target') || (source?.name || sources[0]?.name || '')}
+            isLoggedIn={isLoggedIn}
             onBackToTcping={() => {
               setActiveTab('tcping');
               const url = new URL(window.location.href);

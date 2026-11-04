@@ -133,6 +133,7 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
               initialTarget={summary?.target || target}
               initialPort={testedPort}
               availableHosts={[{ id: hostId, name: hostId, ip }]}
+              isLoggedIn={true}
             />
           </div>
         </div>

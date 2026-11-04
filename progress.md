@@ -2,6 +2,29 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 未登录状态下三网可达性检测 IP 隐匿与测速按钮权限保护（v1.7.221）
+
+- **未登录态安全边界加固与数据脱敏**：
+  - 需求背景：三网可达性（Reach Check）在公开页面（`/tcping`）对访客开放时，需要避免暴露集群母机真实公网 IP，并严禁未授权访客触发测速操作消耗 Globalping 探针额度。
+  - 服务端改进：
+    1. 在 `server/dashboard_auth.py` 新增轻量级身份查询接口 `GET /api/v1/auth/status`，仅返回 `{ authenticated: bool, username?: str, role?: str }`，会话未登录时不抛出 401，不触发强制重定向。
+    2. 中间件白名单放行公共只读端点：允许未登录用户 GET 查询 `/api/v1/reachability/summary`、`/api/v1/reachability/quota` 以及 `/api/v1/reachability/host/{host_id}`。
+    3. 服务端脱敏零泄漏保障：当请求未携带有效登录会话时，`get_reachability_summary` 与 `get_reachability_host` 自动将母机 `target` IP 置空（`""`），同时将探测明细 `results[].ip` 置空，从根源杜绝未授权用户在网络抓包中窥探母机真实 IP。
+    4. 动作严格权限收敛：`POST /api/v1/reachability/trigger`（全量/单机巡检）与 `POST /api/v1/reachability/settings`（API Key 保存）增加显式会话检查，未登录请求坚决返回 401。
+  - 前端改进：
+    1. `frontend/src/api/client.ts`：新增 `getAuthStatus`，支持无感知获取用户登录态。
+    2. `ReachCheckPanel.tsx`：
+       - 当用户未登录（`!isLoggedIn`）时，母机巡检列表隐藏宿主机 IP，18 区域明细卡片隐藏探针/目标 IP，快速选机隐藏 IP 标注，诊断总结与复制报告屏蔽真实 IP。
+       - 隐藏管理员测速按钮：“立即全量巡检”、“配置 API Key”、表格行内“单独重新检测此机”。
+       - 自定义探测面板中的“⚡ 开始可达性检测”测速按钮替换为友好的“登录后测速”引导链接，禁用未授权的表单输入与预设，杜绝未登录用户消耗配额。
+    3. `TcpingPage.tsx` 与 `HostReachabilityBadge.tsx`：分别接入认证状态感知，Dashboard 弹窗保持完全可见，公开页面执行严格脱敏。
+  - Rust Agent 接入支持确认：
+    - 明确确认：当前 Watcher 的 Client Agent 早在 v1.7.197 ~ v1.7.211 已完整实现并更新支持 Runman Rust v2 的接入与全链路管控，覆盖自动探活、Socket 通信（`/run/narwhal-agent/connlimit.sock`）、代次锁、带宽保护、准入隔离与连接过载停止。
+- **验证结论**：
+  - 前端 TypeScript / Vite 生产构建顺利通过，静态产物完整更新（`ReachCheckPanel-PpWfvC8o.js`, `index-uykJ8cwr.js` 等）。
+  - `python -m compileall` 零报错通过。
+  - `tests/test_reach_monitor.py` 新增未登录脱敏与越权阻断测试，全量 12 项单测全绿。
+
 ## 探针配额受限彻底修复、平滑分散调度与历史快照保护（v1.7.220）
 
 - **探针配额受限（HTTP 429）与“0 节点”展示根因评估与修复**：
