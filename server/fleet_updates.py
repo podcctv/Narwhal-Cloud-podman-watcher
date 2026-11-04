@@ -177,11 +177,11 @@ def reconcile(conn, version, revision, now=None):
         if n['status'] not in {'dispatched','failed'}:
             continue
         a = conn.execute('SELECT status,created_at,result_message FROM security_actions WHERE id=?', (n['action_id'],)).fetchone()
-        if a and (a['status'] == 'failed' or now-a['created_at'] > 1800):
+        if a and (a['status'] == 'failed' or now-a['created_at'] > 600):
             conn.execute("UPDATE ops_upgrade_nodes SET status='failed' WHERE campaign=? AND host_id=?", (ident, n['host_id']))
             reason = str(a['result_message'] or 'fleet upgrade timed out')[:400]
             if a['status'] != 'failed':
-                reason = 'Client 未在 30 分钟内回报升级结果'
+                reason = 'Client 未在 10 分钟内回报升级结果'
                 conn.execute("UPDATE security_actions SET status='failed',result_message=?,updated_at=? WHERE id=? AND status IN ('queued','dispatched','running')", (reason, now, n['action_id']))
             if int(meta['attempts'].get(n['host_id'], 0)) >= 3:
                 meta.update(paused_at=now, paused_host=n['host_id'], pause_kind='install_failure', paused_from_status=campaign['status'], paused_reason=reason)
@@ -306,10 +306,16 @@ def reconcile(conn, version, revision, now=None):
                 (ident, *wave_hosts),
             ).fetchall()
         }
-        if len(wave_nodes) == len(wave_hosts) and all(row['status'] == 'verified' for row in wave_nodes.values()):
+        all_concluded = (
+            len(wave_nodes) == len(wave_hosts)
+            and all(row['status'] in {'verified', 'failed'} for row in wave_nodes.values())
+        )
+        if all_concluded:
             wave_healthy = True
             for host in wave_hosts:
                 node = wave_nodes[host]
+                if node['status'] != 'verified':
+                    continue
                 action = conn.execute(
                     'SELECT status,updated_at,params_json FROM security_actions WHERE id=?',
                     (node['action_id'],),
@@ -330,6 +336,8 @@ def reconcile(conn, version, revision, now=None):
                 meta.pop('rollout_waiting_for_health', None)
                 wave_hosts = []
                 allow_new_wave = True
+            else:
+                allow_new_wave = False
         else:
             allow_new_wave = False
     if not permitted:

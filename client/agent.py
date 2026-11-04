@@ -62,6 +62,7 @@ APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 
 _warned_missing_bins = set()
 _warned_timeout_commands = set()
+_unresponsive_exec_containers = set()
 _podman_bin = None
 _container_bin = None
 _runtime_bins = None
@@ -224,10 +225,10 @@ def get_container_bin() -> str:
 
 def _runtime_command_timeout() -> float:
     try:
-        configured = float(os.getenv("RUNTIME_COMMAND_TIMEOUT_SECONDS", "30"))
+        configured = float(os.getenv("RUNTIME_COMMAND_TIMEOUT_SECONDS", "10"))
     except ValueError:
-        configured = 30.0
-    return max(5.0, min(300.0, configured))
+        configured = 10.0
+    return max(3.0, min(300.0, configured))
 
 
 def _runman_exec_request(
@@ -367,6 +368,13 @@ def run(cmd: List[str], timeout: float | None = None) -> str:
         return ""
     except subprocess.TimeoutExpired:
         command_name = cmd[0] if cmd else "unknown"
+        if len(cmd) >= 3 and cmd[1] == "exec":
+            _unresponsive_exec_containers.add(cmd[2])
+        elif len(cmd) >= 4 and "exec" in cmd:
+            for idx, arg in enumerate(cmd):
+                if arg == "exec" and idx + 1 < len(cmd):
+                    _unresponsive_exec_containers.add(cmd[idx + 1])
+                    break
         if command_name not in _warned_timeout_commands:
             _warned_timeout_commands.add(command_name)
             print(f"runtime command timed out and was skipped: {command_name}")
@@ -392,6 +400,8 @@ def _runtime_base(runtime: str, project: str = "") -> List[str]:
 
 
 def _runtime_exec_cmd(runtime: str, name: str, shell_command: str, project: str = "") -> List[str]:
+    if name and name in _unresponsive_exec_containers:
+        return ["true"]
     if _runtime_kind(runtime) == "runman":
         return [
             _RUNMAN_EXEC_SENTINEL,
@@ -3018,6 +3028,9 @@ def _collect_container_access_log_stats(
         pid = int(container.get("pid", 0) or 0)
     except (ValueError, TypeError):
         pid = 0
+
+    if name and name in _unresponsive_exec_containers:
+        return _summarize_access_lines([], interval_seconds, True, 0)
 
     proc_root = f"/proc/{pid}/root" if pid > 1 and os.path.isdir(f"/proc/{pid}/root") else ""
 
@@ -8627,13 +8640,13 @@ def collect_container(
         if warn_key not in _warned_parse_paths:
             _warned_parse_paths.add(warn_key)
             print(f"warn: '{runtime} stats' returned empty output; CPU/内存/网络将显示为 0。")
-    if conn_count <= 0:
+    if conn_count <= 0 and pid <= 0:
         conn_count = _count_connections_from_exec(runtime, name, project)
     tcp_ip_counter = _collect_tcp_remote_ips(pid)
     udp_ip_counter = _collect_udp_remote_ips(pid)
-    if not tcp_ip_counter:
+    if not tcp_ip_counter and pid <= 0:
         tcp_ip_counter = _collect_remote_ips_from_exec(runtime, name, "tcp", project)
-    if not udp_ip_counter:
+    if not udp_ip_counter and pid <= 0:
         udp_ip_counter = _collect_remote_ips_from_exec(runtime, name, "udp", project)
     tcp_country_stats = _geoip_country_batch(tcp_ip_counter)
     udp_country_stats = _geoip_country_batch(udp_ip_counter)
@@ -12345,8 +12358,25 @@ def main() -> None:
     args = parser.parse_args()
     node_operations.load_config()
     _start_admission_guard(args.server,args.secret,args.host_id,args.node_id)
+    try:
+        action_poll_interval = max(5, int(os.getenv("ACTION_POLL_INTERVAL", "10")))
+    except ValueError:
+        action_poll_interval = 10
+    last_action_poll = 0.0
 
     while True:
+        _unresponsive_exec_containers.clear()
+        now_mono = time.monotonic()
+        if now_mono - last_action_poll >= action_poll_interval:
+            last_action_poll = now_mono
+            try:
+                process_security_actions(
+                    args.server, args.secret, args.host_id, args.node_id,
+                    bridge_inventory=[],
+                )
+            except Exception as action_error:
+                print(f"initial security action poll failed: {action_error}")
+
         containers = list_containers()
         _abuse_targets = containers
         _schedule_abuse_guard(args.server, args.secret, args.host_id, args.node_id)
@@ -12377,6 +12407,16 @@ def main() -> None:
         collected = []
         included_deep_sample_ids: List[int] = []
         for c in containers:
+            now_mono = time.monotonic()
+            if now_mono - last_action_poll >= action_poll_interval:
+                last_action_poll = now_mono
+                try:
+                    process_security_actions(
+                        args.server, args.secret, args.host_id, args.node_id,
+                        bridge_inventory=[],
+                    )
+                except Exception as action_error:
+                    print(f"security action poll failed: {action_error}")
             if c.get("runtime") == "runman" and c.get("status") != "running":
                 container_report = collect_runman_report(c)
                 container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''

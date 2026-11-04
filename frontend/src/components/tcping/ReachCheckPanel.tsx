@@ -86,6 +86,64 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
     }
   };
 
+  const handleSelectClusterItem = useCallback((item: ReachabilitySummaryItem) => {
+    if (item.target) setTarget(item.target);
+    if (item.port) setPort(item.port);
+    if (item.protocol) setProtocol(item.protocol as any || 'TCP');
+    if (item.results && item.results.length > 0) {
+      setLiveResults(item.results);
+      const isOk = item.verdict === 'ok';
+      setSummary({
+        target: item.target || item.host_id,
+        port: item.port || 443,
+        protocol: (item.protocol as any) || 'TCP',
+        verdict: (item.verdict as any) || 'ok',
+        verdictLabel: item.verdict_label || '可达性检测完毕',
+        verdictDescription: item.verdict_desc || '',
+        advice: [
+          isOk
+            ? '当前开放端口从全球各核心区域及中国大陆电信、联通、移动三大运营商均可正常建立 TCP 连接。'
+            : '检测到部分区域或运营商可能存在握手丢包或超时，请根据下方探针时延与状态排查。'
+        ],
+        results: item.results,
+        stats: {
+          total: item.stats?.total || 18,
+          success: item.stats?.ok || item.results.filter((r: any) => r.status === 'ok').length,
+          failed: (item.stats?.total || 18) - (item.stats?.ok || item.results.filter((r: any) => r.status === 'ok').length),
+          cnSuccess: item.results.filter((r: any) => r.region?.group === 'cn' && r.status === 'ok').length,
+          cnTotal: item.results.filter((r: any) => r.region?.group === 'cn').length || 3,
+          cnAverageMs: item.stats?.cnAverageMs || null,
+          globalAverageMs: item.stats?.globalAverageMs || null,
+          minLatencyMs: null,
+          maxLatencyMs: null,
+        },
+        checkedAt: (item.checked_at || Math.floor(Date.now() / 1000)) * 1000,
+      });
+    }
+  }, []);
+
+  // Automatically hydrate summary and 18-region breakdown from cluster hourly data
+  useEffect(() => {
+    if (summary || liveResults.length > 0) return;
+    if (!clusterData?.items || clusterData.items.length === 0) return;
+
+    let match = clusterData.items.find(
+      it => it.host_id === initialTarget || it.target === initialTarget
+    );
+    if (!match && target) {
+      match = clusterData.items.find(
+        it => it.host_id === target || it.target === target
+      );
+    }
+    if (!match && clusterData.items.length > 0) {
+      match = clusterData.items[0];
+    }
+
+    if (match) {
+      handleSelectClusterItem(match);
+    }
+  }, [clusterData, initialTarget, target, summary, liveResults.length, handleSelectClusterItem]);
+
   // Load cached result from sessionStorage if available
   useEffect(() => {
     if (!target) return;
@@ -343,15 +401,13 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              setTarget(item.target);
-                              setPort(item.port);
-                              setProtocol(item.protocol as any || 'TCP');
-                              handleStartCheck(item.target, item.port);
+                              handleSelectClusterItem(item);
+                              window.scrollTo({ top: 380, behavior: 'smooth' });
                             }}
                             className="rounded-lg border border-slate-700 bg-slate-800/80 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700 transition"
-                            title="以此机为目标启动 18 区域即时探测"
+                            title="载入此机最新巡检成果并在上方展开 18 区域明细"
                           >
-                            详细探测
+                            查看详情
                           </button>
                           <button
                             type="button"
@@ -394,7 +450,12 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                     onChange={(e) => {
                       const sel = availableHosts.find(h => h.id === e.target.value);
                       if (sel) {
-                        setTarget(sel.ip || sel.name || sel.id);
+                        const clusterItem = clusterData?.items?.find(it => it.host_id === sel.id || it.host_id === sel.name);
+                        if (clusterItem) {
+                          handleSelectClusterItem(clusterItem);
+                        } else {
+                          setTarget(sel.ip || sel.name || sel.id);
+                        }
                       }
                     }}
                     className="h-10 rounded-lg border border-slate-700 bg-slate-800/90 px-2.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition cursor-pointer"

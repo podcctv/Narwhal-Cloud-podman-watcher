@@ -2,6 +2,27 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 舰队波次升级死锁修复与容器采集并发/时延优化（v1.7.215）
+
+- **舰队波次升级死锁根因修复**：
+  - 现象：全集群 25 台节点停留在旧版本（v1.7.203），升级活动仅向首波 3 台节点分发动作后由于节点执行超时，`allow_new_wave` 保持 `False`，导致其余 22 台待升级主机永久被跳过。
+  - 修复：重构 `server/fleet_updates.py` 波次终态判定。当当前波次所有节点均达到终态（`status in ('verified', 'failed')`）时，经验证节点 soak 巡检后立即递增 `rollout_wave`、清空 `wave_hosts` 并恢复 `allow_new_wave = True`。失败节点按退避进入 `retry_at` 等待重试，彻底解除 1~3 台慢节点对全集群升级进度的卡死；将超时回收阈值优化至 600 秒（10 分钟）。
+- **Client 容器采集长耗时卡死与动作轮询饥饿解决**：
+  - 现象：母机包含数十个容器时，单次采集耗时达数小时（`reports` 采样严重落后 15 小时，前端提示“仅保留过期历史快照”），导致升级指令在 30 分钟内无法被 client 轮询执行。
+  - 根因：Incus 容器在未安装/未运行 `incus-agent` 时，每条 `exec` 阻塞 30 秒。空闲容器在 `/proc/net` 确认连接为 0 时仍重复触发 `ss` 回退探测；且 `process_security_actions` 仅在 `main` 循环末尾调用，容器扫描耗时长时无法轮询动作。
+  - 修复：
+    1. 在 `client/agent.py` 中引入 `_unresponsive_exec_containers` 熔断机制，单容器发生一次 exec 超时后当轮其余 exec 指令立即跳过。
+    2. 消除空闲容器的假性回退，当 `pid > 0` 且 `/proc/net` 可读时严格信任内核套接字表，禁止多余容器内 `exec`。
+    3. 默认运行时指令超时从 30s 缩短至 10s（下限 3s）。
+    4. 在 `main` 循环入口及容器扫描遍历中每 10 秒（`action_poll_interval`）主动轮询并执行 `process_security_actions`，杜绝动作轮询饥饿。
+- **Reach Check 全球三网可达性 0 节点即时水合与详情交互**：
+  - 服务端 `/api/v1/reachability/summary` 在各主机结果中直接返回 18 区域探测详情数组 `results`。
+  - 前端 `ReachCheckPanel.tsx` 挂载时自动从每小时巡检成果水合数据，消灭初始“0 节点”展示；快速选机或点击巡检列表“查看详情”即时切至对应母机 18 区域时延与三网网络状态。
+- **验证结论**：
+  - 前端 TypeScript 生产构建编译成功（产物输出至 `server/static/`）。
+  - Python `compileall` 无报错。
+  - 全量 955 项单元测试全部通过（0 失败，43 项按环境正常跳过）。
+
 ## 可达性后台巡检线程安全与 CGNAT SSRF 严格隔离（v1.7.214）
 
 - **后台巡检跨线程 SQLite 对象共享异常修复**：

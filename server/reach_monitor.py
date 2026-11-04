@@ -550,8 +550,9 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                     max_checked = checked_at
                 try:
                     stats = json.loads(r["stats_json"] or "{}")
+                    results = json.loads(r["results_json"] or "[]")
                 except Exception:
-                    stats = {}
+                    stats, results = {}, []
                 items.append({
                     "host_id": r["host_id"],
                     "target": r["target"],
@@ -561,6 +562,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                     "verdict_label": r["verdict_label"],
                     "verdict_desc": r["verdict_desc"],
                     "stats": stats,
+                    "results": results,
                     "checked_at": checked_at,
                 })
             return JSONResponse(content={"items": items, "last_checked": max_checked})

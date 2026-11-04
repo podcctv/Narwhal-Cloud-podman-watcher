@@ -1229,6 +1229,7 @@ export interface ReachabilitySummaryItem {
     cnUnicomMs: number;
     cnMobileMs: number;
   };
+  results?: any[];
 }
 
 export interface ReachabilityClusterSummary {
