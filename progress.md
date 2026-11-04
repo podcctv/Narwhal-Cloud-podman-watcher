@@ -2,6 +2,18 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 可达性后台巡检线程安全与 CGNAT SSRF 严格隔离（v1.7.214）
+
+- **后台巡检跨线程 SQLite 对象共享异常修复**：
+  - 现象：`server/reach_monitor.py` 在 `run_hourly_reach_cycle` 中将主事件循环创建的 `conn` 传递给 `asyncio.to_thread(perform_host_reach_check, conn, host_id)`，运行时抛出 `SQLite objects created in a thread can only be used in that same thread`，导致全集群自动化每小时检测结果未能写入 `host_reachability` 表，前端 TCPPING 可达性页面展示为 0 节点。
+  - 修复：重构 worker 线程调用链，将 `db_factory` 传入 worker 并在其内部独立创建与 `finally: conn.close()`，严格杜绝跨线程共享连接。
+- **Globalping 异步测量轮询防早退完善**：
+  - 修正当 Globalping API 预分配 18 个探针占位槽（status: in-progress）时误判定为已完成的逻辑，严格校验 `status == "finished"` 或全量探针终态，确保准确获取各区域 TTFB、TCP、DNS 与 TLS 时延。
+- **SSRF 策略补充 RFC 6598 CGNAT 过滤**：
+  - 在 `is_public_ip` 中补充 `100.64.0.0/10` 运营商级 NAT 网段过滤，防止将运营商私有网络暴露给外部公共探针。
+- **单元测试补充**：
+  - 新增 `tests/test_reach_monitor.py` 覆盖 SSRF/CGNAT 防护、公网 IP/开放端口发现、18 区域时延与诊断判定、以及跨线程数据库执行验证。
+
 ## 自动化三网可达性巡检与容器上线/舰队升级修复（v1.7.213）
 
 - **Dockerfile 镜像依赖完善与版本递增**：在 `server/Dockerfile` 中补充 `COPY reach_monitor.py .`，满足 GitHub Actions 跨架构镜像 smoke-test 导入依赖与 GHCR 版本递增门禁。

@@ -110,6 +110,8 @@ def record_client_ip(conn: sqlite3.Connection, host_id: str, client_ip: str, ts:
         pass
 
 
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+
 def is_public_ip(ip_str: str) -> bool:
     """SSRF & Bogon protection: ensures target is not RFC 1918, CGNAT, loopback, link-local, multicast."""
     if not ip_str or not isinstance(ip_str, str):
@@ -117,6 +119,8 @@ def is_public_ip(ip_str: str) -> bool:
     clean = ip_str.split("/")[0].strip()
     try:
         ip = ipaddress.ip_address(clean)
+        if ip in _CGNAT_NET:
+            return False
         return not (
             ip.is_private
             or ip.is_loopback
@@ -296,7 +300,8 @@ def execute_globalping_measurement(target: str, port: int, timeout_seconds: int 
             m_data = json.loads(poll_resp.read().decode("utf-8"))
             if m_data.get("status") == "finished":
                 return m_data
-            if m_data.get("results") and len(m_data["results"]) >= len(REACH_REGIONS):
+            results = m_data.get("results") or []
+            if results and all(r.get("result", {}).get("status") in {"finished", "failed"} for r in results):
                 return m_data
 
     return m_data if "m_data" in locals() else {"results": []}
@@ -490,17 +495,21 @@ async def run_hourly_reach_cycle(db_factory: Callable[[], sqlite3.Connection]) -
         logger.info("No active hosts found for automated reach check")
         return 0
 
+    def _worker_check(db_f: Callable[[], sqlite3.Connection], h_id: str) -> Optional[Dict[str, Any]]:
+        c = db_f()
+        try:
+            return perform_host_reach_check(c, h_id)
+        finally:
+            c.close()
+
     checked = 0
     for host_id in hosts:
-        conn = db_factory()
         try:
-            res = await asyncio.to_thread(perform_host_reach_check, conn, host_id)
+            res = await asyncio.to_thread(_worker_check, db_factory, host_id)
             if res:
                 checked += 1
         except Exception as e:
             logger.error(f"Error in reach check cycle for {host_id}: {e}")
-        finally:
-            conn.close()
         # Rate-limiting pause between hosts
         await asyncio.sleep(2.5)
 
