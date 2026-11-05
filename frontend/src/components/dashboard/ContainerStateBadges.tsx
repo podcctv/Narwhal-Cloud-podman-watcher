@@ -225,6 +225,10 @@ const buildSignals = (container: ContainerItem, alerts: SecurityAlert[]): Contai
     const count = security.sensitive_file_events.length;
     add('dropper-detected', `可疑落盘 ${count}`, 'danger', `在 /tmp 或 /dev/shm 检出 ${count} 个可执行文件/木马落地`);
   }
+  if (security.microburst?.detected) {
+    const isFlood = security.microburst.flood_type === 'outbound_small_packet_flood';
+    add('microburst-alert', isFlood ? `⚡ 小包泛洪 (${security.microburst.tx_pps} PPS)` : `⚡ 瞬时突发 (${security.microburst.tx_pps} PPS)`, isFlood ? 'danger' : 'warning', `检测到短时高频微突发流量，瞬时发包率: ${security.microburst.tx_pps} PPS，平均包长: ${security.microburst.avg_tx_packet_size}B`);
+  }
   if (container.alerts?.cpu) add('cpu-alert', 'CPU 高负载', 'warning');
   if (container.alerts?.memory) add('memory-alert', '内存压力', 'warning');
   if (container.alerts?.disk) add('disk-alert', '磁盘压力', 'warning');

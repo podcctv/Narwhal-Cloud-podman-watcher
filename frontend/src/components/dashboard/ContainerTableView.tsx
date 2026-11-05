@@ -11,6 +11,10 @@ import {
   ArrowUp,
   ArrowDown,
   Gauge,
+  Zap,
+  Activity,
+  Cpu as CpuIcon,
+  HardDrive,
 } from 'lucide-react';
 import { ContainerItem, ContainerIdentity, SecurityAlert } from '../../api/types';
 import { fmtBytes, fmtMbps } from '../../api/client';
@@ -124,12 +128,140 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
   );
 
   return (
-    <div
-      tabIndex={0}
-      role="region"
-      aria-label="容器状态数据表格"
-      className="ui-table-wrap shadow-inner"
-    >
+    <div className="space-y-4">
+      {/* Responsive Cyberpunk Bento Card Stream for Mobile / Tablet */}
+      <div className="block md:hidden space-y-3">
+        {sortedContainers.map((c) => {
+          const risk = evaluateContainerRisk(c, activeAlerts);
+          const isStale = Boolean(c.alerts?.stale);
+          const hasResourceAlert = !isStale && hasContainerResourceAlert(c);
+          const hasResourceGuardFailure = !isStale && hasContainerResourceGuardFailure(c);
+          const hasProtocolGuardNeedsReview = !isStale && hasContainerProtocolGuardNeedsReview(c);
+          const cpu = typeof c.cpu_percent === 'number' && Number.isFinite(c.cpu_percent) ? c.cpu_percent : null;
+          const mem = typeof c.mem_percent === 'number' && Number.isFinite(c.mem_percent) ? c.mem_percent : null;
+          const memUsed = typeof c.mem_bytes === 'number' && Number.isFinite(c.mem_bytes) ? fmtBytes(c.mem_bytes) : '—';
+          const rxMbps = typeof c.net_rx_bps === 'number' && Number.isFinite(c.net_rx_bps) ? fmtMbps(c.net_rx_bps) : null;
+          const txMbps = typeof c.net_tx_bps === 'number' && Number.isFinite(c.net_tx_bps) ? fmtMbps(c.net_tx_bps) : null;
+          const sec = c.security || {};
+
+          const identity: ContainerIdentity = {
+            host_id: c.host_id,
+            runtime: c.runtime,
+            project: c.project,
+            container_name: c.container_name,
+            alert_id: risk.actionableAlert?.id,
+          };
+
+          const glowClass = risk.isCritical || hasResourceGuardFailure
+            ? 'border-rose-500/40 bg-rose-950/20 glow-rose'
+            : risk.isWarning || hasProtocolGuardNeedsReview || hasResourceAlert
+            ? 'border-amber-500/40 bg-amber-950/20 glow-amber'
+            : 'border-slate-800 bg-slate-900/60 hover:border-slate-700';
+
+          return (
+            <div
+              key={`card-${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
+              onClick={() => onSelect(identity)}
+              className={`rounded-2xl border p-4 transition-all cursor-pointer space-y-3 ${glowClass}`}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+                      risk.isCritical || hasResourceGuardFailure
+                        ? 'bg-rose-500 animate-pulse shadow-[0_0_8px_rgba(244,63,94,0.9)]'
+                        : risk.isWarning || hasProtocolGuardNeedsReview
+                        ? 'bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.8)]'
+                        : 'bg-emerald-400 shadow-[0_0_6px_rgba(34,197,94,0.7)]'
+                    }`}
+                  />
+                  <span className="font-bold text-sm text-slate-100 truncate">{c.container_name}</span>
+                  <span className="rounded-md bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 font-mono border border-slate-700">
+                    {c.runtime}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                  {risk.canRemediate && onQuickDisposition && (
+                    <button
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={() => onQuickDisposition(identity, 'deny')}
+                      className="px-2 py-1 text-[11px] font-semibold bg-rose-950/80 text-rose-300 border border-rose-500/40 rounded-lg hover:bg-rose-900 transition-colors"
+                    >
+                      处置
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onSelect(identity)}
+                    className="px-2.5 py-1 text-[11px] font-medium bg-slate-800 text-sky-300 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors"
+                  >
+                    排查
+                  </button>
+                </div>
+              </div>
+
+              {/* Bento Metrics 4-Grid */}
+              <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
+                    <CpuIcon className="h-3 w-3 text-sky-400" />
+                    <span>CPU 使用率</span>
+                  </div>
+                  <div className="text-sm font-bold text-slate-200 mt-1">
+                    {cpu !== null ? `${cpu.toFixed(1)}%` : '—'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
+                    <HardDrive className="h-3 w-3 text-indigo-400" />
+                    <span>内存占用</span>
+                  </div>
+                  <div className="text-sm font-bold text-slate-200 mt-1 truncate">
+                    {memUsed} {mem !== null ? `(${mem.toFixed(0)}%)` : ''}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
+                    <ArrowDownLeft className="h-3 w-3 text-emerald-400" />
+                    <span>网络 RX / TX</span>
+                  </div>
+                  <div className="text-xs font-bold text-slate-200 mt-1 truncate">
+                    ↓{rxMbps ? `${rxMbps}M` : '0'} · ↑{txMbps ? `${txMbps}M` : '0'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
+                    <Activity className="h-3 w-3 text-amber-400" />
+                    <span>连接 / 进程</span>
+                  </div>
+                  <div className="text-xs font-bold text-slate-200 mt-1">
+                    {c.conn_count ?? 0} conn · {sec.process_count ?? 0} proc
+                  </div>
+                </div>
+              </div>
+
+              {/* State Badges */}
+              <div className="pt-1">
+                <ContainerStateBadges container={c} activeAlerts={activeAlerts} maxVisible={4} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Desktop Cyberpunk Bento Table */}
+      <div
+        tabIndex={0}
+        role="region"
+        aria-label="容器状态数据表格"
+        className="hidden md:block ui-table-wrap rounded-2xl border border-slate-800/90 bg-slate-950/70 shadow-2xl overflow-hidden"
+      >
       <table className="w-full text-left border-collapse text-xs">
         <thead>
           <tr className="border-b border-slate-800/90 bg-slate-900/90 text-[11px] font-semibold text-slate-400 font-mono">
@@ -308,6 +440,15 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                 {/* 8. Protocol & Badges */}
                 <td className="py-2.5 px-2 whitespace-nowrap">
                   <div className="flex items-center gap-1">
+                    {sec.microburst?.detected && (
+                      <span
+                        className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/20 border border-amber-500/60 px-1.5 py-0.5 text-[9px] font-bold text-amber-300 animate-pulse"
+                        title={`微突发流量: ${sec.microburst.tx_pps} PPS (${sec.microburst.flood_type})`}
+                      >
+                        <Zap className="h-2.5 w-2.5 text-amber-400" />
+                        <span>{sec.microburst.tx_pps} PPS</span>
+                      </span>
+                    )}
                     {(c.alerts?.hy2_detected || sec.hy2_protocol?.detected) && (
                       <span
                         className="inline-flex items-center gap-0.5 rounded-full bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.5 text-[9px] font-bold text-violet-300"
@@ -401,6 +542,7 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
           })}
         </tbody>
       </table>
+    </div>
     </div>
   );
 };

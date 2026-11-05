@@ -287,6 +287,16 @@ export interface ContainerSecurity {
     sha256?: string;
     threat_score: number;
   }[];
+  microburst?: {
+    detected: boolean;
+    flood_type: string;
+    threat_level: string;
+    rx_pps: number;
+    tx_pps: number;
+    avg_tx_packet_size?: number;
+    avg_rx_packet_size?: number;
+    sampled_interval_sec?: number;
+  };
   configuration_risks?: { message?: string; code?: string }[];
   communication_detail_available?: boolean;
   service_inventory_state?: 'complete' | 'partial' | 'unavailable' | string;

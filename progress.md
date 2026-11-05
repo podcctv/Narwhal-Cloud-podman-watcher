@@ -2,6 +2,25 @@
 
 更新时间：2026-11-05（Asia/Shanghai）
 
+## 阶段三：轻量化微突发小包泛洪感知与容器大盘 Cyberpunk Bento 全面下沉（v1.8.6）
+
+- **阶段三（P2 · 全盘统一与微突发感知）全链路落地**：
+  - 需求背景：按三阶段演进计划推进 Phase 3，搭建短周期微突发流量感知引擎（捕捉平滑均值所漏掉的高频 SYN/UDP 泛洪攻击），并将 Cyberpunk Bento Glow 极客黑金现代设计语言全面覆盖至容器大盘与响应式卡片。
+  - **核心特性实装**：
+    1. **短周期微突发流量与小包泛洪感知引擎 (`client/microburst_guard.py`)**：
+       - 突破 5 分钟粗粒度滑动均值的局限，高频采集容器网络数据包增量，度量瞬时 PPS（Packets Per Second）与平均包长（`bytes / packets`）。
+       - 智能识别小包洪水特征：当出站发包率 $\ge 3000$ PPS 且平均包长 $\le 128$ 字节时，立即打上 `outbound_small_packet_flood` 高危标记；当出站 PPS $\ge 5000$ 时打上 `high_pps_outbound_burst` 预警。
+       - 遥测接入：`client/agent.py` 在 `collect_container` 与 `collect_runman_report` 中实时上报 `security["microburst"]`。
+    2. **容器主表与响应式移动卡片全面统一为 Cyberpunk Bento Glow**：
+       - `ContainerTableView.tsx` 架构重构，提供桌面/平板/手机自适应双轨交互：
+         - **移动/平板端响应式 Bento 流式卡片**：废弃超宽横向滚动条，卡片采用 `rounded-2xl` 极客黑金边缘微光与发光呼吸灯（`.glow-emerald`, `.glow-rose`, `.glow-amber`），内嵌 CPU 进度磁贴、内存磁贴、双向网络吞吐磁贴及连接/进程磁贴。
+         - **桌面端 Cyberpunk Bento 矩阵大盘**：高密度数据栅格加上柔和黑金光晕，各列基准对齐，行内直观展示微突发流量胶囊（`⚡ xxxx PPS`）与一键快捷排查。
+       - `ContainerStateBadges.tsx` 动态联动：实时呈现 `⚡ 小包泛洪 (xxxx PPS)` 或 `⚡ 瞬时突发`，安全运维一眼可知。
+- **验证结论**：
+  - 前端 `npm run build` TypeScript 编译与 Vite 生产打包 100% 成功，打包输出 `Dashboard-DTqRJIIF.js`、`ReachCheckPanel-CJaULOCP.js` 等更新文件。
+  - `python -m compileall` 零报错通过。
+  - 全量 35 项单测（涵盖微突发流量检测、敏感落盘、可达性趋势与阶段 1 核心防线）全部 100% 绿色通过。
+
 ## 阶段二：敏感目录可执行文件落地感知、TCP PING 24小时时延 Sparkline 与 Telegram 告警联动（v1.8.5）
 
 - **阶段二（P1 · 智能感知）全链路落地**：
