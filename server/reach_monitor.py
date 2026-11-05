@@ -926,6 +926,48 @@ def parse_measurement_results(
     }
 
 
+def notify_reachability_state_change(conn: sqlite3.Connection, host_id: str, new_verdict: str, verdict_label: str, target: str, port: int, protocol: str, prev_verdict: str | None = None) -> None:
+    """Send Telegram alert or recovery notice when reachability state transitions."""
+    is_anomaly = new_verdict in ("blocked", "timeout")
+    is_recovery = prev_verdict in ("blocked", "timeout") and new_verdict in ("ok", "partial")
+    if not is_anomaly and not is_recovery:
+        return
+    try:
+        bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
+        if not bots:
+            return
+        import html
+        from server.app import _telegram_api, _parse_telegram_target
+        if is_anomaly:
+            msg = (
+                f"<b>🚨 母机网络可达性异常告警</b>\n\n"
+                f"<b>母机:</b> <code>{html.escape(host_id)}</code>\n"
+                f"<b>目标:</b> <code>{html.escape(target)}:{port} ({protocol})</code>\n"
+                f"<b>判定:</b> <b>{html.escape(verdict_label)}</b>\n"
+                f"<b>说明:</b> 国内三大运营商检测连接超时或握手被中断，请排查线路或端口放行。"
+            )
+        else:
+            msg = (
+                f"<b>✅ 母机网络可达性已恢复正常</b>\n\n"
+                f"<b>母机:</b> <code>{html.escape(host_id)}</code>\n"
+                f"<b>目标:</b> <code>{html.escape(target)}:{port} ({protocol})</code>\n"
+                f"<b>判定:</b> <b>{html.escape(verdict_label)}</b>\n"
+                f"<b>说明:</b> 经自动化探测验证，节点三网连通性与握手已恢复通畅。"
+            )
+
+        for bot in bots:
+            try:
+                chat_target, thread_id = _parse_telegram_target(str(bot["target"] or ""))
+                payload = {"chat_id": chat_target, "text": msg, "parse_mode": "HTML"}
+                if thread_id is not None:
+                    payload["message_thread_id"] = thread_id
+                _telegram_api(str(bot["token"]), "sendMessage", payload)
+            except Exception as e:
+                logger.warning(f"Failed to deliver reachability telegram alert via bot {bot['id']}: {e}")
+    except Exception as exc:
+        logger.warning(f"Reachability notification processing failed: {exc}")
+
+
 def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional[Dict[str, Any]]:
     """Runs reachability check for a single host. Supports IPv4, IPv6, and dual-stack
     machines with intelligent token budgeting to prevent quota exhaustion.
@@ -1075,6 +1117,9 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
                 results_v6_json = prev["results_json_v6"]
                 checked_at_v6_val = prev["checked_at_v6"]
 
+        prev_reach_row = conn.execute("SELECT verdict FROM host_reachability WHERE host_id=?", (host_id,)).fetchone()
+        prev_v_val = prev_reach_row["verdict"] if prev_reach_row else None
+
         conn.execute("""
             INSERT INTO host_reachability(
                 host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at,
@@ -1104,6 +1149,11 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
             target_v6_val, port_v6_val, proto_v6_val, verdict_v6_val, stats_v6_json, checked_at_v6_val
         ))
         conn.commit()
+        if prev_v_val != summary_v4["verdict"]:
+            notify_reachability_state_change(
+                conn, host_id, summary_v4["verdict"], summary_v4["verdict_label"],
+                primary_target, port, summary_v4["protocol"], prev_v_val
+            )
 
         combined = dict(summary_v4)
         combined["is_dual_stack"] = is_dual
@@ -1238,6 +1288,30 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
             total_active_row = conn.execute("SELECT count(*) FROM hosts WHERE last_seen > ?", (now - 1800,)).fetchone()
             total_active = total_active_row[0] if total_active_row else 0
 
+            # Batch extract trend points for sparklines (up to 24 per host)
+            history_by_host: dict[str, list[dict[str, Any]]] = {}
+            for h in conn.execute(
+                "SELECT host_id, verdict, stats_json, checked_at "
+                "FROM host_reachability_history ORDER BY checked_at ASC"
+            ).fetchall():
+                hid = h["host_id"]
+                if hid not in history_by_host:
+                    history_by_host[hid] = []
+                try:
+                    st_data = json.loads(h["stats_json"] or "{}")
+                except Exception:
+                    st_data = {}
+                cn_ms = st_data.get("cn_avg") or st_data.get("cnAvg")
+                gl_ms = st_data.get("global_avg") or st_data.get("globalAvg")
+                history_by_host[hid].append({
+                    "ts": int(h["checked_at"] or 0),
+                    "verdict": h["verdict"],
+                    "cn_ms": round(float(cn_ms), 1) if cn_ms is not None else None,
+                    "global_ms": round(float(gl_ms), 1) if gl_ms is not None else None,
+                })
+                if len(history_by_host[hid]) > 24:
+                    history_by_host[hid].pop(0)
+
             rows = conn.execute("SELECT * FROM host_reachability ORDER BY checked_at DESC").fetchall()
             items = []
             max_checked = 0
@@ -1311,6 +1385,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                     "results_v6": results_v6,
                     "checked_at_v6": int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0,
                     "checked_at_v6_iso_utc8": format_utc8(int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0),
+                    "trend_24h": history_by_host.get(r["host_id"], []),
                 })
 
             return JSONResponse(content={
@@ -1430,6 +1505,26 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 "checked_at_v6": int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0,
                 "checked_at_v6_iso_utc8": format_utc8(int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0),
             }
+            hist_rows = conn.execute(
+                "SELECT verdict, stats_json, checked_at "
+                "FROM host_reachability_history WHERE host_id=? ORDER BY checked_at ASC LIMIT 48",
+                (host_id,)
+            ).fetchall()
+            trend_24h = []
+            for h in hist_rows:
+                try:
+                    st_data = json.loads(h["stats_json"] or "{}")
+                except Exception:
+                    st_data = {}
+                cn_ms = st_data.get("cn_avg") or st_data.get("cnAvg")
+                gl_ms = st_data.get("global_avg") or st_data.get("globalAvg")
+                trend_24h.append({
+                    "ts": int(h["checked_at"] or 0),
+                    "verdict": h["verdict"],
+                    "cn_ms": round(float(cn_ms), 1) if cn_ms is not None else None,
+                    "global_ms": round(float(gl_ms), 1) if gl_ms is not None else None,
+                })
+            item["trend_24h"] = trend_24h
             return JSONResponse(content={"item": item, **item})
         finally:
             conn.close()

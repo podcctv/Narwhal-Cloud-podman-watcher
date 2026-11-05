@@ -274,6 +274,19 @@ export interface ContainerSecurity {
     v6_ips?: string[];
     applied_at?: number | null;
   };
+  sensitive_file_events?: {
+    path: string;
+    filename: string;
+    size_bytes: number;
+    mtime: number;
+    mode_octal: string;
+    is_elf: boolean;
+    is_executable: boolean;
+    is_hidden: boolean;
+    sha256_prefix?: string;
+    sha256?: string;
+    threat_score: number;
+  }[];
   configuration_risks?: { message?: string; code?: string }[];
   communication_detail_available?: boolean;
   service_inventory_state?: 'complete' | 'partial' | 'unavailable' | string;
@@ -1272,6 +1285,12 @@ export interface ReachabilitySummaryItem {
   stats_v6?: ReachabilityStats;
   results_v6?: any[];
   checked_at_v6?: number;
+  trend_24h?: {
+    ts: number;
+    verdict: string;
+    cn_ms?: number | null;
+    global_ms?: number | null;
+  }[];
 }
 
 export interface ReachabilityQuotaInfo {

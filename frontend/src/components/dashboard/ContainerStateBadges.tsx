@@ -221,6 +221,10 @@ const buildSignals = (container: ContainerItem, alerts: SecurityAlert[]): Contai
   if (security.anti_spoof?.active) {
     add('anti-spoof', '🔒 源IP防伪造', 'success', '宿主机网卡已启用 rp_filter 与源地址白名单校验');
   }
+  if (Array.isArray(security.sensitive_file_events) && security.sensitive_file_events.length > 0) {
+    const count = security.sensitive_file_events.length;
+    add('dropper-detected', `可疑落盘 ${count}`, 'danger', `在 /tmp 或 /dev/shm 检出 ${count} 个可执行文件/木马落地`);
+  }
   if (container.alerts?.cpu) add('cpu-alert', 'CPU 高负载', 'warning');
   if (container.alerts?.memory) add('memory-alert', '内存压力', 'warning');
   if (container.alerts?.disk) add('disk-alert', '磁盘压力', 'warning');

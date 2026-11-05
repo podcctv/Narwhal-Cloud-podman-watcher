@@ -50,7 +50,7 @@ except ImportError:  # Optional at import time for source-only/test environments
     maxminddb = None
 
 try:
-    from client import abuse_guard, abuse_collection, network_quarantine, admission_guard, admission_observe, pasarguard_guard, container_freeze, udp_guard, anti_spoof_guard
+    from client import abuse_guard, abuse_collection, network_quarantine, admission_guard, admission_observe, pasarguard_guard, container_freeze, udp_guard, anti_spoof_guard, file_guard
 except ImportError:
     import abuse_guard
     import abuse_collection
@@ -61,6 +61,7 @@ except ImportError:
     import container_freeze
     import udp_guard
     import anti_spoof_guard
+    import file_guard
 
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 
@@ -8215,6 +8216,7 @@ def collect_runman_report(
         'freeze_guard': container_freeze.get_freeze_status('runman', str(container.get('name') or ''), container.get('pid'), instance_id=instance_id, expected_start_ticks=str(container.get('pid_start_ticks') or '')),
         'udp_blackhole': udp_guard.get_udp_blackhole_status('runman', str(container.get('name') or ''), pid=int(container.get('pid') or 0)),
         'anti_spoof': anti_spoof_guard.get_anti_spoof_status_for_container('runman', str(container.get('name') or '')),
+        'sensitive_file_events': file_guard.scan_container_sensitive_drops(int(container.get('pid') or 0), runtime='runman', name=str(container.get('name') or '')),
     })
     existing_disk = report.get('container_disk') if isinstance(report.get('container_disk'), dict) else {}
     existing_fs = existing_disk.get('fs') if isinstance(existing_disk.get('fs'), dict) else {}
@@ -9110,6 +9112,7 @@ def collect_container(
             "freeze_guard": container_freeze.get_freeze_status(runtime_name, name, pid, instance_id=instance_id or container_id),
             "udp_blackhole": udp_guard.get_udp_blackhole_status(runtime_name, name, pid=pid),
             "anti_spoof": anti_spoof_guard.get_anti_spoof_status_for_container(runtime_name, name),
+            "sensitive_file_events": file_guard.scan_container_sensitive_drops(pid, runtime=runtime_name, name=name),
         }
     )
     cpu_pressure_percent = cpu_percent

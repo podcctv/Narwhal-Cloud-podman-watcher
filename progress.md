@@ -2,6 +2,29 @@
 
 更新时间：2026-11-05（Asia/Shanghai）
 
+## 阶段二：敏感目录可执行文件落地感知、TCP PING 24小时时延 Sparkline 与 Telegram 告警联动（v1.8.5）
+
+- **阶段二（P1 · 智能感知）全链路落地**：
+  - 需求背景：按三阶段演进路径推进 Phase 2，增强对容器可写层可疑木马、Dropper 与 XMRig 等敏感落盘文件的实时感知，并将 TCP PING 巡检升级为具备 24 小时历史趋势折线与 Telegram 告警联动的智能巡检中心。
+  - **核心特性实装**：
+    1. **敏感目录可执行文件落地感知引擎 (`client/file_guard.py`)**：
+       - 内核级扫描 `/tmp`、`/dev/shm`、`/var/tmp` 敏感路径，深度识别 ELF 二进制（`\x7fELF`）、Shebang 脚本（`#!/bin/sh`、`#!/bin/bash`）及 `+x` 可执行落盘文件。
+       - 智能提取容器相对路径、文件大小、SHA-256 指纹前缀与威胁打分（ELF 90 分、脚本 70 分），并对大文件与深度遍历执行严格有界限制。
+       - 采集集成：`client/agent.py` 在 `collect_container` 与 `collect_runman_report` 中将 `sensitive_file_events` 上报至安全遥测。
+    2. **前端落盘威胁告警与高危提示**：
+       - `ContainerStateBadges.tsx` 动态展示 `🚨 可疑落盘 N` 红色高危徽章。
+       - `ContainerDrawer.tsx` 新增“检测到敏感目录可执行文件落地”告警卡片，列出文件名、完整路径、ELF 标识、字节大小及 SHA-256 签名。
+    3. **TCP PING 24 小时时延趋势 Sparkline 微型折线**：
+       - `server/reach_monitor.py` 在 `get_reachability_summary` 与 `get_reachability_host` 接口中，批量提取近 24 次（24 小时整点）巡检历史数据，生成 `trend_24h` 序列。
+       - `frontend/src/components/tcping/ReachCheckPanel.tsx` 实装极客黑金风格 `ReachabilitySparkline`，在展开的母机手风琴卡片中绘制高精度平滑 SVG 曲线与发光面积图，动态展示 24h 最低、最高与均值时延，节点状态（通畅/阻断/异常）在时间轴上多色高亮。
+    4. **Telegram 异常告警与自动恢复通知联动**：
+       - 当每小时或单机巡检检测到母机网络可达性转变为异常（`blocked` / `timeout` 疑似 GFW 阻断或全网超时）时，自动通过已启用的 Telegram Bot 触发富文本 HTML 告警推送。
+       - 当网络恢复通畅后，自动触发绿色恢复通知，消除运维死角。
+- **验证结论**：
+  - 前端 `npm run build` TypeScript 编译与 Vite 生产构建 100% 成功，打包输出 `ReachCheckPanel-DpNO99PO.js`、`ContainerDrawer-CE4dhD2G.js` 等静态产物。
+  - `python -m compileall` 零报错通过。
+  - 全量 31 项单元测试（涵盖 `test_file_guard.py`, `test_reach_monitor.py`, `test_container_freeze.py`, `test_udp_guard.py`, `test_anti_spoof_guard.py` 等）100% 绿色通过。
+
 ## 阶段一：Rust/Incus 容器 cgroup 进程挂起冻结、出站 UDP 专项阻断与网卡反欺骗（v1.8.4）
 
 - **阶段一（P0 · 核心防线）全链路落地**：

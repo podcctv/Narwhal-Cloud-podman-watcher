@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Globe, AlertTriangle, CheckCircle2, RefreshCw,
   Zap, ArrowRight, HelpCircle, ChevronDown, ChevronUp, Copy, Check,
-  Key, Clock
+  Key, Clock, Activity
 } from 'lucide-react';
 import { RegionResult, ReachCheckSummary } from '../../utils/reachCheck';
 import { api } from '../../api/client';
@@ -72,6 +72,104 @@ const getStatusGlow = (item: ReachabilitySummaryItem) => {
   if (item.verdict === 'gfw_blocked') return 'bg-rose-500 animate-pulse glow-rose';
   if (item.verdict_label === '探针配额受限') return 'bg-purple-400 glow-purple';
   return 'bg-amber-400 glow-amber';
+};
+
+const ReachabilitySparkline: React.FC<{
+  trend?: { ts: number; verdict: string; cn_ms?: number | null; global_ms?: number | null }[];
+}> = ({ trend = [] }) => {
+  if (!trend || trend.length === 0) {
+    return (
+      <div className="flex items-center gap-2 text-[11px] text-slate-500 font-mono py-1">
+        <Activity className="h-3.5 w-3.5 text-slate-600" />
+        <span>24h 时延趋势采集中（每小时自动生成快照）</span>
+      </div>
+    );
+  }
+
+  const validPoints = trend.map(p => ({
+    ts: p.ts,
+    val: typeof p.cn_ms === 'number' && p.cn_ms > 0 ? p.cn_ms : (typeof p.global_ms === 'number' && p.global_ms > 0 ? p.global_ms : null),
+    verdict: p.verdict,
+  }));
+
+  const numericVals = validPoints.filter((p): p is { ts: number; val: number; verdict: string } => typeof p.val === 'number' && p.val > 0);
+  const minVal = numericVals.length ? Math.min(...numericVals.map(p => p.val)) : 0;
+  const maxVal = numericVals.length ? Math.max(...numericVals.map(p => p.val)) : 100;
+  const latestVal = numericVals.length ? numericVals[numericVals.length - 1].val : null;
+  const avgVal = numericVals.length ? Math.round(numericVals.reduce((a, b) => a + b.val, 0) / numericVals.length) : null;
+
+  const w = 320;
+  const h = 42;
+  const padY = 6;
+  const padX = 6;
+  const range = maxVal - minVal || 1;
+
+  const coords = validPoints.map((p, idx) => {
+    const x = padX + (idx / Math.max(1, validPoints.length - 1)) * (w - 2 * padX);
+    const y = p.val != null ? h - padY - ((p.val - minVal) / range) * (h - 2 * padY) : h / 2;
+    return { x, y, val: p.val, verdict: p.verdict, ts: p.ts };
+  });
+
+  const pathD = coords.reduce((acc, pt, i) => `${acc} ${i === 0 ? 'M' : 'L'} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`, '');
+  const areaD = coords.length > 1
+    ? `${pathD} L ${coords[coords.length - 1].x.toFixed(1)} ${h} L ${coords[0].x.toFixed(1)} ${h} Z`
+    : '';
+
+  const strokeColor = latestVal != null
+    ? (latestVal <= 80 ? '#34d399' : latestVal <= 180 ? '#38bdf8' : latestVal <= 280 ? '#fbbf24' : '#f87171')
+    : '#94a3b8';
+
+  return (
+    <div className="rounded-xl border border-slate-800/80 bg-slate-950/70 p-3 space-y-2">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-semibold text-slate-300 flex items-center gap-1.5 font-sans">
+          <Activity className="h-3.5 w-3.5 text-sky-400" />
+          <span>24小时三网时延趋势 (24h Latency Sparkline)</span>
+        </span>
+        <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
+          <span>最低: <b className="text-emerald-400">{minVal ? `${minVal}ms` : '—'}</b></span>
+          <span>最高: <b className="text-amber-400">{maxVal ? `${maxVal}ms` : '—'}</b></span>
+          <span>均值: <b className="text-sky-300">{avgVal ? `${avgVal}ms` : '—'}</b></span>
+        </div>
+      </div>
+
+      <div className="relative w-full h-[44px] flex items-center">
+        <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full overflow-visible" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="sparkline-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={strokeColor} stopOpacity="0.35" />
+              <stop offset="100%" stopColor={strokeColor} stopOpacity="0.0" />
+            </linearGradient>
+          </defs>
+          {areaD && <path d={areaD} fill="url(#sparkline-fill)" />}
+          {pathD && (
+            <path
+              d={pathD}
+              fill="none"
+              stroke={strokeColor}
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
+          {coords.map((pt, idx) => (
+            <circle
+              key={idx}
+              cx={pt.x}
+              cy={pt.y}
+              r={idx === coords.length - 1 ? 3.5 : 2}
+              className={pt.verdict === 'ok' ? 'fill-emerald-400' : pt.verdict === 'gfw_blocked' ? 'fill-rose-500' : 'fill-amber-400'}
+            />
+          ))}
+        </svg>
+      </div>
+      <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono pt-0.5">
+        <span>24 小时前</span>
+        <span>最近 12 小时</span>
+        <span>当前最新采样</span>
+      </div>
+    </div>
+  );
 };
 
 const latencyBadgeColor = (ms: number) => {
@@ -802,6 +900,9 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                                 </span>
                               </div>
                             </div>
+
+                            {/* 24-Hour Latency Sparkline */}
+                            <ReachabilitySparkline trend={item.trend_24h} />
 
                             {/* Actionable troubleshooting advice */}
                             {summary.advice && summary.advice.length > 0 && (

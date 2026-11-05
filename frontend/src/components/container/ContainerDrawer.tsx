@@ -1097,7 +1097,37 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               </div>
             </div>
 
-                            {/* Phase 1 Kernel Defense & Containment Controls */}
+                            {/* Sensitive Dropped Files Alert */}
+                {Array.isArray(sec.sensitive_file_events) && sec.sensitive_file_events.length > 0 && (
+                  <div className="col-span-1 sm:col-span-2 rounded-lg border border-rose-500/50 bg-rose-950/30 p-3 text-rose-200">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] font-semibold flex items-center gap-1.5 text-rose-300">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
+                        <span>检测到敏感目录可执行文件落地 ({sec.sensitive_file_events.length} 个)</span>
+                      </span>
+                      <span className="text-[10px] font-bold bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 rounded-sm text-rose-300 animate-pulse">
+                        高危落地
+                      </span>
+                    </div>
+                    <div className="space-y-1.5 mt-2">
+                      {sec.sensitive_file_events.map((evt, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-2 rounded bg-slate-950/50 border border-rose-900/40 text-xs font-mono">
+                          <div className="truncate mr-2">
+                            <span className="text-slate-200 font-semibold">{evt.filename}</span>
+                            <span className="text-slate-400 ml-2 text-[11px]">{evt.path}</span>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0 text-[11px]">
+                            {evt.is_elf && <span className="px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40">ELF</span>}
+                            <span className="text-slate-400">{evt.size_bytes} B</span>
+                            {evt.sha256_prefix && <span className="text-slate-500 font-mono">{evt.sha256_prefix}...</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Phase 1 Kernel Defense & Containment Controls */}
                 <div className="col-span-1 sm:col-span-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-slate-300">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[11px] font-semibold flex items-center gap-1.5 text-slate-200">

@@ -1,4 +1,5 @@
 import asyncio
+import time
 import json
 import sqlite3
 import unittest
@@ -602,6 +603,82 @@ class TestReachMonitor(unittest.TestCase):
         # 1700000000 = 2023-11-14 22:13:20 UTC -> 2023-11-15 06:13:20 UTC+8
         formatted = reach_monitor.format_utc8(1700000000)
         self.assertEqual(formatted, "2023-11-15 06:13:20")
+
+    def test_trend_24h_and_telegram_anomaly_notification(self):
+        host_id = "hk-node-trend"
+        now = int(time.time())
+        # Insert history records
+        for i in range(5):
+            self.conn.execute(
+                "INSERT INTO host_reachability_history(host_id, target, port, protocol, verdict, stats_json, checked_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (host_id, "1.2.3.4", 80, "TCP", "ok", json.dumps({"cnAvg": 120 + i, "globalAvg": 150 + i}), now - (5 - i) * 3600)
+            )
+        # Insert current reachability
+        self.conn.execute(
+            "INSERT INTO host_reachability(host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (host_id, "1.2.3.4", 80, "TCP", "ok", "三网通畅", "", json.dumps({"cnAvg": 125, "globalAvg": 155}), "[]", now)
+        )
+        self.conn.commit()
+
+        class UnclosableConnection:
+            def __init__(self, conn):
+                self._conn = conn
+            def __getattr__(self, name):
+                if name == "close":
+                    return lambda: None
+                return getattr(self._conn, name)
+
+        from fastapi import FastAPI
+        app = FastAPI()
+        reach_monitor.attach(app, lambda: UnclosableConnection(self.conn), None, None)
+        routes = {r.path: r for r in app.routes}
+
+        class FakeReq:
+            class state:
+                dashboard_user = "admin"
+
+        host_route = routes["/api/v1/reachability/host/{host_id}"].endpoint
+        resp = host_route(host_id, FakeReq())
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.body.decode("utf-8"))
+        self.assertIn("trend_24h", data)
+        self.assertEqual(len(data["trend_24h"]), 5)
+        self.assertEqual(data["trend_24h"][0]["cn_ms"], 120.0)
+
+        # Verify notify_reachability_state_change dispatches to telegram bot
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS notification_bots (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 1,
+                kind TEXT DEFAULT 'telegram',
+                token TEXT DEFAULT 'fake:token',
+                target TEXT DEFAULT '-100123456'
+            )
+        """)
+        self.conn.execute("INSERT INTO notification_bots(id, enabled, kind, token, target) VALUES(1, 1, 'telegram', '1234:xyz', '-100999')")
+        self.conn.commit()
+
+        sent_calls = []
+        def fake_tg(token, method, payload):
+            sent_calls.append((token, method, payload))
+            return {"ok": True}
+
+        with patch("server.app._telegram_api", side_effect=fake_tg):
+            reach_monitor.notify_reachability_state_change(
+                self.conn, host_id, "blocked", "疑似 GFW 阻断", "1.2.3.4", 80, "TCP", prev_verdict="ok"
+            )
+            self.assertEqual(len(sent_calls), 1)
+            self.assertIn("异常告警", sent_calls[0][2]["text"])
+
+            # Test recovery notification
+            sent_calls.clear()
+            reach_monitor.notify_reachability_state_change(
+                self.conn, host_id, "ok", "三网通畅", "1.2.3.4", 80, "TCP", prev_verdict="blocked"
+            )
+            self.assertEqual(len(sent_calls), 1)
+            self.assertIn("已恢复正常", sent_calls[0][2]["text"])
 
 if __name__ == "__main__":
     unittest.main()
