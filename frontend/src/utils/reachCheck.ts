@@ -85,6 +85,9 @@ export interface ReachCheckSummary {
     globalAverageMs: number | null;
     minLatencyMs: number | null;
     maxLatencyMs: number | null;
+    cnTelecomMs?: number | null;
+    cnUnicomMs?: number | null;
+    cnMobileMs?: number | null;
   };
   checkedAt: number;
 }
