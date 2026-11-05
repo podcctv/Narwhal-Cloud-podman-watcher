@@ -388,5 +388,160 @@ class TestReachMonitor(unittest.TestCase):
 
         asyncio.run(_test())
 
+    def test_discover_dual_stack_targets(self):
+        # Insert host with both public IPv4 and IPv6 in host_security
+        sec_payload = {
+            "host_firewall": {
+                "interface_inventory": {
+                    "interfaces": [
+                        {
+                            "name": "eth0",
+                            "addresses": [
+                                "192.168.1.100/24",
+                                "15.204.57.108/32",
+                                "2606:4700::1/64",  # Cloudflare IPv6, should be ignored
+                                "2001:4860:4860::8888/64",  # Public IPv6
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?, ?, ?)",
+            ("node-dual-stack", 1000, json.dumps(sec_payload))
+        )
+        targets = reach_monitor.discover_host_targets(self.conn, "node-dual-stack")
+        self.assertEqual(targets.get("ipv4"), "15.204.57.108")
+        self.assertEqual(targets.get("ipv6"), "2001:4860:4860::8888")
+
+    @patch("server.reach_monitor.execute_globalping_measurement")
+    def test_perform_host_reach_check_dual_stack_budget(self, mock_meas):
+        # Prepare dual stack host
+        sec_payload = {
+            "host_firewall": {
+                "interface_inventory": {
+                    "interfaces": [
+                        {
+                            "name": "eth0",
+                            "addresses": [
+                                "15.204.57.108/32",
+                                "2001:4860:4860::8888/64",
+                            ]
+                        }
+                    ]
+                },
+                "listening_ports": [443]
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?, ?, ?)",
+            ("node-dual-test", 1000, json.dumps(sec_payload))
+        )
+
+        # Mock Globalping measurements: 1st call for V4 (5 regions), 2nd call for V6 (3 regions)
+        calls = []
+        def _mock_exec(target, port, protocol="TCP", regions=None, api_key=None, conn=None):
+            calls.append({"target": target, "port": port, "regions": regions})
+            region_count = len(regions) if regions else 8
+            # Return successful results for all regions
+            return {
+                "status": "finished",
+                "results": [
+                    {
+                        "probe": {"asn": r.get("asn", 0), "country": r.get("country", "CN")},
+                        "result": {"status": "finished", "timings": {"tcp": 50, "total": 50}}
+                    }
+                    for r in (regions or [])
+                ],
+                "active_regions": regions or [],
+            }
+        mock_meas.side_effect = _mock_exec
+
+        res = reach_monitor.perform_host_reach_check(self.conn, "node-dual-test")
+        self.assertIsNotNone(res)
+        self.assertTrue(res.get("is_dual_stack"))
+        self.assertTrue(res.get("has_ipv6"))
+        self.assertEqual(res.get("target"), "15.204.57.108")
+        self.assertEqual(res.get("target_v6"), "2001:4860:4860::8888")
+
+        # Verify calls and budget: V4 must have 5 regions, V6 must have 3 regions (Total = 8)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["target"], "15.204.57.108")
+        self.assertEqual(len(calls[0]["regions"]), 5)  # China 3 + HK + US
+        self.assertEqual(calls[1]["target"], "2001:4860:4860::8888")
+        self.assertEqual(len(calls[1]["regions"]), 3)  # China 3 only
+
+        # Verify DB row contains both V4 and V6
+        row = self.conn.execute("SELECT * FROM host_reachability WHERE host_id=?", ("node-dual-test",)).fetchone()
+        self.assertEqual(row["target"], "15.204.57.108")
+        self.assertEqual(row["target_v6"], "2001:4860:4860::8888")
+        self.assertEqual(row["verdict_v6"], "ok")
+        self.assertEqual(row["verdict_label_v6"], "三网通畅")
+
+    def test_reachability_api_dual_stack_masking(self):
+        class UnclosableConnection:
+            def __init__(self, conn):
+                self._conn = conn
+            def __getattr__(self, name):
+                if name == "close":
+                    return lambda: None
+                return getattr(self._conn, name)
+
+        from fastapi import FastAPI
+        app = FastAPI()
+        reach_monitor.attach(app, lambda: UnclosableConnection(self.conn), None, None)
+
+        now = 1700000000
+        stats_v4 = {"total": 5, "ok": 5, "cn_success": 3, "cnAverageMs": 45}
+        stats_v6 = {"total": 3, "ok": 3, "cn_success": 3, "cnAverageMs": 48}
+        results_v4 = [{"region": {"id": "cn-telecom"}, "status": "ok", "ip": "15.204.57.108"}]
+        results_v6 = [{"region": {"id": "cn-telecom"}, "status": "ok", "ip": "2001:4860:4860::8888"}]
+
+        self.conn.execute("""
+            INSERT INTO host_reachability(
+                host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at,
+                target_v6, port_v6, protocol_v6, verdict_v6, verdict_label_v6, verdict_desc_v6, stats_json_v6, results_json_v6, checked_at_v6
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "node-mask-dual", "15.204.57.108", 443, "TCP", "ok", "三网通畅·核心可达", "描述",
+            json.dumps(stats_v4), json.dumps(results_v4), now,
+            "2001:4860:4860::8888", 443, "TCP", "ok", "三网通畅", "IPv6描述",
+            json.dumps(stats_v6), json.dumps(results_v6), now
+        ))
+        self.conn.commit()
+
+        class MockUnauthRequest:
+            class state:
+                dashboard_user = None
+
+        class MockAuthRequest:
+            class state:
+                dashboard_user = {"username": "admin", "role": "admin"}
+
+        routes = {r.path: r for r in app.routes}
+        summary_route = routes["/api/v1/reachability/summary"].endpoint
+
+        # 1. Unauthenticated: both V4 and V6 targets and results IP must be masked
+        res_unauth = summary_route(MockUnauthRequest())
+        body_unauth = json.loads(res_unauth.body.decode("utf-8"))
+        item_unauth = body_unauth["items"][0]
+        self.assertTrue(item_unauth["is_dual_stack"])
+        self.assertEqual(item_unauth["target"], "")
+        self.assertEqual(item_unauth["target_v6"], "")
+        self.assertEqual(item_unauth["results"][0]["ip"], "")
+        self.assertEqual(item_unauth["results_v6"][0]["ip"], "")
+        self.assertEqual(item_unauth["stats"]["cnAverageMs"], 45)
+        self.assertEqual(item_unauth["stats_v6"]["cnAverageMs"], 48)
+
+        # 2. Authenticated: both V4 and V6 IPs are visible
+        res_auth = summary_route(MockAuthRequest())
+        body_auth = json.loads(res_auth.body.decode("utf-8"))
+        item_auth = body_auth["items"][0]
+        self.assertEqual(item_auth["target"], "15.204.57.108")
+        self.assertEqual(item_auth["target_v6"], "2001:4860:4860::8888")
+        self.assertEqual(item_auth["results"][0]["ip"], "15.204.57.108")
+        self.assertEqual(item_auth["results_v6"][0]["ip"], "2001:4860:4860::8888")
+
 if __name__ == "__main__":
     unittest.main()

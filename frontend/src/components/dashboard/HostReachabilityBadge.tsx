@@ -18,6 +18,8 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
   const [summary, setSummary] = useState<ReachCheckSummary | null>(null);
   const [testedPort, setTestedPort] = useState<number>(443);
   const [modalOpen, setModalOpen] = useState(false);
+  const [isDualStack, setIsDualStack] = useState<boolean>(false);
+  const [statsV6, setStatsV6] = useState<any>(null);
 
   const target = ip || hostId;
 
@@ -42,6 +44,8 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
         const item = res?.item || res;
         if (!active || !item || !item.target) return;
         setTestedPort(item.port || 0);
+        setIsDualStack(Boolean(item.is_dual_stack));
+        setStatsV6(item.stats_v6 || null);
         setSummary({
           target: item.target,
           port: item.port || 0,
@@ -83,10 +87,15 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
   const isPing = summary?.protocol === 'PING' || testedPort <= 0;
   const portLabel = isPing ? 'ICMP' : `:${testedPort}`;
 
+  const v4Latency = summary?.stats?.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : '';
+  const v6Latency = (statsV6?.cnAverageMs ?? statsV6?.cn_avg_ms) ? `${statsV6.cnAverageMs ?? statsV6.cn_avg_ms}ms` : '';
+
   const badgeText = !summary
     ? '可达性检测'
+    : isDualStack && v4Latency && v6Latency
+    ? `三网双栈 (V4: ${v4Latency} | V6: ${v6Latency})`
     : summary.verdict === 'ok'
-    ? `三网可达 ${summary.stats?.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : ''} (${portLabel})`
+    ? `三网可达 ${v4Latency} (${portLabel})`
     : summary.verdict === 'gfw_blocked'
     ? `国内受阻 (${portLabel})`
     : summary.verdict === 'partial'

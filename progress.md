@@ -2,6 +2,40 @@
 
 更新时间：2026-11-04（Asia/Shanghai）
 
+## 双栈机器 IPv4 与 IPv6 并行探测、智能 Token 配额预算与全景展示（v1.7.222）
+
+- **双栈机器（IPv4 + IPv6）全链路探测与展示**：
+  - 需求背景：部分高性能与优质线路宿主机具备双栈（IPv4 与 IPv6）公网 IP。旧版巡检仅提取首个可用 IP（默认偏好 IPv4），无法度量中国大陆三大运营商对宿主机 IPv6 栈的连通性与时延差异。
+  - Token / 探针额度用量调研与数学建模优化：
+    1. **额度限制约束**：Globalping 匿名公共 IP 接口严格限制每小时 250 点（Credits），每探测 1 个区域消耗 1 点。集群包含 28 台母机。若双栈机器无节制分别执行两轮 8 点（或 16 点）测试，每台消耗 16 点，28 台合计高达 $16 \times 28 = 448$ 点/小时，将迅速击穿 250 点上限并触发 HTTP 429。
+    2. **精准分栈预算模型（Dual-Stack Smart Budgeting）**：
+       - 单栈机器：分配 8 点（国内三网 3 节点 + 海外核心 5 节点）。
+       - 双栈机器：在无专属 API Key 情况下，总点数严格锁定为 **8 点/台**：
+         - **IPv4 栈**：分配 5 点（中国电信、中国联通、中国移动 + 亚太香港 + 美西洛杉矶）。
+         - **IPv6 栈**：分配 3 点（中国电信、中国联通、中国移动）。
+         - 单机合计点数：$5 + 3 = 8$ 点/台。
+       - **集群全局消耗**：$28 \text{ 台} \times 8 \text{ 点/台} = 224 \text{ 点/小时} \le 250 \text{ 点/小时}$，安全余量 26 点/小时，在零触发 429 限流的前提下，实现集群所有双栈母机国内三网电信/联通/移动 V4 与 V6 毫秒级时延全覆盖！
+       - 配置免费专属 API Key 后自动解锁全量 18 区域双栈探测。
+  - 服务端改进（`server/reach_monitor.py`）：
+    1. **数据表平滑迁移**：在 `host_reachability` 与 `host_reachability_history` 增加 `target_v6`, `port_v6`, `protocol_v6`, `verdict_v6`, `verdict_label_v6`, `verdict_desc_v6`, `stats_json_v6`, `results_json_v6`, `checked_at_v6` 等字段，`init_db` 内置自适应列探查与幂等迁移。
+    2. **双栈目标发现引擎（`discover_host_targets`）**：遍历 `host_security` 接口清单、`reports` 网络地址、`gfw_states` 与 `host_client_ips`，精准识别并过滤私网/链路本地/Cloudflare 边缘 IP，同步提取验证过的公网 IPv4 与公网 IPv6。
+    3. **自适应研判算法修正**：修复小样本（3 探针 / 5 探针 / 8 探针）预算模式下因探针数不足 14 而被误判为 `partial`（部分受阻）的 Bug；当国内三网全部通过且全部探针成功时，精准赋予“三网通畅”或“三网通畅·核心可达”绿色认证。
+    4. **API 脱敏收敛**：`/api/v1/reachability/summary` 与 `/api/v1/reachability/host/{host_id}` 输出 `is_dual_stack`, `has_ipv6`, `target_v6`, `stats_v6`, `results_v6`；未登录访问时同时严格抹除 IPv4 与 IPv6 目标真实 IP。
+  - 前端呈现改进（`ReachCheckPanel.tsx` & `HostReachabilityBadge.tsx`）：
+    1. **集群巡检列表全景呈现**：
+       - 宿主机列针对双栈母机展示高亮紫底 `双栈 IPv4/IPv6` 标识，纯 IPv6 机器展示 `纯 IPv6` 徽标。
+       - 可达性判定列并列展示 V4 与 V6 双栈判定结果（如 `V4: 三网通畅`、`V6: 三网通畅`）。
+       - 电信、联通、移动三大运营商列针对双栈机器分别提供 `V4: xxx ms` 与 `V6: xxx ms` 独立着色时延胶囊。
+       - 全球均延列并列展示 V4 均延与 V6 均延。
+    2. **18 区域明细双栈切换**：
+       - 详情展开卡片支持一键在 `[IPv4 探测结果]` 与 `[IPv6 探测结果]` 之间无缝切换，动态联动展示各栈的 18 区域丢包、DNS/TCP 建连、TLS 及首包分段时延。
+    3. **宿主机卡片徽标增强**：
+       - Dashboard 宿主机卡片上的 `HostReachabilityBadge` 对双栈母机实时显示 `三网双栈 (V4: xxxms | V6: xxxms)`，一目了然。
+- **验证结论**：
+  - 前端 TypeScript / Vite 生产构建顺利通过，静态资源完整打包输出（`ReachCheckPanel-KKCSyHeO.js`, `Dashboard-BSVrg-b2.js` 等）。
+  - `python -m compileall` 零报错通过。
+  - `tests/test_reach_monitor.py` 扩展新增 3 项双栈发现、双栈预算调度与脱敏单测，15 项测试全量通过；`test_dashboard_auth.py` 与 `test_tcping.py` 68 项测试全绿。
+
 ## 未登录状态下三网可达性检测 IP 隐匿与测速按钮权限保护（v1.7.221）
 
 - **未登录态安全边界加固与数据脱敏**：

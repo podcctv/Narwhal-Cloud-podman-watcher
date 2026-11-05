@@ -1210,6 +1210,27 @@ export interface InvestigationResponse {
   window: { start: number; end: number }; host_id: string; days: number;
 }
 
+export interface ReachabilityStats {
+  total: number;
+  ok: number;
+  success?: number;
+  failed?: number;
+  cn_success?: number;
+  cn_total?: number;
+  cn_avg_ms?: number | null;
+  global_avg_ms?: number | null;
+  min_ms?: number | null;
+  max_ms?: number | null;
+  cnAverageMs: number;
+  globalAverageMs: number;
+  cnTelecomMs: number;
+  cnUnicomMs: number;
+  cnMobileMs: number;
+  cn_telecom_ms?: number | null;
+  cn_unicom_ms?: number | null;
+  cn_mobile_ms?: number | null;
+}
+
 export interface ReachabilitySummaryItem {
   host_id: string;
   target: string;
@@ -1220,27 +1241,19 @@ export interface ReachabilitySummaryItem {
   verdict_desc: string;
   checked_at: number;
   checked_at_iso_utc8?: string;
-  stats: {
-    total: number;
-    ok: number;
-    success?: number;
-    failed?: number;
-    cn_success?: number;
-    cn_total?: number;
-    cn_avg_ms?: number | null;
-    global_avg_ms?: number | null;
-    min_ms?: number | null;
-    max_ms?: number | null;
-    cnAverageMs: number;
-    globalAverageMs: number;
-    cnTelecomMs: number;
-    cnUnicomMs: number;
-    cnMobileMs: number;
-    cn_telecom_ms?: number | null;
-    cn_unicom_ms?: number | null;
-    cn_mobile_ms?: number | null;
-  };
+  stats: ReachabilityStats;
   results?: any[];
+  is_dual_stack?: boolean;
+  has_ipv6?: boolean;
+  target_v6?: string;
+  port_v6?: number;
+  protocol_v6?: string;
+  verdict_v6?: string;
+  verdict_label_v6?: string;
+  verdict_desc_v6?: string;
+  stats_v6?: ReachabilityStats;
+  results_v6?: any[];
+  checked_at_v6?: number;
 }
 
 export interface ReachabilityQuotaInfo {
@@ -1250,6 +1263,7 @@ export interface ReachabilityQuotaInfo {
   is_rate_limited: boolean;
   api_key_configured: boolean;
   pacing_seconds: number;
+  dual_stack_budget?: string;
 }
 
 export interface ReachabilityClusterSummary {

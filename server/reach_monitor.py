@@ -150,7 +150,16 @@ def init_db(conn: sqlite3.Connection) -> None:
         verdict_desc TEXT NOT NULL,
         stats_json TEXT NOT NULL DEFAULT '{}',
         results_json TEXT NOT NULL DEFAULT '[]',
-        checked_at INTEGER NOT NULL
+        checked_at INTEGER NOT NULL,
+        target_v6 TEXT DEFAULT '',
+        port_v6 INTEGER DEFAULT 0,
+        protocol_v6 TEXT DEFAULT 'TCP',
+        verdict_v6 TEXT DEFAULT '',
+        verdict_label_v6 TEXT DEFAULT '',
+        verdict_desc_v6 TEXT DEFAULT '',
+        stats_json_v6 TEXT DEFAULT '{}',
+        results_json_v6 TEXT DEFAULT '[]',
+        checked_at_v6 INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS host_reachability_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,7 +169,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         protocol TEXT NOT NULL,
         verdict TEXT NOT NULL,
         stats_json TEXT NOT NULL DEFAULT '{}',
-        checked_at INTEGER NOT NULL
+        checked_at INTEGER NOT NULL,
+        target_v6 TEXT DEFAULT '',
+        port_v6 INTEGER DEFAULT 0,
+        protocol_v6 TEXT DEFAULT 'TCP',
+        verdict_v6 TEXT DEFAULT '',
+        stats_json_v6 TEXT DEFAULT '{}',
+        checked_at_v6 INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_reach_hist_host ON host_reachability_history(host_id, checked_at);
     CREATE TABLE IF NOT EXISTS host_client_ips (
@@ -174,6 +189,39 @@ def init_db(conn: sqlite3.Connection) -> None:
         updated_at INTEGER NOT NULL
     );
     """)
+
+    # Migrate columns if existing tables lacked dual-stack fields
+    try:
+        hr_cols = {row[1] for row in conn.execute("PRAGMA table_info(host_reachability)").fetchall()}
+        v6_cols = [
+            ("target_v6", "TEXT DEFAULT ''"),
+            ("port_v6", "INTEGER DEFAULT 0"),
+            ("protocol_v6", "TEXT DEFAULT 'TCP'"),
+            ("verdict_v6", "TEXT DEFAULT ''"),
+            ("verdict_label_v6", "TEXT DEFAULT ''"),
+            ("verdict_desc_v6", "TEXT DEFAULT ''"),
+            ("stats_json_v6", "TEXT DEFAULT '{}'"),
+            ("results_json_v6", "TEXT DEFAULT '[]'"),
+            ("checked_at_v6", "INTEGER DEFAULT 0"),
+        ]
+        for col_name, col_def in v6_cols:
+            if col_name not in hr_cols:
+                conn.execute(f"ALTER TABLE host_reachability ADD COLUMN {col_name} {col_def}")
+
+        hist_cols = {row[1] for row in conn.execute("PRAGMA table_info(host_reachability_history)").fetchall()}
+        hist_v6_cols = [
+            ("target_v6", "TEXT DEFAULT ''"),
+            ("port_v6", "INTEGER DEFAULT 0"),
+            ("protocol_v6", "TEXT DEFAULT 'TCP'"),
+            ("verdict_v6", "TEXT DEFAULT ''"),
+            ("stats_json_v6", "TEXT DEFAULT '{}'"),
+            ("checked_at_v6", "INTEGER DEFAULT 0"),
+        ]
+        for col_name, col_def in hist_v6_cols:
+            if col_name not in hist_cols:
+                conn.execute(f"ALTER TABLE host_reachability_history ADD COLUMN {col_name} {col_def}")
+    except Exception as e:
+        logger.debug(f"Dual-stack column migration: {e}")
 
 
 def record_client_ip(conn: sqlite3.Connection, host_id: str, client_ip: str, ts: Optional[int] = None) -> None:
@@ -295,8 +343,29 @@ def extract_client_ip(request: Any) -> str:
     return ""
 
 
-def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
-    """Finds a verified public IPv4 / IPv6 address or domain name for the host."""
+def discover_host_targets(conn: sqlite3.Connection, host_id: str) -> Dict[str, str]:
+    """Finds verified public IPv4 and IPv6 addresses for the host.
+    Returns: {"ipv4": str, "ipv6": str}
+    """
+    found_v4 = ""
+    found_v6 = ""
+
+    def _consider(cand: Any) -> None:
+        nonlocal found_v4, found_v6
+        if not cand:
+            return
+        clean_ip = str(cand).split("/")[0].strip()
+        if not clean_ip or not is_public_ip(clean_ip):
+            return
+        try:
+            ip = ipaddress.ip_address(clean_ip)
+            if ip.version == 4 and not found_v4:
+                found_v4 = clean_ip
+            elif ip.version == 6 and not found_v6:
+                found_v6 = clean_ip
+        except ValueError:
+            pass
+
     # 1. From host_security interface_inventory
     sec = conn.execute(
         "SELECT payload_json FROM host_security WHERE host_id=? ORDER BY ts DESC LIMIT 1",
@@ -312,13 +381,9 @@ def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
                 if name.startswith(("docker", "br-", "veth", "tailscale", "wg", "zt")):
                     continue
                 for addr in iface.get("addresses", []):
-                    clean_ip = str(addr or "").split("/")[0].strip()
-                    if is_public_ip(clean_ip) and "." in clean_ip:
-                        return clean_ip
-                for addr in iface.get("addresses", []):
-                    clean_ip = str(addr or "").split("/")[0].strip()
-                    if is_public_ip(clean_ip):
-                        return clean_ip
+                    _consider(addr)
+                    if found_v4 and found_v6:
+                        return {"ipv4": found_v4, "ipv6": found_v6}
         except Exception:
             pass
 
@@ -331,11 +396,9 @@ def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
         try:
             p = json.loads(rep["payload_json"])
             for addr in p.get("network_addresses", []) or []:
-                clean_ip = str(addr or "").split("/")[0].strip()
-                if is_public_ip(clean_ip) and "." in clean_ip:
-                    return clean_ip
-                if is_public_ip(clean_ip):
-                    return clean_ip
+                _consider(addr)
+                if found_v4 and found_v6:
+                    return {"ipv4": found_v4, "ipv6": found_v6}
         except Exception:
             pass
 
@@ -347,32 +410,40 @@ def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
         try:
             gp = json.loads(gfw["evidence_json"])
             for t in gp.get("targets", []) or []:
-                tip = str(t.get("ip") or "").strip()
-                if is_public_ip(tip):
-                    return tip
+                _consider(t.get("ip"))
             for bek in gp.get("blocked_endpoint_keys", []) or []:
-                if bek and is_public_ip(str(bek[0])):
-                    return str(bek[0])
+                if bek:
+                    _consider(bek[0])
+            if found_v4 and found_v6:
+                return {"ipv4": found_v4, "ipv6": found_v6}
         except Exception:
             pass
 
     # 4. From host_client_ips
     try:
         cip = conn.execute("SELECT client_ip FROM host_client_ips WHERE host_id=?", (host_id,)).fetchone()
-        if cip and cip["client_ip"] and is_public_ip(str(cip["client_ip"])):
-            return str(cip["client_ip"])
+        if cip and cip["client_ip"]:
+            _consider(cip["client_ip"])
+            if found_v4 and found_v6:
+                return {"ipv4": found_v4, "ipv6": found_v6}
     except Exception:
         pass
 
     # 5. From hosts client_ip if legacy column exists
     try:
         h = conn.execute("SELECT client_ip FROM hosts WHERE host_id=?", (host_id,)).fetchone()
-        if h and h["client_ip"] and is_public_ip(str(h["client_ip"])):
-            return str(h["client_ip"])
+        if h and h["client_ip"]:
+            _consider(h["client_ip"])
     except Exception:
         pass
 
-    return ""
+    return {"ipv4": found_v4, "ipv6": found_v6}
+
+
+def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
+    """Finds a verified public IPv4 / IPv6 address or domain name for the host."""
+    targets = discover_host_targets(conn, host_id)
+    return targets.get("ipv4") or targets.get("ipv6") or ""
 
 
 def discover_host_open_ports(conn: sqlite3.Connection, host_id: str) -> List[int]:
@@ -714,26 +785,54 @@ def parse_measurement_results(
     cn_success_count = len(cn_ok)
 
     proto_label = "Ping" if is_ping else "TCP"
-    if cn_success_count == 3 and success_count >= 14:
-        verdict = "ok"
-        verdict_label = "三网通畅·全球可达"
-        verdict_desc = f"中国电信、联通、移动及全球各主要区域均可顺畅建立 {proto_label} 连接。"
-    elif cn_success_count == 0 and success_count >= 8:
-        verdict = "gfw_blocked"
-        verdict_label = "国内受阻·疑似GFW阻断"
-        verdict_desc = f"海外节点完全通畅，但中国大陆三大运营商探针均连接超时或握手被中断。"
-    elif cn_success_count >= 1 and success_count < 6:
-        verdict = "cn_only"
-        verdict_label = "仅国内可达·海外受阻"
-        verdict_desc = "国内部分或全部可连，但大部分海外区域无法访问，疑似配置了海外 IP 白名单或境外出口丢包。"
-    elif success_count == 0:
-        verdict = "timeout"
-        verdict_label = "全网连接超时/端口未放行"
-        verdict_desc = f"所有探针均无法建立 {proto_label} 握手，请检查防火墙或服务监听状态。"
+    if total_count <= 8:
+        # Budget mode (8 core regions, 5 dual-stack V4 regions, or 3 V6 regions)
+        if success_count == 0:
+            verdict = "timeout"
+            verdict_label = "全网连接超时/端口未放行"
+            verdict_desc = f"所有已测探针均无法建立 {proto_label} 握手，请检查防火墙或服务监听状态。"
+        elif cn_success_count == 3 and success_count == total_count:
+            verdict = "ok"
+            verdict_label = "三网通畅" if total_count == 3 else "三网通畅·核心可达"
+            verdict_desc = f"中国电信、联通、移动及已测核心区域均可顺畅建立 {proto_label} 连接。"
+        elif cn_success_count == 3 and success_count >= total_count - 1:
+            verdict = "ok"
+            verdict_label = "三网通畅·海外良好"
+            verdict_desc = f"中国三大运营商均通畅，绝大部分已测区域可建立 {proto_label} 连接。"
+        elif cn_success_count == 0 and success_count >= 2:
+            verdict = "gfw_blocked"
+            verdict_label = "国内受阻·疑似GFW阻断"
+            verdict_desc = f"海外节点通畅，但中国大陆三大运营商探针均连接超时或握手被中断。"
+        elif cn_success_count >= 1 and (total_count > 3 and success_count < 3):
+            verdict = "cn_only"
+            verdict_label = "仅国内可达·海外受阻"
+            verdict_desc = "国内部分可连，但海外主要区域无法访问，疑似配置了海外 IP 白名单或境外出口丢包。"
+        else:
+            verdict = "partial"
+            verdict_label = "部分区域受阻"
+            verdict_desc = f"{success_count}/{total_count} 个区域可达，部分运营商或地区连接异常。"
     else:
-        verdict = "partial"
-        verdict_label = "部分区域受阻"
-        verdict_desc = f"{success_count}/{total_count} 个区域可达，部分运营商或地区连接异常。"
+        # Full 18-region check (with API key or full quota)
+        if cn_success_count == 3 and success_count >= 14:
+            verdict = "ok"
+            verdict_label = "三网通畅·全球可达"
+            verdict_desc = f"中国电信、联通、移动及全球各主要区域均可顺畅建立 {proto_label} 连接。"
+        elif cn_success_count == 0 and success_count >= 8:
+            verdict = "gfw_blocked"
+            verdict_label = "国内受阻·疑似GFW阻断"
+            verdict_desc = f"海外节点完全通畅，但中国大陆三大运营商探针均连接超时或握手被中断。"
+        elif cn_success_count >= 1 and success_count < 6:
+            verdict = "cn_only"
+            verdict_label = "仅国内可达·海外受阻"
+            verdict_desc = "国内部分或全部可连，但大部分海外区域无法访问，疑似配置了海外 IP 白名单或境外出口丢包。"
+        elif success_count == 0:
+            verdict = "timeout"
+            verdict_label = "全网连接超时/端口未放行"
+            verdict_desc = f"所有探针均无法建立 {proto_label} 握手，请检查防火墙或服务监听状态。"
+        else:
+            verdict = "partial"
+            verdict_label = "部分区域受阻"
+            verdict_desc = f"{success_count}/{total_count} 个区域可达，部分运营商或地区连接异常。"
 
     effective_proto = "PING" if is_ping else "TCP"
     stats = {
@@ -771,10 +870,15 @@ def parse_measurement_results(
 
 
 def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional[Dict[str, Any]]:
-    """Runs reachability check for a single host with a randomly selected open port or ICMP ping."""
-    target = discover_host_target(conn, host_id)
-    if not target or not is_public_ip(target):
-        logger.info(f"Skipping reach check for {host_id}: no public target discovered (target={target!r})")
+    """Runs reachability check for a single host. Supports IPv4, IPv6, and dual-stack
+    machines with intelligent token budgeting to prevent quota exhaustion.
+    """
+    targets = discover_host_targets(conn, host_id)
+    target_v4 = targets.get("ipv4") or ""
+    target_v6 = targets.get("ipv6") or ""
+
+    if not target_v4 and not target_v6:
+        logger.info(f"Skipping reach check for {host_id}: no public target discovered")
         return None
 
     open_ports = discover_host_open_ports(conn, host_id)
@@ -785,13 +889,39 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
         port = 0
         protocol = "PING"
 
-    logger.info(f"Running automated reach check for {host_id} -> {target}:{port} ({protocol}, from {len(open_ports)} open ports)")
+    api_key = get_globalping_api_key(conn)
+    is_dual = bool(target_v4 and target_v6)
+
+    # Token budgeting for dual-stack vs single-stack
+    if is_dual:
+        if api_key:
+            v4_regions = REACH_REGIONS
+            v6_regions = REACH_REGIONS
+        elif _rate_limit_state.get("remaining", 250) < 6:
+            # Low budget fallback: 3 for V4, 3 for V6 (or skip V6 if < 3)
+            v4_regions = [r for r in REACH_REGIONS if r["id"] in {"cn-telecom", "cn-unicom", "cn-mobile"}]
+            v6_regions = [r for r in REACH_REGIONS if r["id"] in {"cn-telecom", "cn-unicom", "cn-mobile"}] if _rate_limit_state.get("remaining", 250) >= 6 else []
+        else:
+            # Optimized token budget: V4 gets 5 points (China 3 + HK + US), V6 gets 3 points (China 3)
+            # Total consumption = 5 + 3 = 8 credits per host (strictly <= 250 credits/hr across 28 cluster hosts)
+            v4_regions = [r for r in REACH_REGIONS if r["id"] in {"cn-telecom", "cn-unicom", "cn-mobile", "apac-hk", "am-us-la"}]
+            v6_regions = [r for r in REACH_REGIONS if r["id"] in {"cn-telecom", "cn-unicom", "cn-mobile"}]
+    else:
+        v4_regions = None
+        v6_regions = None
+
+    primary_target = target_v4 or target_v6
+    logger.info(f"Running automated reach check for {host_id} (dual={is_dual}, v4={target_v4!r}, v6={target_v6!r}) -> {primary_target}:{port} ({protocol})")
+
     try:
-        m_data = execute_globalping_measurement(target, port, protocol, conn=conn)
+        # 1. Primary measurement (IPv4 if dual or single V4; or IPv6 if single V6)
+        m_v4_data = execute_globalping_measurement(
+            primary_target, port, protocol, regions=v4_regions if is_dual else None, api_key=api_key, conn=conn
+        )
 
         # Rate-limiting / Quota exhausted handling:
         # CRITICAL: Preserve existing healthy host reachability records and avoid overwriting with blank/empty data!
-        if m_data.get("status") == "rate_limited":
+        if m_v4_data.get("status") == "rate_limited":
             logger.warning(f"Host {host_id} reach check rate limited; preserving historical records without overwriting")
             existing = conn.execute(
                 "SELECT host_id, verdict_label, results_json FROM host_reachability WHERE host_id=?",
@@ -799,7 +929,7 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
             ).fetchone()
             # Only create an entry if host has never had any reachability record or existing was already rate_limited
             if not existing or existing["results_json"] in ("[]", ""):
-                summary = parse_measurement_results(m_data, target, port, protocol)
+                summary = parse_measurement_results(m_v4_data, primary_target, port, protocol, regions=v4_regions)
                 now = int(time.time())
                 conn.execute("""
                     INSERT INTO host_reachability(host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at)
@@ -808,33 +938,102 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
                         verdict=excluded.verdict, verdict_label=excluded.verdict_label,
                         verdict_desc=excluded.verdict_desc, checked_at=excluded.checked_at
                 """, (
-                    host_id, target, port, summary["protocol"], summary["verdict"], summary["verdict_label"],
+                    host_id, primary_target, port, summary["protocol"], summary["verdict"], summary["verdict_label"],
                     summary["verdict_desc"], json.dumps(summary["stats"]), json.dumps(summary["results"]), now
                 ))
                 conn.commit()
             return None
 
-        summary = parse_measurement_results(m_data, target, port, protocol)
+        summary_v4 = parse_measurement_results(m_v4_data, primary_target, port, protocol, regions=v4_regions)
         now = int(time.time())
+
+        # 2. Secondary measurement for IPv6 if dual-stack
+        summary_v6: Optional[Dict[str, Any]] = None
+        if is_dual and v6_regions and target_v6:
+            try:
+                m_v6_data = execute_globalping_measurement(
+                    target_v6, port, protocol, regions=v6_regions, api_key=api_key, conn=conn
+                )
+                if m_v6_data.get("status") != "rate_limited":
+                    summary_v6 = parse_measurement_results(m_v6_data, target_v6, port, protocol, regions=v6_regions)
+                else:
+                    logger.warning(f"Host {host_id} IPv6 reach check rate limited; retaining existing IPv6 record")
+            except Exception as e:
+                logger.warning(f"Host {host_id} IPv6 check failed: {e}")
+
+        # Retrieve previous records to safely preserve v6 if secondary was rate-limited or failed
+        target_v6_val = target_v6 if is_dual else ""
+        port_v6_val = port if summary_v6 else 0
+        proto_v6_val = summary_v6["protocol"] if summary_v6 else "TCP"
+        verdict_v6_val = summary_v6["verdict"] if summary_v6 else ""
+        verdict_label_v6_val = summary_v6["verdict_label"] if summary_v6 else ""
+        verdict_desc_v6_val = summary_v6["verdict_desc"] if summary_v6 else ""
+        stats_v6_json = json.dumps(summary_v6["stats"]) if summary_v6 else "{}"
+        results_v6_json = json.dumps(summary_v6["results"]) if summary_v6 else "[]"
+        checked_at_v6_val = now if summary_v6 else 0
+
+        if not summary_v6 and is_dual:
+            prev = conn.execute(
+                "SELECT target_v6, port_v6, protocol_v6, verdict_v6, verdict_label_v6, verdict_desc_v6, stats_json_v6, results_json_v6, checked_at_v6 "
+                "FROM host_reachability WHERE host_id=?",
+                (host_id,),
+            ).fetchone()
+            if prev and prev["target_v6"]:
+                target_v6_val = prev["target_v6"]
+                port_v6_val = prev["port_v6"]
+                proto_v6_val = prev["protocol_v6"]
+                verdict_v6_val = prev["verdict_v6"]
+                verdict_label_v6_val = prev["verdict_label_v6"]
+                verdict_desc_v6_val = prev["verdict_desc_v6"]
+                stats_v6_json = prev["stats_json_v6"]
+                results_v6_json = prev["results_json_v6"]
+                checked_at_v6_val = prev["checked_at_v6"]
+
         conn.execute("""
-            INSERT INTO host_reachability(host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO host_reachability(
+                host_id, target, port, protocol, verdict, verdict_label, verdict_desc, stats_json, results_json, checked_at,
+                target_v6, port_v6, protocol_v6, verdict_v6, verdict_label_v6, verdict_desc_v6, stats_json_v6, results_json_v6, checked_at_v6
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(host_id) DO UPDATE SET
                 target=excluded.target, port=excluded.port, protocol=excluded.protocol,
                 verdict=excluded.verdict, verdict_label=excluded.verdict_label, verdict_desc=excluded.verdict_desc,
-                stats_json=excluded.stats_json, results_json=excluded.results_json, checked_at=excluded.checked_at
+                stats_json=excluded.stats_json, results_json=excluded.results_json, checked_at=excluded.checked_at,
+                target_v6=excluded.target_v6, port_v6=excluded.port_v6, protocol_v6=excluded.protocol_v6,
+                verdict_v6=excluded.verdict_v6, verdict_label_v6=excluded.verdict_label_v6, verdict_desc=excluded.verdict_desc,
+                stats_json_v6=excluded.stats_json_v6, results_json=excluded.results_json_v6, checked_at_v6=excluded.checked_at_v6
         """, (
-            host_id, target, port, summary["protocol"], summary["verdict"], summary["verdict_label"],
-            summary["verdict_desc"], json.dumps(summary["stats"]), json.dumps(summary["results"]), now
+            host_id, primary_target, port, summary_v4["protocol"], summary_v4["verdict"], summary_v4["verdict_label"],
+            summary_v4["verdict_desc"], json.dumps(summary_v4["stats"]), json.dumps(summary_v4["results"]), now,
+            target_v6_val, port_v6_val, proto_v6_val, verdict_v6_val, verdict_label_v6_val, verdict_desc_v6_val,
+            stats_v6_json, results_v6_json, checked_at_v6_val
         ))
+
         conn.execute("""
-            INSERT INTO host_reachability_history(host_id, target, port, protocol, verdict, stats_json, checked_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
-        """, (host_id, target, port, summary["protocol"], summary["verdict"], json.dumps(summary["stats"]), now))
+            INSERT INTO host_reachability_history(
+                host_id, target, port, protocol, verdict, stats_json, checked_at,
+                target_v6, port_v6, protocol_v6, verdict_v6, stats_json_v6, checked_at_v6
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            host_id, primary_target, port, summary_v4["protocol"], summary_v4["verdict"], json.dumps(summary_v4["stats"]), now,
+            target_v6_val, port_v6_val, proto_v6_val, verdict_v6_val, stats_v6_json, checked_at_v6_val
+        ))
         conn.commit()
-        return summary
+
+        combined = dict(summary_v4)
+        combined["is_dual_stack"] = is_dual
+        combined["has_ipv6"] = bool(target_v6_val)
+        combined["target_v6"] = target_v6_val
+        combined["port_v6"] = port_v6_val
+        combined["protocol_v6"] = proto_v6_val
+        combined["verdict_v6"] = verdict_v6_val
+        combined["verdict_label_v6"] = verdict_label_v6_val
+        combined["verdict_desc_v6"] = verdict_desc_v6_val
+        combined["stats_v6"] = json.loads(stats_v6_json) if stats_v6_json else {}
+        combined["results_v6"] = json.loads(results_v6_json) if results_v6_json else []
+        combined["checked_at_v6"] = checked_at_v6_val
+        return combined
     except Exception as e:
-        logger.error(f"Failed automated reach check for {host_id} ({target}:{port} {protocol}): {e}")
+        logger.error(f"Failed automated reach check for {host_id} ({primary_target}:{port} {protocol}): {e}")
         return None
 
 
@@ -935,6 +1134,7 @@ def _get_quota_payload(conn: Optional[sqlite3.Connection] = None) -> Dict[str, A
         "is_rate_limited": bool(_rate_limit_state.get("is_rate_limited", False)),
         "api_key_configured": bool(api_key),
         "pacing_seconds": int(_rate_limit_state.get("pacing_seconds", 128)),
+        "dual_stack_budget": "IPv4 5探针 + IPv6 3探针 = 8点/台 (28台集群稳定消耗 224点/小时)",
     }
 
 
@@ -973,13 +1173,31 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 except Exception:
                     stats, results = {}, []
 
+                target_v6_raw = str(r["target_v6"] or "") if "target_v6" in r.keys() else ""
+                stats_v6_raw = str(r["stats_json_v6"] or "{}") if "stats_json_v6" in r.keys() else "{}"
+                results_v6_raw = str(r["results_json_v6"] or "[]") if "results_json_v6" in r.keys() else "[]"
+                try:
+                    stats_v6 = json.loads(stats_v6_raw or "{}")
+                    results_v6 = json.loads(results_v6_raw or "[]")
+                except Exception:
+                    stats_v6, results_v6 = {}, []
+
                 # IP masking for unauthenticated public visitors
                 target_val = r["target"]
+                target_v6_val = target_v6_raw
                 if not is_auth:
                     target_val = ""
+                    target_v6_val = ""
                     for res_item in results:
                         if isinstance(res_item, dict) and "ip" in res_item:
                             res_item["ip"] = ""
+                    for res_item in results_v6:
+                        if isinstance(res_item, dict) and "ip" in res_item:
+                            res_item["ip"] = ""
+
+                has_v6 = bool(target_v6_raw)
+                has_v4 = bool(r["target"])
+                is_dual = bool(has_v4 and has_v6)
 
                 items.append({
                     "host_id": r["host_id"],
@@ -992,6 +1210,17 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                     "stats": stats,
                     "results": results,
                     "checked_at": checked_at,
+                    "is_dual_stack": is_dual,
+                    "has_ipv6": has_v6,
+                    "target_v6": target_v6_val,
+                    "port_v6": int(r["port_v6"] or 0) if "port_v6" in r.keys() else 0,
+                    "protocol_v6": str(r["protocol_v6"] or "TCP") if "protocol_v6" in r.keys() else "TCP",
+                    "verdict_v6": str(r["verdict_v6"] or "") if "verdict_v6" in r.keys() else "",
+                    "verdict_label_v6": str(r["verdict_label_v6"] or "") if "verdict_label_v6" in r.keys() else "",
+                    "verdict_desc_v6": str(r["verdict_desc_v6"] or "") if "verdict_desc_v6" in r.keys() else "",
+                    "stats_v6": stats_v6,
+                    "results_v6": results_v6,
+                    "checked_at_v6": int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0,
                 })
 
             return JSONResponse(content={
@@ -1062,12 +1291,29 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
             except Exception:
                 stats, results = {}, []
 
+            target_v6_raw = str(r["target_v6"] or "") if "target_v6" in r.keys() else ""
+            stats_v6_raw = str(r["stats_json_v6"] or "{}") if "stats_json_v6" in r.keys() else "{}"
+            results_v6_raw = str(r["results_json_v6"] or "[]") if "results_json_v6" in r.keys() else "[]"
+            try:
+                stats_v6 = json.loads(stats_v6_raw or "{}")
+                results_v6 = json.loads(results_v6_raw or "[]")
+            except Exception:
+                stats_v6, results_v6 = {}, []
+
             is_auth = bool(getattr(request.state, "dashboard_user", None))
             target_val = r["target"] if is_auth else ""
+            target_v6_val = target_v6_raw if is_auth else ""
             if not is_auth:
                 for res_item in results:
                     if isinstance(res_item, dict) and "ip" in res_item:
                         res_item["ip"] = ""
+                for res_item in results_v6:
+                    if isinstance(res_item, dict) and "ip" in res_item:
+                        res_item["ip"] = ""
+
+            has_v6 = bool(target_v6_raw)
+            has_v4 = bool(r["target"])
+            is_dual = bool(has_v4 and has_v6)
 
             item = {
                 "host_id": r["host_id"],
@@ -1080,6 +1326,17 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 "stats": stats,
                 "results": results,
                 "checked_at": int(r["checked_at"] or 0),
+                "is_dual_stack": is_dual,
+                "has_ipv6": has_v6,
+                "target_v6": target_v6_val,
+                "port_v6": int(r["port_v6"] or 0) if "port_v6" in r.keys() else 0,
+                "protocol_v6": str(r["protocol_v6"] or "TCP") if "protocol_v6" in r.keys() else "TCP",
+                "verdict_v6": str(r["verdict_v6"] or "") if "verdict_v6" in r.keys() else "",
+                "verdict_label_v6": str(r["verdict_label_v6"] or "") if "verdict_label_v6" in r.keys() else "",
+                "verdict_desc_v6": str(r["verdict_desc_v6"] or "") if "verdict_desc_v6" in r.keys() else "",
+                "stats_v6": stats_v6,
+                "results_v6": results_v6,
+                "checked_at_v6": int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0,
             }
             return JSONResponse(content={"item": item, **item})
         finally:
