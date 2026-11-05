@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  Globe, Shield, AlertTriangle, CheckCircle2, RefreshCw,
+  Globe, AlertTriangle, CheckCircle2, RefreshCw,
   Zap, ArrowRight, HelpCircle, ChevronDown, ChevronUp, Copy, Check,
-  Key, Clock, Sparkles
+  Key, Clock
 } from 'lucide-react';
 import { RegionResult, ReachCheckSummary } from '../../utils/reachCheck';
 import { api } from '../../api/client';
@@ -40,6 +40,39 @@ function formatInspectionTime(checkedAt?: number, isoUtc8?: string): { time: str
   }
   return { time: timeStr, relative: relativeStr, full: fullStr };
 }
+
+function getHostFlag(hostId: string): string {
+  const lower = hostId.toLowerCase();
+  if (lower.includes('香港') || lower.includes('hkt') || lower.includes('hongkong') || lower.includes(' hk') || lower.startsWith('hk')) return '🇭🇰';
+  if (lower.includes('日本') || lower.includes('tokyo') || lower.includes('osaka') || lower.includes(' jp') || lower.startsWith('jp')) return '🇯🇵';
+  if (lower.includes('美国') || lower.includes('洛杉矶') || lower.includes('us') || lower.includes('america') || lower.includes('sjc') || lower.includes('lax') || lower.includes('硅谷')) return '🇺🇸';
+  if (lower.includes('新加坡') || lower.includes('singapore') || lower.includes(' sg') || lower.startsWith('sg')) return '🇸🇬';
+  if (lower.includes('德国') || lower.includes('germany') || lower.includes('frankfurt') || lower.includes(' de') || lower.startsWith('de')) return '🇩🇪';
+  if (lower.includes('英国') || lower.includes('uk') || lower.includes('london') || lower.includes(' gb')) return '🇬🇧';
+  if (lower.includes('韩国') || lower.includes('korea') || lower.includes('seoul') || lower.includes(' kr')) return '🇰🇷';
+  if (lower.includes('台湾') || lower.includes('taiwan') || lower.includes('taipei') || lower.includes(' tw')) return '🇹🇼';
+  if (lower.includes('瑞典') || lower.includes('sweden') || lower.includes('stockholm') || lower.includes(' se')) return '🇸🇪';
+  if (lower.includes('法国') || lower.includes('france') || lower.includes('paris') || lower.includes(' fr')) return '🇫🇷';
+  if (lower.includes('荷兰') || lower.includes('netherlands') || lower.includes('amsterdam') || lower.includes(' nl')) return '🇳🇱';
+  if (lower.includes('俄罗斯') || lower.includes('russia') || lower.includes('moscow') || lower.includes(' ru')) return '🇷🇺';
+  if (lower.includes('澳大利亚') || lower.includes('australia') || lower.includes('sydney') || lower.includes(' au')) return '🇦🇺';
+  return '🌐';
+}
+
+const latencyBadgeTextColor = (ms?: number | null) => {
+  if (!ms || ms <= 0) return 'text-slate-400';
+  if (ms <= 60) return 'text-emerald-400';
+  if (ms <= 150) return 'text-sky-400';
+  if (ms <= 260) return 'text-amber-400';
+  return 'text-rose-400';
+};
+
+const getStatusGlow = (item: ReachabilitySummaryItem) => {
+  if (item.verdict === 'ok') return 'bg-emerald-400 glow-emerald';
+  if (item.verdict === 'gfw_blocked') return 'bg-rose-500 animate-pulse glow-rose';
+  if (item.verdict_label === '探针配额受限') return 'bg-purple-400 glow-purple';
+  return 'bg-amber-400 glow-amber';
+};
 
 const latencyBadgeColor = (ms: number) => {
   if (ms <= 60) return 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300';
@@ -274,45 +307,69 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   }, [liveResults, filterGroup]);
 
   return (
-    <div className="space-y-6 animate-fade-in" aria-label="全球与三网可达性检测面板">
-      {/* Top Banner & Return button */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <Globe className="h-5 w-5 text-sky-400" />
-            <h1 className="text-lg font-bold text-slate-100">全球与三网可达性 (Reach Check)</h1>
+    <div className="space-y-4 animate-fade-in" aria-label="全球与三网可达性检测面板">
+      {/* STREAMLINED BENTO HEADER: Title, Compact KPI Pills & Action Controls */}
+      <div className="bg-gradient-to-r from-slate-900/90 via-slate-900/70 to-slate-950/90 border border-slate-800/80 rounded-2xl p-4 md:p-5 flex flex-wrap items-center justify-between gap-4 shadow-xl">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <span className="text-xl">🌐</span>
+            <h1 className="text-base font-bold text-white tracking-wide">全球与三网网络巡检大盘</h1>
+            <span className="bg-sky-500/10 text-sky-400 border border-sky-500/30 px-2 py-0.5 rounded text-[11px] font-mono">
+              1 小时定时自动轮询
+            </span>
+            {triggerMessage && (
+              <span className="text-xs text-sky-300 font-mono animate-fade-in bg-sky-950/70 px-2.5 py-0.5 rounded border border-sky-800/60">
+                {triggerMessage}
+              </span>
+            )}
           </div>
-          <p className="mt-1 text-xs text-slate-400">
-            系统每小时自动对母机公网端点进行分布式采样，深度度量中国大陆三大运营商与全球节点连通性及延时。
+          <p className="text-xs text-slate-400">
+            基于 Globalping 18 节点分布式探测，涵盖中国电信、联通、移动及全球主要区域网络握手与时延分析。
           </p>
         </div>
 
-        {onBackToTcping && (
-          <button
-            type="button"
-            onClick={onBackToTcping}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition"
+        {/* Compact KPI Pills & Actions */}
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl px-3 py-1.5 text-xs font-mono">
+            <span className="text-slate-500 font-sans block text-[10px]">巡检主机</span>
+            <span className="text-slate-100 font-bold">{clusterData?.total_hosts || availableHosts.length || 0} 台</span>
+          </div>
+          <div className="bg-emerald-950/40 border border-emerald-800/40 rounded-xl px-3 py-1.5 text-xs font-mono">
+            <span className="text-emerald-500/90 font-sans block text-[10px]">三网畅通</span>
+            <span className="text-emerald-300 font-bold">{clusterData?.ok_hosts || 0} 台</span>
+          </div>
+          <div className="bg-rose-950/40 border border-rose-800/40 rounded-xl px-3 py-1.5 text-xs font-mono">
+            <span className="text-rose-500/90 font-sans block text-[10px]">疑似受阻</span>
+            <span className="text-rose-300 font-bold">{clusterData?.blocked_hosts || 0} 台</span>
+          </div>
+          <div
+            className="bg-sky-950/40 border border-sky-800/40 rounded-xl px-3 py-1.5 text-xs font-mono cursor-help"
+            title={
+              quota?.is_rate_limited
+                ? `探针配额受限，约 ${Math.ceil((quota.reset_seconds || 0) / 60)} 分钟后重置`
+                : `剩余额度: ${quota?.remaining ?? 250} / ${quota?.limit ?? 250} 点`
+            }
           >
-            <span>返回省份测速</span>
-            <ArrowRight className="h-3.5 w-3.5" />
-          </button>
-        )}
-      </div>
-
-      {/* CLUSTER AUTOMATED HOURLY INSPECTION SECTION */}
-      <section className="rounded-2xl border border-sky-900/50 bg-slate-900/70 p-5 shadow-xl space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
-          <div className="flex items-center gap-2">
-            <div className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
-            <h2 className="text-sm font-semibold text-slate-200">
-              集群母机定时巡检结果 (1 小时定时自动测试 · 智能端口与 Ping 探测)
-            </h2>
+            <span className="text-sky-500/90 font-sans block text-[10px]">探针配额</span>
+            <span className="text-sky-300 font-bold">
+              {quota?.is_rate_limited ? '受限待重置' : `${quota?.remaining ?? 250} / ${quota?.limit ?? 250}`}
+            </span>
           </div>
 
-          <div className="flex items-center gap-2">
-            {triggerMessage && (
-              <span className="text-xs text-sky-300 font-mono animate-fade-in">{triggerMessage}</span>
+          {/* Action buttons */}
+          <div className="flex items-center gap-1.5">
+            {onBackToTcping && (
+              <button
+                type="button"
+                onClick={onBackToTcping}
+                className="rounded-xl border border-slate-700 bg-slate-800/90 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition flex items-center gap-1.5 cursor-pointer"
+                title="返回 VPS 发起的全国网络连接测速"
+              >
+                <span>省份测速</span>
+                <ArrowRight className="h-3 w-3" />
+              </button>
             )}
+
             {authed && (
               <button
                 type="button"
@@ -320,28 +377,30 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                   setApiKeyInput(localStorage.getItem('narwhal_globalping_key') || '');
                   setShowKeyModal(true);
                 }}
-                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition"
-                title="配置 Globalping 探针 API Key"
+                className="rounded-xl border border-slate-700 bg-slate-800/90 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition flex items-center gap-1 cursor-pointer"
+                title="配置 Globalping 探针专属 API Key"
               >
                 <Key className="h-3.5 w-3.5 text-amber-400" />
-                <span>{quota?.api_key_configured ? 'API Key (已绑定)' : '配置 API Key'}</span>
+                <span className="hidden sm:inline">{quota?.api_key_configured ? '已绑 Key' : 'API Key'}</span>
               </button>
             )}
+
             <button
               type="button"
               disabled={loadingCluster}
               onClick={fetchClusterSummary}
-              className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition"
+              className="rounded-xl border border-slate-700 bg-slate-800/90 p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition cursor-pointer"
               title="刷新最新巡检数据"
             >
-              <RefreshCw className={`h-3.5 w-3.5 ${loadingCluster ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-3.5 w-3.5 ${loadingCluster ? 'animate-spin text-sky-400' : ''}`} />
             </button>
+
             {authed && (
               <button
                 type="button"
                 disabled={triggeringCluster}
                 onClick={handleTriggerCluster}
-                className="flex items-center gap-1.5 rounded-lg bg-sky-600/90 hover:bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition disabled:opacity-50"
+                className="rounded-xl bg-sky-600 hover:bg-sky-500 px-3.5 py-2 text-xs font-semibold text-white shadow-lg shadow-sky-950/40 transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
               >
                 <Zap className={`h-3.5 w-3.5 ${triggeringCluster ? 'animate-spin' : ''}`} />
                 <span>立即全量巡检</span>
@@ -349,329 +408,278 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             )}
           </div>
         </div>
+      </div>
 
-        {/* Cluster Stats Ribbon */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
-          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-            <span className="text-slate-400 block font-sans text-[11px]">纳入巡检母机</span>
-            <span className="text-lg font-bold text-slate-100">{clusterData?.total_hosts || availableHosts.length || 0} 台</span>
-          </div>
-          <div className="rounded-xl border border-emerald-900/40 bg-emerald-950/20 p-3">
-            <span className="text-emerald-400 block font-sans text-[11px]">三网全通畅母机</span>
-            <span className="text-lg font-bold text-emerald-300">{clusterData?.ok_hosts || 0} 台</span>
-          </div>
-          <div className="rounded-xl border border-rose-900/40 bg-rose-950/20 p-3">
-            <span className="text-rose-400 block font-sans text-[11px]">疑似受阻 / 异常</span>
-            <span className="text-lg font-bold text-rose-300">{clusterData?.blocked_hosts || 0} 台</span>
-          </div>
-          <div className="rounded-xl border border-sky-900/40 bg-sky-950/20 p-3">
-            <span className="text-sky-400 block font-sans text-[11px]">巡检状态</span>
-            <span className="text-sm font-semibold text-sky-300 mt-1 block">
-              {clusterData?.items?.length ? '每小时自动轮询中' : '等待初次巡检'}
-            </span>
-          </div>
+      {/* SUBTLE SCHEDULING & PACING BAR */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 bg-slate-950/60 border border-slate-800/80 rounded-xl px-3.5 py-2">
+        <div className="flex items-center gap-2">
+          <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+          <span>
+            <strong>平滑时序调度：</strong>集群 {clusterData?.total_hosts || availableHosts.length || 0} 台母机均匀分散至 1 小时时间轴（每约 {quota?.pacing_seconds || 128} 秒自动调度 1 台），双栈机器采用智能配额预算（IPv4 5探针 + IPv6 3探针），杜绝 429 限流并兼顾三网全覆盖。
+          </span>
         </div>
-
-        {/* Quota & Pacing Intelligence Ribbon */}
-        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-amber-400" />
-              <span className="font-semibold text-slate-200">探针配额与规划调度</span>
-              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border ${
-                quota?.is_rate_limited
-                  ? 'border-purple-500/50 bg-purple-950/60 text-purple-300'
-                  : (quota?.remaining ?? 250) < 20
-                  ? 'border-amber-500/40 bg-amber-950/60 text-amber-300'
-                  : 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
-              }`}>
-                {quota?.is_rate_limited
-                  ? `探针配额受限 (${Math.ceil((quota.reset_seconds || 0) / 60)} 分钟后重置)`
-                  : (quota?.remaining ?? 250) < 20
-                  ? `额度紧张 (剩余 ${quota?.remaining ?? 250} / ${quota?.limit ?? 250} 点)`
-                  : `额度充裕 (剩余 ${quota?.remaining ?? 250} / ${quota?.limit ?? 250} 点)`}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 text-[11px] text-slate-400 font-sans">
-              {quota?.api_key_configured ? (
-                <span className="text-emerald-400 flex items-center gap-1">
-                  <Key className="h-3 w-3" /> 专属 API Key 额度
-                </span>
-              ) : (
-                <span className="text-slate-400 flex items-center gap-1">
-                  <Shield className="h-3 w-3 text-sky-400" /> 公共 IP 免费额度 (250/h)
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="text-[11px] text-slate-400 leading-relaxed font-sans border-t border-slate-800/60 pt-2 flex items-center gap-2">
-            <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-            <span>
-              <strong>平滑时序规划与双栈优化：</strong>集群 {clusterData?.total_hosts || availableHosts.length || 28} 台母机均匀分散至 1 小时时间轴（每约 {quota?.pacing_seconds || 128} 秒自动调度 1 台），双栈机器采用智能配额预算（IPv4 5探针 + IPv6 3探针 = 8点/台），杜绝突发 429 限流并兼顾 IPv4/IPv6 双栈三网全覆盖。
-            </span>
-          </div>
+        <div className="hidden md:flex items-center gap-2 text-slate-500 font-mono">
+          <span>口径: Globalping 18 核心节点分布式采样</span>
         </div>
+      </div>
 
-        {/* MODERN HORIZON FLOW CARDS (0 Horizontal Scrolling · No Text Overlap · Direct Button Access) */}
-        {(!clusterData?.items || clusterData.items.length === 0) ? (
-          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-8 text-center text-slate-500 font-sans text-xs">
-            暂无母机巡检数据。点击右上角“立即全量巡检”启动首轮测试，或等待下一次整点自动测试。
-          </div>
-        ) : (
-          <div className="space-y-3.5">
-            {clusterData.items.map((item: ReachabilitySummaryItem) => {
-              const isOk = item.verdict === 'ok';
-              const isBlocked = item.verdict === 'gfw_blocked';
-              const isLimited = item.verdict_label === '探针配额受限';
-              const isExpanded = expandedHostId === item.host_id;
+      {/* BENTO GLOW MODERN CARDS STREAM (Zero text overlap · Direct Button Access) */}
+      {(!clusterData?.items || clusterData.items.length === 0) ? (
+        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-8 text-center text-slate-500 font-sans text-xs">
+          暂无母机巡检数据。点击右上角“立即全量巡检”启动首轮测试，或等待下一次整点自动测试。
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {clusterData.items.map((item: ReachabilitySummaryItem) => {
+            const isOk = item.verdict === 'ok';
+            const isBlocked = item.verdict === 'gfw_blocked';
+            const isLimited = item.verdict_label === '探针配额受限';
+            const isExpanded = expandedHostId === item.host_id;
 
-              const v4Telecom = item.stats?.cnTelecomMs ?? (item.stats as any)?.cn_telecom_ms;
-              const v4Unicom = item.stats?.cnUnicomMs ?? (item.stats as any)?.cn_unicom_ms;
-              const v4Mobile = item.stats?.cnMobileMs ?? (item.stats as any)?.cn_mobile_ms;
-              const v4Global = item.stats?.globalAverageMs ?? (item.stats as any)?.global_avg_ms;
+            const v4Telecom = item.stats?.cnTelecomMs ?? (item.stats as any)?.cn_telecom_ms;
+            const v4Unicom = item.stats?.cnUnicomMs ?? (item.stats as any)?.cn_unicom_ms;
+            const v4Mobile = item.stats?.cnMobileMs ?? (item.stats as any)?.cn_mobile_ms;
+            const v4Global = item.stats?.globalAverageMs ?? (item.stats as any)?.global_avg_ms;
 
-              const v6Telecom = item.stats_v6?.cnTelecomMs ?? (item.stats_v6 as any)?.cn_telecom_ms;
-              const v6Unicom = item.stats_v6?.cnUnicomMs ?? (item.stats_v6 as any)?.cn_unicom_ms;
-              const v6Mobile = item.stats_v6?.cnMobileMs ?? (item.stats_v6 as any)?.cn_mobile_ms;
-              const v6Global = item.stats_v6?.globalAverageMs ?? (item.stats_v6 as any)?.global_avg_ms;
-              const v6CnAvg = item.stats_v6?.cnAverageMs ?? (item.stats_v6 as any)?.cn_avg_ms;
+            const v6Telecom = item.stats_v6?.cnTelecomMs ?? (item.stats_v6 as any)?.cn_telecom_ms;
+            const v6Unicom = item.stats_v6?.cnUnicomMs ?? (item.stats_v6 as any)?.cn_unicom_ms;
+            const v6Mobile = item.stats_v6?.cnMobileMs ?? (item.stats_v6 as any)?.cn_mobile_ms;
+            const v6Global = item.stats_v6?.globalAverageMs ?? (item.stats_v6 as any)?.global_avg_ms;
+            const v6CnAvg = item.stats_v6?.cnAverageMs ?? (item.stats_v6 as any)?.cn_avg_ms;
 
-              const inspection = formatInspectionTime(item.checked_at, item.checked_at_iso_utc8);
+            const inspection = formatInspectionTime(item.checked_at, item.checked_at_iso_utc8);
 
-              const isPing = item.port <= 0 || item.protocol === 'PING';
-              const portDisplay = isPing ? 'ICMP Ping' : `${item.port} ${item.protocol}`;
+            const isPing = item.port <= 0 || item.protocol === 'PING';
+            const portDisplay = isPing ? 'ICMP Ping' : `${item.port} ${item.protocol}`;
 
-              return (
-                <div
-                  key={item.host_id}
-                  className={`rounded-xl border transition-all duration-150 ${
-                    isExpanded
-                      ? 'border-sky-500/70 bg-slate-900/90 shadow-lg shadow-sky-950/20 ring-1 ring-sky-500/40'
-                      : 'border-slate-800 bg-slate-900/60 hover:border-slate-700/80 hover:bg-slate-900/80 shadow-xs'
-                  }`}
-                >
-                  {/* Card Header Strip: Host Identity, Badges, Time & Always-Visible Action Buttons */}
-                  <div className="p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/60">
-                    <div className="flex items-center gap-2 flex-wrap min-w-0">
-                      <span className={`h-2.5 w-2.5 rounded-full shrink-0 ${
-                        isOk
-                          ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]'
-                          : isBlocked
-                          ? 'bg-rose-500 animate-pulse shadow-[0_0_8px_rgba(244,63,94,0.6)]'
-                          : isLimited
-                          ? 'bg-purple-400'
-                          : 'bg-amber-400'
-                      }`} />
-                      <h3 className="font-semibold text-sm text-slate-100 truncate max-w-[280px] sm:max-w-[420px]" title={item.host_id}>
-                        {item.host_id}
-                      </h3>
-                      {item.is_dual_stack && (
-                        <span className="inline-flex items-center gap-1 rounded bg-indigo-950/90 border border-indigo-700/60 text-indigo-300 px-2 py-0.5 text-[11px] font-medium font-sans">
-                          双栈 IPv4/IPv6
-                        </span>
-                      )}
-                      {!item.is_dual_stack && item.has_ipv6 && (
-                        <span className="inline-flex items-center gap-1 rounded bg-purple-950/90 border border-purple-700/60 text-purple-300 px-2 py-0.5 text-[11px] font-medium font-sans">
-                          纯 IPv6
-                        </span>
-                      )}
-                      <span className="rounded bg-slate-800/90 border border-slate-700/60 px-2 py-0.5 text-[11px] text-sky-300 font-mono font-medium">
-                        {portDisplay}
+            return (
+              <div
+                key={item.host_id}
+                className={`rounded-2xl border transition-all duration-200 p-4 md:p-5 ${
+                  isExpanded
+                    ? 'border-sky-500/70 bg-slate-900/90 shadow-xl shadow-sky-950/20 ring-1 ring-sky-500/40'
+                    : 'border-slate-800/80 bg-slate-900/70 hover:border-slate-700/80 hover:bg-slate-900/90 hover:shadow-xl hover:shadow-black/40'
+                }`}
+              >
+                {/* Card Top: Host Title, Flags, Badges, Time & Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-slate-800/60">
+                  <div className="flex items-center gap-2.5 flex-wrap min-w-0">
+                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${getStatusGlow(item)}`} />
+                    <span className="text-base shrink-0 select-none">{getHostFlag(item.host_id)}</span>
+                    <h3 className="font-bold text-sm text-slate-100 tracking-wide truncate max-w-[280px] sm:max-w-[420px]" title={item.host_id}>
+                      {item.host_id}
+                    </h3>
+                    {item.is_dual_stack && (
+                      <span className="bg-indigo-950/90 text-indigo-300 border border-indigo-700/60 px-2 py-0.5 rounded text-[11px] font-medium font-sans">
+                        双栈 IPv4/IPv6
                       </span>
-                    </div>
+                    )}
+                    {!item.is_dual_stack && item.has_ipv6 && (
+                      <span className="bg-purple-950/90 text-purple-300 border border-purple-700/60 px-2 py-0.5 rounded text-[11px] font-medium font-sans">
+                        纯 IPv6
+                      </span>
+                    )}
+                    <span className="bg-slate-800 text-sky-300 border border-slate-700 px-2 py-0.5 rounded text-[11px] font-mono font-medium">
+                      {portDisplay}
+                    </span>
+                  </div>
 
-                    {/* Time & Action buttons: Always fixed in primary viewport, zero horizontal scroll needed! */}
-                    <div className="flex items-center gap-2.5 shrink-0 font-sans ml-auto">
-                      <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400 font-mono pr-1" title={inspection.full}>
-                        <Clock className="h-3.5 w-3.5 text-slate-500" />
-                        <span>{inspection.time}</span>
-                        <span className="text-[11px] text-slate-500 font-sans">({inspection.relative})</span>
-                      </div>
-                      {authed && (
-                        <button
-                          type="button"
-                          disabled={triggeringHostId === item.host_id}
-                          onClick={() => handleTriggerHost(item.host_id)}
-                          className="rounded-lg border border-slate-700 bg-slate-800/90 hover:bg-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:text-slate-100 transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                          title="单独重新检测此机 (即时执行)"
-                        >
-                          <RefreshCw className={`h-3.5 w-3.5 ${triggeringHostId === item.host_id ? 'animate-spin text-sky-400' : 'text-slate-400'}`} />
-                          <span className="font-medium text-[11px]">{triggeringHostId === item.host_id ? '检测中' : '刷新'}</span>
-                        </button>
-                      )}
+                  {/* Actions: Always visible in primary viewport */}
+                  <div className="flex items-center gap-2.5 shrink-0 ml-auto text-xs">
+                    <div className="hidden sm:flex items-center gap-1.5 text-slate-400 font-mono text-[11px]" title={inspection.full}>
+                      <Clock className="h-3.5 w-3.5 text-slate-500" />
+                      <span>{inspection.time}</span>
+                      <span className="text-slate-500 font-sans">({inspection.relative})</span>
+                    </div>
+                    {authed && (
                       <button
                         type="button"
-                        onClick={() => toggleExpandHost(item)}
-                        className={`rounded-lg border px-3 py-1 text-xs font-medium transition flex items-center gap-1.5 shadow-xs cursor-pointer ${
-                          isExpanded
-                            ? 'border-sky-500 bg-sky-950/80 text-sky-300'
-                            : 'border-slate-700 bg-slate-800/90 text-slate-200 hover:bg-slate-700'
-                        }`}
-                        title={isExpanded ? '收起此机详细巡检成果' : '展开此机最新诊断与各区域时延详情'}
+                        disabled={triggeringHostId === item.host_id}
+                        onClick={() => handleTriggerHost(item.host_id)}
+                        className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:text-slate-100 transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                        title="单独重新检测此机 (即时执行)"
                       >
-                        <span>{isExpanded ? '收起详情' : '查看详情'}</span>
-                        {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                        <RefreshCw className={`h-3.5 w-3.5 ${triggeringHostId === item.host_id ? 'animate-spin text-sky-400' : 'text-slate-400'}`} />
+                        <span className="font-medium text-[11px]">{triggeringHostId === item.host_id ? '检测中' : '刷新'}</span>
                       </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => toggleExpandHost(item)}
+                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition flex items-center gap-1.5 cursor-pointer shadow-xs ${
+                        isExpanded
+                          ? 'border-sky-500 bg-sky-950/80 text-sky-300'
+                          : 'border-sky-500/40 bg-sky-600/10 hover:bg-sky-600/20 text-sky-300'
+                      }`}
+                      title={isExpanded ? '收起此机详细巡检成果' : '展开此机最新诊断与各区域时延详情'}
+                    >
+                      <span>{isExpanded ? '收起详情' : '查看详情'}</span>
+                      {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Card Middle: Dual Track Carrier Matrix */}
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-3.5 items-center">
+                  {/* Left: Target Addresses */}
+                  <div className="lg:col-span-3 space-y-1 text-xs font-mono">
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <span className="text-slate-500 font-sans text-[11px] w-5 shrink-0">V4</span>
+                      <span className="truncate text-slate-200" title={authed ? item.target : '已脱敏'}>
+                        {authed ? (item.target || '—') : '已脱敏公网 IP'}
+                      </span>
+                    </div>
+                    {item.is_dual_stack && (
+                      <div className="flex items-center gap-2 text-slate-400">
+                        <span className="text-slate-500 font-sans text-[11px] w-5 shrink-0">V6</span>
+                        <span className="truncate text-indigo-300" title={authed ? item.target_v6 : '已脱敏'}>
+                          {authed ? (item.target_v6 || '—') : '已脱敏 IPv6'}
+                        </span>
+                      </div>
+                    )}
+                    <div className="sm:hidden flex items-center gap-1 text-[11px] text-slate-500 pt-0.5 font-mono">
+                      <Clock className="h-3 w-3" />
+                      <span>{inspection.time} ({inspection.relative})</span>
                     </div>
                   </div>
 
-                  {/* Card Body: Responsive 3-Section Grid (Zero text overlap) */}
-                  <div className="p-3.5 sm:p-4 grid grid-cols-1 md:grid-cols-12 gap-3.5 items-center">
-                    {/* Section 1: Public IPs (3 cols on md/lg) */}
-                    <div className="md:col-span-3 space-y-1 text-xs font-mono">
-                      <div className="flex items-center gap-1.5 text-slate-300">
-                        <span className="text-slate-500 font-sans text-[11px] w-6 shrink-0">V4:</span>
-                        <span className="truncate" title={authed ? item.target : '已脱敏'}>
-                          {authed ? (item.target || '—') : '已脱敏公网 IP'}
-                        </span>
-                      </div>
-                      {item.is_dual_stack && (
-                        <div className="flex items-center gap-1.5 text-slate-400">
-                          <span className="text-slate-500 font-sans text-[11px] w-6 shrink-0">V6:</span>
-                          <span className="truncate text-indigo-300/90" title={authed ? item.target_v6 : '已脱敏'}>
-                            {authed ? (item.target_v6 || '—') : '已脱敏 IPv6'}
+                  {/* Middle: Verdict Pills */}
+                  <div className="lg:col-span-3 space-y-1.5">
+                    <div>
+                      <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium border ${
+                        isOk
+                          ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
+                          : isBlocked
+                          ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
+                          : isLimited
+                          ? 'border-purple-500/40 bg-purple-950/60 text-purple-300'
+                          : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
+                      }`}>
+                        {isOk ? <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" /> : isLimited ? <Clock className="h-3 w-3 text-purple-400 shrink-0" /> : <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />}
+                        <span className="truncate">{item.is_dual_stack ? `V4: ${item.verdict_label}` : item.verdict_label}</span>
+                      </span>
+                    </div>
+                    {item.is_dual_stack && (
+                      <div>
+                        {item.verdict_label_v6 ? (
+                          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium border ${
+                            item.verdict_v6 === 'ok'
+                              ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
+                              : item.verdict_v6 === 'gfw_blocked'
+                              ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
+                              : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
+                          }`}>
+                            {item.verdict_v6 === 'ok' ? <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" /> : <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />}
+                            <span className="truncate">V6: {item.verdict_label_v6}</span>
                           </span>
-                        </div>
-                      )}
-                      <div className="sm:hidden flex items-center gap-1 text-[11px] text-slate-500 pt-0.5">
-                        <Clock className="h-3 w-3" />
-                        <span>{inspection.time} ({inspection.relative})</span>
-                      </div>
-                    </div>
-
-                    {/* Section 2: Verdict Badges (4 cols on md/lg) */}
-                    <div className="md:col-span-4 space-y-1.5">
-                      <div className="flex items-center">
-                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium border ${
-                          isOk
-                            ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
-                            : isBlocked
-                            ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
-                            : isLimited
-                            ? 'border-purple-500/40 bg-purple-950/60 text-purple-300'
-                            : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
-                        }`}>
-                          {isOk ? <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" /> : isLimited ? <Clock className="h-3 w-3 text-purple-400 shrink-0" /> : <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />}
-                          <span className="truncate">{item.is_dual_stack ? `V4: ${item.verdict_label}` : item.verdict_label}</span>
-                        </span>
-                      </div>
-                      {item.is_dual_stack && (
-                        <div className="flex items-center">
-                          {item.verdict_label_v6 ? (
-                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium border ${
-                              item.verdict_v6 === 'ok'
-                                ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
-                                : item.verdict_v6 === 'gfw_blocked'
-                                ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
-                                : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
-                            }`}>
-                              {item.verdict_v6 === 'ok' ? <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" /> : <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />}
-                              <span className="truncate">V6: {item.verdict_label_v6}</span>
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-slate-500">V6: 待测试</span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Section 3: Core 4 Carrier Metrics Grid (5 cols on md/lg) */}
-                    <div className="md:col-span-5 grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono">
-                      {/* Telecom */}
-                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
-                        <span className="text-[10px] text-slate-400 font-sans block truncate">中国电信 (4134)</span>
-                        <div className="whitespace-nowrap">
-                          {v4Telecom ? (
-                            <span className={`inline-block px-1.5 py-0.2 rounded text-xs font-bold ${latencyBadgeColor(v4Telecom)}`}>
-                              {item.is_dual_stack ? 'V4 ' : ''}{v4Telecom} ms
-                            </span>
-                          ) : (
-                            <span className="text-slate-600 text-xs">—</span>
-                          )}
-                        </div>
-                        {item.is_dual_stack && (
-                          <div className="pt-0.5 whitespace-nowrap">
-                            {v6Telecom ? (
-                              <span className={`inline-block px-1 py-0.1 rounded text-[10px] ${latencyBadgeColor(v6Telecom)}`}>
-                                V6 {v6Telecom} ms
-                              </span>
-                            ) : (
-                              <span className="text-slate-600 text-[10px]">V6 —</span>
-                            )}
-                          </div>
+                        ) : (
+                          <span className="text-[11px] text-slate-500 font-mono">V6: 待测试</span>
                         )}
                       </div>
-
-                      {/* Unicom */}
-                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
-                        <span className="text-[10px] text-slate-400 font-sans block truncate">中国联通 (4837)</span>
-                        <div className="whitespace-nowrap">
-                          {v4Unicom ? (
-                            <span className={`inline-block px-1.5 py-0.2 rounded text-xs font-bold ${latencyBadgeColor(v4Unicom)}`}>
-                              {item.is_dual_stack ? 'V4 ' : ''}{v4Unicom} ms
-                            </span>
-                          ) : (
-                            <span className="text-slate-600 text-xs">—</span>
-                          )}
-                        </div>
-                        {item.is_dual_stack && (
-                          <div className="pt-0.5 whitespace-nowrap">
-                            {v6Unicom ? (
-                              <span className={`inline-block px-1 py-0.1 rounded text-[10px] ${latencyBadgeColor(v6Unicom)}`}>
-                                V6 {v6Unicom} ms
-                              </span>
-                            ) : (
-                              <span className="text-slate-600 text-[10px]">V6 —</span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Mobile */}
-                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
-                        <span className="text-[10px] text-slate-400 font-sans block truncate">中国移动 (9808)</span>
-                        <div className="whitespace-nowrap">
-                          {v4Mobile ? (
-                            <span className={`inline-block px-1.5 py-0.2 rounded text-xs font-bold ${latencyBadgeColor(v4Mobile)}`}>
-                              {item.is_dual_stack ? 'V4 ' : ''}{v4Mobile} ms
-                            </span>
-                          ) : (
-                            <span className="text-slate-600 text-xs">—</span>
-                          )}
-                        </div>
-                        {item.is_dual_stack && (
-                          <div className="pt-0.5 whitespace-nowrap">
-                            {v6Mobile ? (
-                              <span className={`inline-block px-1 py-0.1 rounded text-[10px] ${latencyBadgeColor(v6Mobile)}`}>
-                                V6 {v6Mobile} ms
-                              </span>
-                            ) : (
-                              <span className="text-slate-600 text-[10px]">V6 —</span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Global Avg */}
-                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
-                        <span className="text-[10px] text-slate-400 font-sans block truncate">全球均延</span>
-                        <div className="whitespace-nowrap text-xs text-slate-200 font-bold">
-                          {v4Global ? `${item.is_dual_stack ? 'V4 ' : ''}${v4Global} ms` : '—'}
-                        </div>
-                        {item.is_dual_stack && (
-                          <div className="whitespace-nowrap text-[10px] text-slate-400 pt-0.5 truncate">
-                            {v6Global ? `V6 ${v6Global} ms` : (v6CnAvg ? `V6 ${v6CnAvg} ms` : 'V6 —')}
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    )}
                   </div>
 
-                  {/* IN-PLACE ACCORDION DETAILS (Expands seamlessly beneath the card) */}
-                  {isExpanded && (
-                    <div className="border-t border-slate-800/80 bg-slate-950/80 p-4 sm:p-5 rounded-b-xl space-y-4 animate-fade-in">
+                  {/* Right: Carrier Telemetry Bento Tiles */}
+                  <div className="lg:col-span-6 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+                    {/* Telecom */}
+                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 space-y-1">
+                      <span className="text-[10px] text-slate-400 font-sans block truncate">中国电信 (4134)</span>
+                      <div className="whitespace-nowrap font-bold">
+                        {v4Telecom ? (
+                          <span className={latencyBadgeTextColor(v4Telecom)}>
+                            {item.is_dual_stack ? 'V4 ' : ''}{v4Telecom} ms
+                          </span>
+                        ) : isBlocked ? (
+                          <span className="text-rose-400 font-medium">V4 — (超时)</span>
+                        ) : (
+                          <span className="text-slate-600 font-medium">V4 —</span>
+                        )}
+                      </div>
+                      {item.is_dual_stack && (
+                        <div className="whitespace-nowrap text-[11px]">
+                          {v6Telecom ? (
+                            <span className={latencyBadgeTextColor(v6Telecom)}>
+                              V6 {v6Telecom} ms
+                            </span>
+                          ) : (
+                            <span className="text-slate-600">V6 —</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Unicom */}
+                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 space-y-1">
+                      <span className="text-[10px] text-slate-400 font-sans block truncate">中国联通 (4837)</span>
+                      <div className="whitespace-nowrap font-bold">
+                        {v4Unicom ? (
+                          <span className={latencyBadgeTextColor(v4Unicom)}>
+                            {item.is_dual_stack ? 'V4 ' : ''}{v4Unicom} ms
+                          </span>
+                        ) : isBlocked ? (
+                          <span className="text-rose-400 font-medium">V4 — (超时)</span>
+                        ) : (
+                          <span className="text-slate-600 font-medium">V4 —</span>
+                        )}
+                      </div>
+                      {item.is_dual_stack && (
+                        <div className="whitespace-nowrap text-[11px]">
+                          {v6Unicom ? (
+                            <span className={latencyBadgeTextColor(v6Unicom)}>
+                              V6 {v6Unicom} ms
+                            </span>
+                          ) : (
+                            <span className="text-slate-600">V6 —</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Mobile */}
+                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 space-y-1">
+                      <span className="text-[10px] text-slate-400 font-sans block truncate">中国移动 (9808)</span>
+                      <div className="whitespace-nowrap font-bold">
+                        {v4Mobile ? (
+                          <span className={latencyBadgeTextColor(v4Mobile)}>
+                            {item.is_dual_stack ? 'V4 ' : ''}{v4Mobile} ms
+                          </span>
+                        ) : isBlocked ? (
+                          <span className="text-rose-400 font-medium">V4 — (超时)</span>
+                        ) : (
+                          <span className="text-slate-600 font-medium">V4 —</span>
+                        )}
+                      </div>
+                      {item.is_dual_stack && (
+                        <div className="whitespace-nowrap text-[11px]">
+                          {v6Mobile ? (
+                            <span className={latencyBadgeTextColor(v6Mobile)}>
+                              V6 {v6Mobile} ms
+                            </span>
+                          ) : (
+                            <span className="text-slate-600">V6 —</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Global Avg */}
+                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 space-y-1">
+                      <span className="text-[10px] text-slate-400 font-sans block truncate">全球核心均延</span>
+                      <div className="whitespace-nowrap text-slate-200 font-bold">
+                        {v4Global ? `${item.is_dual_stack ? 'V4 ' : ''}${v4Global} ms` : '—'}
+                      </div>
+                      {item.is_dual_stack && (
+                        <div className="whitespace-nowrap text-[11px] text-indigo-300 truncate">
+                          {v6Global ? `V6 ${v6Global} ms` : (v6CnAvg ? `V6 ${v6CnAvg} ms` : 'V6 —')}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* IN-PLACE ACCORDION DETAILS (Expands seamlessly beneath the card) */}
+                {isExpanded && (
+                  <div className="mt-4 pt-4 border-t border-slate-800/80 bg-slate-950/60 -mx-4 -mb-4 md:-mx-5 md:-mb-5 p-4 md:p-5 rounded-b-2xl space-y-4 animate-fade-in">
                       {summary ? (
                         <div className="space-y-4">
                           {/* Diagnostic Verdict Card */}
@@ -990,7 +998,6 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             })}
           </div>
         )}
-      </section>
 
       {/* API Key Modal */}
       {showKeyModal && (

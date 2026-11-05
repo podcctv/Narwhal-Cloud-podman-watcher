@@ -223,36 +223,19 @@ export const TcpingPage: React.FC = () => {
     </header>
 
     {activeTab === 'reach' ? (
-      <>
-        <section className="tcp-r-hero">
-          <div className="tcp-r-hero-copy">
-            <p className="tcp-r-eyebrow">GLOBAL & CHINA 3-CARRIERS REACHABILITY / DNS · TCP · TLS TIMINGS</p>
-            <h1>全球与国内三网可达性检测</h1>
-            <p>参考开源 reach-check 核心逻辑，通过 18 个全球节点与国内电信/联通/移动三网实时探测可达性、建连时延与 GFW 阻断诊断。</p>
-            <div className="tcp-r-direction"><Info size={15} /><span>轻量化无侵入架构：纯前端直连 Globalping 探针网络与浏览器本地探测，不占用母机后台守护进程。</span></div>
-          </div>
-          <div className="tcp-r-catalog" aria-label="探测网络规模">
-            <div><b>18+</b><span>全球区域</span></div>
-            <div><b>3 网</b><span>电信/联通/移动</span></div>
-            <div><b>4 阶</b><span>DNS/TCP/TLS/首包</span></div>
-            <div><b>0</b><span>后台资源开销</span></div>
-          </div>
-        </section>
-
-        <div className="max-w-6xl mx-auto px-4 py-6 w-full">
-          <ReachCheckPanel
-            availableHosts={sources.map(s => ({ id: s.id, name: s.name, ip: undefined }))}
-            initialTarget={new URLSearchParams(window.location.search).get('reach_target') || (source?.name || sources[0]?.name || '')}
-            isLoggedIn={isLoggedIn}
-            onBackToTcping={() => {
-              setActiveTab('tcping');
-              const url = new URL(window.location.href);
-              url.searchParams.delete('tab');
-              window.history.replaceState(null, '', url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : ''));
-            }}
-          />
-        </div>
-      </>
+      <div className="max-w-7xl mx-auto px-3 sm:px-4 py-5 w-full">
+        <ReachCheckPanel
+          availableHosts={sources.map(s => ({ id: s.id, name: s.name, ip: undefined }))}
+          initialTarget={new URLSearchParams(window.location.search).get('reach_target') || (source?.name || sources[0]?.name || '')}
+          isLoggedIn={isLoggedIn}
+          onBackToTcping={() => {
+            setActiveTab('tcping');
+            const url = new URL(window.location.href);
+            url.searchParams.delete('tab');
+            window.history.replaceState(null, '', url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : ''));
+          }}
+        />
+      </div>
     ) : (
       <>
     <section className="tcp-r-hero">
