@@ -256,6 +256,24 @@ export interface ContainerSecurity {
     violation_count: number;
     reason?: string;
   };
+  freeze_guard?: {
+    supported?: boolean;
+    frozen?: boolean;
+    journaled?: boolean;
+    frozen_at?: number | null;
+  };
+  udp_blackhole?: {
+    active?: boolean;
+    allow_dns?: boolean;
+    applied_at?: number | null;
+  };
+  anti_spoof?: {
+    active?: boolean;
+    veth?: string;
+    v4_ips?: string[];
+    v6_ips?: string[];
+    applied_at?: number | null;
+  };
   configuration_risks?: { message?: string; code?: string }[];
   communication_detail_available?: boolean;
   service_inventory_state?: 'complete' | 'partial' | 'unavailable' | string;

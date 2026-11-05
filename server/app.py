@@ -5802,7 +5802,7 @@ async def set_container_disposition(request: Request) -> JSONResponse:
         raise HTTPException(
             status_code=400, detail="host_id, runtime, and container_name are required"
         )
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle"):
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "freeze_container", "unfreeze_container", "apply_udp_blackhole", "release_udp_blackhole", "apply_anti_spoof", "release_anti_spoof"):
         raise HTTPException(status_code=400, detail="invalid decision")
 
     conn = db()
@@ -5875,7 +5875,7 @@ async def set_container_disposition(request: Request) -> JSONResponse:
             conn.close()
             return await set_security_alert_disposition(selected_alert_id, request)
 
-        if decision in ("release_udp_throttle", "apply_udp_throttle"):
+        if decision in ("release_udp_throttle", "apply_udp_throttle", "freeze_container", "unfreeze_container", "apply_udp_blackhole", "release_udp_blackhole", "apply_anti_spoof", "release_anti_spoof"):
             now = int(time.time())
             action_type = decision
             params = {"rate_mbps": 10, "duration": 3600} if decision == "apply_udp_throttle" else {}

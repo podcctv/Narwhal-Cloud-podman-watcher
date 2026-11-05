@@ -2609,6 +2609,56 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertEqual(body_apply["action"]["action_type"], "apply_udp_throttle")
         self.assertEqual(body_apply["action"]["params"]["rate_mbps"], 10)
 
+    def test_phase1_freeze_udp_blackhole_anti_spoof_dispositions(self):
+        class ContainerReq:
+            state = type("State", (), {"dashboard_user": "test_admin"})()
+            def __init__(self, data):
+                self.data = data
+            async def json(self):
+                return self.data
+
+        # freeze_container
+        req_freeze = ContainerReq({
+            "host_id": "hk-host",
+            "runtime": "runman",
+            "project": "default",
+            "container_name": "12345678-1234-1234-1234-123456789abc",
+            "decision": "freeze_container",
+        })
+        resp = asyncio.run(server.set_container_disposition(req_freeze))
+        self.assertEqual(resp.status_code, 202)
+        body = json.loads(resp.body)
+        self.assertEqual(body["decision"], "freeze_container")
+        self.assertEqual(body["action"]["action_type"], "freeze_container")
+
+        # apply_udp_blackhole
+        req_udp = ContainerReq({
+            "host_id": "hk-host",
+            "runtime": "runman",
+            "project": "default",
+            "container_name": "12345678-1234-1234-1234-123456789abc",
+            "decision": "apply_udp_blackhole",
+        })
+        resp = asyncio.run(server.set_container_disposition(req_udp))
+        self.assertEqual(resp.status_code, 202)
+        body = json.loads(resp.body)
+        self.assertEqual(body["decision"], "apply_udp_blackhole")
+        self.assertEqual(body["action"]["action_type"], "apply_udp_blackhole")
+
+        # apply_anti_spoof
+        req_spoof = ContainerReq({
+            "host_id": "hk-host",
+            "runtime": "runman",
+            "project": "default",
+            "container_name": "12345678-1234-1234-1234-123456789abc",
+            "decision": "apply_anti_spoof",
+        })
+        resp = asyncio.run(server.set_container_disposition(req_spoof))
+        self.assertEqual(resp.status_code, 202)
+        body = json.loads(resp.body)
+        self.assertEqual(body["decision"], "apply_anti_spoof")
+        self.assertEqual(body["action"]["action_type"], "apply_anti_spoof")
+
 
     def test_report_handles_null_disk_payload_and_updates_last_seen(self):
         now = int(time.time())

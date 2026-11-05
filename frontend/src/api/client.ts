@@ -266,7 +266,7 @@ export const api = {
 
   dispositionContainer: (
     identity: ContainerIdentity,
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve' | 'release_udp_throttle' | 'apply_udp_throttle' | string
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'resolve' | 'release_udp_throttle' | 'apply_udp_throttle' | 'freeze_container' | 'unfreeze_container' | 'apply_udp_blackhole' | 'release_udp_blackhole' | 'apply_anti_spoof' | 'release_anti_spoof' | string
   ) =>
     request<{ queued?: boolean; detail?: string }>('/api/v1/containers/disposition', {
       method: 'POST',

@@ -50,7 +50,7 @@ except ImportError:  # Optional at import time for source-only/test environments
     maxminddb = None
 
 try:
-    from client import abuse_guard, abuse_collection, network_quarantine, admission_guard, admission_observe, pasarguard_guard
+    from client import abuse_guard, abuse_collection, network_quarantine, admission_guard, admission_observe, pasarguard_guard, container_freeze, udp_guard, anti_spoof_guard
 except ImportError:
     import abuse_guard
     import abuse_collection
@@ -58,6 +58,9 @@ except ImportError:
     import admission_guard
     import admission_observe
     import pasarguard_guard
+    import container_freeze
+    import udp_guard
+    import anti_spoof_guard
 
 APP_VERSION = os.getenv("NARWHAL_VERSION", "dev").strip() or "dev"
 
@@ -8209,6 +8212,9 @@ def collect_runman_report(
         'runman_metrics': raw_metrics,
         'inspection_status': 'runman_guest_exec' if str(container.get('status')) == 'running' else 'stopped',
         'deep_process_inspection_supported': str(container.get('status')) == 'running',
+        'freeze_guard': container_freeze.get_freeze_status('runman', str(container.get('name') or ''), container.get('pid'), instance_id=instance_id, expected_start_ticks=str(container.get('pid_start_ticks') or '')),
+        'udp_blackhole': udp_guard.get_udp_blackhole_status('runman', str(container.get('name') or ''), pid=int(container.get('pid') or 0)),
+        'anti_spoof': anti_spoof_guard.get_anti_spoof_status_for_container('runman', str(container.get('name') or '')),
     })
     existing_disk = report.get('container_disk') if isinstance(report.get('container_disk'), dict) else {}
     existing_fs = existing_disk.get('fs') if isinstance(existing_disk.get('fs'), dict) else {}
@@ -9101,6 +9107,9 @@ def collect_container(
             "vmess_listener_inventory_source": vmess_listener_source,
             "vmess_listener_inventory_reason": vmess_listener_inventory_reason,
             "vmess_listener_inventory_complete": vmess_listener_inventory_complete,
+            "freeze_guard": container_freeze.get_freeze_status(runtime_name, name, pid, instance_id=instance_id or container_id),
+            "udp_blackhole": udp_guard.get_udp_blackhole_status(runtime_name, name, pid=pid),
+            "anti_spoof": anti_spoof_guard.get_anti_spoof_status_for_container(runtime_name, name),
         }
     )
     cpu_pressure_percent = cpu_percent
@@ -11971,6 +11980,50 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             _hy2_throttle_states[key]["consecutive_violation_count"] = 0
             _hy2_throttle_states[key]["reason"] = ""
         return ok, message
+    if action_type == "freeze_container":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        pid = int(params.get("pid") or 0)
+        instance_id = str(params.get("instance_id") or "")
+        return container_freeze.freeze_container(runtime_kind, container_name, pid, instance_id=instance_id)
+    if action_type == "unfreeze_container":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        pid = int(params.get("pid") or 0)
+        instance_id = str(params.get("instance_id") or "")
+        return container_freeze.unfreeze_container(runtime_kind, container_name, pid, instance_id=instance_id)
+    if action_type == "apply_udp_blackhole":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        project = str(action.get("project") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        pid = int(params.get("pid") or 0)
+        instance_id = str(params.get("instance_id") or "")
+        allow_dns = bool(params.get("allow_dns", True))
+        return udp_guard.apply_udp_blackhole(runtime_kind, container_name, pid=pid, instance_id=instance_id, allow_dns=allow_dns, project=project)
+    if action_type == "release_udp_blackhole":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        project = str(action.get("project") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        pid = int(params.get("pid") or 0)
+        instance_id = str(params.get("instance_id") or "")
+        return udp_guard.release_udp_blackhole(runtime_kind, container_name, pid=pid, instance_id=instance_id, project=project)
+    if action_type == "apply_anti_spoof":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        veth_name = str(params.get("veth_name") or "")
+        allocated_ips = params.get("allocated_ips") if isinstance(params.get("allocated_ips"), list) else []
+        return anti_spoof_guard.apply_anti_spoof(veth_name, allocated_ips, runtime=runtime_kind, name=container_name)
+    if action_type == "release_anti_spoof":
+        runtime_kind = str(action.get("runtime") or "").strip().lower()
+        container_name = str(action.get("container_name") or "").strip()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        veth_name = str(params.get("veth_name") or "")
+        return anti_spoof_guard.release_anti_spoof(veth_name, runtime=runtime_kind, name=container_name)
     if action_type == "remediate_malicious_process":
         return remediate_malicious_process(action)
     if action_type == "stop_container":

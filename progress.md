@@ -2,6 +2,34 @@
 
 更新时间：2026-11-05（Asia/Shanghai）
 
+## 阶段一：Rust/Incus 容器 cgroup 进程挂起冻结、出站 UDP 专项阻断与网卡反欺骗（v1.8.4）
+
+- **阶段一（P0 · 核心防线）全链路落地**：
+  - 需求背景：用户要求按“阶段 1、2、3 顺序实施”，全面升级 Rust (Runman)、Incus 与 Podman 容器的深度管控、网络封锁与应急阻断能力。
+  - **核心特性实装**：
+    1. **cgroup v2 进程冻结挂起与解冻 (`client/container_freeze.py`)**：
+       - 精确绑定容器实例代次（Runman UUID / expected_start_ticks / Incus lxc.payload），定位专属 `cgroup` 边界。
+       - 通过 `cgroup.freeze`（值 1/0）触发原子冻结/解冻，并在超时保护下轮询读回 `cgroup.events`（`frozen 1` / `frozen 0`），超时自动安全回滚。
+       - 瞬间定格所有进程/线程，内存现场与取证状态完好保留，不杀进程、安全可逆；写入 `/var/lib/narwhal-agent/container-freeze.json` 状态日志。
+    2. **出站 UDP 专项阻断黑洞 (`client/udp_guard.py`)**：
+       - 借助 `nsenter -t <pid> -n` 精准进入容器网络命名空间，基于 nftables 表 `inet narwhal_udp_guard`（或 iptables fallback）构建出站 UDP 黑洞。
+       - 阻断恶意 UDP 洪水与 DNS/NTP/CLDAP 放大攻击，同时精准放行回环 (`lo`)、已建立连接 (`ESTABLISHED,RELATED`)、可选 53 端口 DNS 解析与入站 TCP/SSH 管理通道，避免全断网误杀。
+       - 写入 `/var/lib/narwhal-agent/udp-blackhole.json` 状态日志。
+    3. **宿主机 Veth 源地址反欺骗校验 (`client/anti_spoof_guard.py`)**：
+       - 在宿主机侧设置容器网卡接口 `net.ipv4.conf.<veth>.rp_filter=1`（严格逆向路径校验）。
+       - 在宿主机 Forward 链注入 nftables 表 `inet narwhal_antispoof` 规则，严禁容器通过 Raw Socket 伪造未分配的源 IP 发包。
+       - 写入 `/var/lib/narwhal-agent/anti-spoof.json` 状态日志。
+    4. **Server API 契约与全状态遥测接入**：
+       - `server/app.py` 中的 `set_container_disposition` 支持新指令：`freeze_container`、`unfreeze_container`、`apply_udp_blackhole`、`release_udp_blackhole`、`apply_anti_spoof`、`release_anti_spoof`。
+       - `client/agent.py` 遥测上报集成 `freeze_guard`、`udp_blackhole` 与 `anti_spoof` 状态，实时回传至控制中心。
+    5. **前端 UI 控件与状态徽章即时呈现**：
+       - `ContainerStateBadges.tsx` 动态展示 `❄️ 进程已挂起`、`🛡️ UDP黑洞` 与 `🔒 源IP防伪造` 状态。
+       - `ContainerDrawer.tsx` 新增专属“容器内核防护与应急阻断 (Phase 1 核心防线)”控制磁贴，支持一键挂起/解冻、一键实施/解除 UDP 阻断，并提示 Veth 防伪造保护状态。
+- **验证结论**：
+  - 前端 `npm run build` TypeScript 编译与 Vite 生产打包 100% 成功，产出 `ContainerDrawer-BQ943_mx.js` 等更新文件。
+  - `python -m compileall` 零报错通过。
+  - 10 项全新专项单元测试（`test_container_freeze.py`, `test_udp_guard.py`, `test_anti_spoof_guard.py`）与服务端集成单测（`test_server_runtime.py`）全部 100% 绿色通过。
+
 ## 全面实装 Cyberpunk Bento Glow 极客黑金卡片大盘与极简顶栏（v1.8.3）
 
 - **痛点根治与顶层多层嵌套标题终极精简**：

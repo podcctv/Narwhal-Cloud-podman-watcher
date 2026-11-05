@@ -17,6 +17,7 @@ import {
   ArrowUpRight,
   Gauge,
   Unlock,
+  Snowflake,
   Mail,
   Save,
 } from 'lucide-react';
@@ -263,7 +264,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [diagnostic, setDiagnostic] = useState<DiagnosticData | null>(null);
   const [isDrawerActionLoading, setIsDrawerActionLoading] = useState(false);
-  const [pendingDecision, setPendingDecision] = useState<'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle' | null>(null);
+  const [pendingDecision, setPendingDecision] = useState<'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle' | 'freeze_container' | 'unfreeze_container' | 'apply_udp_blackhole' | 'release_udp_blackhole' | null>(null);
   const [userEmail, setUserEmail] = useState('');
   const [userNote, setUserNote] = useState('');
   const [isSavingUserNote, setIsSavingUserNote] = useState(false);
@@ -366,7 +367,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   };
 
   const handleDrawerDisposition = async (
-    decision: 'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle'
+    decision: 'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle' | 'freeze_container' | 'unfreeze_container' | 'apply_udp_blackhole' | 'release_udp_blackhole' | string
   ) => {
     if (!identity) return;
     setIsDrawerActionLoading(true);
@@ -383,8 +384,16 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           : decision === 'resolve'
           ? '风险已标记为已解决'
           : decision === 'release_udp_throttle'
-          ? (res.queued ? 'UDP 限速解除指令已下发节点执行' : '已解除 UDP 限速')
-          : '已成功添加放行策略'
+          ? (res.queued ? '恢复指令已下发节点执行' : '已解除 UDP 限速')
+          : decision === 'freeze_container'
+          ? (res.queued ? '挂起冻结指令已下发节点' : '容器进程已成功挂起冻结')
+          : decision === 'unfreeze_container'
+          ? (res.queued ? '解除冻结指令已下发节点' : '容器已解除冻结恢复运行')
+          : decision === 'apply_udp_blackhole'
+          ? (res.queued ? 'UDP 黑洞指令已下发节点' : '出站 UDP 专项阻断已生效')
+          : decision === 'release_udp_blackhole'
+          ? (res.queued ? '解除 UDP 黑洞指令已下发' : '出站 UDP 阻断已解除')
+          : '已成功应用操作'
       );
       const latestData = await api.getLatest(true);
       const found = latestData.items.find(
@@ -544,12 +553,20 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
     return false;
   });
   const confirmationCopy = pendingDecision === 'release_udp_throttle'
-    ? { title: '确认立即解除 UDP 限速？', description: `将立即移除 ${identity.container_name} 的 Linux tc 限速规则并恢复全速。`, confirmLabel: '解除限速', tone: 'primary' as const }
+    ? { title: '确认解除 UDP 限速？', description: `将移除 ${identity.container_name} 的 Linux tc 限速规则并恢复全速。`, confirmLabel: '解除限速', tone: 'primary' as const }
+    : pendingDecision === 'freeze_container'
+    ? { title: '确认挂起冻结容器进程？', description: `将通过 cgroup v2 挂起 ${identity.container_name} 的全部线程，不杀死进程，内存现场与取证状态完好保留。`, confirmLabel: '挂起冻结', tone: 'danger' as const }
+    : pendingDecision === 'unfreeze_container'
+    ? { title: '确认解除冻结恢复运行？', description: `将通过 cgroup v2 唤醒 ${identity.container_name} 的全部挂起进程恢复正常运行。`, confirmLabel: '解除冻结', tone: 'primary' as const }
+    : pendingDecision === 'apply_udp_blackhole'
+    ? { title: '确认实施出站 UDP 专项阻断？', description: `将在 ${identity.container_name} 的网络命名空间中定向丢弃出站 UDP 流量，保留 TCP/SSH 正常入站与管理。`, confirmLabel: '实施 UDP 阻断', tone: 'danger' as const }
+    : pendingDecision === 'release_udp_blackhole'
+    ? { title: '确认解除出站 UDP 阻断？', description: `将恢复 ${identity.container_name} 的正常出站 UDP 流量。`, confirmLabel: '解除阻断', tone: 'primary' as const }
     : pendingDecision === 'deny'
-    ? { title: '确认定向处置？', description: `仅处理 ${identity.container_name} 中已识别的违规进程、服务或配置，不会停止容器。`, confirmLabel: '确认处置', tone: 'danger' as const }
+    ? { title: '确认处置封禁？', description: `对 ${identity.container_name} 确认违规处置，停止违规行为。`, confirmLabel: '确认处置', tone: 'danger' as const }
     : pendingDecision === 'allow_silent'
-    ? { title: '确认放行策略？', description: '当前风险会被持续放行且不再提醒；可在告警历史中撤销。', confirmLabel: '确认放行', tone: 'primary' as const }
-    : { title: '确认标记为已解决？', description: '活动告警将转入历史记录；再次检测到风险时仍会重新告警。', confirmLabel: '标记已解决', tone: 'primary' as const };
+    ? { title: '确认放行不处置？', description: '当前放行后不再提醒，在告警历史中显示。', confirmLabel: '确认放行', tone: 'primary' as const }
+    : { title: '确认标记为已解决？', description: '活动告警将转入历史记录，再次检测到异常时仍会恢复告警。', confirmLabel: '标为已解决', tone: 'primary' as const }
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="container-drawer-title">
@@ -1080,7 +1097,133 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
               </div>
             </div>
 
-            {/* Security Checks & Surface Risk */}
+                            {/* Phase 1 Kernel Defense & Containment Controls */}
+                <div className="col-span-1 sm:col-span-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-slate-300">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-semibold flex items-center gap-1.5 text-slate-200">
+                      <Shield className="h-3.5 w-3.5 text-sky-400" />
+                      <span>容器内核防护与应急阻断 (Phase 1 核心防线)</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      cgroup v2 · NetNS · Host Veth
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    {/* Freeze Control */}
+                    <div className="p-2.5 rounded-md border border-slate-800/80 bg-slate-950/40 flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-slate-300 flex items-center gap-1.5">
+                            <Snowflake className="h-3.5 w-3.5 text-sky-400" />
+                            进程冻结挂起
+                          </span>
+                          {sec.freeze_guard?.frozen ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/40 font-bold animate-pulse">
+                              已冻结 (frozen 1)
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">
+                              正常运行
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                          瞬间定格容器所有线程，内存现场与取证完整保留，不破坏进程。
+                        </p>
+                      </div>
+                      <div className="pt-2 mt-1 border-t border-slate-800/50">
+                        {sec.freeze_guard?.frozen ? (
+                          <button
+                            type="button"
+                            disabled={isDrawerActionLoading}
+                            onClick={() => setPendingDecision('unfreeze_container')}
+                            className="w-full flex items-center justify-center gap-1 rounded bg-sky-600 hover:bg-sky-500 text-white px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
+                          >
+                            <Unlock className="h-3 w-3" />
+                            <span>解除冻结恢复</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isDrawerActionLoading}
+                            onClick={() => setPendingDecision('freeze_container')}
+                            className="w-full flex items-center justify-center gap-1 rounded border border-sky-500/40 bg-sky-950/40 hover:bg-sky-900/60 text-sky-300 px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
+                          >
+                            <Snowflake className="h-3 w-3" />
+                            <span>挂起冻结进程</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* UDP Blackhole Control */}
+                    <div className="p-2.5 rounded-md border border-slate-800/80 bg-slate-950/40 flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-slate-300 flex items-center gap-1.5">
+                            <Gauge className="h-3.5 w-3.5 text-amber-400" />
+                            出站 UDP 专项阻断
+                          </span>
+                          {sec.udp_blackhole?.active ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold">
+                              阻断中 (放行DNS)
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">
+                              全速放行
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                          定向切断容器出站 UDP 洪水与放大攻击，保留 TCP、SSH 及入站通道。
+                        </p>
+                      </div>
+                      <div className="pt-2 mt-1 border-t border-slate-800/50">
+                        {sec.udp_blackhole?.active ? (
+                          <button
+                            type="button"
+                            disabled={isDrawerActionLoading}
+                            onClick={() => setPendingDecision('release_udp_blackhole')}
+                            className="w-full flex items-center justify-center gap-1 rounded bg-amber-600 hover:bg-amber-500 text-white px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
+                          >
+                            <Unlock className="h-3 w-3" />
+                            <span>解除 UDP 阻断</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isDrawerActionLoading}
+                            onClick={() => setPendingDecision('apply_udp_blackhole')}
+                            className="w-full flex items-center justify-center gap-1 rounded border border-amber-500/40 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
+                          >
+                            <Shield className="h-3 w-3" />
+                            <span>实施 UDP 黑洞</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Anti-IP Spoof Status Bar */}
+                  <div className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-between text-[11px]">
+                    <span className="text-slate-400 flex items-center gap-1.5">
+                      <Shield className="h-3 w-3 text-emerald-400" />
+                      宿主机 Veth 源地址反欺骗校验 (Anti-IP Spoofing)
+                    </span>
+                    {sec.anti_spoof?.active ? (
+                      <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                        <Check className="h-3 w-3" /> 已启用 strict rp_filter 与源 IP 白名单
+                      </span>
+                    ) : (
+                      <span className="text-slate-500">
+                        内核标准转发模式
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+{/* Security Checks & Surface Risk */}
             <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
               <h3 className="text-xs font-bold text-slate-200 flex items-center gap-2">
                 <Shield className="h-4 w-4 text-amber-400" />

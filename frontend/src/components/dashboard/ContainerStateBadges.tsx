@@ -212,6 +212,15 @@ const buildSignals = (container: ContainerItem, alerts: SecurityAlert[]): Contai
     const rate = container.alerts?.udp_throttle_rate_mbps ?? security.udp_throttle?.rate_mbps;
     add('udp-throttle', rate == null ? 'UDP 限速生效' : `UDP 限速 ${rate} Mbps`, 'info', security.udp_throttle?.reason || 'UDP 定向限速当前生效');
   }
+  if (security.freeze_guard?.frozen) {
+    add('freeze-guard', '❄️ 进程已冻结', 'info', '容器全部进程已被 cgroup v2 挂起冻结，内存与取证现场完好保留');
+  }
+  if (security.udp_blackhole?.active) {
+    add('udp-blackhole', '🛡️ UDP黑洞', 'warning', '容器出站 UDP 流量已被定向丢弃黑洞，TCP 与入站业务正常');
+  }
+  if (security.anti_spoof?.active) {
+    add('anti-spoof', '🔒 源IP防伪造', 'success', '宿主机网卡已启用 rp_filter 与源地址白名单校验');
+  }
   if (container.alerts?.cpu) add('cpu-alert', 'CPU 高负载', 'warning');
   if (container.alerts?.memory) add('memory-alert', '内存压力', 'warning');
   if (container.alerts?.disk) add('disk-alert', '磁盘压力', 'warning');
