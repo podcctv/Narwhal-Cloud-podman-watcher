@@ -266,6 +266,10 @@ export interface ContainerSecurity {
     active?: boolean;
     allow_dns?: boolean;
     applied_at?: number | null;
+    auto_triggered?: boolean;
+    expires_at?: number | null;
+    remaining_seconds?: number | null;
+    reason?: string;
   };
   anti_spoof?: {
     active?: boolean;

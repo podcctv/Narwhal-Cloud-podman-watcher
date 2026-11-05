@@ -4064,27 +4064,35 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         buyer_email_mapping_states = {}
         mapped_after = int(time.time()) - buyer_notifications.buyer_mapping.TTL
         if can_view_user_notes:
-            buyer_emails = {
-                (r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"]): str(r["user_email"] or "")
-                for r in conn.execute(
-                    """
-                    SELECT host_id,runtime,project,container_name,vm_id,user_email
-                    FROM buyer_targets WHERE source='upstream' AND enabled=1 AND scope='user'
-                      AND user_email<>'' AND verified_at>=?
-                    """,
-                    (mapped_after,),
-                )
-            }
-            buyer_email_mapping_states = {
-                (r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"]):
-                    (str(r["user_email"] or ""), int(r["verified_at"] or 0), int(r["enabled"] or 0))
-                for r in conn.execute(
-                    """
-                    SELECT host_id,runtime,project,container_name,vm_id,user_email,verified_at,enabled
-                    FROM buyer_targets WHERE source='upstream' AND scope='user'
-                    """
-                )
-            }
+            buyer_emails = {}
+            for r in conn.execute(
+                """
+                SELECT host_id,runtime,project,container_name,vm_id,user_email
+                FROM buyer_targets WHERE source='upstream' AND enabled=1 AND scope='user'
+                  AND user_email<>'' AND verified_at>=?
+                """,
+                (mapped_after,),
+            ):
+                email_val = str(r["user_email"] or "")
+                buyer_emails[(r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"])] = email_val
+                if r["runtime"] in ("incus", "podman", "container"):
+                    buyer_emails.setdefault((r["host_id"], "runman", r["project"], r["container_name"], r["vm_id"]), email_val)
+                elif r["runtime"] == "runman":
+                    buyer_emails.setdefault((r["host_id"], "incus", r["project"], r["container_name"], r["vm_id"]), email_val)
+
+            buyer_email_mapping_states = {}
+            for r in conn.execute(
+                """
+                SELECT host_id,runtime,project,container_name,vm_id,user_email,verified_at,enabled
+                FROM buyer_targets WHERE source='upstream' AND scope='user'
+                """
+            ):
+                state_val = (str(r["user_email"] or ""), int(r["verified_at"] or 0), int(r["enabled"] or 0))
+                buyer_email_mapping_states[(r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"])] = state_val
+                if r["runtime"] in ("incus", "podman", "container"):
+                    buyer_email_mapping_states.setdefault((r["host_id"], "runman", r["project"], r["container_name"], r["vm_id"]), state_val)
+                elif r["runtime"] == "runman":
+                    buyer_email_mapping_states.setdefault((r["host_id"], "incus", r["project"], r["container_name"], r["vm_id"]), state_val)
             buyer_email_issues = {
                 (r["host_id"], r["runtime"], r["project"], r["container_name"]): str(r["reason"] or "")
                 for r in conn.execute(
@@ -4619,7 +4627,8 @@ async def request_container_diagnostic(request: Request) -> JSONResponse:
         latest_payload = json.loads(latest["payload_json"] or "{}")
     except (TypeError, ValueError):
         latest_payload = {}
-    if str(latest_payload.get("monitor_mode") or "full") != "full":
+    monitor_mode = str(latest_payload.get("monitor_mode") or "full").strip().lower()
+    if monitor_mode in ("notice", "off", "disabled"):
         conn.close()
         raise HTTPException(status_code=409, detail="container is not in full monitoring mode")
 

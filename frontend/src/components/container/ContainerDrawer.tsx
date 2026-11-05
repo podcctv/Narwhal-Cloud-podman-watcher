@@ -888,7 +888,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                       <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(ioGuard?.state)}</span>
                     </div>
                     <p className="text-[11px] leading-relaxed text-slate-300">
-                      {ioGuard?.device ? `设备 ${ioGuard.device}` : '设备待识别'}
+                      {ioGuard?.device ? `设备 ${ioGuard.device}` : ioGuard?.state === 'normal' ? '常规读写 (未触发限额)' : '设备待识别'}
                       {ioGuard?.device_busy_percent !== undefined && ioGuard.device_busy_percent !== null ? ` · 磁盘忙碌 ${fmtNumber(ioGuard.device_busy_percent, 1)}%` : ''}
                       {ioGuard?.host_io_psi_some_avg10 != null ? ` · 母鸡 I/O PSI ${fmtNumber(ioGuard.host_io_psi_some_avg10, 2)}%` : ioGuard?.host_pressure_basis === 'device_busy_fallback_psi_unavailable' ? ' · PSI 不可用，按设备忙碌率兼容判断' : ''}
                       {ioGuard?.dominant_share_percent !== undefined ? ` · 容器占比 ${fmtNumber(ioGuard.dominant_share_percent, 1)}%` : ''}

@@ -176,10 +176,19 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                         : 'bg-emerald-400 shadow-[0_0_6px_rgba(34,197,94,0.7)]'
                     }`}
                   />
-                  <span className="font-bold text-sm text-slate-100 truncate">{c.container_name}</span>
-                  <span className="rounded-md bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 font-mono border border-slate-700">
-                    {c.runtime}
-                  </span>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-sm text-slate-100 truncate">{c.container_name}</span>
+                      <span className="rounded-md bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 font-mono border border-slate-700">
+                        {c.runtime}
+                      </span>
+                    </div>
+                    {c.user_email && (
+                      <div className="text-[11px] text-sky-400/90 font-mono truncate" title={c.user_email}>
+                        {c.user_email}
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -370,6 +379,11 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
                       {c.runtime}
                     </span>
                   </div>
+                  {c.user_email && (
+                    <div className="text-[10px] text-sky-400/90 truncate max-w-[180px] sm:max-w-[240px]" title={c.user_email}>
+                      {c.user_email}
+                    </div>
+                  )}
                 </td>
 
                 {/* 3. CPU */}

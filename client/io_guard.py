@@ -889,8 +889,10 @@ def observe(
                 and host_io_psi < host_psi_threshold
                 and any(value >= pressure_threshold for value in busy_devices)
             )
+            detected_device = next(iter(rates.keys()), None) or (next(iter(host.get("devices", {}).keys()), None) if isinstance(host.get("devices"), dict) else None)
             security["io_guard"] = {
                 "state": "sampling_unavailable" if sample_seconds <= 0 else "waiting_for_host_psi" if waiting_for_psi else "normal",
+                "device": detected_device,
                 "host_io_psi_some_avg10": host_io_psi,
                 "container_io_psi_some_avg10": container_io_psi,
                 "host_io_psi_threshold_percent": host_psi_threshold,

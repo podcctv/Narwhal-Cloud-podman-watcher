@@ -216,7 +216,9 @@ const buildSignals = (container: ContainerItem, alerts: SecurityAlert[]): Contai
     add('freeze-guard', '❄️ 进程已冻结', 'info', '容器全部进程已被 cgroup v2 挂起冻结，内存与取证现场完好保留');
   }
   if (security.udp_blackhole?.active) {
-    add('udp-blackhole', '🛡️ UDP黑洞', 'warning', '容器出站 UDP 流量已被定向丢弃黑洞，TCP 与入站业务正常');
+    const bhRem = security.udp_blackhole?.remaining_seconds;
+    const bhLabel = bhRem && bhRem > 0 ? `🛡️ UDP黑洞 (${Math.ceil(bhRem / 60)}m)` : '🛡️ UDP黑洞';
+    add('udp-blackhole', bhLabel, 'warning', security.udp_blackhole?.reason || '容器出站 UDP 流量已被定向丢弃黑洞，TCP 与入站业务正常');
   }
   if (security.anti_spoof?.active) {
     add('anti-spoof', '🔒 源IP防伪造', 'success', '宿主机网卡已启用 rp_filter 与源地址白名单校验');

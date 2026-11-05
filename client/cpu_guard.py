@@ -105,6 +105,7 @@ def _container_psi(container: dict[str, Any]) -> dict[str, Any]:
         container.get("runtime"),
         container.get("stable_id") or container.get("id"),
         container.get("name"),
+        expected_start_ticks=(str(container.get("pid_start_ticks") or "") if container.get("runtime") == "runman" else ""),
     )
     if target is None:
         return {"status": "unavailable", "reason": error}

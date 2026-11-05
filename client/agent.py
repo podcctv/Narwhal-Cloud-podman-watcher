@@ -4803,6 +4803,89 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
                 throttle_state['violation_started_at'] = 0
                 throttle_state['violation_last_at'] = 0
 
+        # Targeted Outbound UDP Flood & Microburst Auto-Blackhole Engine
+        if udp_guard is not None and c_runtime in ("incus", "podman", "runman") and c_pid > 1:
+            bh_key = f"{c_runtime}:{c_project}:{c_name}"
+            bh_state = _udp_blackhole_auto_states.setdefault(bh_key, {
+                "consecutive_flood_count": 0,
+                "flood_started_at": 0,
+            })
+            bh_status = udp_guard.get_udp_blackhole_status(c_runtime, c_name, pid=c_pid)
+            is_blackholed = bool(bh_status.get("active"))
+            expires_at = int(bh_status.get("expires_at") or 0)
+
+            # Auto-release check if auto-blackholed and expired
+            if is_blackholed and expires_at > 0 and now_ts >= expires_at:
+                rel_ok, rel_msg = udp_guard.release_udp_blackhole(c_runtime, c_name, pid=c_pid, project=c_project)
+                if rel_ok:
+                    is_blackholed = False
+                    bh_state["consecutive_flood_count"] = 0
+                    bh_state["flood_started_at"] = 0
+                    bh_status = udp_guard.get_udp_blackhole_status(c_runtime, c_name, pid=c_pid)
+
+            # Auto-trigger check if not currently blackholed
+            if not is_blackholed:
+                auto_bh_enabled = os.getenv("SECURITY_UDP_BLACKHOLE_AUTO", "true").strip().lower() not in ("0", "false", "no", "off")
+                microburst = security.get("microburst") if isinstance(security.get("microburst"), dict) else {}
+                mb_flood_type = str(microburst.get("flood_type") or "")
+                tx_pps = float(microburst.get("tx_pps") or 0.0)
+                avg_tx_pkt_size = float(microburst.get("avg_tx_packet_size") or 0.0)
+
+                # Conditions:
+                # A: Outbound small packet flood (tx_pps >= 3000, avg pkt size <= 128 bytes)
+                is_small_pkt_flood = (mb_flood_type == "outbound_small_packet_flood" and tx_pps >= 3000)
+                # B: Massive burst (tx_pps >= 6000)
+                is_massive_burst = (tx_pps >= 6000)
+                # C: High bandwidth outbound UDP flood (>40 Mbps and concurrency >= 300)
+                c_udp_tx_bps = float(container.get("udp_tx_bps") or container.get("net_tx_bps") or 0.0)
+                udp_heavy_flood = (c_udp_tx_bps >= 40_000_000 and hy2_concurrency >= 300)
+
+                is_flood_candidate = is_small_pkt_flood or is_massive_burst or udp_heavy_flood
+
+                if is_flood_candidate:
+                    if not bh_state.get("flood_started_at"):
+                        bh_state["flood_started_at"] = now_ts
+                    bh_state["consecutive_flood_count"] = bh_state.get("consecutive_flood_count", 0) + 1
+
+                    # Trigger immediately if extreme flood (PPS >= 8000), or sustained for >= 2 cycles
+                    should_trigger = (tx_pps >= 8000) or (bh_state["consecutive_flood_count"] >= 2)
+
+                    if should_trigger and auto_bh_enabled:
+                        trigger_reason = (
+                            f"检测到高危出站小包泛洪 (发包率 {tx_pps} PPS，平均包长 {avg_tx_pkt_size}B)"
+                            if is_small_pkt_flood else
+                            f"检测到超高频出站发包泛洪 ({tx_pps} PPS)"
+                            if is_massive_burst else
+                            f"检测到大流量高并发 UDP 异常打流 ({c_udp_tx_bps/(1024*1024):.1f} Mbps, 并发 {hy2_concurrency})"
+                        )
+                        duration = int(os.getenv("SECURITY_UDP_BLACKHOLE_DURATION", "1800"))
+                        applied, apply_msg = udp_guard.apply_udp_blackhole(
+                            c_runtime, c_name, pid=c_pid,
+                            instance_id=str(container.get("instance_id") or ""),
+                            allow_dns=True,
+                            project=c_project,
+                            auto_triggered=True,
+                            duration=duration,
+                            reason=trigger_reason,
+                        )
+                        if applied:
+                            is_blackholed = True
+                            bh_status = udp_guard.get_udp_blackhole_status(c_runtime, c_name, pid=c_pid)
+                            alerts.append(_security_alert(
+                                "udp_flood_blackhole",
+                                "critical",
+                                "已自动实施出站 UDP 专项阻断",
+                                f"{trigger_reason}；已自动注入黑洞规则（放行 53 端口 DNS 与已建 TCP 连接），计划保护 {duration//60} 分钟。",
+                                int(tx_pps),
+                                3000,
+                                container,
+                            ))
+                else:
+                    bh_state["consecutive_flood_count"] = 0
+                    bh_state["flood_started_at"] = 0
+
+            security["udp_blackhole"] = bh_status
+
         socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
         socks_detected = bool(socks_proxy.get("detected")) and not socks_proxy.get('internal_only', False)
         socks_auth_mode = str(socks_proxy.get("auth_mode") or "unknown")
@@ -7483,6 +7566,7 @@ def collect_hy2_indicators(
 
 
 _hy2_throttle_states: Dict[str, Dict[str, Any]] = {}
+_udp_blackhole_auto_states: Dict[str, Dict[str, Any]] = {}
 
 
 def apply_udp_throttle(
@@ -12059,7 +12143,13 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
         pid = int(params.get("pid") or 0)
         instance_id = str(params.get("instance_id") or "")
-        return udp_guard.release_udp_blackhole(runtime_kind, container_name, pid=pid, instance_id=instance_id, project=project)
+        ok, message = udp_guard.release_udp_blackhole(runtime_kind, container_name, pid=pid, instance_id=instance_id, project=project)
+        if ok:
+            key = f"{runtime_kind}:{project}:{container_name}"
+            if key in _udp_blackhole_auto_states:
+                _udp_blackhole_auto_states[key]["consecutive_flood_count"] = 0
+                _udp_blackhole_auto_states[key]["flood_started_at"] = 0
+        return ok, message
     if action_type == "apply_anti_spoof":
         if anti_spoof_guard is None:
             return False, "anti_spoof_guard module unavailable"

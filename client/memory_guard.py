@@ -263,6 +263,8 @@ def observe(
         cgroup_pressure = metrics.get("pressure") if isinstance(metrics.get("pressure"), dict) else {}
         cgroup_some = _pressure_value(cgroup_pressure, "some")
         maximum = metrics.get("max_bytes")
+        if maximum is None and isinstance(container.get("mem_limit_bytes"), (int, float)) and int(container["mem_limit_bytes"]) >= 32 * 1024 * 1024:
+            maximum = int(container["mem_limit_bytes"])
         current_bytes = int(metrics.get("current_bytes") or 0)
         used_percent = current_bytes * 100.0 / maximum if isinstance(maximum, int) and maximum > 0 else -1.0
         status: dict[str, Any] = {

@@ -44,6 +44,22 @@ def identifier(value):
         return ""
 
 
+def _runtime_compatible(upstream_rt, local_rt):
+    if not upstream_rt or upstream_rt == local_rt:
+        return True
+    u = str(upstream_rt).strip().lower()
+    l = str(local_rt).strip().lower()
+    if u == l:
+        return True
+    # runman manages both incus and podman containers locally
+    if "runman" in (u, l) and (u in ("incus", "podman", "container", "runman") and l in ("incus", "podman", "container", "runman")):
+        return True
+    # generic container from upstream matches any container runtime
+    if "container" in (u, l) and (u in ("incus", "podman", "runman", "container") and l in ("incus", "podman", "runman", "container")):
+        return True
+    return False
+
+
 def normalize_email(value):
     email = str(value or "").strip()
     if len(email) > 254 or not re.fullmatch(r"[^@\s]{1,64}@[^@\s.]+(?:\.[^@\s.]+)+", email):
@@ -98,9 +114,13 @@ def fetch_catalog(cfg, validate_url, opener_factory):
             for item in items:
                 if not isinstance(item, dict) or identifier(item.get("machine_id")) != machine_id:
                     raise ValueError("实例与来源机器不一致，未应用任何关联")
+                raw_email = normalize_email(item.get("user_email"))
+                if not raw_email and "@" in str(item.get("user_name") or ""):
+                    raw_email = normalize_email(item.get("user_name"))
                 result.append({"id": identifier(item.get("id")), "machine_id": machine_id,
                                "user_id": str(item.get("user_id") or ""),
-                               "user_email": normalize_email(item.get("user_email")),
+                               "user_email": raw_email,
+                               "user_name": str(item.get("user_name") or ""),
                                "runtime": item.get("type"), "status": item.get("status"),
                                "node_name": str(machine.get("name") or "")[:100],
                                "bandwidth_mbps": capacity(item.get("bandwidth_mbps"))})
@@ -146,7 +166,7 @@ def apply(conn, catalog, now):
     counts = {"matched": 0, "unmatched": 0, "manual": 0, "deferred": 0}
     for row in identities:
         fields = tuple(row[k] for k in IDENTITY)
-        old = conn.execute("SELECT * FROM buyer_targets WHERE host_id=? AND runtime=? AND project=? AND container_name=?", fields).fetchone()
+        old = conn.execute("SELECT * FROM buyer_targets WHERE host_id=? AND container_name=? AND (runtime=? OR runtime IN ('incus','podman','runman','container')) ORDER BY (runtime=?) DESC, verified_at DESC LIMIT 1", (row["host_id"], row["container_name"], row["runtime"], row["runtime"])).fetchone()
         if old and old["source"] == "manual":
             counts["manual"] += 1
             continue  # Includes explicit manual disable / broadcast choices.
@@ -162,7 +182,7 @@ def apply(conn, catalog, now):
             reason = "上游找不到此实例（已删除或非托管）"
         elif len(candidates) != 1:
             reason = "上游实例 UUID 重复，拒绝自动关联"
-        elif not identifier(vm.get("machine_id")) or vm.get("runtime") != row["runtime"]:
+        elif not identifier(vm.get("machine_id")) or not _runtime_compatible(vm.get("runtime"), row["runtime"]):
             reason = "上游机器或运行时身份不一致"
         elif not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", str(vm.get("user_id") or "")):
             reason = "上游实例没有有效买家 user_id"
@@ -177,10 +197,13 @@ def apply(conn, catalog, now):
                 conn.execute("UPDATE buyer_targets SET enabled=0 WHERE host_id=? AND runtime=? AND project=? AND container_name=?", fields)
             counts["unmatched"] += 1
             continue
+        email_to_save = normalize_email(vm.get("user_email")) or (old["user_email"] if old and old["user_email"] else "")
         conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,user_email,scope,enabled,source,vm_id,verified_at) "
                      "VALUES(?,?,?,?,?,?,?,?,'user',1,'upstream',?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET "
-                     "machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,user_email=excluded.user_email,scope='user',enabled=1,source='upstream',vm_id=excluded.vm_id,verified_at=excluded.verified_at",
-                     (*fields, identifier(vm["machine_id"]), vm["user_id"], vm.get("node_name", ""), normalize_email(vm.get("user_email")), key, now))
+                     "machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,"
+                     "user_email=CASE WHEN excluded.user_email<>'' THEN excluded.user_email ELSE buyer_targets.user_email END,"
+                     "scope='user',enabled=1,source='upstream',vm_id=excluded.vm_id,verified_at=excluded.verified_at",
+                     (*fields, identifier(vm["machine_id"]), vm["user_id"], vm.get("node_name", ""), email_to_save, key, now))
         conn.execute("UPDATE buyer_targets SET bandwidth_mbps=? WHERE host_id=? AND runtime=? AND project=? AND container_name=?", (capacity(vm.get('bandwidth_mbps')), *fields))
         conn.execute("UPDATE buyer_outbox SET machine_id=?,user_id=?,scope='user',due_at=?,last_error='' WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND status IN ('queued','retrying','blocked')",
                      (identifier(vm["machine_id"]), vm["user_id"], now, *fields))

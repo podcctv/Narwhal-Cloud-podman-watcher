@@ -2,6 +2,25 @@
 
 更新时间：2026-11-05（Asia/Shanghai）
 
+## 落实容器资源自动防护、UDP专项阻断自动触发、邮箱映射与深度采样修复（v1.8.9）
+
+- **核心缺陷排查与闭环修复**：
+  1. **按需深度快照分析不可用（409 被拒）修复**：
+     - 根因：`server/app.py` 接口 `request_container_diagnostic` 强制硬编码校验 `latest_payload.get("monitor_mode") != "full"`。Runman 容器主动上报模式为 `runman_guest_exec`，导致请求被错误判定为非全量监控，抛出 `409: container is not in full monitoring mode` 阻断深度采样。
+     - 修复：调整为阻断白名单模式，仅当 `monitor_mode in ("notice", "off", "disabled")`（如 Docker 仅提醒模式）时才拒绝，全面放行 Runman、Incus 与 Podman 的深度快照下发。
+  2. **容器用户邮箱 API 关联失效修复与大盘直观展示**：
+     - 根因：`server/buyer_mapping.py` 执行 `apply()` 时使用严格不兼容的等于判定 `vm.get("runtime") != row["runtime"]`。上游 API 标明类型为 `incus`、`podman` 或 `container`，而本地现代节点上报为 `runman`，导致 51 个容器被标记为“上游机器或运行时身份不一致”并将 `enabled` 置为 0，旧邮箱全部从大盘抹除；同时同步逻辑在未提供新邮箱时会把历史邮箱覆盖为空。
+     - 修复：引入 `_runtime_compatible()` 兼容性机制（支持 Runman 统管 Incus/Podman/Container）；在 `DO UPDATE SET` 中采用 `CASE WHEN excluded.user_email<>'' THEN ... ELSE buyer_targets.user_email END` 保留已有合法邮箱；提取上游 `user_name` 中包含的邮箱；并在 `ContainerTableView.tsx`（桌面表格与移动 Bento 卡片）容器名称下方直接清晰呈现买家邮箱。
+  3. **CPU、内存与磁盘 I/O 自动保护落实与可用性修复**：
+     - **容器 PSI 不可用修复**：`client/cpu_guard.py` 的 `_container_psi` 调用 `resolve_container_cgroup` 时漏传 `expected_start_ticks`，导致所有 Runman 容器 cgroup 边界解析失败并回退为“不可用”。补全启动代次校验后，容器 CPU/内存/IO PSI 压力指标 100% 正常采出。
+     - **内存保护不可用修复**：`client/memory_guard.py` 之前只读 `memory.max`，在未设置内核硬限制的容器中因值为 `max` 而判定为“不支持自动保护”。实装内存配额兜底机制，自动回退至容器汇报的 RAM 配额（`mem_limit_bytes`），使内存阶梯回收与自动防护完全落实可用。
+     - **磁盘 I/O 状态提示优化**：`client/io_guard.py` 识别容器挂载块设备并回显；在前端 `ContainerDrawer.tsx` 中当 I/O 处于正常且未受限状态时，将原容易产生误解的“设备待识别”优化为“常规读写 (未触发限额)”。
+  4. **出站 UDP 专项阻断自动触发与合理触发条件落地**：
+     - 在 `client/agent.py` 与 `client/udp_guard.py` 中构建自动化感知处置引擎：
+       - **合理触发条件**：结合阶段三微突发引擎，当检测到出站小包泛洪（`outbound_small_packet_flood`：发包率 $\ge 3000$ PPS 且平均包长 $\le 128$ 字节持续 2 轮）、瞬时发包突发（$\ge 6000$ PPS 持续或 $\ge 8000$ PPS 瞬间爆发）、或大流量异常打流（UDP 出站 $\ge 40$ Mbps 且 UDP 并发 $\ge 300$）时，自动触发出站 UDP 黑洞。
+       - **安全放行边界**：保持精准放行 `lo`、`ESTABLISHED,RELATED`、入站流量以及 53 端口 DNS 解析，杜绝断网误杀。
+       - **自动恢复与状态留存**：写入持久化日志，默认 30 分钟（1800 秒）保护期满后自动恢复解除；支持前端 `ContainerDrawer` 与徽章动态倒计时及一键手动解除。
+
 ## 修复客户端升级模块分发缺失导致的母机离线问题与自愈导入兜底（v1.8.8）
 
 - **故障诊断与根因定位**：

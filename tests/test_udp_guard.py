@@ -85,7 +85,27 @@ class TestUdpGuard(unittest.TestCase):
             self.assertTrue(status.get("active"))
             self.assertFalse(status.get("allow_dns"))
 
+    def test_auto_triggered_and_duration(self):
+        def mock_runner(cmd: list[str]) -> tuple[bool, str]:
+            return True, "table inet narwhal_udp_guard"
+
+        with patch.object(udp_guard, "JOURNAL_PATH", str(self.journal_path)):
+            ok, msg = udp_guard.apply_udp_blackhole(
+                "runman", "auto-vm", pid=5555, allow_dns=True,
+                auto_triggered=True, duration=1200, reason="高危小包泛洪",
+                runner=mock_runner, nsenter_bin="/usr/bin/nsenter", nft_bin="/usr/sbin/nft"
+            )
+            self.assertTrue(ok)
+            status = udp_guard.get_udp_blackhole_status(
+                "runman", "auto-vm", pid=5555, runner=mock_runner,
+                nsenter_bin="/usr/bin/nsenter", nft_bin="/usr/sbin/nft"
+            )
+            self.assertTrue(status["active"])
+            self.assertTrue(status["auto_triggered"])
+            self.assertIsNotNone(status["expires_at"])
+            self.assertGreater(status["remaining_seconds"], 1150)
+            self.assertEqual(status["reason"], "高危小包泛洪")
+
 
 if __name__ == "__main__":
     unittest.main()
-

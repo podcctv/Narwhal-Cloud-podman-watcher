@@ -96,6 +96,9 @@ def apply_udp_blackhole(
     instance_id: str = "",
     allow_dns: bool = True,
     project: str = "default",
+    auto_triggered: bool = False,
+    duration: int = 1800,
+    reason: str = "",
     *,
     runner: Callable[[list[str]], tuple[bool, str]] | None = None,
     nsenter_bin: str | None = None,
@@ -167,6 +170,7 @@ def apply_udp_blackhole(
 
     journal_key = f"{runtime_name}:{container_name}"
     journal = _read_journal()
+    applied_time = int(time.time())
     journal[journal_key] = {
         "status": "blackholed",
         "runtime": runtime_name,
@@ -174,7 +178,10 @@ def apply_udp_blackhole(
         "instance_id": instance_id,
         "pid": pid,
         "allow_dns": allow_dns,
-        "applied_at": int(time.time()),
+        "applied_at": applied_time,
+        "auto_triggered": bool(auto_triggered),
+        "expires_at": applied_time + duration if duration > 0 else 0,
+        "reason": reason,
     }
     _write_journal(journal)
     dns_note = " (放行 53 端口 DNS 解析)" if allow_dns else " (完全阻断全部 UDP)"
@@ -264,9 +271,18 @@ def get_udp_blackhole_status(
             if ok and "table inet " + NFT_TABLE in out:
                 is_active = True
 
+    applied_at = entry.get("applied_at") if isinstance(entry, dict) else None
+    expires_at = entry.get("expires_at") if isinstance(entry, dict) else None
+    auto_triggered = bool(entry.get("auto_triggered", False)) if isinstance(entry, dict) else False
+    now_ts = int(time.time())
+    remaining_seconds = max(0, expires_at - now_ts) if (is_active and expires_at and expires_at > 0) else None
     return {
         "active": is_active,
         "allow_dns": entry.get("allow_dns", True) if isinstance(entry, dict) else True,
-        "applied_at": entry.get("applied_at") if isinstance(entry, dict) else None,
+        "applied_at": applied_at,
+        "auto_triggered": auto_triggered,
+        "expires_at": expires_at,
+        "remaining_seconds": remaining_seconds,
+        "reason": str(entry.get("reason", "")) if isinstance(entry, dict) else "",
     }
 
