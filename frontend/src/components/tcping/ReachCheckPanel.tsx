@@ -253,7 +253,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
   // Copy report summary to clipboard
   const handleCopyReport = () => {
     if (!summary) return;
-    const targetDisplay = authed ? `${summary.target}:${summary.port}` : `${isIpString(summary.target) ? '已脱敏目标' : summary.target}:${summary.port}`;
+    const targetDisplay = authed ? `${summary.target}:${summary.port <= 0 ? 'PING' : summary.port}` : `${isIpString(summary.target) ? '已脱敏目标' : summary.target}:${summary.port <= 0 ? 'PING' : summary.port}`;
     const lines = [
       `【全球与三网可达性检测报告】`,
       `目标: ${targetDisplay} (${summary.protocol})`,
@@ -283,7 +283,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
             <h1 className="text-lg font-bold text-slate-100">全球与三网可达性 (Reach Check)</h1>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            参考开源标准，系统每小时自动获取母机开放端口并随机选测，支持全球核心节点与国内三大运营商实时可达性与时延剖析。
+            系统每小时自动对母机公网端点进行分布式采样，深度度量中国大陆三大运营商与全球节点连通性及延时。
           </p>
         </div>
 
@@ -305,7 +305,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
           <div className="flex items-center gap-2">
             <div className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
             <h2 className="text-sm font-semibold text-slate-200">
-              集群母机定时巡检结果 (1 小时定时自动测试 · 随机开放端口)
+              集群母机定时巡检结果 (1 小时定时自动测试 · 智能端口与 Ping 探测)
             </h2>
           </div>
 
@@ -414,590 +414,582 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
           </div>
         </div>
 
-        {/* Cluster Results Table */}
-        <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/50">
-          <table className="w-full text-left text-xs text-slate-300">
-            <thead className="bg-slate-900/80 text-[11px] font-semibold text-slate-400 border-b border-slate-800 uppercase tracking-wider">
-              <tr>
-                <th className="p-3">宿主机 / 目标</th>
-                <th className="p-3">开放端口</th>
-                <th className="p-3">可达性判定</th>
-                <th className="p-3">中国电信 (4134)</th>
-                <th className="p-3">中国联通 (4837)</th>
-                <th className="p-3">中国移动 (9808)</th>
-                <th className="p-3">全球均延</th>
-                <th className="p-3">巡检时间</th>
-                <th className="p-3 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 font-mono">
-              {(!clusterData?.items || clusterData.items.length === 0) ? (
-                <tr>
-                  <td colSpan={9} className="p-8 text-center text-slate-500 font-sans">
-                    暂无母机巡检数据。点击右上角“立即全量巡检”启动首轮测试，或等待下一次整点自动测试。
-                  </td>
-                </tr>
-              ) : (
-                clusterData.items.map((item: ReachabilitySummaryItem) => {
-                  const isOk = item.verdict === 'ok';
-                  const isBlocked = item.verdict === 'gfw_blocked';
-                  const isLimited = item.verdict_label === '探针配额受限';
-                  const isExpanded = expandedHostId === item.host_id;
+        {/* MODERN HORIZON FLOW CARDS (0 Horizontal Scrolling · No Text Overlap · Direct Button Access) */}
+        {(!clusterData?.items || clusterData.items.length === 0) ? (
+          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-8 text-center text-slate-500 font-sans text-xs">
+            暂无母机巡检数据。点击右上角“立即全量巡检”启动首轮测试，或等待下一次整点自动测试。
+          </div>
+        ) : (
+          <div className="space-y-3.5">
+            {clusterData.items.map((item: ReachabilitySummaryItem) => {
+              const isOk = item.verdict === 'ok';
+              const isBlocked = item.verdict === 'gfw_blocked';
+              const isLimited = item.verdict_label === '探针配额受限';
+              const isExpanded = expandedHostId === item.host_id;
 
-                  const v4Telecom = item.stats?.cnTelecomMs ?? (item.stats as any)?.cn_telecom_ms;
-                  const v4Unicom = item.stats?.cnUnicomMs ?? (item.stats as any)?.cn_unicom_ms;
-                  const v4Mobile = item.stats?.cnMobileMs ?? (item.stats as any)?.cn_mobile_ms;
-                  const v4Global = item.stats?.globalAverageMs ?? (item.stats as any)?.global_avg_ms;
+              const v4Telecom = item.stats?.cnTelecomMs ?? (item.stats as any)?.cn_telecom_ms;
+              const v4Unicom = item.stats?.cnUnicomMs ?? (item.stats as any)?.cn_unicom_ms;
+              const v4Mobile = item.stats?.cnMobileMs ?? (item.stats as any)?.cn_mobile_ms;
+              const v4Global = item.stats?.globalAverageMs ?? (item.stats as any)?.global_avg_ms;
 
-                  const v6Telecom = item.stats_v6?.cnTelecomMs ?? (item.stats_v6 as any)?.cn_telecom_ms;
-                  const v6Unicom = item.stats_v6?.cnUnicomMs ?? (item.stats_v6 as any)?.cn_unicom_ms;
-                  const v6Mobile = item.stats_v6?.cnMobileMs ?? (item.stats_v6 as any)?.cn_mobile_ms;
-                  const v6Global = item.stats_v6?.globalAverageMs ?? (item.stats_v6 as any)?.global_avg_ms;
-                  const v6CnAvg = item.stats_v6?.cnAverageMs ?? (item.stats_v6 as any)?.cn_avg_ms;
+              const v6Telecom = item.stats_v6?.cnTelecomMs ?? (item.stats_v6 as any)?.cn_telecom_ms;
+              const v6Unicom = item.stats_v6?.cnUnicomMs ?? (item.stats_v6 as any)?.cn_unicom_ms;
+              const v6Mobile = item.stats_v6?.cnMobileMs ?? (item.stats_v6 as any)?.cn_mobile_ms;
+              const v6Global = item.stats_v6?.globalAverageMs ?? (item.stats_v6 as any)?.global_avg_ms;
+              const v6CnAvg = item.stats_v6?.cnAverageMs ?? (item.stats_v6 as any)?.cn_avg_ms;
 
-                  const inspection = formatInspectionTime(item.checked_at, item.checked_at_iso_utc8);
+              const inspection = formatInspectionTime(item.checked_at, item.checked_at_iso_utc8);
 
-                  return (
-                    <React.Fragment key={item.host_id}>
-                      <tr className={`hover:bg-slate-900/40 transition ${isExpanded ? 'bg-slate-900/70 border-l-2 border-l-sky-500' : ''}`}>
-                        {/* Host ID & Target */}
-                        <td className="p-3 font-sans">
-                          <div className="h-6 flex items-center gap-1.5 flex-wrap">
-                            <span className="font-semibold text-slate-100 truncate max-w-[200px]" title={item.host_id}>
-                              {item.host_id}
-                            </span>
-                            {item.is_dual_stack && (
-                              <span className="inline-flex items-center gap-1 rounded bg-indigo-950/80 border border-indigo-700/50 text-indigo-300 px-1.5 py-0.2 text-[10px] font-medium font-sans">
-                                双栈 IPv4/IPv6
-                              </span>
-                            )}
-                            {!item.is_dual_stack && item.has_ipv6 && (
-                              <span className="inline-flex items-center gap-1 rounded bg-purple-950/80 border border-purple-700/50 text-purple-300 px-1.5 py-0.2 text-[10px] font-medium font-sans">
-                                纯 IPv6
-                              </span>
-                            )}
-                          </div>
-                          {authed ? (
-                            <div className="h-6 flex items-center text-[11px] font-mono text-slate-400 truncate max-w-[240px]">
-                              {item.is_dual_stack ? (
-                                <span title={`V4: ${item.target} · V6: ${item.target_v6}`}>
-                                  V4: {item.target} · V6: {item.target_v6}
-                                </span>
-                              ) : (
-                                <span>{item.target || item.target_v6 || '—'}</span>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="h-6 flex items-center text-[11px] text-slate-500">
-                              <span>已脱敏目标</span>
-                            </div>
-                          )}
-                        </td>
+              const isPing = item.port <= 0 || item.protocol === 'PING';
+              const portDisplay = isPing ? 'ICMP Ping' : `${item.port} ${item.protocol}`;
 
-                        {/* Open Port */}
-                        <td className="p-3">
-                          <div className="h-6 flex items-center whitespace-nowrap">
-                            <span className="rounded bg-slate-800/80 px-2 py-0.5 text-sky-300 font-bold">
-                              {item.port <= 0 || item.protocol === 'PING' ? 'PING' : item.port}
-                            </span>
-                            <span className="text-[10px] text-slate-500 ml-1 font-sans">{item.protocol}</span>
-                          </div>
-                          {item.is_dual_stack ? (
-                            <div className="h-6 flex items-center whitespace-nowrap text-[10px] text-slate-400 font-mono">
-                              <span>
-                                V6: {item.port_v6 && item.port_v6 !== item.port ? (item.port_v6 <= 0 ? 'PING' : item.port_v6) : '同 V4'}
-                              </span>
-                            </div>
-                          ) : null}
-                        </td>
+              return (
+                <div
+                  key={item.host_id}
+                  className={`rounded-xl border transition-all duration-150 ${
+                    isExpanded
+                      ? 'border-sky-500/70 bg-slate-900/90 shadow-lg shadow-sky-950/20 ring-1 ring-sky-500/40'
+                      : 'border-slate-800 bg-slate-900/60 hover:border-slate-700/80 hover:bg-slate-900/80 shadow-xs'
+                  }`}
+                >
+                  {/* Card Header Strip: Host Identity, Badges, Time & Always-Visible Action Buttons */}
+                  <div className="p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/60">
+                    <div className="flex items-center gap-2 flex-wrap min-w-0">
+                      <span className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+                        isOk
+                          ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]'
+                          : isBlocked
+                          ? 'bg-rose-500 animate-pulse shadow-[0_0_8px_rgba(244,63,94,0.6)]'
+                          : isLimited
+                          ? 'bg-purple-400'
+                          : 'bg-amber-400'
+                      }`} />
+                      <h3 className="font-semibold text-sm text-slate-100 truncate max-w-[280px] sm:max-w-[420px]" title={item.host_id}>
+                        {item.host_id}
+                      </h3>
+                      {item.is_dual_stack && (
+                        <span className="inline-flex items-center gap-1 rounded bg-indigo-950/90 border border-indigo-700/60 text-indigo-300 px-2 py-0.5 text-[11px] font-medium font-sans">
+                          双栈 IPv4/IPv6
+                        </span>
+                      )}
+                      {!item.is_dual_stack && item.has_ipv6 && (
+                        <span className="inline-flex items-center gap-1 rounded bg-purple-950/90 border border-purple-700/60 text-purple-300 px-2 py-0.5 text-[11px] font-medium font-sans">
+                          纯 IPv6
+                        </span>
+                      )}
+                      <span className="rounded bg-slate-800/90 border border-slate-700/60 px-2 py-0.5 text-[11px] text-sky-300 font-mono font-medium">
+                        {portDisplay}
+                      </span>
+                    </div>
 
-                        {/* Verdict */}
-                        <td className="p-3 font-sans">
-                          <div className="h-6 flex items-center whitespace-nowrap">
-                            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border ${
-                              isOk
+                    {/* Time & Action buttons: Always fixed in primary viewport, zero horizontal scroll needed! */}
+                    <div className="flex items-center gap-2.5 shrink-0 font-sans ml-auto">
+                      <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400 font-mono pr-1" title={inspection.full}>
+                        <Clock className="h-3.5 w-3.5 text-slate-500" />
+                        <span>{inspection.time}</span>
+                        <span className="text-[11px] text-slate-500 font-sans">({inspection.relative})</span>
+                      </div>
+                      {authed && (
+                        <button
+                          type="button"
+                          disabled={triggeringHostId === item.host_id}
+                          onClick={() => handleTriggerHost(item.host_id)}
+                          className="rounded-lg border border-slate-700 bg-slate-800/90 hover:bg-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:text-slate-100 transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                          title="单独重新检测此机 (即时执行)"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${triggeringHostId === item.host_id ? 'animate-spin text-sky-400' : 'text-slate-400'}`} />
+                          <span className="font-medium text-[11px]">{triggeringHostId === item.host_id ? '检测中' : '刷新'}</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => toggleExpandHost(item)}
+                        className={`rounded-lg border px-3 py-1 text-xs font-medium transition flex items-center gap-1.5 shadow-xs cursor-pointer ${
+                          isExpanded
+                            ? 'border-sky-500 bg-sky-950/80 text-sky-300'
+                            : 'border-slate-700 bg-slate-800/90 text-slate-200 hover:bg-slate-700'
+                        }`}
+                        title={isExpanded ? '收起此机详细巡检成果' : '展开此机最新诊断与各区域时延详情'}
+                      >
+                        <span>{isExpanded ? '收起详情' : '查看详情'}</span>
+                        {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Card Body: Responsive 3-Section Grid (Zero text overlap) */}
+                  <div className="p-3.5 sm:p-4 grid grid-cols-1 md:grid-cols-12 gap-3.5 items-center">
+                    {/* Section 1: Public IPs (3 cols on md/lg) */}
+                    <div className="md:col-span-3 space-y-1 text-xs font-mono">
+                      <div className="flex items-center gap-1.5 text-slate-300">
+                        <span className="text-slate-500 font-sans text-[11px] w-6 shrink-0">V4:</span>
+                        <span className="truncate" title={authed ? item.target : '已脱敏'}>
+                          {authed ? (item.target || '—') : '已脱敏公网 IP'}
+                        </span>
+                      </div>
+                      {item.is_dual_stack && (
+                        <div className="flex items-center gap-1.5 text-slate-400">
+                          <span className="text-slate-500 font-sans text-[11px] w-6 shrink-0">V6:</span>
+                          <span className="truncate text-indigo-300/90" title={authed ? item.target_v6 : '已脱敏'}>
+                            {authed ? (item.target_v6 || '—') : '已脱敏 IPv6'}
+                          </span>
+                        </div>
+                      )}
+                      <div className="sm:hidden flex items-center gap-1 text-[11px] text-slate-500 pt-0.5">
+                        <Clock className="h-3 w-3" />
+                        <span>{inspection.time} ({inspection.relative})</span>
+                      </div>
+                    </div>
+
+                    {/* Section 2: Verdict Badges (4 cols on md/lg) */}
+                    <div className="md:col-span-4 space-y-1.5">
+                      <div className="flex items-center">
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium border ${
+                          isOk
+                            ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
+                            : isBlocked
+                            ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
+                            : isLimited
+                            ? 'border-purple-500/40 bg-purple-950/60 text-purple-300'
+                            : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
+                        }`}>
+                          {isOk ? <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" /> : isLimited ? <Clock className="h-3 w-3 text-purple-400 shrink-0" /> : <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />}
+                          <span className="truncate">{item.is_dual_stack ? `V4: ${item.verdict_label}` : item.verdict_label}</span>
+                        </span>
+                      </div>
+                      {item.is_dual_stack && (
+                        <div className="flex items-center">
+                          {item.verdict_label_v6 ? (
+                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium border ${
+                              item.verdict_v6 === 'ok'
                                 ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
-                                : isBlocked
+                                : item.verdict_v6 === 'gfw_blocked'
                                 ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
-                                : isLimited
-                                ? 'border-purple-500/40 bg-purple-950/60 text-purple-300'
                                 : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
                             }`}>
-                              {isOk ? <CheckCircle2 className="h-3 w-3 text-emerald-400" /> : isLimited ? <Clock className="h-3 w-3 text-purple-400" /> : <AlertTriangle className="h-3 w-3" />}
-                              <span>{item.is_dual_stack ? `V4: ${item.verdict_label}` : item.verdict_label}</span>
+                              {item.verdict_v6 === 'ok' ? <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" /> : <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />}
+                              <span className="truncate">V6: {item.verdict_label_v6}</span>
                             </span>
-                          </div>
-                          {item.is_dual_stack ? (
-                            <div className="h-6 flex items-center whitespace-nowrap">
-                              {item.verdict_label_v6 ? (
-                                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium border ${
-                                  item.verdict_v6 === 'ok'
-                                    ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
-                                    : item.verdict_v6 === 'gfw_blocked'
-                                    ? 'border-rose-500/50 bg-rose-950/60 text-rose-300 animate-pulse'
-                                    : 'border-amber-500/40 bg-amber-950/60 text-amber-300'
-                                }`}>
-                                  {item.verdict_v6 === 'ok' ? <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400" /> : <AlertTriangle className="h-2.5 w-2.5" />}
-                                  <span>V6: {item.verdict_label_v6}</span>
-                                </span>
-                              ) : (
-                                <span className="text-[10px] text-slate-500">V6: 待测试</span>
-                              )}
-                            </div>
-                          ) : null}
-                        </td>
+                          ) : (
+                            <span className="text-[11px] text-slate-500">V6: 待测试</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
 
-                        {/* China Telecom */}
-                        <td className="p-3">
-                          <div className="h-6 flex items-center whitespace-nowrap">
-                            {v4Telecom ? (
-                              <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-mono ${latencyBadgeColor(v4Telecom)}`}>
-                                {item.is_dual_stack ? 'V4: ' : ''}{v4Telecom} ms
+                    {/* Section 3: Core 4 Carrier Metrics Grid (5 cols on md/lg) */}
+                    <div className="md:col-span-5 grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono">
+                      {/* Telecom */}
+                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
+                        <span className="text-[10px] text-slate-400 font-sans block truncate">中国电信 (4134)</span>
+                        <div className="whitespace-nowrap">
+                          {v4Telecom ? (
+                            <span className={`inline-block px-1.5 py-0.2 rounded text-xs font-bold ${latencyBadgeColor(v4Telecom)}`}>
+                              {item.is_dual_stack ? 'V4 ' : ''}{v4Telecom} ms
+                            </span>
+                          ) : (
+                            <span className="text-slate-600 text-xs">—</span>
+                          )}
+                        </div>
+                        {item.is_dual_stack && (
+                          <div className="pt-0.5 whitespace-nowrap">
+                            {v6Telecom ? (
+                              <span className={`inline-block px-1 py-0.1 rounded text-[10px] ${latencyBadgeColor(v6Telecom)}`}>
+                                V6 {v6Telecom} ms
                               </span>
                             ) : (
-                              <span className="text-slate-600">—</span>
+                              <span className="text-slate-600 text-[10px]">V6 —</span>
                             )}
                           </div>
-                          {item.is_dual_stack ? (
-                            <div className="h-6 flex items-center whitespace-nowrap">
-                              {v6Telecom ? (
-                                <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono ${latencyBadgeColor(v6Telecom)}`}>
-                                  V6: {v6Telecom} ms
-                                </span>
-                              ) : (
-                                <span className="text-slate-600 text-[10px] font-mono">V6: —</span>
-                              )}
-                            </div>
-                          ) : null}
-                        </td>
+                        )}
+                      </div>
 
-                        {/* China Unicom */}
-                        <td className="p-3">
-                          <div className="h-6 flex items-center whitespace-nowrap">
-                            {v4Unicom ? (
-                              <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-mono ${latencyBadgeColor(v4Unicom)}`}>
-                                {item.is_dual_stack ? 'V4: ' : ''}{v4Unicom} ms
+                      {/* Unicom */}
+                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
+                        <span className="text-[10px] text-slate-400 font-sans block truncate">中国联通 (4837)</span>
+                        <div className="whitespace-nowrap">
+                          {v4Unicom ? (
+                            <span className={`inline-block px-1.5 py-0.2 rounded text-xs font-bold ${latencyBadgeColor(v4Unicom)}`}>
+                              {item.is_dual_stack ? 'V4 ' : ''}{v4Unicom} ms
+                            </span>
+                          ) : (
+                            <span className="text-slate-600 text-xs">—</span>
+                          )}
+                        </div>
+                        {item.is_dual_stack && (
+                          <div className="pt-0.5 whitespace-nowrap">
+                            {v6Unicom ? (
+                              <span className={`inline-block px-1 py-0.1 rounded text-[10px] ${latencyBadgeColor(v6Unicom)}`}>
+                                V6 {v6Unicom} ms
                               </span>
                             ) : (
-                              <span className="text-slate-600">—</span>
+                              <span className="text-slate-600 text-[10px]">V6 —</span>
                             )}
                           </div>
-                          {item.is_dual_stack ? (
-                            <div className="h-6 flex items-center whitespace-nowrap">
-                              {v6Unicom ? (
-                                <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono ${latencyBadgeColor(v6Unicom)}`}>
-                                  V6: {v6Unicom} ms
-                                </span>
-                              ) : (
-                                <span className="text-slate-600 text-[10px] font-mono">V6: —</span>
-                              )}
-                            </div>
-                          ) : null}
-                        </td>
+                        )}
+                      </div>
 
-                        {/* China Mobile */}
-                        <td className="p-3">
-                          <div className="h-6 flex items-center whitespace-nowrap">
-                            {v4Mobile ? (
-                              <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-mono ${latencyBadgeColor(v4Mobile)}`}>
-                                {item.is_dual_stack ? 'V4: ' : ''}{v4Mobile} ms
+                      {/* Mobile */}
+                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
+                        <span className="text-[10px] text-slate-400 font-sans block truncate">中国移动 (9808)</span>
+                        <div className="whitespace-nowrap">
+                          {v4Mobile ? (
+                            <span className={`inline-block px-1.5 py-0.2 rounded text-xs font-bold ${latencyBadgeColor(v4Mobile)}`}>
+                              {item.is_dual_stack ? 'V4 ' : ''}{v4Mobile} ms
+                            </span>
+                          ) : (
+                            <span className="text-slate-600 text-xs">—</span>
+                          )}
+                        </div>
+                        {item.is_dual_stack && (
+                          <div className="pt-0.5 whitespace-nowrap">
+                            {v6Mobile ? (
+                              <span className={`inline-block px-1 py-0.1 rounded text-[10px] ${latencyBadgeColor(v6Mobile)}`}>
+                                V6 {v6Mobile} ms
                               </span>
                             ) : (
-                              <span className="text-slate-600">—</span>
+                              <span className="text-slate-600 text-[10px]">V6 —</span>
                             )}
                           </div>
-                          {item.is_dual_stack ? (
-                            <div className="h-6 flex items-center whitespace-nowrap">
-                              {v6Mobile ? (
-                                <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono ${latencyBadgeColor(v6Mobile)}`}>
-                                  V6: {v6Mobile} ms
-                                </span>
-                              ) : (
-                                <span className="text-slate-600 text-[10px] font-mono">V6: —</span>
-                              )}
-                            </div>
-                          ) : null}
-                        </td>
+                        )}
+                      </div>
 
-                        {/* Global Average */}
-                        <td className="p-3">
-                          <div className="h-6 flex items-center whitespace-nowrap font-mono text-xs text-slate-300">
-                            {v4Global ? `${item.is_dual_stack ? 'V4: ' : ''}${v4Global} ms` : '—'}
+                      {/* Global Avg */}
+                      <div className="rounded-lg bg-slate-950/70 border border-slate-800/80 p-2 space-y-0.5">
+                        <span className="text-[10px] text-slate-400 font-sans block truncate">全球均延</span>
+                        <div className="whitespace-nowrap text-xs text-slate-200 font-bold">
+                          {v4Global ? `${item.is_dual_stack ? 'V4 ' : ''}${v4Global} ms` : '—'}
+                        </div>
+                        {item.is_dual_stack && (
+                          <div className="whitespace-nowrap text-[10px] text-slate-400 pt-0.5 truncate">
+                            {v6Global ? `V6 ${v6Global} ms` : (v6CnAvg ? `V6 ${v6CnAvg} ms` : 'V6 —')}
                           </div>
-                          {item.is_dual_stack ? (
-                            <div className="h-6 flex items-center whitespace-nowrap font-mono text-[10px] text-slate-400">
-                              {v6Global ? `V6: ${v6Global} ms` : (v6CnAvg ? `V6三网: ${v6CnAvg} ms` : 'V6: —')}
-                            </div>
-                          ) : null}
-                        </td>
+                        )}
+                      </div>
+                    </div>
+                  </div>
 
-                        {/* Inspection Time */}
-                        <td className="p-3">
-                          <div className="h-6 flex items-center whitespace-nowrap text-xs text-slate-300 font-mono" title={inspection.full}>
-                            {inspection.time}
-                          </div>
-                          <div className="h-6 flex items-center whitespace-nowrap text-[10px] text-slate-500 font-sans" title={inspection.full}>
-                            {inspection.relative}
-                          </div>
-                        </td>
-
-                        {/* Actions */}
-                        <td className="p-3 text-right font-sans">
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => toggleExpandHost(item)}
-                              className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition flex items-center gap-1 ${
-                                isExpanded
-                                  ? 'border-sky-500 bg-sky-950/70 text-sky-300 shadow-xs'
-                                  : 'border-slate-700 bg-slate-800/80 text-slate-200 hover:bg-slate-700'
-                              }`}
-                              title={isExpanded ? '收起此机详细巡检成果' : '展开此机最新诊断与各区域时延详情'}
-                            >
-                              <span>{isExpanded ? '收起详情' : '查看详情'}</span>
-                              {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                            </button>
-                            {authed && (
-                              <button
-                                type="button"
-                                disabled={triggeringHostId === item.host_id}
-                                onClick={() => handleTriggerHost(item.host_id)}
-                                className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-300 hover:text-slate-100 hover:bg-slate-700 transition flex items-center gap-1.5 disabled:opacity-60"
-                                title="单独重新检测此机 (即时执行)"
-                              >
-                                <RefreshCw className={`h-3.5 w-3.5 ${triggeringHostId === item.host_id ? 'animate-spin text-sky-400' : 'text-slate-400'}`} />
-                                <span className="font-medium text-[11px]">{triggeringHostId === item.host_id ? '检测中' : '刷新'}</span>
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-
-                      {/* IN-PLACE ACCORDION SUB-ROW UNDER THIS HOST */}
-                      {isExpanded && (
-                        <tr key={`${item.host_id}-details`} className="bg-slate-950/90 border-b-2 border-sky-500/40">
-                          <td colSpan={9} className="p-4 sm:p-6 space-y-5">
-                            {summary ? (
-                              <div className="space-y-4">
-                                {/* Diagnostic Verdict Card */}
-                                <div className={`rounded-xl border p-5 transition-all space-y-4 ${
-                                  summary.verdict === 'ok'
-                                    ? 'border-emerald-500/40 bg-gradient-to-br from-emerald-950/40 via-slate-900/80 to-slate-950'
-                                    : summary.verdict === 'gfw_blocked'
-                                    ? 'border-rose-500/50 bg-gradient-to-br from-rose-950/40 via-slate-900/80 to-slate-950'
-                                    : summary.verdict === 'partial'
-                                    ? 'border-amber-500/40 bg-gradient-to-br from-amber-950/40 via-slate-900/80 to-slate-950'
-                                    : 'border-slate-700 bg-slate-900/80'
-                                }`}>
-                                  <div className="flex flex-wrap items-start justify-between gap-4">
-                                    <div className="space-y-1">
-                                      <div className="flex items-center gap-2 flex-wrap">
-                                        <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ${
-                                          summary.verdict === 'ok'
-                                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                                            : summary.verdict === 'gfw_blocked'
-                                            ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse'
-                                            : summary.verdict === 'partial'
-                                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                                            : 'bg-slate-700/50 text-slate-300 border border-slate-600'
-                                        }`}>
-                                          {summary.verdict === 'ok' ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-                                          <span>{summary.verdictLabel}</span>
-                                        </span>
-                                        <span className="font-mono text-sm font-semibold text-slate-100">
-                                          {authed ? `${summary.target}:${summary.port <= 0 ? 'PING' : summary.port}` : `${isIpString(summary.target) ? '目标节点' : summary.target}:${summary.port <= 0 ? 'PING' : summary.port}`}
-                                        </span>
-                                        <span className="text-xs text-slate-400 font-mono">
-                                          ({summary.protocol} 探测 · 18 节点巡检)
-                                        </span>
-                                      </div>
-                                      <p className="text-xs text-slate-300 leading-relaxed pt-1">
-                                        {summary.verdictDescription}
-                                      </p>
-                                    </div>
-
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      {item.is_dual_stack && (
-                                        <div className="flex items-center rounded-lg bg-slate-950/90 p-0.5 border border-slate-700/80">
-                                          <button
-                                            type="button"
-                                            onClick={() => handleSelectClusterItem(item, 'v4')}
-                                            className={`px-2.5 py-1 text-xs rounded-md font-medium transition ${
-                                              activeStackTab === 'v4'
-                                                ? 'bg-sky-600 text-white shadow-xs'
-                                                : 'text-slate-400 hover:text-slate-200'
-                                            }`}
-                                          >
-                                            IPv4 探测结果
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => handleSelectClusterItem(item, 'v6')}
-                                            className={`px-2.5 py-1 text-xs rounded-md font-medium transition ${
-                                              activeStackTab === 'v6'
-                                                ? 'bg-indigo-600 text-white shadow-xs'
-                                                : 'text-slate-400 hover:text-slate-200'
-                                            }`}
-                                          >
-                                            IPv6 探测结果
-                                          </button>
-                                        </div>
-                                      )}
-                                      <button
-                                        type="button"
-                                        onClick={handleCopyReport}
-                                        className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 transition"
-                                      >
-                                        {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                                        <span>{copied ? '已复制' : '复制诊断报告'}</span>
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                  {/* Metrics strip */}
-                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800/60 font-mono">
-                                    <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
-                                      <span className="text-[11px] text-slate-400 block font-sans">国内三网平均时延</span>
-                                      <span className="text-base font-bold text-sky-300">
-                                        {summary.stats.cnAverageMs ? `${summary.stats.cnAverageMs} ms` : '—'}
-                                      </span>
-                                      <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                                        可达: {summary.stats.cnSuccess} / {summary.stats.cnTotal} 运营商
-                                      </span>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
-                                      <span className="text-[11px] text-slate-400 block font-sans">海外区域平均时延</span>
-                                      <span className="text-base font-bold text-emerald-300">
-                                        {(() => {
-                                          const ovs = summary.results.filter(r => r.region.group !== 'cn' && r.status === 'ok');
-                                          return ovs.length ? `${Math.round(ovs.reduce((a, b) => a + b.timings.total, 0) / ovs.length)} ms` : '—';
-                                        })()}
-                                      </span>
-                                      <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                                        可达: {summary.results.filter(r => r.region.group !== 'cn' && r.status === 'ok').length} / {summary.results.filter(r => r.region.group !== 'cn').length} 区域
-                                      </span>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
-                                      <span className="text-[11px] text-slate-400 block font-sans">全球核心可达率</span>
-                                      <span className="text-base font-bold text-slate-100">
-                                        {Math.round((summary.stats.success / (summary.stats.total || 1)) * 100)}%
-                                      </span>
-                                      <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                                        成功: {summary.stats.success} / {summary.stats.total} 节点
-                                      </span>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
-                                      <span className="text-[11px] text-slate-400 block font-sans">巡检探测口径</span>
-                                      <span className="text-base font-bold text-indigo-300 font-sans">
-                                        {summary.protocol === 'PING' ? 'ICMP Ping' : `TCP :${summary.port}`}
-                                      </span>
-                                      <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                                        18 核心节点分布式探测
-                                      </span>
-                                    </div>
-                                  </div>
-
-                                  {/* Actionable troubleshooting advice */}
-                                  {summary.advice && summary.advice.length > 0 && (
-                                    <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 space-y-1.5 text-xs">
-                                      <div
-                                        className="flex items-center justify-between text-slate-300 cursor-pointer font-semibold"
-                                        onClick={() => setShowAdvice(!showAdvice)}
-                                      >
-                                        <div className="flex items-center gap-1.5">
-                                          <HelpCircle className="h-3.5 w-3.5 text-sky-400" />
-                                          <span>排错指引与建议措施</span>
-                                        </div>
-                                        {showAdvice ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                                      </div>
-                                      {showAdvice && (
-                                        <ul className="list-disc list-inside space-y-1 text-slate-400 pl-1 pt-1 leading-relaxed">
-                                          {summary.advice.map((adviceText, idx) => (
-                                            <li key={idx}>{adviceText}</li>
-                                          ))}
-                                        </ul>
-                                      )}
-                                    </div>
-                                  )}
+                  {/* IN-PLACE ACCORDION DETAILS (Expands seamlessly beneath the card) */}
+                  {isExpanded && (
+                    <div className="border-t border-slate-800/80 bg-slate-950/80 p-4 sm:p-5 rounded-b-xl space-y-4 animate-fade-in">
+                      {summary ? (
+                        <div className="space-y-4">
+                          {/* Diagnostic Verdict Card */}
+                          <div className={`rounded-xl border p-4 sm:p-5 transition-all space-y-4 ${
+                            summary.verdict === 'ok'
+                              ? 'border-emerald-500/40 bg-gradient-to-br from-emerald-950/40 via-slate-900/80 to-slate-950'
+                              : summary.verdict === 'gfw_blocked'
+                              ? 'border-rose-500/50 bg-gradient-to-br from-rose-950/40 via-slate-900/80 to-slate-950'
+                              : summary.verdict === 'partial'
+                              ? 'border-amber-500/40 bg-gradient-to-br from-amber-950/40 via-slate-900/80 to-slate-950'
+                              : 'border-slate-700 bg-slate-900/80'
+                          }`}>
+                            <div className="flex flex-wrap items-start justify-between gap-4">
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ${
+                                    summary.verdict === 'ok'
+                                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                      : summary.verdict === 'gfw_blocked'
+                                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse'
+                                      : summary.verdict === 'partial'
+                                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                      : 'bg-slate-700/50 text-slate-300 border border-slate-600'
+                                  }`}>
+                                    {summary.verdict === 'ok' ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+                                    <span>{summary.verdictLabel}</span>
+                                  </span>
+                                  <span className="font-mono text-sm font-semibold text-slate-100">
+                                    {authed ? `${summary.target}:${summary.port <= 0 ? 'PING' : summary.port}` : `${isIpString(summary.target) ? '目标节点' : summary.target}:${summary.port <= 0 ? 'PING' : summary.port}`}
+                                  </span>
+                                  <span className="text-xs text-slate-400 font-mono">
+                                    ({summary.protocol} 探测 · 18 节点巡检)
+                                  </span>
                                 </div>
+                                <p className="text-xs text-slate-300 leading-relaxed pt-1">
+                                  {summary.verdictDescription}
+                                </p>
+                              </div>
 
-                                {/* 18-Region Results Grid */}
-                                <div className="space-y-3">
-                                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-2">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <h3 className="text-sm font-semibold text-slate-200">各区域及运营商探测结果</h3>
-                                      <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-400 font-mono">
-                                        {liveResults.length} 节点
-                                      </span>
-                                      {item.is_dual_stack && (
-                                        <span className="rounded-full bg-indigo-950/80 border border-indigo-700/60 px-2 py-0.5 text-xs text-indigo-300 font-sans">
-                                          当前显示: {activeStackTab === 'v6' ? 'IPv6 栈探测' : 'IPv4 栈探测'}
-                                        </span>
-                                      )}
-                                    </div>
-
-                                    {/* Region Tabs */}
-                                    <div className="flex items-center gap-1 text-xs">
-                                      {[
-                                        { id: 'all', label: '全部' },
-                                        { id: 'cn', label: '中国大陆三网' },
-                                        { id: 'apac', label: '亚太' },
-                                        { id: 'emea', label: '欧洲/中东/非洲' },
-                                        { id: 'am', label: '美洲' },
-                                      ].map(tab => (
-                                        <button
-                                          key={tab.id}
-                                          type="button"
-                                          onClick={() => setFilterGroup(tab.id as any)}
-                                          className={`rounded-lg px-2.5 py-1 transition font-medium ${
-                                            filterGroup === tab.id
-                                              ? 'bg-sky-600 text-white shadow-xs'
-                                              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                                          }`}
-                                        >
-                                          {tab.label}
-                                        </button>
-                                      ))}
-                                    </div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {item.is_dual_stack && (
+                                  <div className="flex items-center rounded-lg bg-slate-950/90 p-0.5 border border-slate-700/80">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSelectClusterItem(item, 'v4')}
+                                      className={`px-2.5 py-1 text-xs rounded-md font-medium transition cursor-pointer ${
+                                        activeStackTab === 'v4'
+                                          ? 'bg-sky-600 text-white shadow-xs'
+                                          : 'text-slate-400 hover:text-slate-200'
+                                      }`}
+                                    >
+                                      IPv4 探测结果
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSelectClusterItem(item, 'v6')}
+                                      className={`px-2.5 py-1 text-xs rounded-md font-medium transition cursor-pointer ${
+                                        activeStackTab === 'v6'
+                                          ? 'bg-indigo-600 text-white shadow-xs'
+                                          : 'text-slate-400 hover:text-slate-200'
+                                      }`}
+                                    >
+                                      IPv6 探测结果
+                                    </button>
                                   </div>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={handleCopyReport}
+                                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 transition cursor-pointer"
+                                >
+                                  {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                                  <span>{copied ? '已复制' : '复制诊断报告'}</span>
+                                </button>
+                              </div>
+                            </div>
 
-                                  {/* Region cards */}
-                                  {liveResults.length === 0 ? (
-                                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-6 text-center text-xs text-slate-400 space-y-2">
-                                      <Globe className="h-6 w-6 text-slate-600 mx-auto" />
-                                      <p className="font-semibold text-slate-300">暂无此栈的区域探测明细</p>
-                                    </div>
-                                  ) : (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                                      {filteredResults.map(res => {
-                                        const rOk = res.status === 'ok';
-                                        const rTesting = res.status === 'testing';
-                                        const rCn = res.region.group === 'cn';
+                            {/* Metrics strip */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800/60 font-mono">
+                              <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
+                                <span className="text-[11px] text-slate-400 block font-sans">国内三网平均时延</span>
+                                <span className="text-base font-bold text-sky-300">
+                                  {summary.stats.cnAverageMs ? `${summary.stats.cnAverageMs} ms` : '—'}
+                                </span>
+                                <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
+                                  可达: {summary.stats.cnSuccess} / {summary.stats.cnTotal} 运营商
+                                </span>
+                              </div>
 
-                                        return (
-                                          <div
-                                            key={res.region.id}
-                                            className={`rounded-xl border p-3.5 space-y-2.5 transition ${
-                                              rTesting
-                                                ? 'border-slate-800 bg-slate-900/40 animate-pulse'
-                                                : rOk
-                                                ? rCn
-                                                  ? 'border-sky-500/30 bg-slate-900/80 shadow-xs'
-                                                  : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
-                                                : 'border-rose-900/40 bg-rose-950/10 hover:border-rose-800/60'
-                                            }`}
-                                          >
-                                            <div className="flex items-start justify-between gap-2">
-                                              <div className="min-w-0 flex-1">
-                                                <div className="flex items-center gap-1.5">
-                                                  <span className="text-sm shrink-0">{res.region.flag}</span>
-                                                  <h4 className="font-semibold text-xs text-slate-100 truncate" title={res.region.name}>
-                                                    {res.region.name}
-                                                  </h4>
-                                                </div>
-                                                <div className="flex items-center gap-1.5 mt-0.5">
-                                                  {res.region.asn && (
-                                                    <span className="text-[10px] font-mono text-slate-400">
-                                                      AS{res.region.asn}
-                                                    </span>
-                                                  )}
-                                                  {authed && res.ip && (
-                                                    <span className="text-[10px] font-mono text-slate-500 truncate" title={res.ip}>
-                                                      · {res.ip}
-                                                    </span>
-                                                  )}
-                                                </div>
-                                              </div>
+                              <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
+                                <span className="text-[11px] text-slate-400 block font-sans">海外区域平均时延</span>
+                                <span className="text-base font-bold text-emerald-300">
+                                  {(() => {
+                                    const ovs = summary.results.filter(r => r.region.group !== 'cn' && r.status === 'ok');
+                                    return ovs.length ? `${Math.round(ovs.reduce((a, b) => a + b.timings.total, 0) / ovs.length)} ms` : '—';
+                                  })()}
+                                </span>
+                                <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
+                                  可达: {summary.results.filter(r => r.region.group !== 'cn' && r.status === 'ok').length} / {summary.results.filter(r => r.region.group !== 'cn').length} 区域
+                                </span>
+                              </div>
 
-                                              <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold ${
-                                                rTesting
-                                                  ? 'border-sky-500/40 bg-sky-950/40 text-sky-400'
-                                                  : rOk
-                                                  ? latencyBadgeColor(res.timings.total)
-                                                  : res.status === 'timeout'
-                                                  ? 'border-rose-500/40 bg-rose-950/40 text-rose-300'
-                                                  : res.status === 'refused'
-                                                  ? 'border-amber-500/40 bg-amber-950/40 text-amber-300'
-                                                  : 'border-slate-700 bg-slate-800 text-slate-400'
-                                              }`}>
-                                                {rTesting
-                                                  ? '检测中...'
-                                                  : rOk
-                                                  ? `${res.timings.total} ms`
-                                                  : res.status === 'timeout'
-                                                  ? '连接超时'
-                                                  : res.status === 'refused'
-                                                  ? '端口拒绝'
-                                                  : res.status === 'dns_error'
-                                                  ? 'DNS失败'
-                                                  : res.status === 'tls_error'
-                                                  ? 'TLS错误'
-                                                  : '检测失败'}
+                              <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
+                                <span className="text-[11px] text-slate-400 block font-sans">全球核心可达率</span>
+                                <span className="text-base font-bold text-slate-100">
+                                  {Math.round((summary.stats.success / (summary.stats.total || 1)) * 100)}%
+                                </span>
+                                <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
+                                  成功: {summary.stats.success} / {summary.stats.total} 节点
+                                </span>
+                              </div>
+
+                              <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800/60">
+                                <span className="text-[11px] text-slate-400 block font-sans">巡检探测口径</span>
+                                <span className="text-base font-bold text-indigo-300 font-sans">
+                                  {summary.protocol === 'PING' ? 'ICMP Ping' : `TCP :${summary.port}`}
+                                </span>
+                                <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
+                                  18 核心节点分布式探测
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Actionable troubleshooting advice */}
+                            {summary.advice && summary.advice.length > 0 && (
+                              <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 space-y-1.5 text-xs">
+                                <div
+                                  className="flex items-center justify-between text-slate-300 cursor-pointer font-semibold"
+                                  onClick={() => setShowAdvice(!showAdvice)}
+                                >
+                                  <div className="flex items-center gap-1.5">
+                                    <HelpCircle className="h-3.5 w-3.5 text-sky-400" />
+                                    <span>排错指引与建议措施</span>
+                                  </div>
+                                  {showAdvice ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                                </div>
+                                {showAdvice && (
+                                  <ul className="list-disc list-inside space-y-1 text-slate-400 pl-1 pt-1 leading-relaxed">
+                                    {summary.advice.map((adviceText, idx) => (
+                                      <li key={idx}>{adviceText}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* 18-Region Results Grid */}
+                          <div className="space-y-3">
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-2">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="text-sm font-semibold text-slate-200">各区域及运营商探测结果</h3>
+                                <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-400 font-mono">
+                                  {liveResults.length} 节点
+                                </span>
+                                {item.is_dual_stack && (
+                                  <span className="rounded-full bg-indigo-950/80 border border-indigo-700/60 px-2 py-0.5 text-xs text-indigo-300 font-sans">
+                                    当前显示: {activeStackTab === 'v6' ? 'IPv6 栈探测' : 'IPv4 栈探测'}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Region Tabs */}
+                              <div className="flex items-center gap-1 text-xs">
+                                {[
+                                  { id: 'all', label: '全部' },
+                                  { id: 'cn', label: '中国大陆三网' },
+                                  { id: 'apac', label: '亚太' },
+                                  { id: 'emea', label: '欧洲/中东/非洲' },
+                                  { id: 'am', label: '美洲' },
+                                ].map(tab => (
+                                  <button
+                                    key={tab.id}
+                                    type="button"
+                                    onClick={() => setFilterGroup(tab.id as any)}
+                                    className={`rounded-lg px-2.5 py-1 transition font-medium cursor-pointer ${
+                                      filterGroup === tab.id
+                                        ? 'bg-sky-600 text-white shadow-xs'
+                                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                                    }`}
+                                  >
+                                    {tab.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Region cards */}
+                            {liveResults.length === 0 ? (
+                              <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-6 text-center text-xs text-slate-400 space-y-2">
+                                <Globe className="h-6 w-6 text-slate-600 mx-auto" />
+                                <p className="font-semibold text-slate-300">暂无此栈的区域探测明细</p>
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                {filteredResults.map(res => {
+                                  const rOk = res.status === 'ok';
+                                  const rTesting = res.status === 'testing';
+                                  const rCn = res.region.group === 'cn';
+
+                                  return (
+                                    <div
+                                      key={res.region.id}
+                                      className={`rounded-xl border p-3.5 space-y-2.5 transition ${
+                                        rTesting
+                                          ? 'border-slate-800 bg-slate-900/40 animate-pulse'
+                                          : rOk
+                                          ? rCn
+                                            ? 'border-sky-500/30 bg-slate-900/80 shadow-xs'
+                                            : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
+                                          : 'border-rose-900/40 bg-rose-950/10 hover:border-rose-800/60'
+                                      }`}
+                                    >
+                                      <div className="flex items-start justify-between gap-2">
+                                        <div className="min-w-0 flex-1">
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="text-sm shrink-0">{res.region.flag}</span>
+                                            <h4 className="font-semibold text-xs text-slate-100 truncate" title={res.region.name}>
+                                              {res.region.name}
+                                            </h4>
+                                          </div>
+                                          <div className="flex items-center gap-1.5 mt-0.5">
+                                            {res.region.asn && (
+                                              <span className="text-[10px] font-mono text-slate-400">
+                                                AS{res.region.asn}
                                               </span>
-                                            </div>
-
-                                            {/* Timings breakdown bar */}
-                                            {rOk && (
-                                              <div className="space-y-1 pt-1 border-t border-slate-800/60 text-[10px] font-mono">
-                                                <div className="flex items-center justify-between text-slate-400">
-                                                  <span>时延构成</span>
-                                                  <span className="text-slate-200 font-bold">{res.timings.total} ms</span>
-                                                </div>
-                                                <div className="flex gap-1.5 text-slate-400 flex-wrap">
-                                                  {res.timings.dns !== undefined && (
-                                                    <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                                                      DNS: {res.timings.dns}ms
-                                                    </span>
-                                                  )}
-                                                  {res.timings.tcp !== undefined && (
-                                                    <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                                                      TCP: {res.timings.tcp}ms
-                                                    </span>
-                                                  )}
-                                                  {res.timings.tls !== undefined && (
-                                                    <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                                                      TLS: {res.timings.tls}ms
-                                                    </span>
-                                                  )}
-                                                  {res.timings.ttfb !== undefined && (
-                                                    <span className="rounded bg-slate-800/80 px-1 py-0.2">
-                                                      TTFB: {res.timings.ttfb}ms
-                                                    </span>
-                                                  )}
-                                                </div>
-                                              </div>
                                             )}
-
-                                            {!rOk && !rTesting && res.error && (
-                                              <div className="pt-1 border-t border-slate-800/60 text-[10px] text-rose-300/80 font-mono truncate" title={res.error}>
-                                                {res.error}
-                                              </div>
+                                            {authed && res.ip && (
+                                              <span className="text-[10px] font-mono text-slate-500 truncate" title={res.ip}>
+                                                · {res.ip}
+                                              </span>
                                             )}
                                           </div>
-                                        );
-                                      })}
+                                        </div>
+
+                                        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold ${
+                                          rTesting
+                                            ? 'border-sky-500/40 bg-sky-950/40 text-sky-400'
+                                            : rOk
+                                            ? latencyBadgeColor(res.timings.total)
+                                            : res.status === 'timeout'
+                                            ? 'border-rose-500/40 bg-rose-950/40 text-rose-300'
+                                            : res.status === 'refused'
+                                            ? 'border-amber-500/40 bg-amber-950/40 text-amber-300'
+                                            : 'border-slate-700 bg-slate-800 text-slate-400'
+                                        }`}>
+                                          {rTesting
+                                            ? '检测中...'
+                                            : rOk
+                                            ? `${res.timings.total} ms`
+                                            : res.status === 'timeout'
+                                            ? '连接超时'
+                                            : res.status === 'refused'
+                                            ? '端口拒绝'
+                                            : res.status === 'dns_error'
+                                            ? 'DNS失败'
+                                            : res.status === 'tls_error'
+                                            ? 'TLS错误'
+                                            : '检测失败'}
+                                        </span>
+                                      </div>
+
+                                      {/* Timings breakdown bar */}
+                                      {rOk && (
+                                        <div className="space-y-1 pt-1 border-t border-slate-800/60 text-[10px] font-mono">
+                                          <div className="flex items-center justify-between text-slate-400">
+                                            <span>时延构成</span>
+                                            <span className="text-slate-200 font-bold">{res.timings.total} ms</span>
+                                          </div>
+                                          <div className="flex gap-1.5 text-slate-400 flex-wrap">
+                                            {res.timings.dns !== undefined && (
+                                              <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                                                DNS: {res.timings.dns}ms
+                                              </span>
+                                            )}
+                                            {res.timings.tcp !== undefined && (
+                                              <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                                                TCP: {res.timings.tcp}ms
+                                              </span>
+                                            )}
+                                            {res.timings.tls !== undefined && (
+                                              <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                                                TLS: {res.timings.tls}ms
+                                              </span>
+                                            )}
+                                            {res.timings.ttfb !== undefined && (
+                                              <span className="rounded bg-slate-800/80 px-1 py-0.2">
+                                                TTFB: {res.timings.ttfb}ms
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {!rOk && !rTesting && res.error && (
+                                        <div className="pt-1 border-t border-slate-800/60 text-[10px] text-rose-300/80 font-mono truncate" title={res.error}>
+                                          {res.error}
+                                        </div>
+                                      )}
                                     </div>
-                                  )}
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="p-4 text-center text-slate-500 font-sans text-xs">
-                                正在加载该机器巡检详情...
+                                  );
+                                })}
                               </div>
                             )}
-                          </td>
-                        </tr>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-4 text-center text-slate-500 font-sans text-xs">
+                          正在加载该机器巡检详情...
+                        </div>
                       )}
-                    </React.Fragment>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       {/* API Key Modal */}
@@ -1012,7 +1004,7 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
               <button
                 type="button"
                 onClick={() => { setShowKeyModal(false); setKeyFeedback(''); }}
-                className="text-slate-400 hover:text-slate-200 text-sm font-bold"
+                className="text-slate-400 hover:text-slate-200 text-sm font-bold cursor-pointer"
               >
                 ✕
               </button>
@@ -1060,14 +1052,14 @@ export const ReachCheckPanel: React.FC<ReachCheckPanelProps> = ({
                 <button
                   type="button"
                   onClick={() => { setShowKeyModal(false); setKeyFeedback(''); }}
-                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 cursor-pointer"
                 >
                   取消
                 </button>
                 <button
                   type="submit"
                   disabled={savingKey}
-                  className="rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-1.5 text-xs font-semibold text-white transition disabled:opacity-50"
+                  className="rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-1.5 text-xs font-semibold text-white transition disabled:opacity-50 cursor-pointer"
                 >
                   {savingKey ? '保存中...' : '保存并同步'}
                 </button>
