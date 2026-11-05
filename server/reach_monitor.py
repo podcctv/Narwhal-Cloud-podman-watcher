@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import ipaddress
 import json
 import logging
@@ -446,18 +447,101 @@ def discover_host_target(conn: sqlite3.Connection, host_id: str) -> str:
     return targets.get("ipv4") or targets.get("ipv6") or ""
 
 
+def format_utc8(ts: int) -> str:
+    """Formats unix epoch seconds into UTC+8 standard string (YYYY-MM-DD HH:mm:ss)."""
+    if not ts or ts <= 0:
+        return ""
+    try:
+        return datetime.datetime.fromtimestamp(
+            ts, tz=datetime.timezone(datetime.timedelta(hours=8))
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
 def discover_host_open_ports(conn: sqlite3.Connection, host_id: str) -> List[int]:
-    """Finds all currently open listening ports for this machine from the latest report and host_security."""
+    """Finds all currently open public listening ports for this machine.
+    Prioritizes verified endpoints from gfw_states and explicit host mappings in network_exposure.
+    Container-internal unmapped ports are strictly excluded to avoid false unreachable alerts.
+    """
     ports: Set[int] = set()
 
-    # 1. From host_security latest row only
-    sec = conn.execute(
-        "SELECT payload_json FROM host_security WHERE host_id=? ORDER BY ts DESC LIMIT 1",
-        (host_id,),
-    ).fetchone()
-    if sec:
-        try:
-            p = json.loads(sec["payload_json"])
+    # 1. From gfw_states evidence_json targets (verified endpoints)
+    try:
+        gfw = conn.execute(
+            "SELECT evidence_json FROM gfw_states WHERE host_id=?", (host_id,)
+        ).fetchone()
+        if gfw and gfw["evidence_json"]:
+            gp = json.loads(gfw["evidence_json"])
+            for t in gp.get("targets", []) or []:
+                p = t.get("port")
+                if p:
+                    try:
+                        port = int(p)
+                        if 1 <= port <= 65535 and port not in {25, 53, 5355}:
+                            ports.add(port)
+                    except (ValueError, TypeError):
+                        pass
+            for bek in gp.get("blocked_endpoint_keys", []) or []:
+                if isinstance(bek, (list, tuple)) and len(bek) >= 2 and bek[1]:
+                    try:
+                        port = int(bek[1])
+                        if 1 <= port <= 65535 and port not in {25, 53, 5355}:
+                            ports.add(port)
+                    except (ValueError, TypeError):
+                        pass
+    except Exception:
+        pass
+
+    # 2. From reports latest rows:
+    try:
+        rep_rows = conn.execute(
+            "SELECT payload_json FROM reports WHERE host_id=? ORDER BY ts DESC LIMIT 30",
+            (host_id,),
+        ).fetchall()
+        for rep in rep_rows:
+            p = json.loads(rep["payload_json"] or "{}")
+            sec_p = p.get("security", {})
+            has_public_container_ip = any(
+                is_public_ip(str(addr).split("/")[0].strip())
+                for addr in (p.get("network_addresses", []) or [])
+            )
+            # If container has direct public IP or host networking, its listening ports are publicly reachable
+            if has_public_container_ip:
+                for lp in sec_p.get("listening_ports", []) or []:
+                    try:
+                        port = int(lp)
+                        if 1 <= port <= 65535 and port not in {25, 53, 5355}:
+                            ports.add(port)
+                    except (ValueError, TypeError):
+                        continue
+
+            # Explicit host network exposures (mapped ports)
+            for exp in sec_p.get("network_exposure", []) or []:
+                if isinstance(exp, dict):
+                    hp = exp.get("host_port")
+                    if not hp and exp.get("listen"):
+                        listen_str = str(exp.get("listen")).strip()
+                        if ":" in listen_str:
+                            hp = listen_str.split(":")[-1]
+                    if hp:
+                        try:
+                            port = int(hp)
+                            if 1 <= port <= 65535 and port not in {25, 53, 5355}:
+                                ports.add(port)
+                        except (ValueError, TypeError):
+                            continue
+    except Exception:
+        pass
+
+    # 3. From host_security host_firewall (actual host listening ports)
+    try:
+        sec = conn.execute(
+            "SELECT payload_json FROM host_security WHERE host_id=? ORDER BY ts DESC LIMIT 1",
+            (host_id,),
+        ).fetchone()
+        if sec:
+            p = json.loads(sec["payload_json"] or "{}")
             hf = p.get("host_firewall", {})
             for lp in hf.get("listening_ports", []) or []:
                 try:
@@ -466,35 +550,8 @@ def discover_host_open_ports(conn: sqlite3.Connection, host_id: str) -> List[int
                         ports.add(port)
                 except (ValueError, TypeError):
                     continue
-        except Exception:
-            pass
-
-    # 2. From reports latest row only
-    rep = conn.execute(
-        "SELECT payload_json FROM reports WHERE host_id=? ORDER BY ts DESC LIMIT 1",
-        (host_id,),
-    ).fetchone()
-    if rep:
-        try:
-            p = json.loads(rep["payload_json"])
-            sec_p = p.get("security", {})
-            for lp in sec_p.get("listening_ports", []) or []:
-                try:
-                    port = int(lp)
-                    if 1 <= port <= 65535 and port not in {25, 53, 5355}:
-                        ports.add(port)
-                except (ValueError, TypeError):
-                    continue
-            for exp in sec_p.get("network_exposure", []) or []:
-                if isinstance(exp, dict) and exp.get("host_port"):
-                    try:
-                        hp = int(exp["host_port"])
-                        if 1 <= hp <= 65535 and hp not in {25, 53, 5355}:
-                            ports.add(hp)
-                    except (ValueError, TypeError):
-                        continue
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     return sorted(ports)
 
@@ -947,6 +1004,23 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
         summary_v4 = parse_measurement_results(m_v4_data, primary_target, port, protocol, regions=v4_regions)
         now = int(time.time())
 
+        # Smart ICMP ping fallback: if chosen TCP port failed all probes, verify if host is alive via ICMP
+        if summary_v4.get("stats", {}).get("success", 0) == 0 and protocol == "TCP":
+            logger.info(f"Host {host_id} TCP port {port} unreachable; attempting ICMP ping fallback on {primary_target}...")
+            try:
+                m_ping_data = execute_globalping_measurement(
+                    primary_target, 0, "PING", regions=v4_regions if is_dual else None, api_key=api_key, conn=conn
+                )
+                if m_ping_data.get("status") != "rate_limited":
+                    summary_ping = parse_measurement_results(m_ping_data, primary_target, 0, "PING", regions=v4_regions)
+                    if summary_ping.get("stats", {}).get("success", 0) > 0:
+                        logger.info(f"Host {host_id} ICMP ping fallback succeeded: verdict={summary_ping['verdict_label']}")
+                        summary_v4 = summary_ping
+                        port = 0
+                        protocol = "PING"
+            except Exception as ping_err:
+                logger.warning(f"ICMP fallback failed for {host_id}: {ping_err}")
+
         # 2. Secondary measurement for IPv6 if dual-stack
         summary_v6: Optional[Dict[str, Any]] = None
         if is_dual and v6_regions and target_v6:
@@ -956,6 +1030,18 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
                 )
                 if m_v6_data.get("status") != "rate_limited":
                     summary_v6 = parse_measurement_results(m_v6_data, target_v6, port, protocol, regions=v6_regions)
+                    # ICMP ping fallback for IPv6 if TCP failed completely
+                    if summary_v6.get("stats", {}).get("success", 0) == 0 and protocol == "TCP":
+                        try:
+                            m_v6_ping = execute_globalping_measurement(
+                                target_v6, 0, "PING", regions=v6_regions, api_key=api_key, conn=conn
+                            )
+                            if m_v6_ping.get("status") != "rate_limited":
+                                summary_v6_ping = parse_measurement_results(m_v6_ping, target_v6, 0, "PING", regions=v6_regions)
+                                if summary_v6_ping.get("stats", {}).get("success", 0) > 0:
+                                    summary_v6 = summary_v6_ping
+                        except Exception:
+                            pass
                 else:
                     logger.warning(f"Host {host_id} IPv6 reach check rate limited; retaining existing IPv6 record")
             except Exception as e:
@@ -1031,6 +1117,8 @@ def perform_host_reach_check(conn: sqlite3.Connection, host_id: str) -> Optional
         combined["stats_v6"] = json.loads(stats_v6_json) if stats_v6_json else {}
         combined["results_v6"] = json.loads(results_v6_json) if results_v6_json else []
         combined["checked_at_v6"] = checked_at_v6_val
+        combined["checked_at_iso_utc8"] = format_utc8(now)
+        combined["checked_at_v6_iso_utc8"] = format_utc8(checked_at_v6_val)
         return combined
     except Exception as e:
         logger.error(f"Failed automated reach check for {host_id} ({primary_target}:{port} {protocol}): {e}")
@@ -1210,6 +1298,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                     "stats": stats,
                     "results": results,
                     "checked_at": checked_at,
+                    "checked_at_iso_utc8": format_utc8(checked_at),
                     "is_dual_stack": is_dual,
                     "has_ipv6": has_v6,
                     "target_v6": target_v6_val,
@@ -1221,6 +1310,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                     "stats_v6": stats_v6,
                     "results_v6": results_v6,
                     "checked_at_v6": int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0,
+                    "checked_at_v6_iso_utc8": format_utc8(int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0),
                 })
 
             return JSONResponse(content={
@@ -1326,6 +1416,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 "stats": stats,
                 "results": results,
                 "checked_at": int(r["checked_at"] or 0),
+                "checked_at_iso_utc8": format_utc8(int(r["checked_at"] or 0)),
                 "is_dual_stack": is_dual,
                 "has_ipv6": has_v6,
                 "target_v6": target_v6_val,
@@ -1337,6 +1428,7 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                 "stats_v6": stats_v6,
                 "results_v6": results_v6,
                 "checked_at_v6": int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0,
+                "checked_at_v6_iso_utc8": format_utc8(int(r["checked_at_v6"] or 0) if "checked_at_v6" in r.keys() else 0),
             }
             return JSONResponse(content={"item": item, **item})
         finally:
@@ -1362,8 +1454,8 @@ def attach(app: FastAPI, db_factory: Callable[[], sqlite3.Connection], verify_si
                         return perform_host_reach_check(c, host_id)
                     finally:
                         c.close()
-                asyncio.create_task(asyncio.to_thread(_worker_single))
-                return JSONResponse(content={"ok": True, "message": f"主机 {host_id} 可达性测试已在后台触发"})
+                res = await asyncio.to_thread(_worker_single)
+                return JSONResponse(content={"ok": True, "message": f"主机 {host_id} 可达性测试已完成", "item": res})
             else:
                 asyncio.create_task(run_hourly_reach_cycle(db_factory))
                 return JSONResponse(content={"ok": True, "message": "全集群可达性自动化巡检已在后台启动（平滑时序调度）"})

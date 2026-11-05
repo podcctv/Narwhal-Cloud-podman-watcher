@@ -542,6 +542,66 @@ class TestReachMonitor(unittest.TestCase):
         self.assertEqual(item_auth["target_v6"], "2001:4860:4860::8888")
         self.assertEqual(item_auth["results"][0]["ip"], "15.204.57.108")
         self.assertEqual(item_auth["results_v6"][0]["ip"], "2001:4860:4860::8888")
+        self.assertTrue(item_auth["checked_at_iso_utc8"].startswith("2023-"))
+
+    def test_icmp_ping_fallback_when_tcp_fails(self):
+        # When TCP probe gets 0 successes, it should automatically fall back to ICMP ping
+        host_id = "node-tcp-fail-ping-ok"
+        now = 1700000000
+        self.conn.execute("INSERT INTO hosts(host_id, last_seen, agent_version) VALUES(?, ?, '1.7.219')", (host_id, now))
+        reach_monitor.record_client_ip(self.conn, host_id, "103.73.220.161", now)
+        # Add host_security with closed port 22
+        self.conn.execute(
+            "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?, ?, ?)",
+            (host_id, now, json.dumps({"host_firewall": {"listening_ports": [22]}}))
+        )
+        self.conn.commit()
+
+        calls = []
+        def _mock_exec(target, port, protocol="TCP", regions=None, **kwargs):
+            calls.append({"target": target, "port": port, "protocol": protocol})
+            regs = regions or [r for r in reach_monitor.REACH_REGIONS if r["id"] in {"cn-telecom", "cn-unicom", "cn-mobile"}]
+            if protocol == "TCP":
+                # Simulated TCP refused / timeout
+                return {
+                    "status": "finished",
+                    "type": "http",
+                    "active_regions": regs,
+                    "results": [
+                        {"probe": {"asn": r.get("asn", 0), "country": r.get("country", "CN")}, "result": {"rawOutput": "connect ECONNREFUSED"}}
+                        for r in regs
+                    ],
+                }
+            else:
+                # Simulated Ping success!
+                return {
+                    "status": "finished",
+                    "type": "ping",
+                    "active_regions": regs,
+                    "results": [
+                        {"probe": {"asn": r.get("asn", 0), "country": r.get("country", "CN")}, "result": {"stats": {"avg": 35.0, "loss": 0, "rcv": 3}}}
+                        for r in regs
+                    ],
+                }
+
+        with patch("server.reach_monitor.execute_globalping_measurement", side_effect=_mock_exec):
+            res = reach_monitor.perform_host_reach_check(self.conn, host_id)
+            self.assertIsNotNone(res)
+            # Must have executed 2 calls: first TCP, then Ping fallback
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["protocol"], "TCP")
+            self.assertEqual(calls[1]["protocol"], "PING")
+            self.assertEqual(res["protocol"], "PING")
+            self.assertEqual(res["verdict"], "ok")
+            self.assertIn("三网通畅", res["verdict_label"])
+            self.assertEqual(res["stats"]["cn_success"], 3)
+
+    def test_format_utc8(self):
+        self.assertEqual(reach_monitor.format_utc8(0), "")
+        self.assertEqual(reach_monitor.format_utc8(None), "")
+        # 1700000000 = 2023-11-14 22:13:20 UTC -> 2023-11-15 06:13:20 UTC+8
+        formatted = reach_monitor.format_utc8(1700000000)
+        self.assertEqual(formatted, "2023-11-15 06:13:20")
 
 if __name__ == "__main__":
     unittest.main()
