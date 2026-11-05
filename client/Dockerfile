@@ -23,5 +23,10 @@ COPY manual_bandwidth.py .
 COPY cpu_guard.py .
 COPY io_guard.py .
 COPY memory_guard.py .
+COPY container_freeze.py .
+COPY udp_guard.py .
+COPY anti_spoof_guard.py .
+COPY file_guard.py .
+COPY microburst_guard.py .
 
 CMD ["python", "agent.py"]

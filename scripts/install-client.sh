@@ -507,7 +507,7 @@ cp "$ROOT_DIR/client/incus_health.py" "$CLIENT_APP_DIR/incus_health.py"
 cp "$ROOT_DIR/client/disk_cleanup.py" "$CLIENT_APP_DIR/disk_cleanup.py"
 cp "$ROOT_DIR/client/disk_cleanup_worker.py" "$CLIENT_APP_DIR/disk_cleanup_worker.py"
 cp "$ROOT_DIR/client/security_banner.py" "$CLIENT_APP_DIR/security_banner.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard resource_cgroup cpu_guard io_guard memory_guard; do
+for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard resource_cgroup cpu_guard io_guard memory_guard container_freeze udp_guard anti_spoof_guard file_guard microburst_guard; do
   cp "$ROOT_DIR/client/$module.py" "$CLIENT_APP_DIR/$module.py"
 done
 cp "$ROOT_DIR/client/tcp_probe.py" "$CLIENT_APP_DIR/tcp_probe.py"
@@ -517,6 +517,9 @@ cp "$ROOT_DIR/client/host_security_audit.py" "$CLIENT_APP_DIR/host_security_audi
 cp "$ROOT_DIR/client/vmess_guard.py" "$CLIENT_APP_DIR/vmess_guard.py"
 cp "$ROOT_DIR/client/speedtest_guard.py" "$CLIENT_APP_DIR/speedtest_guard.py"
 cp "$ROOT_DIR/client/manual_bandwidth.py" "$CLIENT_APP_DIR/manual_bandwidth.py"
+for f in "$ROOT_DIR"/client/*.py; do
+  [[ -f "$f" ]] && cp "$f" "$CLIENT_APP_DIR/"
+done
 install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
 cp "$ROOT_DIR/client/requirements.txt" "$CLIENT_APP_DIR/requirements.txt"
 cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"

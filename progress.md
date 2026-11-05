@@ -2,6 +2,23 @@
 
 更新时间：2026-11-05（Asia/Shanghai）
 
+## 修复客户端升级模块分发缺失导致的母机离线问题与自愈导入兜底（v1.8.8）
+
+- **故障诊断与根因定位**：
+  - 现象：v1.8.7 上线后，集群全部 26 台容器宿主机在定时自动更新后停止心跳上报，大盘显示“没有新鲜容器数据的主机（26 组需核验）”。
+  - 根因：在阶段一至阶段三引入的防护增强模块（`container_freeze.py`、`udp_guard.py`、`anti_spoof_guard.py`、`file_guard.py`、`microburst_guard.py`）未被同步加入客户端安装与更新脚本（`scripts/install-client.sh`、`scripts/managed-client-update.sh` 及 `client/Dockerfile`）的模块分发列表中。客户端定时拉取主干更新并重启 `narwhal-monitor-client.service` 时，`client/agent.py` 因顶层静态导入缺失模块抛出 `ModuleNotFoundError: No module named 'container_freeze'` 导致服务闪退。
+- **全链路修复与容错加固**：
+  1. **安装脚本动态分发与模块补齐 (`scripts/install-client.sh`)**：
+     - 在原有显式列表基础上追加 `container_freeze`、`udp_guard`、`anti_spoof_guard`、`file_guard`、`microburst_guard`。
+     - 增加兜底通配拷贝 `cp "$ROOT_DIR"/client/*.py "$CLIENT_APP_DIR/"`，防止未来任何新增模块因脚本未更新而遗漏。
+  2. **托管升级事务快照与编译全面覆盖 (`scripts/managed-client-update.sh`)**：
+     - 在 `restore`、`py_compile` 和 `snapshot` 逻辑中补全 5 个新增防护模块的编译校验与快照回滚能力。
+  3. **容器镜像补齐 (`client/Dockerfile`)**：
+     - 添加 `COPY container_freeze.py .`、`udp_guard.py`、`anti_spoof_guard.py`、`file_guard.py`、`microburst_guard.py`。
+  4. **客户端弹性自愈导入兜底 (`client/agent.py`)**：
+     - 将新增安全模块的顶层强依赖解耦，改造为独立 `try...except ImportError` 弹性导入，遇到模块文件缺失时自动回退为 `None`，杜绝任何情况下的 Agent 闪退。
+     - 采集方法（`collect_runman_report`、`collect_container`）与处置动作（`freeze_container`、`udp_blackhole`、`anti_spoof`）对模块存在性做空值防御，确保心跳链路在极端异常下绝对高可用。
+
 ## 修复 CI 隔离沙箱文件日志权限与生产环境自动交付配置（v1.8.7）
 
 - **CI 与自动化发布修复**：

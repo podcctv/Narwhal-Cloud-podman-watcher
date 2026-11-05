@@ -62,7 +62,7 @@ restore() {
   if [[ -f "$app_dir/admission_guard.py" ]]; then
     "$app_dir/.venv/bin/python" "$app_dir/admission_guard.py" --release-all || return 1
   fi
-  for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard incus_health incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard speedtest_guard; do
+  for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard incus_health incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard speedtest_guard container_freeze udp_guard anti_spoof_guard file_guard microburst_guard; do
     if [[ -f "$snapshot/$module.py" ]]; then
       install -m 0644 "$snapshot/$module.py" "$app_dir/$module.py" || return 1
     fi
@@ -166,12 +166,18 @@ fi
 for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard incus_health incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard speedtest_guard manual_bandwidth; do
   "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
 done
+for module in container_freeze udp_guard anti_spoof_guard file_guard microburst_guard; do
+  "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
+done
 "$app_dir/.venv/bin/python" -m py_compile "$stage/client/gfw_probe.py"
 "$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/incus_health.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/gfw_probe.py" "$stage/client/incus_metrics.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py" "$stage/client/host_security_audit.py" "$stage/client/vmess_guard.py" "$stage/client/speedtest_guard.py" "$stage/client/manual_bandwidth.py" "$stage/client/cpu_guard.py" "$stage/client/io_guard.py" "$stage/client/memory_guard.py"
 mkdir -p "$snapshot"
 chmod 0700 "$snapshot"
 install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
 for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard incus_health incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard speedtest_guard manual_bandwidth; do
+  [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
+done
+for module in container_freeze udp_guard anti_spoof_guard file_guard microburst_guard; do
   [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
 done
 [[ ! -f "$app_dir/gfw_probe.py" ]] || install -m 0644 "$app_dir/gfw_probe.py" "$snapshot/gfw_probe.py"
