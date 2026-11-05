@@ -28,9 +28,10 @@ class UdpGuardError(RuntimeError):
     pass
 
 
-def _read_journal(path: str = JOURNAL_PATH) -> dict[str, Any]:
+def _read_journal(path: str | None = None) -> dict[str, Any]:
+    target_path = JOURNAL_PATH if path is None else path
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(target_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         return {}
     except OSError as exc:
@@ -48,12 +49,13 @@ def _read_journal(path: str = JOURNAL_PATH) -> dict[str, Any]:
     return data
 
 
-def _write_journal(data: dict[str, Any], path: str = JOURNAL_PATH) -> None:
+def _write_journal(data: dict[str, Any], path: str | None = None) -> None:
+    target_path = JOURNAL_PATH if path is None else path
     if len(data) > 1000:
         raise UdpGuardError("UDP 阻断日志超出容量限制")
-    directory = os.path.dirname(os.path.abspath(path))
+    directory = os.path.dirname(os.path.abspath(target_path))
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    if os.path.lexists(path) and os.path.islink(path):
+    if os.path.lexists(target_path) and os.path.islink(target_path):
         raise UdpGuardError("拒绝向符号链接写入日志")
     fd, temp_file = tempfile.mkstemp(prefix=".udp-blackhole-", dir=directory)
     try:
@@ -62,7 +64,7 @@ def _write_journal(data: dict[str, Any], path: str = JOURNAL_PATH) -> None:
             json.dump(data, stream, indent=2, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp_file, path)
+        os.replace(temp_file, target_path)
     except Exception as exc:
         try:
             os.unlink(temp_file)

@@ -2,6 +2,13 @@
 
 更新时间：2026-11-05（Asia/Shanghai）
 
+## 修复 CI 隔离沙箱文件日志权限与生产环境自动交付配置（v1.8.7）
+
+- **CI 与自动化发布修复**：
+  - 问题诊断：分析 GitHub Actions CI 构建失败原因，定位到 `udp_guard.py`、`container_freeze.py` 与 `anti_spoof_guard.py` 中的 `_write_journal` / `_read_journal` 函数签名默认形参在模块加载阶段固化为 `/var/lib/narwhal-agent`，导致 CI 非 root runner 沙箱测试时抛出 `PermissionError`，进而阻断了 GHCR 镜像自动构建与发布流水线。
+  - 修复实现：改为在调用时动态解析 `target_path = JOURNAL_PATH if path is None else path`，确保 `unittest.mock.patch` 完美生效，CI 非特权运行 100% 绿色通过。
+  - 生产环境自动化联动：连接到 OVH US West 生产主机（`debian@15.204.57.108:8721`），确认守护更新定时器与自动化更新逻辑。
+
 ## 阶段三：轻量化微突发小包泛洪感知与容器大盘 Cyberpunk Bento 全面下沉（v1.8.6）
 
 - **阶段三（P2 · 全盘统一与微突发感知）全链路落地**：
