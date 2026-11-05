@@ -1,6 +1,6 @@
 # 项目概览
 
-更新基线：在 fork `origin/main` 的 v1.7.209 上实现 Runman upperdir 双口径可写层视图、SysVinit 精准服务清理及 Admission/PasarGuard/有界磁盘清理适配，整合 Reach Check 与 null-disk/心跳修复，当前版本 `1.7.211`（2026-11-04）。提交历史与主要功能索引见 [README.md](README.md)。
+更新基线：在 fork `origin/main` 上实现 Runman upperdir 双口径可写层视图、SysVinit 精准服务清理、开源标准全球与国内三网 Reach Check、双栈 IPv4/IPv6 并行探测、平滑调度与脱敏保护，全面启用 SemVer 规范，当前版本 `1.8.0`（2026-11-05）。提交历史与版本演进规范见 [README.md](README.md)。
 
 ## 项目目标
 

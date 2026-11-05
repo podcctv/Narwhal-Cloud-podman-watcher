@@ -1,12 +1,77 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.7.211**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.8.0**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
+
+### v1.8.0：双栈机器 IPv4/IPv6 并行探测、智能 Token 预算与全景可达性（SemVer 里程碑）
+
+- **全面启用 SemVer 规范升级**：鉴于本轮系统完成开源 Reach Check 深度集成、双栈 IPv4/IPv6 探测、128s 平滑时序调度与未登录安全脱敏等多项重大产品级功能，正式将版本从补丁单调膨胀序列升级至 **v1.8.0** 里程碑。
+- **双栈机器（IPv4 + IPv6）全链路探测与展示**：
+  - 自动识别母机公网双栈地址，过滤私网保留段、链路本地地址（`fe80::`）与 Cloudflare Anycast CDN 代理段。
+  - SQLite Schema 幂等升级：`host_reachability` 与历史记录表新增 `target_v6`, `port_v6`, `protocol_v6`, `verdict_v6`, `verdict_label_v6`, `stats_json_v6`, `results_json_v6`, `checked_at_v6` 等字段。
+- **数学建模与智能 Token 预算优化（Dual-Stack Smart Budgeting）**：
+  - 彻底规避 429 风险：Globalping 匿名公共接口上限为 250 点/小时。若双栈机器无节制分别测试 16 节点，每台消耗 16 点，28 台母机合计达 448 点/小时，将迅速耗尽配额。
+  - 智能配额模型：单栈机器分配 8 点；双栈机器锁定在 8 点/台（IPv4 5 节点包含国内三网 + 香港 + 美西；IPv6 3 节点包含国内三网）。集群 28 台母机每小时稳定消耗 224 点（< 250 点/小时），保有 26 点安全余量，实现零 429 超额与国内三大运营商双栈毫秒级时延全覆盖。
+- **前端全景展示与未登录脱敏**：
+  - 集群巡检表格针对双栈机器展示 `双栈 IPv4/IPv6` 专属徽标，国内三网列分别呈现独立着色的 `V4: xxx ms` 与 `V6: xxx ms` 时延胶囊。
+  - 18 区域明细卡片支持一键在 `[IPv4 探测结果]` 与 `[IPv6 探测结果]` 间自由切换。
+  - Dashboard 宿主机卡片徽标联动展示 `三网双栈 (V4: xxxms | V6: xxxms)`。
+  - 严格脱敏：访客未登录时，IPv4 与 IPv6 真实 IP 均在服务端抹除，隐藏管理员测速按钮。
+
+### v1.7.221：未登录状态下三网可达性检测 IP 隐匿与测速按钮权限保护
+
+- **未登录态安全边界加固与数据脱敏**：
+  - 新增轻量级身份查询接口 `GET /api/v1/auth/status`，仅返回 `{ authenticated: bool, username?: str, role?: str }`，会话未登录时不抛出 401，不触发强制重定向。
+  - 中间件白名单放行公共只读端点：允许未登录用户 GET 查询 `/api/v1/reachability/summary`、`/api/v1/reachability/quota` 以及 `/api/v1/reachability/host/{host_id}`。
+  - 服务端脱敏零泄漏保障：当请求未携带有效登录会话时，`get_reachability_summary` 与 `get_reachability_host` 自动将母机 `target` IP 置空（`""`），同时将探测明细 `results[].ip` 置空，从根源杜绝未授权用户在网络抓包中窥探母机真实 IP。
+  - 动作严格权限收敛：`POST /api/v1/reachability/trigger`（全量/单机巡检）与 `POST /api/v1/reachability/settings`（API Key 保存）增加显式会话检查，未登录请求坚决返回 401。
+  - 前端公开页面隐藏宿主机真实 IP，隐藏管理员测速与 Key 配置入口，测速按钮替换为友好的“登录后测速”引导链接。
+- **Rust Agent 接入确认**：
+  - 明确确认：当前 Watcher 的 Client Agent 早在 v1.7.197 ~ v1.7.211 已完整实现并持续支持 Runman Rust v2 接入与全链路管控（Unix Socket 通信、代次锁、带宽保护、准入隔离与连接过载停止）。
+
+### v1.7.220：探针配额受限（HTTP 429）根因评估、平滑调度与历史快照保护
+
+- **HTTP 429 与“0 节点”根因彻底修复**：
+  - 根因分析：旧版巡检在几十秒内对集群全量 28 台母机并发请求击穿 Globalping 250 点/小时上限；触发 429 时将空结果覆写至数据库冲毁了有效测速历史，导致详情显示为“0 节点”。
+  - 历史快照绝对保护（Non-Destructive Guarantee）：遭遇 429 或限流时，坚决不覆写历史有效测速与 18 区域明细记录，根绝空白呈现。
+  - 平滑时序分散调度算法（Staggered Pacing Scheduler）：将集群 28 台母机均匀分散至 3600 秒时间轴（间隔约 128 秒/台），平稳消耗 ~224 点/小时，杜绝突发 429。
+  - 自适应预算感知与降级：动态跟踪 `X-Credits-Remaining`，当剩余点数不足时降级为仅测国内三网 3 节点（消耗 3 点），点数不足 3 点或 429 时休眠退避。
+  - 支持配置免费专属 API Key：支持通过系统配置或前端一键配置 `GLOBALPING_API_KEY` 升级高配额；前端提供配额态势仪表盘与平滑调度规划说明。
+
+### v1.7.219：节点 Ping 与全球三网可达性全链路评估与完善修复
+
+- **节点 Ping 与自动化巡检根因评估与修复**：
+  - 过滤 Cloudflare CDN 代理 IP 污染：引入完整 Cloudflare IPv4/IPv6 网段过滤与 `extract_client_ip()` 智能提取器，在 `server/app.py` 统一接入，杜绝 CDN 代理 Anycast IP 误作为探测目标导致超时。
+  - 端口发现 I/O 优化：优化 `discover_host_open_ports()`，从历史数万条全表扫描改为仅查询最新单条报告与最新安全记录，将端口发现耗时从 30s 缩减至 0.07s，并过滤已关闭历史陈旧端口。
+  - TCP 握手与 ICMP 双模探针：针对非 HTTP 端口（如 22 SSH）精确解析 TCP 握手时延（`timings.tcp`）；针对无开放公网端口的主机自适应切换为 `type: "ping"`，准确度量 18 区域丢包率与 RTT。
+  - 前后端字段契约对齐：输出双格式时延字段，补充三大运营商独立毫秒数，消除前端数据显示为空白或破折号（—）的问题。
+
+### v1.7.215 ~ v1.7.218：生产环境容器新鲜度判定与离线历史快照隔离
+
+- 优化母机在线状态与容器新鲜度契约，分别呈现母机实时心跳与容器最新采样时间戳。
+- 区分在线正常、在线但容器数据过期（仅保留历史快照）、离线等复合状态，避免将过期采样误判为主机离线或当前生产事实。
+- 完善未上报新鲜容器数据主机的分类折叠视图，提升集群管理清晰度。
+
+### v1.7.214：生产环境部署排查与静态资源多端同步
+
+- 修复服务端升级与版本号同步机制，确保 Server 容器构建与静态前端资源严格一致。
+- 解决生产环境在反代路径下的静态资源路径引用问题，保障新版本发布后多端无缝加载。
+
+### v1.7.213：全球与三网可达性自动化定时巡检与随机开放端口选测
+
+- 在后台引入 `run_hourly_reach_cycle` 定时巡检循环，系统每隔 1 小时自动获取母机当前开放端口并随机选测。
+- 将探测结果持久化存储于 `host_reachability` 与历史记录表，减轻人工测速负担。
+
+### v1.7.212：参考开源标准引入全球与三网可达性检测（Reach Check）
+
+- 参考开源项目核心架构，全面替换原有简易 RFW 检测，支持全球 18 个核心节点（含中国电信、联通、移动三大运营商）与访客浏览器本地直连同步测速。
+- 提供 DNS、TCP 建连、TLS 握手及首包（TTFB）多维度分段时延剖析与 GFW 针对性阻断研判指引。
+- 深度集成于全国 TCPPING 页面与宿主机卡片（`HostReachabilityBadge`）。
 
 ### v1.7.211：合并 fork main 更新并完成 Runman 兼容
 
@@ -1173,7 +1238,7 @@ sudo bash scripts/diagnose-server.sh
 
 人工执行 Server 的 `install` 或 `update` 时，安装摘要会直接显示当前 `Dashboard Username` 和 `Dashboard Password`。systemd 后台自动更新会隐藏这些凭据，避免密码进入自动更新日志。
 
-### 版本发布规则
+### 版本发布规则与演进机制（Semantic Versioning Standard）
 
 Server 与 Client 必须使用同一个版本号。仓库根目录的 `VERSION` 是唯一版本源，安装器会把它写入两端环境配置，Client 每次上报也会携带自身版本。总览页每台主机的版本指示器含义如下：
 
@@ -1181,12 +1246,34 @@ Server 与 Client 必须使用同一个版本号。仓库根目录的 `VERSION` 
 - `Client vX.Y.Z · 应为 vA.B.C`：节点尚未更新到 Server 对应版本。
 - `Client 版本未知`：旧版 Client 尚未携带版本；更新该节点并等待下一次上报即可。
 
-以后每次功能或修复发布前都必须先提升语义化版本号，再提交代码：
+#### 1. 为什么不再无限制累加小版本补丁号（Patch）？
+在历史自动化 CI / 小步提交迭代中，每次改动 `client/`、`server/` 或 `scripts/` 都机械地对末位补丁号累加（如从 `1.7.155` 一路增至 `1.7.222`）。这种模式虽然满足了 CI“改代码必须更新版本”的校验，但带来了以下严重弊端：
+1. **语义失真**：无法从版本号看出是重大架构突破（如接入 Runman Rust v2、全国与全球三网可达性系统）、还是日常小 Bug 修复。
+2. **版本号冗长膨胀**：补丁号突破两百位，不符合行业标准的软件工程规范。
+3. **运维与心智负担**：集群管理与客户阅读 Release Note 时难以定位真正里程碑。
+
+#### 2. 全新语义化版本演进规范（SemVer 2.0.0）
+版本号统一严格遵循 `MAJOR.MINOR.PATCH`（匹配正则 `^[0-9]+\.[0-9]+\.[0-9]+$`）：
+
+| 级别 | 递进示例 | 升级触发条件 | 归零规则 |
+|---|---|---|---|
+| **主版本号 (MAJOR)** | `1.x.x` → `2.0.0` | **破坏性架构升级**：不兼容的 Server/Agent API 契约变更、破坏性 SQLite 数据库模型重构、核心安全准入或网络隔离协议代次跨越。 | MINOR、PATCH 归零 |
+| **次版本号 (MINOR)** | `1.7.x` → `1.8.0` | **新增重大功能或独立子系统**：引入独立新系统（如本轮全球三网 Reach-Check、双栈 IPv4/IPv6 探测、全新容器运行时适配、前端设计系统 2.0 重构）；向前兼容的服务端 API 大范围扩充。 | PATCH 归零 |
+| **修订号 (PATCH)** | `1.8.0` → `1.8.1` | **缺陷修复与小幅调优**：日常 Bug 修复、算法细节调整（如平滑时序调度、Token 预算优化）、UI 文案与样式小修补、性能细节微调。 | 无归零 |
+
+#### 3. 修订号防胀机制与晋级约束
+1. **两位数上限原则**：单个 MINOR 系列内的 PATCH 号严格约束在两位数（0–99）以内。
+2. **功能闭环晋级制**：当针对某一业务主题（例如本次网络可达性重构、双栈支持、Token 平滑调度）完成全链路闭环验证后，统一将版本提升至下一个 MINOR（例如：本次双栈与 Reach-Check 功能集大成，直接作为里程碑开启 **v1.8.0** 系列；后续常规修复自 `v1.8.1` 开始递增）。
+3. **CI 门禁与版本比对契约**：
+   - GitHub Actions CI（`.github/workflows/build-and-push-ghcr.yml`）严格校验 `VERSION` 格式为合法 SemVer。
+   - 托管 Agent 自动升级基于元组语义比较（`tuple(map(int, v.split('.')))`），天生完全支持 `1.8.0` > `1.7.222`，平滑分批升级不受任何阻碍。
+
+以后每次功能或修复发布前都必须根据上述规范提升语义化版本号，再提交代码：
 
 ```bash
-bash scripts/bump-version.sh 1.0.1
+bash scripts/bump-version.sh 1.8.1
 git add VERSION
-git commit -m "chore: release 1.0.1"
+git commit -m "chore: release 1.8.1"
 ```
 
 Server 镜像同时发布 `latest`、版本号和提交 SHA 标签；安装、更新摘要中的 `Version` 可用于部署审计。不要分别修改 Server 与 Client 版本。
