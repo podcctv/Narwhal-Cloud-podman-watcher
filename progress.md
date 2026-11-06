@@ -2,6 +2,30 @@
 
 更新时间：2026-11-06（Asia/Shanghai）
 
+## 容器真实业务并发 IP 限制 · 业务端口聚焦与抗公网扫描 DoS 架构（v1.8.12）
+
+- **需求背景**：
+  - 用户提出深度架构诉求：“10IP入栈如果是扫描不是真实业务如何界定，我希望限制容器真实业务的并发IP，而不是被几十个IP的入栈扫描就限制”。
+  - 若单纯统计首包 SYN，公网全网扫描器（如 Censys、Shodan、ZoomEye、Masscan）的随机探测包将迅速耗尽 10 个入站名额，导致合法业务用户被拒绝（扫描引发的 DoS）。
+- **全链路落地与深度架构加固**：
+  1. **业务监听端口动态聚焦 (`client/admission_linux.py` / `client/admission_observe.py`)**：
+     - `observe.sockets(pid)` 在无感知兼容原有调用解包前提下，精确提取容器内实际处于 `LISTEN` 状态的端口列表（`listening_ports`）。
+     - nftables 准入表底层新增内核快速旁路规则：`incoming meta l4proto tcp tcp dport != { listening_ports } return`。
+     - **防扫描效果**：针对未开放业务端口的公网随机扫描（扫 22, 80, 443, 3389, 8080 等非业务端口），在内核态直接 return 绕过准入队列，**零入队、零占位、100% 免疫非业务端口扫描**。
+  2. **基于 ESTABLISHED 真实会话的状态占位 (`client/admission_policy.py`)**：
+     - 引入会话确认（`confirmed`）与试用期隔离机制（`PROBATION_GAP = 15s`）：
+     - 只有在容器业务监听端口上**成功完成 TCP 三次握手进入 `ESTABLISHED` 状态**的来源 IP（通过内核 `/proc/<pid>/net/tcp` 提取的 `inbound` 验证），才被确认为**真实业务并发来源（Confirmed Business Source）**。
+     - 针对业务端口的单向 SYN 探针、半开扫描（`SYN_RECV`）或握手后立即断开的探测探针，因未形成持续业务会话，在 15 秒试用期后自动被清理，**绝不占用持续业务并发配额**。
+  3. **并发业务容量判决与精准拦截 (`client/admission_guard.py`)**：
+     - 准入决策以 **“当前活跃已确认业务并发 IP”** 为判断基准（`confirmed_count < source_limit`）。
+     - 当且仅当容器内部确实存在 $\ge 10$ 个不同的真实业务客户端同时保持活跃连接时，第 11 个新来源才会被拦截并触发 `inbound_source_blocked` 告警。
+  4. **前端状态面板与文案精准回显 (`frontend/src/components/container/AdmissionStatus.tsx`)**：
+     - 回显文案优化为 `业务入站准入 ${confirmedCount}/${sourceLimit} IP`。
+     - 明确提示“已启用业务监听端口聚焦与真实已建立会话识别，公网扫描不消耗配额。超过上限的新来源连接已被自动阻断。”
+  5. **全量验证保障**：
+     - 新增非业务端口 50 次并发扫描零占位测试、未建立会话探针 15s 自动淘汰测试及真实 10 并发业务拦截测试。
+     - 993 项单元与集成测试全部通过；13 项 Playwright E2E UI 脚本全部通过。
+
 ## 单容器多 IP 入站限制防护 · 默认 10 IP 阈值、超限阻断与告警（v1.8.11）
 
 - **需求背景**：
@@ -30,20 +54,3 @@
   6. **全量验证保障**：
      - 补充针对 10-IP 限制、第 11 个来源拦截、重复探测计数、已有来源保持与 120s 空闲过期的全套单元测试。
      - 991 个单元测试全部通过（0 失败）；13 个 Playwright UI 端到端回归脚本全部通过。
-
-## 重构三网时延徽章与全景浮窗 (Popover) · 根治折叠截断 Bug（v1.8.10）
-
-- **缺陷根因排查与闭环修复**：
-  1. **折叠卡片下点击时延截断变形 Bug 根治**：
-     - **根因**：母鸡卡片外部带有样式类 `.ui-contain-card { contain: layout style; }` 与 `overflow: hidden`。依据 CSS 规范，`contain: layout` 会强制为所有后代元素（包括 `position: fixed`）重新创建包含块，导致旧弹窗完全无法覆盖全屏，而是被死死挤压在 40px 高度的折叠标题栏内，严重挤压变形；且徽章渲染在母鸡折叠 `<button>` 内部，触发按钮嵌套与事件冒泡冲突。
-     - **修复**：
-       - 采用 **`ReactDOM.createPortal(..., document.body)`** 将小浮窗彻底挂载至最顶层 `document.body`，彻底逃逸任何卡片级 `contain: layout` 和 `overflow: hidden` 限制。
-       - 将徽章触发器重构为 `<span role="button" tabIndex={0}>`，消除 HTML 按钮嵌套非法语法，并在点击与键盘交互时通过 `e.stopPropagation()` 严格阻断母鸡折叠/展开事件冒泡。
-       - 实装智能视口碰撞检测与自适应翻转（Auto Flip），当屏幕下方空间不足时自动向上翻转。
-  2. **落地「方案 A：极光脉冲 · 拟态胶囊 (Aurora Bento Capsule)」交互体验**：
-     - **极光脉冲徽章**：采用双脉冲呼吸微光指示点（绿/黄/红三态）、微光渐变边框、`三网可达 182.4ms [ICMP]`，并带有平滑旋转小箭头，视觉精致高雅。
-     - **三网 Bento 独立网格浮窗**：
-       - 中国电信（蓝点）、中国联通（天蓝点）、中国移动（紫点）三网专属色块，精确呈现各自独立时延与丢包状态。
-       - 包含全球 18 节点均延、最优时延、GFW 阻断状态与双栈网络说明。
-       - 双栈机器提供 IPv4 / IPv6 实时一键切栈查看。
-       - 底部提供相对时间戳（如“10分钟前巡检”）与「全网拓扑 →」（以 Portal 方式呼出全功能 18 节点探针分析）和「TCP 测速」入口。

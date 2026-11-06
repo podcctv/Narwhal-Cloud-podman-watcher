@@ -284,6 +284,94 @@ class LinuxTests(unittest.TestCase):
             self.assertIn('198.51.100.12',ips)
             self.assertNotIn('192.0.2.1',ips)
 
+    def test_scanner_on_closed_port_never_consumes_admission_slot_or_blocks_business_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nft=mock.Mock();nft.digests={}
+            g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=nft,queues=mock.Mock())
+            c={'runtime':'incus','project':'default','name':'test-scanner'}
+            now=int(time.time())
+            # Container only listens on port 45556
+            snap={'instance_id':'b'*36,'ips':['10.9.0.2'],'interfaces':['br-test'],'epoch':'boot:net:pid',
+                  'flows':set(),'inbound':[],'listening_ports':[45556]}
+            g.update(c,snap,now)
+            state=next(iter(g.states.values()))
+            queue=next(iter(g.records.values()))['queue']
+
+            # 50 scanners scan port 22, 80, 443, 3389, 8080 (closed ports)
+            for i in range(1, 51):
+                raw_scan=bytearray(24);raw_scan[0]=0x45;raw_scan[9]=6
+                raw_scan[12:16]=socket.inet_aton(f'198.51.100.{(i % 250) + 1}')
+                raw_scan[16:20]=socket.inet_aton('10.9.0.2')
+                raw_scan[20:24]=struct.pack('!HH',10000+i,80) # destination port 80 is closed
+                # Must NOT be dropped, but passed to kernel naturally without occupying a slot
+                self.assertTrue(g.decision(queue,raw_scan))
+
+            # Not a single scanner IP consumed any source slot!
+            self.assertEqual(len(state.data['sources']),0)
+            self.assertEqual(state.data['blocked_packets'],0)
+
+            # Legitimate business client arrives on the listening port 45556
+            raw_biz=bytearray(24);raw_biz[0]=0x45;raw_biz[9]=6
+            raw_biz[12:16]=socket.inet_aton('203.0.113.1');raw_biz[16:20]=socket.inet_aton('10.9.0.2')
+            raw_biz[20:24]=struct.pack('!HH',12345,45556) # destination port 45556
+            self.assertTrue(g.decision(queue,raw_biz))
+            # Now source slot is occupied by legitimate client
+            self.assertEqual(len(state.data['sources']),1)
+            self.assertEqual(state.data['sources'][0]['ip'],'203.0.113.1')
+
+    def test_tentative_syn_scanner_probe_expires_without_blocking_confirmed_business_clients(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nft=mock.Mock();nft.digests={}
+            nft.live.return_value=set()
+            g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=nft,queues=mock.Mock())
+            c={'runtime':'incus','project':'default','name':'test-probation'}
+            now=int(time.time())
+            # 9 confirmed business clients already established on listening port 45556
+            biz_sources=[f'192.0.2.{i}' for i in range(1, 10)]
+            snap={'instance_id':'c'*36,'ips':['10.9.0.2'],'interfaces':['br-test'],'epoch':'boot:net:pid',
+                  'flows':set(),'inbound':biz_sources,'listening_ports':[45556]}
+            g.update(c,snap,now)
+            state=next(iter(g.states.values()))
+            queue=next(iter(g.records.values()))['queue']
+            self.assertEqual(len(state.data['sources']),9)
+
+            # Scanner probe sends SYN to listening port 45556
+            raw_scan=bytearray(24);raw_scan[0]=0x45;raw_scan[9]=6
+            raw_scan[12:16]=socket.inet_aton('198.51.100.99');raw_scan[16:20]=socket.inet_aton('10.9.0.2')
+            raw_scan[20:24]=struct.pack('!HH',54321,45556)
+            self.assertTrue(g.decision(queue,raw_scan))
+            # 9 confirmed + 1 tentative probe = 10 total entries
+            self.assertEqual(len(state.data['sources']),10)
+            probe_entry=[x for x in state.data['sources'] if x['ip']=='198.51.100.99'][0]
+            self.assertFalse(probe_entry.get('confirmed'))
+
+            # Scanner never finishes handshake. After probation gap (16s later),
+            # another check / admission expires the tentative probe because it is not confirmed
+            # Scanner probe was recorded at `now`. We advance policy clock beyond PROBATION_GAP:
+            for s in state.data['sources']:
+                if s['ip'] == '198.51.100.99':
+                    s['first_seen'] = now - 20
+            # A 10th REAL business client connects
+            raw_biz10=bytearray(24);raw_biz10[0]=0x45;raw_biz10[9]=6
+            raw_biz10[12:16]=socket.inet_aton('192.0.2.10');raw_biz10[16:20]=socket.inet_aton('10.9.0.2')
+            raw_biz10[20:24]=struct.pack('!HH',54322,45556)
+            # Must succeed because scanner expired from probation!
+            self.assertTrue(g.decision(queue,raw_biz10))
+            # Mark the 10 real sources as confirmed via observe
+            all_10=biz_sources+['192.0.2.10']
+            snap['inbound']=all_10
+            snap['observed_at']=now+1
+            g.update(c,snap,now+1)
+            self.assertEqual(len(state.data['sources']),10)
+            self.assertTrue(all(x.get('confirmed') for x in state.data['sources']))
+
+            # Now that all 10 are confirmed business sources, an 11th new source is blocked!
+            raw_11=bytearray(24);raw_11[0]=0x45;raw_11[9]=6
+            raw_11[12:16]=socket.inet_aton('198.51.100.111');raw_11[16:20]=socket.inet_aton('10.9.0.2')
+            raw_11[20:24]=struct.pack('!HH',54323,45556)
+            self.assertFalse(g.decision(queue,raw_11))
+            self.assertIn('198.51.100.111',state.data['blocked'])
+
 
 class PasarTests(unittest.TestCase):
     @unittest.skipUnless(os.name == 'posix', 'Runman guest exec requires POSIX')

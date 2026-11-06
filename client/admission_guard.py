@@ -83,6 +83,9 @@ class Guard:
                 return False
             if direction=='out':
                 return True
+            listening=record.get('listening_ports')
+            if proto==6 and listening and dport not in listening:
+                return True
             accepted,changed=state.admit_source(src,now)
             if not accepted:
                 return False
@@ -141,8 +144,9 @@ class Guard:
                 occupied={r['queue'] for r in self.records.values()}
                 while queue in occupied:
                     queue=20000+(queue-20000+2)%40000
+                listening_ports=sorted({int(p) for p in (snapshot.get('listening_ports') or []) if isinstance(p,(int,str)) and str(p).isdigit() and 1<=int(p)<=65535})[:64]
                 record={'table':'nwguard_'+digest[:16],'queue':queue,'ips':ips,'container':{k:container[k] for k in ('runtime','project','name','id') if k in container},
-                        'verified_at':now,'epoch':epoch,'interfaces':interfaces,'pid':snapshot.get('pid')}
+                        'verified_at':now,'epoch':epoch,'interfaces':interfaces,'pid':snapshot.get('pid'),'listening_ports':listening_ports}
                 self.records[key]=record
                 self.states[key]=policy.Policy(source_limit=self.source_limit)
             self.by_queue[record['queue']]=(key,'in')
@@ -158,12 +162,13 @@ class Guard:
             changed=state.observe(snapshot['flows'],snapshot['inbound'],live,now,epoch=epoch)
             digest=self.nft.digests.get(record['table'])
             digest=digest if isinstance(digest,str) else ''
-            desired=hashlib.sha256(json.dumps([ips,interfaces,epoch,bool(state.data.get('limited')),self.source_limit],sort_keys=True).encode()).hexdigest()
+            listening_ports=sorted({int(p) for p in (snapshot.get('listening_ports') or []) if isinstance(p,(int,str)) and str(p).isdigit() and 1<=int(p)<=65535})[:64]
+            desired=hashlib.sha256(json.dumps([ips,interfaces,epoch,bool(state.data.get('limited')),self.source_limit,listening_ports],sort_keys=True).encode()).hexdigest()
             changed=changed or fresh or record.get('dirty') or record.get('disabled') or not digest or record.get('fingerprint')!=digest or record.get('applied_config')!=desired
-            record.update(ips=ips,epoch=epoch,verified_at=now,interfaces=interfaces,pid=snapshot.get('pid'))
+            record.update(ips=ips,epoch=epoch,verified_at=now,interfaces=interfaces,pid=snapshot.get('pid'),listening_ports=listening_ports)
             self.save()
             if changed:
-                self.nft.apply(record['table'],ips,record['queue'],state.data['sources'],state.data.get('limited',False),interfaces=interfaces,source_limit=self.source_limit,source_idle=policy.SOURCE_IDLE)
+                self.nft.apply(record['table'],ips,record['queue'],state.data['sources'],state.data.get('limited',False),interfaces=interfaces,source_limit=self.source_limit,source_idle=policy.SOURCE_IDLE,listening_ports=listening_ports)
             # Readback is required; a missing/overwritten table is never green.
             self.nft.live(record['table'])
             digest=self.nft.digests.get(record['table'])
@@ -265,9 +270,9 @@ class Guard:
             if active:
                 limit=status.get('source_limit',10)
                 blocked_ips='、'.join(list(active.keys())[:5])
-                result.append({**base,'type':'inbound_source_blocked','severity':'warning','title':f'单容器入站已达 {limit} IP 上限并阻断新连接',
-                    'message':f"当前活跃入站来源已达上限 {limit} 个；已阻断 {len(active)} 个超限新来源。拦截来源示例：{blocked_ips}。已有连接不受影响；来源闲置 2 分钟后自动释放名额。",
-                    'value':len(status.get('sources',[]))+len(active),'threshold':limit})
+                result.append({**base,'type':'inbound_source_blocked','severity':'warning','title':f'单容器并发业务已达 {limit} IP 上限并阻断新连接',
+                    'message':f"当前活跃并发业务来源已达上限 {limit} 个；已阻断 {len(active)} 个超限新来源。拦截来源示例：{blocked_ips}。已有业务连接不受影响；常规端口扫描不占用名额；来源闲置 2 分钟后自动释放名额。",
+                    'value':len(status.get('confirmed_sources', status.get('sources', [])))+len(active),'threshold':limit})
         return result
 
 _guard=None

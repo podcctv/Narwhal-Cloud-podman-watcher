@@ -203,7 +203,9 @@ export interface ContainerSecurity {
     source_limit?: number;
     source_limit_enforced?: boolean;
     source_policy?: 'first_five_enforced' | 'observe_only' | 'active_limit_enforced';
-    sources?: { ip: string; first_seen: number }[];
+    sources?: { ip: string; first_seen: number; confirmed?: boolean }[];
+    confirmed_sources?: { ip: string; first_seen: number; confirmed?: boolean }[];
+    listening_ports?: number[];
     blocked?: Record<string, { first_seen: number; last_seen: number; packets: number }>;
     limited?: boolean;
     tcp_connections?: number;

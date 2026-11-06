@@ -22,6 +22,16 @@ class UnsupportedNetwork(ValueError):
         self.instance_id=identity
 
 
+class SocketObservation(tuple):
+    def __new__(cls, epoch, flows, inbound, listening=()):
+        obj = super().__new__(cls, (epoch, flows, inbound))
+        obj.epoch = epoch
+        obj.flows = flows
+        obj.inbound = inbound
+        obj.listening = tuple(sorted(listening))
+        return obj
+
+
 def decode(value):
     raw=bytes.fromhex(value)
     raw=b''.join(raw[i:i+4][::-1] for i in range(0,len(raw),4))
@@ -72,7 +82,7 @@ def sockets(pid):
             inbound.append(raddr)
     if epoch!=incarnation(pid):
         raise ValueError('container restarted during observation')
-    return epoch,flows,inbound
+    return SocketObservation(epoch,flows,inbound,listen)
 
 
 def snapshot(container, runtime_bins, run, require_forward=True):
@@ -125,9 +135,11 @@ def snapshot(container, runtime_bins, run, require_forward=True):
     isolation.target(runtime,project,name,identity)
     ips=sorted(set(policy.address(x) for x in ips))
     if not ips:raise UnsupportedNetwork(identity)
-    epoch,flows,inbound=sockets(pid)
+    res=sockets(pid)
+    epoch,flows,inbound=res
+    listening=getattr(res,'listening',())
     if not require_forward:
-        return {'instance_id':identity,'ips':ips,'epoch':epoch,'flows':flows,'inbound':inbound,'pid':pid,'observed_at':int(time.time())}
+        return {'instance_id':identity,'ips':ips,'epoch':epoch,'flows':flows,'inbound':inbound,'listening_ports':list(listening),'pid':pid,'observed_at':int(time.time())}
     # Prove the host-side veth for every protected address. An address alone is
     # not an isolation boundary (different Incus projects can reuse a subnet).
     def links(args):
@@ -167,4 +179,4 @@ def snapshot(container, runtime_bins, run, require_forward=True):
     if epoch!=incarnation(pid):raise ValueError('container incarnation changed')
     if runtime=='runman' and actual_addresses!=set(ips):raise UnsupportedNetwork(identity)
     if not proven or proven|internal!=set(ips):raise UnsupportedNetwork(identity)
-    return {'instance_id':identity,'ips':sorted(proven),'interfaces':sorted(interfaces),'epoch':epoch,'flows':flows,'inbound':inbound,'pid':pid,'observed_at':int(time.time())}
+    return {'instance_id':identity,'ips':sorted(proven),'interfaces':sorted(interfaces),'epoch':epoch,'flows':flows,'inbound':inbound,'listening_ports':list(listening),'pid':pid,'observed_at':int(time.time())}

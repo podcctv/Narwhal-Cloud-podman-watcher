@@ -18,6 +18,7 @@ PERIOD = 1800
 DEFAULT_SOURCE_LIMIT = 10
 MAX_SOURCE_LIMIT = 64
 SOURCE_IDLE = 120
+PROBATION_GAP = 15
 OBSERVE_SAMPLE = 5
 BLOCKED_MAX = 32
 
@@ -76,22 +77,35 @@ class Policy:
                 continue
             seen.add(ip)
             if len(self.data['sources']) < self.capacity():
-                self.data['sources'].append({'ip': ip, 'first_seen': now, 'last_seen': now})
+                self.data['sources'].append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': True})
         self.data.update(seeded=True, source_order_basis='first_complete_observation')
 
-    def observe_source(self, source, now):
+    def observe_source(self, source, now, confirmed=False):
         """Record a bounded sample of current IPs without an admission decision."""
         ip = address(source)
-        if any(x['ip'] == ip for x in self.data['sources']):
-            return False
+        for entry in self.data['sources']:
+            if entry['ip'] == ip:
+                if confirmed:
+                    entry['confirmed'] = True
+                entry['last_seen'] = now
+                return False
         if len(self.data['sources']) < self.capacity():
-            self.data['sources'].append({'ip': ip, 'first_seen': now, 'last_seen': now})
+            self.data['sources'].append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': confirmed})
             return True
         return False
 
     def _expire_idle(self, now):
-        keep = [s for s in self.data['sources']
-                if now - int(s.get('last_seen', s.get('first_seen', 0))) <= SOURCE_IDLE]
+        keep = []
+        for s in self.data['sources']:
+            is_confirmed = s.get('confirmed', True)
+            last = int(s.get('last_seen', s.get('first_seen', 0)))
+            first = int(s.get('first_seen', 0))
+            if is_confirmed:
+                if now - last <= SOURCE_IDLE:
+                    keep.append(s)
+            else:
+                if now - first <= PROBATION_GAP:
+                    keep.append(s)
         changed = len(keep) != len(self.data['sources'])
         self.data['sources'] = keep
         return changed
@@ -100,27 +114,30 @@ class Policy:
         """Admission decision for a NEW inbound flow; returns (accepted, slot_added).
 
         Only called for sources the kernel fast path does not already know.
+        Confirmed active business sources count towards the limit; provisional
+        entries allow completion of 3-way handshakes without blocking.
         """
         ip = address(source)
         if not self.enforced:
-            return True, self.observe_source(ip, now)
+            return True, self.observe_source(ip, now, confirmed=True)
         for entry in self.data['sources']:
             if entry['ip'] == ip:
                 entry['last_seen'] = now
                 return True, False
         self._expire_idle(now)
-        if len(self.data['sources']) < self.source_limit:
-            self.data['sources'].append({'ip': ip, 'first_seen': now, 'last_seen': now})
-            self.data['blocked'].pop(ip, None)
-            return True, True
-        self.data['blocked_packets'] += 1
-        self.data['last_blocked_at'] = now
-        blocked = self.data['blocked']
-        if ip not in blocked and len(blocked) >= BLOCKED_MAX:
-            blocked.pop(min(blocked, key=lambda key: blocked[key].get('last_seen', 0)))
-        item = blocked.setdefault(ip, {'first_seen': now, 'packets': 0})
-        item.update(last_seen=now, packets=item.get('packets', 0) + 1)
-        return False, False
+        confirmed_count = sum(1 for s in self.data['sources'] if s.get('confirmed', True))
+        if confirmed_count >= self.source_limit:
+            self.data['blocked_packets'] += 1
+            self.data['last_blocked_at'] = now
+            blocked = self.data['blocked']
+            if ip not in blocked and len(blocked) >= BLOCKED_MAX:
+                blocked.pop(min(blocked, key=lambda key: blocked[key].get('last_seen', 0)))
+            item = blocked.setdefault(ip, {'first_seen': now, 'packets': 0})
+            item.update(last_seen=now, packets=item.get('packets', 0) + 1)
+            return False, False
+        self.data['sources'].append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': False})
+        self.data['blocked'].pop(ip, None)
+        return True, True
 
     def admit_tcp(self, flow, now):
         if not self.data.get('limited'):
@@ -143,31 +160,53 @@ class Policy:
             self.data['sources'] = [s for s in old_sources if s['ip'] in live]
             changed = len(old_sources) != len(self.data['sources'])
             for value in list(inbound) + list(live_sources):
-                changed = self.observe_source(value, now) or changed
+                changed = self.observe_source(value, now, confirmed=True) or changed
             return changed
-        # Enforced: the kernel's per-container timeout set is the authority for
-        # which admitted sources are still active (refreshed on every packet).
+        inbound_set = set()
+        for value in inbound:
+            try: inbound_set.add(address(value))
+            except ValueError: continue
         kernel = set()
         for value in live_sources:
-            try:
-                kernel.add(address(value))
-            except ValueError:
-                continue
+            try: kernel.add(address(value))
+            except ValueError: continue
         old = len(self.data['sources'])
         keep = []
+        seen = set()
         for entry in self.data['sources']:
-            if entry['ip'] in kernel:
+            ip = entry['ip']
+            if ip in seen:
+                continue
+            if ip in inbound_set:
+                entry['confirmed'] = True
                 entry['last_seen'] = now
                 keep.append(entry)
-            elif now - int(entry.get('last_seen', entry.get('first_seen', 0))) <= SAMPLE_GAP:
-                # Just admitted; the kernel element may not be visible yet.
-                keep.append(entry)
-        self.data['sources'] = keep
-        known = {x['ip'] for x in keep}
-        for ip in sorted(kernel - known):
-            if len(self.data['sources']) >= self.source_limit:
+                seen.add(ip)
+            elif entry.get('confirmed', False):
+                last = int(entry.get('last_seen', entry.get('first_seen', 0)))
+                if ip in kernel:
+                    entry['last_seen'] = now
+                    keep.append(entry)
+                    seen.add(ip)
+                elif now - last <= SOURCE_IDLE:
+                    keep.append(entry)
+                    seen.add(ip)
+            else:
+                first = int(entry.get('first_seen', 0))
+                if now - first <= PROBATION_GAP:
+                    keep.append(entry)
+                    seen.add(ip)
+        for ip in sorted(inbound_set - seen):
+            if sum(1 for s in keep if s.get('confirmed')) >= self.source_limit:
                 break
-            self.data['sources'].append({'ip': ip, 'first_seen': now, 'last_seen': now})
+            keep.append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': True})
+            seen.add(ip)
+        for ip in sorted(kernel - seen):
+            if sum(1 for s in keep if s.get('confirmed')) >= self.source_limit:
+                break
+            keep.append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': True})
+            seen.add(ip)
+        self.data['sources'] = keep
         return len(self.data['sources']) != old
 
     def observe(self, flows, inbound, live_sources, now=None, valid=True, epoch=''):
@@ -206,7 +245,9 @@ class Policy:
         return changed
 
     def status(self):
-        return {k:v for k,v in self.data.items() if k in {
+        res = {k:v for k,v in self.data.items() if k in {
             'sample_state','sampled_at','tcp_connections','sources','source_order_basis',
             'blocked','blocked_packets','tcp_denied','limited','limited_since',
             'review_at','extensions','recovered_at','event','last_blocked_at'}}
+        res['confirmed_sources'] = [x for x in self.data.get('sources', []) if x.get('confirmed', True)]
+        return res

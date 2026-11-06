@@ -66,7 +66,7 @@ def _source_ips(sources):
     return result
 
 
-def rules(table, ips, queue, sources, limited=False, management_ports=(), interfaces=(), source_limit=0, source_idle=120):
+def rules(table, ips, queue, sources, limited=False, management_ports=(), interfaces=(), source_limit=0, source_idle=120, listening_ports=()):
     if not re.fullmatch(r'nwguard_[a-f0-9]{16}',table) or not 20000<=queue<60000 or queue%2:
         raise ValueError('invalid rule identity')
     by_family = {4:[],6:[]}
@@ -106,6 +106,9 @@ def rules(table, ips, queue, sources, limited=False, management_ports=(), interf
         if len(ports)>8 or any(type(p) is not int or not 1<=p<=65535 for p in ports):
             raise ValueError('invalid management ports')
         lines.append(f'add rule inet {table} incoming meta l4proto tcp tcp dport {{ '+', '.join(map(str,ports))+' } return')
+    valid_listen=sorted({int(p) for p in (listening_ports or []) if isinstance(p,(int,str)) and str(p).isdigit() and 1<=int(p)<=65535})[:64]
+    if source_limit and valid_listen:
+        lines.append(f'add rule inet {table} incoming meta l4proto tcp tcp dport != {{ '+', '.join(map(str,valid_listen))+' } return')
     if source_limit:
         for family in (4,6):
             kind='ip' if family==4 else 'ip6'
@@ -134,8 +137,8 @@ class NFT:
         self.run=runner
         self.digests={}
 
-    def apply(self, table, ips, queue, sources, limited=False, management_ports=(), interfaces=(), source_limit=0, source_idle=120):
-        text=rules(table,ips,queue,sources,limited,management_ports,interfaces,source_limit,source_idle)
+    def apply(self, table, ips, queue, sources, limited=False, management_ports=(), interfaces=(), source_limit=0, source_idle=120, listening_ports=()):
+        text=rules(table,ips,queue,sources,limited,management_ports,interfaces,source_limit,source_idle,listening_ports=listening_ports)
         try:
             self.run(['nft','list','table','inet',table])
         except RuntimeError:
