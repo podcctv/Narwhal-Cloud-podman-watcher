@@ -179,19 +179,18 @@ class Policy:
                 continue
             if ip in inbound_set:
                 entry['confirmed'] = True
+                entry['active_established'] = True
                 entry['last_seen'] = now
                 keep.append(entry)
                 seen.add(ip)
             elif entry.get('confirmed', False):
+                entry['active_established'] = False
                 last = int(entry.get('last_seen', entry.get('first_seen', 0)))
-                if ip in kernel:
-                    entry['last_seen'] = now
-                    keep.append(entry)
-                    seen.add(ip)
-                elif now - last <= SOURCE_IDLE:
+                if now - last <= SOURCE_IDLE:
                     keep.append(entry)
                     seen.add(ip)
             else:
+                entry['active_established'] = False
                 first = int(entry.get('first_seen', 0))
                 if now - first <= PROBATION_GAP:
                     keep.append(entry)
@@ -199,12 +198,7 @@ class Policy:
         for ip in sorted(inbound_set - seen):
             if sum(1 for s in keep if s.get('confirmed')) >= self.source_limit:
                 break
-            keep.append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': True})
-            seen.add(ip)
-        for ip in sorted(kernel - seen):
-            if sum(1 for s in keep if s.get('confirmed')) >= self.source_limit:
-                break
-            keep.append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': True})
+            keep.append({'ip': ip, 'first_seen': now, 'last_seen': now, 'confirmed': True, 'active_established': True})
             seen.add(ip)
         self.data['sources'] = keep
         return len(self.data['sources']) != old
@@ -250,4 +244,5 @@ class Policy:
             'blocked','blocked_packets','tcp_denied','limited','limited_since',
             'review_at','extensions','recovered_at','event','last_blocked_at'}}
         res['confirmed_sources'] = [x for x in self.data.get('sources', []) if x.get('confirmed', True)]
+        res['probation_sources'] = [x for x in self.data.get('sources', []) if not x.get('confirmed', True)]
         return res

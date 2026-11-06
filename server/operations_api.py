@@ -491,7 +491,14 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 ).fetchone() if container_id else None
                 item["container_id"] = container_id
                 manual_email = str(owner["user_email"] or "") if can_view_owner and owner else ""
-                upstream_email = buyer_owner_emails.get((item["host_id"], item["runtime"], item["project"], item["container_name"], container_id), "") if can_view_owner else ""
+                uuid_name = buyer_mapping.identifier(item["container_name"]) if "replacement" not in container_id.lower() else ""
+                cand_ids = (container_id, uuid_name) if uuid_name and uuid_name != container_id else (container_id,)
+                upstream_email = ""
+                if can_view_owner and container_id:
+                    for cid in cand_ids:
+                        upstream_email = buyer_owner_emails.get((item["host_id"], item["runtime"], item["project"], item["container_name"], cid), "")
+                        if upstream_email:
+                            break
                 mapping_issue = buyer_owner_issues.get((item["host_id"], item["runtime"], item["project"], item["container_name"]), "") if can_view_owner else ""
                 item["owner"] = {
                     "user_email": manual_email or upstream_email,

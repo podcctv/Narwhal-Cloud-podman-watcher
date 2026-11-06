@@ -2,6 +2,23 @@
 
 更新时间：2026-11-06（Asia/Shanghai）
 
+## 业务入站准入真实建连 IP 严格过滤与用户邮箱定时自动拉取匹配加固（v1.8.15）
+
+- **需求背景**：
+  - 用户核实 `业务入站准入 9/10 IP` 面板中显示的 IP 是真实建立连接 IP 还是被扫描 IP，并要求 `用户邮箱` 支持定时自动拉取匹配。
+- **根因诊断与全链路修复**：
+  1. **入站准入严格仅确认真实 `ESTABLISHED` 建连 IP (`client/admission_guard.py`, `client/admission_policy.py`, `AdmissionStatus.tsx`)**：
+     - **原问题根因**：旧版在 `Guard.decision()` 收到首包 SYN（`confirmed: False` 15秒观察期）时即调用 `nft.admit()` 将该 IP 写入 nftables `@sources4`/`@sources6` 集合（120秒超时），随后 `_refresh_sources()` 把内核集合中的残留 IP (`kernel - seen`) 直接回填并提升为 `confirmed: True`，导致仅发送 SYN 探测包或 Cloudflare 边缘探测未完成三次握手的 IP 也被计入 `活跃并发业务来源`。
+     - **修复措施**：
+       - `Guard.decision()` 仅对已确认（`confirmed: True`）的来源调用 `nft.admit()`，并在 `Guard.update()` 中仅向内核 `@sources4`/`@sources6` 同步 `confirmed` 来源。
+       - `_refresh_sources()` 移除从 `kernel - seen` 提升 `confirmed: True` 的逻辑；只有容器 `/proc/<pid>/net/tcp[6]` 在实际业务 `LISTEN` 端口上观测到 `state == '01'` (`ESTABLISHED`) 的公网 IP 才会转正为 `confirmed: True`（并标记 `active_established`）。
+       - 前端 `AdmissionStatus.tsx` 明确展示 `已建连活跃业务来源 (confirmed/limit)`，标注每个 IP 是 `已建连(ESTABLISHED)` 还是 `空闲保持(120s内)`，并将 15 秒观察期内的未完成握手 SYN 探测单独统计显示。
+  2. **用户邮箱定时自动拉取与多源匹配闭环 (`server/buyer_mapping.py`, `server/app.py`, `server/operations_api.py`, `ContainerDrawer.tsx`)**：
+     - **高频定时与新实例即时触发**：后台自动拉取周期从 15 分钟缩短为 **3 分钟 (`INTERVAL = 180s`)**；当检测到活跃 UUID 实例尚未完成上游映射时，后台循环在 **30 秒内**自动触发即时同步 (`needs_urgent_sync`)。
+     - **同母机双运行时 (`incus`/`podman` + `runman`) 全部匹配**：修复 `buyer_mapping.apply()` 对同一母机同时上报 `incus` 与 `runman` 同一 VM UUID 时误判为冲突而拒绝匹配的问题（仅拒绝跨不同 `host_id` 的重复 UUID），解决 `[Oracle]Tokyo arm` 等节点实例显示 `上游实例未匹配` 的问题。
+     - **Podman 容器 UUID 名称与短 ID 双向关联**：`operations_api._candidate_vm_ids` 同时按 `container_id` 与 UUID `container_name` 匹配 `buyer_targets` 与 `service_inventory`。
+     - **持久化用户邮箱目录 (`buyer_user_directory`) 与同 `user_id` 自动回填**：针对上游 `/machines/{id}/vms` 接口仅返回 `user_id` + `user_name` 而不返回 `user_email` 的情况，新增 `buyer_user_directory(user_id -> user_email, user_name)` 持久化字典，自动从历史 `buyer_targets` 与 `backups/monitor*.db` 备份库提取回填 `user_id -> user_email` 映射，并在手工补充任一容器邮箱时自动关联至该 `user_id` 名下所有容器。
+
 ## Socket 滥用复核处置按钮（封禁 / 忽略 / 跳过本次）与采集 IP 国家·省份·运营商 (ISP/ASN) 归属匹配（v1.8.14）
 
 - **需求背景**：

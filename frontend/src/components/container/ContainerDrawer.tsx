@@ -651,7 +651,11 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     用户邮箱
                     {container?.user_email_source === 'upstream' && <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-300">上游 API 自动同步</span>}
                     {container?.user_email_source === 'manual' && <span className="rounded-full border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-400">手工备注</span>}
-                    {container?.user_email_source === 'unmatched' && <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">上游实例未匹配</span>}
+                    {container?.user_email_source === 'unmatched' && (
+                      <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">
+                        {container.user_email_status?.startsWith('上游已匹配此实例') ? '上游已匹配实例 (待补邮箱)' : '上游实例未匹配'}
+                      </span>
+                    )}
                   </span>
                   <input
                     type="email"
@@ -663,7 +667,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     className="ui-input"
                   />
                   {container?.user_email_source === 'unmatched' && container.user_email_status && (
-                    <p className="text-[11px] leading-relaxed text-amber-300">{container.user_email_status}。系统不会按容器名称猜邮箱；请核对上游实例 UUID，或手工补充邮箱。</p>
+                    <p className="text-[11px] leading-relaxed text-amber-300">{container.user_email_status.replace(/。+$/, '')}。系统不会按容器名称猜邮箱；请核对上游实例 UUID，或手工补充邮箱。</p>
                   )}
                 </label>
                 <label className="block space-y-1.5">

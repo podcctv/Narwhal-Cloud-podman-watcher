@@ -264,6 +264,33 @@ class BuyerMappingEvidenceTests(unittest.TestCase):
         self.assertEqual(result['unmatched'],2)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM buyer_targets').fetchone()[0],0)
 
+    def test_same_host_dual_runtime_uuid_matches_both_runtimes(self):
+        self.report(host='h')
+        self.conn.execute(
+            'INSERT INTO reports(host_id,runtime,project,container_name,cpu_percent,mem_bytes,net_rx_bps,net_tx_bps,conn_count,podman_network_ok_v4,podman_network_ok_v6,ts,payload_json) VALUES(?,?,?,?,0,0,0,0,0,1,1,?,?)',
+            ('h','runman','default',self.VM,self.now,'{}')
+        )
+        result = mapping.apply(self.conn,[self.vm()],self.now)
+        self.assertEqual(result['matched'],2)
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM buyer_targets WHERE enabled=1').fetchone()[0],2)
+
+    def test_user_directory_propagates_email_across_vms_of_same_user_and_urgent_sync(self):
+        vm2 = '00000000-0000-0000-0000-000000000011'
+        self.report(name=self.VM)
+        self.report(name=vm2)
+        self.assertTrue(mapping.needs_urgent_sync(self.conn,self.now))
+        mapping.record_user_email(self.conn,'buyer1','buyer1@example.com','buyer_name',self.now)
+        result = mapping.apply(
+            self.conn,
+            [self.vm(user_email=None,user_name='buyer_name'),self.vm(id=vm2,user_email=None,user_name='buyer_name')],
+            self.now
+        )
+        self.assertEqual(result['matched'],2)
+        self.assertFalse(mapping.needs_urgent_sync(self.conn,self.now))
+        self.assertFalse(mapping.needs_urgent_sync(self.conn,self.now+60))
+        emails = [r['user_email'] for r in self.conn.execute('SELECT user_email FROM buyer_targets ORDER BY container_name').fetchall()]
+        self.assertEqual(emails,['buyer1@example.com','buyer1@example.com'])
+
     def test_duplicate_upstream_uuid_and_runtime_mismatch_reject(self):
         self.report()
         self.assertEqual(mapping.apply(self.conn,[self.vm(),self.vm()],self.now)['unmatched'],1)

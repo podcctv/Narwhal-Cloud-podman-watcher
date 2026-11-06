@@ -1,9 +1,12 @@
 """Associate only complete upstream VM identities; never guess names or broadcast."""
+from contextlib import closing
 import concurrent.futures
 import json
 import math
 import os
+from pathlib import Path
 import re
+import sqlite3
 import threading
 import time
 import urllib.parse
@@ -11,7 +14,7 @@ import urllib.request
 import uuid
 
 TTL = 900
-INTERVAL = 300
+INTERVAL = 180
 IDENTITY = ("host_id", "runtime", "project", "container_name")
 _lock = threading.Lock()
 
@@ -21,7 +24,8 @@ def initialize(conn):
     for name, definition in (("source", "TEXT NOT NULL DEFAULT 'manual'"),
                              ("vm_id", "TEXT DEFAULT ''"), ("verified_at", "INTEGER DEFAULT 0"),
                              ("bandwidth_mbps", "REAL NOT NULL DEFAULT 0"),
-                             ("user_email", "TEXT NOT NULL DEFAULT ''")):
+                             ("user_email", "TEXT NOT NULL DEFAULT ''"),
+                             ("user_name", "TEXT NOT NULL DEFAULT ''")):
         if name not in columns:
             conn.execute(f"ALTER TABLE buyer_targets ADD COLUMN {name} {definition}")
     conn.executescript("""
@@ -29,7 +33,108 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS buyer_mapping_issues(
       host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,reason TEXT,updated_at INTEGER,
       PRIMARY KEY(host_id,runtime,project,container_name));
+    CREATE TABLE IF NOT EXISTS buyer_user_directory(
+      user_id TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL DEFAULT '',
+      user_name TEXT NOT NULL DEFAULT '',
+      updated_at INTEGER NOT NULL DEFAULT 0);
     """)
+    conn.execute("""
+    INSERT INTO buyer_user_directory(user_id,user_email,user_name,updated_at)
+    SELECT user_id,MAX(user_email),MAX(user_name),MAX(verified_at)
+    FROM buyer_targets WHERE user_id<>'' AND (user_email<>'' OR user_name<>'')
+    GROUP BY user_id
+    ON CONFLICT(user_id) DO UPDATE SET
+      user_email=CASE WHEN excluded.user_email<>'' THEN excluded.user_email ELSE buyer_user_directory.user_email END,
+      user_name=CASE WHEN excluded.user_name<>'' THEN excluded.user_name ELSE buyer_user_directory.user_name END,
+      updated_at=MAX(buyer_user_directory.updated_at,excluded.updated_at)
+    """)
+    try:
+        db_list = conn.execute("PRAGMA database_list").fetchall()
+        main_db = next((str(r[2] or "") for r in db_list if str(r[1] or "") == "main"), "")
+        if main_db and main_db not in {":memory:", ""}:
+            backup_dir = Path(main_db).resolve().parent / "backups"
+            if backup_dir.is_dir():
+                for bpath in sorted(backup_dir.glob("monitor*.db"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
+                    try:
+                        with closing(sqlite3.connect(str(bpath))) as bconn:
+                            bcols = {r[1] for r in bconn.execute("PRAGMA table_info(buyer_targets)")}
+                            if "user_email" not in bcols:
+                                continue
+                            uname_expr = "user_name" if "user_name" in bcols else "''"
+                            brows = bconn.execute(
+                                f"SELECT user_id,MAX(user_email),MAX({uname_expr}),MAX(verified_at) "
+                                "FROM buyer_targets WHERE user_id<>'' AND user_email<>'' GROUP BY user_id"
+                            ).fetchall()
+                            for uid, uemail, uname, uts in brows:
+                                record_user_email(conn, uid, uemail, uname, int(uts or 0))
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    conn.execute("""
+    UPDATE buyer_targets
+    SET user_email=COALESCE(
+      (SELECT d.user_email FROM buyer_user_directory d WHERE d.user_id=buyer_targets.user_id AND d.user_email<>''),
+      buyer_targets.user_email
+    )
+    WHERE (user_email='' OR user_email IS NULL) AND user_id<>''
+    """)
+
+
+def record_user_email(conn, user_id, user_email="", user_name="", now=None):
+    uid = str(user_id or "").strip()
+    if not uid or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", uid):
+        return
+    email = normalize_email(user_email)
+    uname = str(user_name or "").strip()[:128]
+    if not email and not uname:
+        return
+    ts = int(time.time()) if now is None else int(now)
+    conn.execute(
+        "INSERT INTO buyer_user_directory(user_id,user_email,user_name,updated_at) VALUES(?,?,?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET "
+        "user_email=CASE WHEN excluded.user_email<>'' THEN excluded.user_email ELSE buyer_user_directory.user_email END,"
+        "user_name=CASE WHEN excluded.user_name<>'' THEN excluded.user_name ELSE buyer_user_directory.user_name END,"
+        "updated_at=MAX(buyer_user_directory.updated_at,excluded.updated_at)",
+        (uid, email, uname, ts),
+    )
+    if email:
+        conn.execute(
+            "UPDATE buyer_targets SET user_email=? WHERE user_id=? AND (user_email='' OR user_email IS NULL)",
+            (email, uid),
+        )
+
+
+def needs_urgent_sync(conn, now=None):
+    now = int(time.time()) if now is None else int(now)
+    prev = status(conn)
+    last_attempted = int(prev.get("attempted_at", 0) or 0)
+    if now - last_attempted < 30:
+        return False
+    rows = conn.execute(
+        "SELECT host_id,runtime,project,container_name FROM reports "
+        "WHERE runtime IN ('incus','podman','runman') "
+        "GROUP BY host_id,runtime,project,container_name HAVING MAX(ts)>=? LIMIT 500",
+        (now - TTL,),
+    ).fetchall()
+    for r in rows:
+        if not identifier(r[3]):
+            continue
+        mapped = conn.execute(
+            "SELECT verified_at,enabled FROM buyer_targets WHERE host_id=? AND runtime=? AND project=? AND container_name=?",
+            (r[0], r[1], r[2], r[3]),
+        ).fetchone()
+        if mapped and int(mapped[1] or 0) and int(mapped[0] or 0) >= now - TTL:
+            continue
+        issue = conn.execute(
+            "SELECT updated_at FROM buyer_mapping_issues WHERE host_id=? AND runtime=? AND project=? AND container_name=?",
+            (r[0], r[1], r[2], r[3]),
+        ).fetchone()
+        if issue and int(issue[0] or 0) >= last_attempted:
+            continue
+        return True
+    return False
 
 
 def status(conn):
@@ -152,6 +257,12 @@ def apply(conn, catalog, now):
         key = identifier(vm.get("id"))
         if key:
             index.setdefault(key, []).append(vm)
+        if vm.get("user_id") and (vm.get("user_email") or vm.get("user_name")):
+            record_user_email(conn, vm.get("user_id"), vm.get("user_email"), vm.get("user_name"), now)
+    directory = {
+        str(r[0] or ""): (str(r[1] or ""), str(r[2] or ""))
+        for r in conn.execute("SELECT user_id,user_email,user_name FROM buyer_user_directory")
+    }
     identities = [dict(r) for r in conn.execute(
         "SELECT host_id,runtime,project,container_name,MAX(ts) AS last_seen FROM reports "
         "GROUP BY host_id,runtime,project,container_name HAVING MAX(ts)>=? AND MAX(ts)<=? LIMIT 2001", (now - TTL, now+60))]
@@ -176,7 +287,7 @@ def apply(conn, catalog, now):
         reason = ""
         if not key or row["runtime"] not in {"incus", "podman", "runman"}:
             reason = "非托管实例 UUID；请手工登记收件人"
-        elif len(local.get(key, [])) != 1:
+        elif len({r["host_id"] for r in local.get(key, [])}) != 1:
             reason = "同一实例 UUID 对应多个本地身份，拒绝自动关联"
         elif not candidates:
             reason = "上游找不到此实例（已删除或非托管）"
@@ -197,13 +308,24 @@ def apply(conn, catalog, now):
                 conn.execute("UPDATE buyer_targets SET enabled=0 WHERE host_id=? AND runtime=? AND project=? AND container_name=?", fields)
             counts["unmatched"] += 1
             continue
-        email_to_save = normalize_email(vm.get("user_email")) or (old["user_email"] if old and old["user_email"] else "")
-        conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,user_email,scope,enabled,source,vm_id,verified_at) "
-                     "VALUES(?,?,?,?,?,?,?,?,'user',1,'upstream',?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET "
+        dir_email, dir_name = directory.get(str(vm["user_id"]), ("", ""))
+        email_to_save = (
+            normalize_email(vm.get("user_email"))
+            or normalize_email(dir_email)
+            or (normalize_email(old["user_email"]) if old and old["user_email"] else "")
+        )
+        old_name = str(old["user_name"] or "") if old and "user_name" in old.keys() else ""
+        name_to_save = str(vm.get("user_name") or dir_name or old_name).strip()[:128]
+        if email_to_save or name_to_save:
+            record_user_email(conn, vm["user_id"], email_to_save, name_to_save, now)
+            directory[str(vm["user_id"])] = (email_to_save or dir_email, name_to_save or dir_name)
+        conn.execute("INSERT INTO buyer_targets(host_id,runtime,project,container_name,machine_id,user_id,node_name,user_email,user_name,scope,enabled,source,vm_id,verified_at) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,'user',1,'upstream',?,?) ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET "
                      "machine_id=excluded.machine_id,user_id=excluded.user_id,node_name=excluded.node_name,"
                      "user_email=CASE WHEN excluded.user_email<>'' THEN excluded.user_email ELSE buyer_targets.user_email END,"
+                     "user_name=CASE WHEN excluded.user_name<>'' THEN excluded.user_name ELSE buyer_targets.user_name END,"
                      "scope='user',enabled=1,source='upstream',vm_id=excluded.vm_id,verified_at=excluded.verified_at",
-                     (*fields, identifier(vm["machine_id"]), vm["user_id"], vm.get("node_name", ""), email_to_save, key, now))
+                     (*fields, identifier(vm["machine_id"]), vm["user_id"], vm.get("node_name", ""), email_to_save, name_to_save, key, now))
         conn.execute("UPDATE buyer_targets SET bandwidth_mbps=? WHERE host_id=? AND runtime=? AND project=? AND container_name=?", (capacity(vm.get('bandwidth_mbps')), *fields))
         conn.execute("UPDATE buyer_outbox SET machine_id=?,user_id=?,scope='user',due_at=?,last_error='' WHERE host_id=? AND runtime=? AND project=? AND container_name=? AND status IN ('queued','retrying','blocked')",
                      (identifier(vm["machine_id"]), vm["user_id"], now, *fields))

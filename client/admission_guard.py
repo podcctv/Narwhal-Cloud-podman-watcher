@@ -92,8 +92,10 @@ class Guard:
             if changed:
                 try:self.save()
                 except Exception:pass
-                try:self.nft.admit(record['table'],policy.address(src))
-                except Exception:pass
+                norm_ip=policy.address(src)
+                if any(s.get('ip')==norm_ip and s.get('confirmed',True) for s in state.data.get('sources',[])):
+                    try:self.nft.admit(record['table'],norm_ip)
+                    except Exception:pass
             return True
 
     def start(self):
@@ -168,7 +170,8 @@ class Guard:
             record.update(ips=ips,epoch=epoch,verified_at=now,interfaces=interfaces,pid=snapshot.get('pid'),listening_ports=listening_ports)
             self.save()
             if changed:
-                self.nft.apply(record['table'],ips,record['queue'],state.data['sources'],state.data.get('limited',False),interfaces=interfaces,source_limit=self.source_limit,source_idle=policy.SOURCE_IDLE,listening_ports=listening_ports)
+                confirmed_only=[s for s in state.data['sources'] if s.get('confirmed',True)]
+                self.nft.apply(record['table'],ips,record['queue'],confirmed_only,state.data.get('limited',False),interfaces=interfaces,source_limit=self.source_limit,source_idle=policy.SOURCE_IDLE,listening_ports=listening_ports)
             # Readback is required; a missing/overwritten table is never green.
             self.nft.live(record['table'])
             digest=self.nft.digests.get(record['table'])

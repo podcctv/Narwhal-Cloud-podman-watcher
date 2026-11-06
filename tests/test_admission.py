@@ -344,6 +344,18 @@ class LinuxTests(unittest.TestCase):
             self.assertEqual(len(state.data['sources']),10)
             probe_entry=[x for x in state.data['sources'] if x['ip']=='198.51.100.99'][0]
             self.assertFalse(probe_entry.get('confirmed'))
+            nft.admit.assert_not_called()
+
+            # Even if nft.live returns the probe IP or stale IPs, observe() must NOT promote
+            # unconfirmed probes without ESTABLISHED (`inbound`) evidence
+            nft.live.return_value=set(biz_sources)|{'198.51.100.99','104.28.152.143'}
+            g.update(c,snap,now+5)
+            probe_entry=[x for x in state.data['sources'] if x['ip']=='198.51.100.99'][0]
+            self.assertFalse(probe_entry.get('confirmed'))
+            self.assertNotIn('104.28.152.143',[x['ip'] for x in state.data['sources']])
+            status_payload=g.status(c)
+            self.assertEqual(len(status_payload['confirmed_sources']),9)
+            self.assertEqual(len(status_payload['probation_sources']),1)
 
             # Scanner never finishes handshake. After probation gap (16s later),
             # another check / admission expires the tentative probe because it is not confirmed
@@ -360,8 +372,8 @@ class LinuxTests(unittest.TestCase):
             # Mark the 10 real sources as confirmed via observe
             all_10=biz_sources+['192.0.2.10']
             snap['inbound']=all_10
-            snap['observed_at']=now+1
-            g.update(c,snap,now+1)
+            snap['observed_at']=now+6
+            g.update(c,snap,now+6)
             self.assertEqual(len(state.data['sources']),10)
             self.assertTrue(all(x.get('confirmed') for x in state.data['sources']))
 
