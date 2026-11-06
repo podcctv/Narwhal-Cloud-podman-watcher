@@ -41,12 +41,12 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   const protectionOnlyCount = alerts.filter(isProtectionOnlySignal).length;
   const [pendingDecision, setPendingDecision] = useState<{
     id: number;
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve' | 'apply_container_connlimit' | 'release_container_connlimit';
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve' | 'apply_container_connlimit' | 'release_container_connlimit' | 'freeze_container';
   } | null>(null);
 
   const handleDecision = async (
     alertId: number,
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve' | 'apply_container_connlimit' | 'release_container_connlimit'
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'resolve' | 'apply_container_connlimit' | 'release_container_connlimit' | 'freeze_container'
   ) => {
     setSubmittingId(alertId);
     try {
@@ -59,6 +59,8 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
         'success',
         decision === 'resolve'
           ? '告警已标记为已解决'
+          : decision === 'freeze_container'
+          ? '容器封禁冻结指令已排队，等待节点执行'
           : res.queued
           ? '处置指令已排队，等待节点执行'
           : '安全策略已更新'
@@ -83,15 +85,17 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
 
   const confirmationCopy = pendingDecision?.decision === 'deny'
     ? { title: '确认执行定向处置？', description: '仅处理本告警已识别的进程、服务或配置；不会停止整个容器。节点将在下一轮上报时执行并回传结果。', confirmLabel: '确认定向处置', tone: 'danger' as const }
+    : pendingDecision?.decision === 'freeze_container'
+    ? { title: '确认封禁该容器实例？', description: '将向节点下发容器挂起冻结指令，立即定格容器内所有进程并阻断异常连接，同时将本条告警标记为已处理。可在容器详情抽屉中随时解除冻结。', confirmLabel: '确认封禁', tone: 'danger' as const }
     : pendingDecision?.decision === 'apply_container_connlimit'
     ? { title: '确认临时限制 TCP 新连接？', description: '仅对已核验的 Incus 或 Runman 实例生效：入站和出站方向各限制为最多 500 条并发 TCP 连接，持续 30 分钟；达到上限后拒绝新的 TCP SYN。已有会话不会被断开，UDP 不受影响。可能影响合法高并发业务；规则可手动撤销并会自动过期。', confirmLabel: '应用 30 分钟限额', tone: 'danger' as const }
     : pendingDecision?.decision === 'release_container_connlimit'
     ? { title: '解除临时 TCP 限额？', description: '只删除本系统为该 Incus 或 Runman 实例创建并带有专属标记的连接限制规则，不改动其他防火墙规则。', confirmLabel: '解除限额', tone: 'primary' as const }
     : pendingDecision?.decision === 'allow_silent'
-    ? { title: '确认建立放行策略？', description: '该告警对象将被持续放行且不再提醒。你可在告警历史中随时撤销该策略。', confirmLabel: '确认放行', tone: 'primary' as const }
+    ? { title: '确认忽略并建立放行策略？', description: '该告警对象将被持续忽略放行且不再提醒。你可在告警历史中随时恢复提醒。', confirmLabel: '确认忽略', tone: 'primary' as const }
     : pendingDecision?.decision === 'resolve'
     ? { title: '确认标记为已解决？', description: '该告警将从活动列表移入历史记录；后续再次检测到同类风险时仍会重新告警。', confirmLabel: '标记已解决', tone: 'primary' as const }
-    : { title: '确认本次忽略？', description: '仅隐藏当前活动告警。风险仍会被持续采集，并在状态变化后再次提示。', confirmLabel: '本次忽略', tone: 'primary' as const };
+    : { title: '确认跳过本次告警？', description: '仅隐藏当前这一轮活动告警。风险仍会被持续采集，并在后续异常状态变化时再次提示。', confirmLabel: '确认跳过本次', tone: 'primary' as const };
 
   if (alerts.length === 0) {
     return (
@@ -187,6 +191,12 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
             && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
           const canUseConnlimit = alert.type === 'container_connection_count'
             && (alert.runtime === 'incus' || alert.runtime === 'runman') && (alert.project || '') === 'default';
+          const isSocketAbuseReview = alert.type === 'socket_abuse_suspected';
+          const canFreezeContainer = isSocketAbuseReview
+            && Boolean(alert.container_name)
+            && ['incus', 'podman', 'runman'].includes(alert.runtime);
+          const freezePending = connlimitAction?.action_type === 'freeze_container'
+            && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
 
           return (
             <div
@@ -354,15 +364,28 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   </span>
                 </button>}
 
-                {!protectionOnly && !prohibitedActivity && <button
+                {canFreezeContainer && !prohibitedActivity && (
+                  <button
+                    type="button"
+                    disabled={isProcessing || freezePending}
+                    onClick={() => setPendingDecision({ id: alert.id, decision: 'freeze_container' })}
+                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 transition-all hover:bg-rose-900/90 disabled:opacity-50"
+                    title="挂起冻结该容器实例，立即阻断异常连接并标记告警已处理"
+                  >
+                    <Ban className="h-3.5 w-3.5" />
+                    <span>{freezePending ? '封禁执行中...' : '封禁'}</span>
+                  </button>
+                )}
+
+                {(!protectionOnly || isSocketAbuseReview) && !prohibitedActivity && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'allow_silent' })}
                   className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition-all hover:bg-slate-700 disabled:opacity-50"
-                  title="放行并永久不再提醒此项告警"
+                  title={isSocketAbuseReview ? '忽略该容器的此类 Socket 异常提醒（可在告警历史中恢复）' : '放行并永久不再提醒此项告警'}
                 >
                   <Check className="h-3.5 w-3.5 text-emerald-400" />
-                  <span>放行策略</span>
+                  <span>{isSocketAbuseReview ? '忽略' : '放行策略'}</span>
                 </button>}
 
                 {isActionFailed && !prohibitedActivity && (
@@ -378,15 +401,15 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                   </button>
                 )}
 
-                {!protectionOnly && !prohibitedActivity && <button
+                {(!protectionOnly || isSocketAbuseReview) && !prohibitedActivity && <button
                   type="button"
                   disabled={isProcessing}
                   onClick={() => setPendingDecision({ id: alert.id, decision: 'dismiss_once' })}
                   className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-all hover:bg-slate-700 disabled:opacity-50"
-                  title="本次临时忽略"
+                  title={isSocketAbuseReview ? '跳过本次告警提醒，后续状态变化时仍会再次提醒' : '本次临时忽略'}
                 >
                   <EyeOff className="h-3.5 w-3.5 text-slate-400" />
-                  <span>本次忽略</span>
+                  <span>{isSocketAbuseReview ? '跳过本次' : '本次忽略'}</span>
                 </button>}
               </div>
             </div>

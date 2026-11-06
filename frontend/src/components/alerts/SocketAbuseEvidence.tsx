@@ -1,5 +1,5 @@
 import React from 'react';
-import { SocketAbuseAssessment, SocketAbuseDimension } from '../../api/types';
+import { SocketAbuseAssessment, SocketAbuseDimension, SocketAbuseIpDetail } from '../../api/types';
 
 interface SocketAbuseEvidenceProps {
   alert?: Record<string, any> | null;
@@ -77,76 +77,164 @@ const renderDimensionMetrics = (dim: SocketAbuseDimension) => {
     );
   }
   if (dim.key === 'inbound_fanout') {
-    const topIps = Array.isArray(m.top_ips) ? m.top_ips.slice(0, 4) : [];
+    const topIps = Array.isArray(m.top_ips) ? m.top_ips.slice(0, 5) : [];
+    const topIpDetails: SocketAbuseIpDetail[] = Array.isArray(m.top_ip_details) ? m.top_ip_details.slice(0, 6) : [];
     return (
-      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] font-mono">
-        <span
-          className={`rounded border px-1.5 py-0.5 ${
-            Number(m.inbound_established_unique_ips || 0) >= 10
-              ? 'border-amber-500/40 bg-amber-950/50 text-amber-200'
-              : 'border-cyan-500/30 bg-cyan-950/40 text-cyan-200'
-          }`}
-        >
-          已建连真实来源 IP: {m.inbound_established_unique_ips ?? 0}
-        </span>
-        <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-300">
-          入站活跃连接: {m.incoming_established ?? 0}
-        </span>
-        <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-400">
-          仅探测未建连 IP: {m.inbound_syn_recv_unique_ips ?? 0}
-        </span>
-        {m.socks_detected && (
-          <span className="rounded border border-rose-500/35 bg-rose-950/50 px-1.5 py-0.5 text-rose-200">
-            SOCKS5 ({m.socks_auth_mode || 'unknown'})
-          </span>
-        )}
-        {topIps.map((item: string) => (
+      <div className="mt-2 space-y-2 text-[11px] font-mono">
+        <div className="flex flex-wrap gap-1.5">
           <span
-            key={item}
-            className="rounded border border-slate-800 bg-slate-950/80 px-1.5 py-0.5 text-slate-300"
+            className={`rounded border px-1.5 py-0.5 ${
+              Number(m.inbound_established_unique_ips || 0) >= 10
+                ? 'border-amber-500/40 bg-amber-950/50 text-amber-200'
+                : 'border-cyan-500/30 bg-cyan-950/40 text-cyan-200'
+            }`}
           >
-            {item}
+            已建连真实来源 IP: {m.inbound_established_unique_ips ?? 0}
           </span>
-        ))}
+          <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-300">
+            入站活跃连接: {m.incoming_established ?? 0}
+          </span>
+          <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-400">
+            仅探测未建连 IP: {m.inbound_syn_recv_unique_ips ?? 0}
+          </span>
+          {m.socks_detected && (
+            <span className="rounded border border-rose-500/35 bg-rose-950/50 px-1.5 py-0.5 text-rose-200">
+              SOCKS5 ({m.socks_auth_mode || 'unknown'})
+            </span>
+          )}
+        </div>
+        {topIpDetails.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {topIpDetails.map((item) => {
+              const fallbackGeo = [
+                item.country_name || (item.country && item.country !== 'UN' ? item.country : ''),
+                item.region || item.city,
+                item.isp,
+                item.asn,
+              ]
+                .filter(Boolean)
+                .join('·');
+              const geoText = item.geo_label || fallbackGeo;
+              return (
+                <span
+                  key={item.ip}
+                  className="inline-flex flex-wrap items-center gap-1 rounded border border-slate-800 bg-slate-950/85 px-1.5 py-0.5 text-slate-300"
+                >
+                  <span className="font-semibold text-sky-300">{item.ip}</span>
+                  {geoText && (
+                    <span className="rounded bg-amber-950/55 px-1 py-0.2 text-[10px] text-amber-200">
+                      {geoText}
+                    </span>
+                  )}
+                  <span className="text-slate-400">
+                    (已建连{item.established_connections ?? 0}/总{item.connections ?? 0})
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        ) : (
+          topIps.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {topIps.map((item: string) => (
+                <span
+                  key={item}
+                  className="rounded border border-slate-800 bg-slate-950/80 px-1.5 py-0.5 text-slate-300"
+                >
+                  {item}
+                </span>
+              ))}
+            </div>
+          )
+        )}
       </div>
     );
   }
   if (dim.key === 'outbound_profile') {
     const sensitivePorts = Array.isArray(m.sensitive_ports) ? m.sensitive_ports.slice(0, 4) : [];
     const topProcs = Array.isArray(m.top_processes) ? m.top_processes.slice(0, 2) : [];
+    const topOutboundIpDetails: SocketAbuseIpDetail[] = Array.isArray(m.top_ip_details) ? m.top_ip_details.slice(0, 6) : [];
+    const topOutboundIps = Array.isArray(m.top_outbound_ips) ? m.top_outbound_ips.slice(0, 5) : [];
     return (
-      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] font-mono">
-        <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-200">
-          出站活跃: {m.outbound_established ?? 0}
-        </span>
-        <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-300">
-          外部目标 IP: {m.outbound_unique_ips ?? 0} / 端口: {m.outbound_unique_ports ?? 0}
-        </span>
-        <span
-          className={`rounded border px-1.5 py-0.5 ${
-            Number(m.suspicious_outbound_connections || 0) >= 5 || sensitivePorts.length > 0
-              ? 'border-rose-500/40 bg-rose-950/50 text-rose-200'
-              : 'border-slate-700/80 bg-slate-950/70 text-slate-300'
-          }`}
-        >
-          敏感端口连接: {m.suspicious_outbound_connections ?? 0}
-        </span>
-        {sensitivePorts.map((sp: any) => (
-          <span
-            key={`${sp.port}-${sp.service}`}
-            className="rounded border border-rose-500/35 bg-rose-950/50 px-1.5 py-0.5 text-rose-200"
-          >
-            {sp.port}/{sp.service} ({sp.connections}条·{sp.unique_ips}IP)
+      <div className="mt-2 space-y-2 text-[11px] font-mono">
+        <div className="flex flex-wrap gap-1.5">
+          <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-200">
+            出站活跃: {m.outbound_established ?? 0}
           </span>
-        ))}
-        {topProcs.map((proc: any) => (
-          <span
-            key={`${proc.process}-${proc.pid}`}
-            className="rounded border border-cyan-500/25 bg-cyan-950/35 px-1.5 py-0.5 text-cyan-200"
-          >
-            {proc.process}(PID {proc.pid})
+          <span className="rounded border border-slate-700/80 bg-slate-950/70 px-1.5 py-0.5 text-slate-300">
+            外部目标 IP: {m.outbound_unique_ips ?? 0} / 端口: {m.outbound_unique_ports ?? 0}
           </span>
-        ))}
+          <span
+            className={`rounded border px-1.5 py-0.5 ${
+              Number(m.suspicious_outbound_connections || 0) >= 5 || sensitivePorts.length > 0
+                ? 'border-rose-500/40 bg-rose-950/50 text-rose-200'
+                : 'border-slate-700/80 bg-slate-950/70 text-slate-300'
+            }`}
+          >
+            敏感端口连接: {m.suspicious_outbound_connections ?? 0}
+          </span>
+          {sensitivePorts.map((sp: any) => (
+            <span
+              key={`${sp.port}-${sp.service}`}
+              className="rounded border border-rose-500/35 bg-rose-950/50 px-1.5 py-0.5 text-rose-200"
+            >
+              {sp.port}/{sp.service} ({sp.connections}条·{sp.unique_ips}IP)
+            </span>
+          ))}
+          {topProcs.map((proc: any) => (
+            <span
+              key={`${proc.process}-${proc.pid}`}
+              className="rounded border border-cyan-500/25 bg-cyan-950/35 px-1.5 py-0.5 text-cyan-200"
+            >
+              {proc.process}(PID {proc.pid})
+            </span>
+          ))}
+        </div>
+        {topOutboundIpDetails.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {topOutboundIpDetails.map((item) => {
+              const fallbackGeo = [
+                item.country_name || (item.country && item.country !== 'UN' ? item.country : ''),
+                item.region || item.city,
+                item.isp,
+                item.asn,
+              ]
+                .filter(Boolean)
+                .join('·');
+              const geoText = item.geo_label || fallbackGeo;
+              const portsText = Array.isArray(item.ports) && item.ports.length > 0 ? `·端口${item.ports.slice(0, 3).join('/')}` : '';
+              return (
+                <span
+                  key={item.ip}
+                  className="inline-flex flex-wrap items-center gap-1 rounded border border-slate-800 bg-slate-950/85 px-1.5 py-0.5 text-slate-300"
+                >
+                  <span className="font-semibold text-sky-300">{item.ip}</span>
+                  {geoText && (
+                    <span className="rounded bg-emerald-950/55 px-1 py-0.2 text-[10px] text-emerald-200">
+                      {geoText}
+                    </span>
+                  )}
+                  <span className="text-slate-400">
+                    (活跃{item.established_connections ?? 0}/总{item.connections ?? 0}{portsText})
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        ) : (
+          topOutboundIps.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {topOutboundIps.map((item: string) => (
+                <span
+                  key={item}
+                  className="rounded border border-slate-800 bg-slate-950/80 px-1.5 py-0.5 text-slate-300"
+                >
+                  {item}
+                </span>
+              ))}
+            </div>
+          )
+        )}
       </div>
     );
   }

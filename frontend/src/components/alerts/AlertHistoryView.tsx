@@ -5,6 +5,8 @@ import {
   RotateCcw,
   Search,
   Ban,
+  Check,
+  EyeOff,
   Clock,
   ArrowRight,
   Network,
@@ -169,13 +171,20 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
 
   const handleDecision = async (
     alertId: number,
-    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen'
+    decision: 'deny' | 'allow_silent' | 'dismiss_once' | 'reopen' | 'freeze_container'
   ) => {
     if (submittingAlertId !== null) return;
     setSubmittingAlertId(alertId);
     try {
       const res = await api.dispositionAlert(alertId, decision);
-      onToast('success', res.queued ? '操作已排队等待节点执行' : '安全状态已更新');
+      onToast(
+        'success',
+        decision === 'freeze_container'
+          ? '容器封禁冻结指令已排队，等待节点执行'
+          : res.queued
+          ? '操作已排队等待节点执行'
+          : '安全状态已更新'
+      );
       await loadData(true);
     } catch (err: any) {
       onToast('error', `处置操作失败：${err.message || err}`);
@@ -524,7 +533,43 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {alert.type === 'socket_abuse_suspected' && alert.status === 'active' && (
+                      <>
+                        {alert.container_name && ['incus', 'podman', 'runman'].includes(alert.runtime) && (
+                          <button
+                            type="button"
+                            onClick={() => void handleDecision(alert.id, 'freeze_container')}
+                            disabled={submittingAlertId !== null}
+                            className="flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 transition-colors hover:bg-rose-900/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-wait disabled:opacity-50"
+                            title="挂起冻结该容器实例，立即阻断异常连接并标记告警已处理"
+                          >
+                            <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>封禁</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => void handleDecision(alert.id, 'allow_silent')}
+                          disabled={submittingAlertId !== null}
+                          className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-wait disabled:opacity-50"
+                          title="忽略该容器的此类 Socket 异常提醒（可在告警历史中恢复）"
+                        >
+                          <Check className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                          <span>忽略</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDecision(alert.id, 'dismiss_once')}
+                          disabled={submittingAlertId !== null}
+                          className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-wait disabled:opacity-50"
+                          title="跳过本次告警提醒，后续状态变化时仍会再次提醒"
+                        >
+                          <EyeOff className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                          <span>跳过本次</span>
+                        </button>
+                      </>
+                    )}
                     {canRemediate && <button
                       type="button"
                       onClick={() => setPendingRemediation(alert)}

@@ -899,6 +899,15 @@ def process_security_alerts(
                 should_notify = False
             elif automatically_remediated:
                 should_notify = False
+            elif previous_status == "remediated" and alert_type == "socket_abuse_suspected":
+                recent_freeze = conn.execute(
+                    "SELECT status, updated_at FROM security_actions WHERE alert_id=? AND action_type='freeze_container' ORDER BY id DESC LIMIT 1",
+                    (existing["id"],),
+                ).fetchone()
+                if recent_freeze and str(recent_freeze["status"]) in ("queued", "dispatched", "running", "succeeded") and (ts - int(recent_freeze["updated_at"] or 0)) <= 86400:
+                    next_status = "remediated"
+                    restart_episode = False
+                    should_notify = False
             elif previous_status == "dismissed":
                 dismiss_decision = conn.execute(
                     "SELECT created_at FROM security_alert_decisions WHERE alert_id=? AND decision='dismiss_once' ORDER BY id DESC LIMIT 1",
@@ -5421,9 +5430,9 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     decision = str(payload.get("decision") or "").strip().lower()
-    if decision == "allow_silent" and getattr(request.state,"dashboard_role","admin") != "admin":
-        raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略")
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "stop_reviewed_socks", "apply_container_connlimit", "release_container_connlimit"):
+    if decision in ("allow_silent", "freeze_container", "unfreeze_container") and getattr(request.state,"dashboard_role","admin") != "admin":
+        raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略或执行容器封禁操作")
+    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "stop_reviewed_socks", "apply_container_connlimit", "release_container_connlimit", "freeze_container", "unfreeze_container"):
         raise HTTPException(
             status_code=400,
             detail="unsupported alert disposition",
@@ -5438,7 +5447,7 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     if alert['alert_type'] == 'prohibited_activity' and decision != 'reopen':
         conn.close()
         raise HTTPException(status_code=409, detail='隔离事件必须由管理员复核后，通过解除隔离入口处理；不能用忽略、静默或标记恢复替代。')
-    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve", "release_udp_throttle", "apply_udp_throttle", "release_container_connlimit"):
+    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve", "release_udp_throttle", "apply_udp_throttle", "release_container_connlimit", "freeze_container", "unfreeze_container"):
         conn.close()
         raise HTTPException(status_code=409, detail="alert is no longer active")
 
@@ -5650,6 +5659,21 @@ async def set_security_alert_disposition(alert_id: int, request: Request) -> JSO
     elif decision == "apply_udp_throttle":
         action, queued = _queue_security_action_row(
             conn, alert, "apply_udp_throttle", {"rate_mbps": 10, "duration": 3600}, requested_by
+        )
+    elif decision in ("freeze_container", "unfreeze_container"):
+        if alert["runtime"] not in ("podman", "incus", "runman") or not alert["container_name"]:
+            conn.close()
+            raise HTTPException(status_code=400, detail="当前运行时或目标实例不支持封禁/冻结操作")
+        details = _alert_action_evidence(alert)
+        freeze_params: Dict[str, Any] = {}
+        if details.get("instance_id"):
+            freeze_params["instance_id"] = str(details.get("instance_id"))
+        if details.get("pid") and str(details.get("pid")).isdigit():
+            freeze_params["pid"] = int(details["pid"])
+        if decision == "freeze_container":
+            conn.execute("UPDATE security_alerts SET status='remediated' WHERE id=?", (alert_id,))
+        action, queued = _queue_security_action_row(
+            conn, alert, decision, freeze_params, requested_by
         )
     elif decision in ("apply_container_connlimit", "release_container_connlimit"):
         if getattr(request.state, "dashboard_role", "admin") != "admin":
@@ -6634,7 +6658,7 @@ async def security_action_result(
                 _purge_host(conn, host_id)
                 invalidate_security_status_cache()
             if status == "succeeded" and row["action_type"] in (
-                "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth", "stop_reviewed_socks"
+                "remediate_panel_pairing", "remediate_malicious_process", "enforce_socks_auth", "stop_reviewed_socks", "freeze_container"
             ):
                 conn.execute(
                     "UPDATE security_alerts SET status='remediated' WHERE id=? AND status='active'",

@@ -317,3 +317,90 @@ class ConnectionPolicyTests(unittest.TestCase):
         self.assertIn('shared_proxy_socks_abuse', codes)
         self.assertIn('outbound_scan_bruteforce', codes)
         self.assertIn('【四维判断依据】', abuse_alerts[0]['message'])
+
+    def test_socket_abuse_geoip_enrichment_and_p2p_port_diversity(self):
+        cdn_container_security = {
+            'connection_metrics': {
+                'schema': 1,
+                'valid': True,
+                'total': 28,
+                'tcp_total': 23,
+                'tcp_established': 4,
+                'tcp_pending': 0,
+                'tcp_time_wait': 19,
+                'udp_sockets': 5,
+            },
+            'tcp_states': {'established': 4, 'time_wait': 19, 'syn_sent': 0, 'syn_recv': 0},
+            'incoming_established': 0,
+            'inbound_unique_ips': 1,
+            'inbound_established_unique_ips': 0,
+            'inbound_syn_recv_unique_ips': 0,
+            'inbound_top_ips': [
+                {'ip': '223.104.76.233', 'connections': 1, 'established_connections': 0, 'syn_recv_connections': 0},
+            ],
+            'outbound_established': 191,
+            'outbound_unique_ips': 132,
+            'outbound_unique_ports': 2,
+            'outbound_top_ips': [
+                {'ip': '104.16.132.229', 'connections': 24, 'established_connections': 22, 'syn_sent_connections': 0, 'ports': [443]},
+            ],
+            'communication_processes': [
+                {'process': 'ld-musl-aarch64', 'pid': 833, 'inbound_connections': 0, 'outbound_connections': 100},
+            ],
+        }
+        fake_geo_map = {
+            '223.104.76.233': {
+                'country': 'CN',
+                'country_name': 'China',
+                'region': '江苏省',
+                'city': '南京市',
+                'isp': 'China Mobile',
+                'asn': '9808',
+            },
+            '104.16.132.229': {
+                'country': 'US',
+                'country_name': 'United States',
+                'region': 'California',
+                'city': 'San Francisco',
+                'isp': 'Cloudflare, Inc.',
+                'asn': '13335',
+            },
+        }
+        with mock.patch.object(agent, '_geoip_detail_map', return_value=fake_geo_map):
+            agent._enrich_socket_ips_geoip(cdn_container_security, allow_network=True)
+
+        eval_cdn = agent._evaluate_socket_abuse(
+            {'name': 'cdn-node', 'conn_count': 28},
+            cdn_container_security,
+            rx_bps=351600,
+            tx_bps=343800,
+            rx_pps=390,
+            tx_pps=136,
+        )
+        # 132 outbound IPs across only 2 web ports (80/443) with 5 UDP sockets should NOT trigger P2P abuse
+        self.assertFalse(eval_cdn['suspected'])
+        # Total and established metrics should reconcile with outbound_established (191)
+        state_dim = eval_cdn['dimensions'][0]
+        self.assertGreaterEqual(state_dim['metrics']['tcp_established'], 191)
+        self.assertGreaterEqual(state_dim['metrics']['total'], 215)
+        # GeoIP details should be populated on inbound and outbound dimensions
+        inbound_dim = eval_cdn['dimensions'][1]
+        outbound_dim = eval_cdn['dimensions'][2]
+        self.assertIn('中国·江苏省 · China Mobile AS9808', inbound_dim['metrics']['top_ips'][0])
+        self.assertEqual(inbound_dim['metrics']['top_ip_details'][0]['geo_label'], '中国·江苏省 · China Mobile AS9808')
+        self.assertIn('美国·California · Cloudflare, Inc. AS13335', outbound_dim['metrics']['top_outbound_ips'][0])
+        self.assertEqual(outbound_dim['metrics']['top_ip_details'][0]['geo_label'], '美国·California · Cloudflare, Inc. AS13335')
+
+        # When outbound_unique_ports >= 30 (or udp_sockets >= 80), P2P fanout abuse DOES trigger
+        p2p_security = dict(cdn_container_security, outbound_unique_ports=48, udp_sockets=95)
+        eval_p2p = agent._evaluate_socket_abuse(
+            {'name': 'p2p-node', 'conn_count': 215},
+            p2p_security,
+            rx_bps=351600,
+            tx_bps=343800,
+            rx_pps=390,
+            tx_pps=136,
+        )
+        self.assertTrue(eval_p2p['suspected'])
+        self.assertIn('p2p_or_outbound_fanout_abuse', {c['code'] for c in eval_p2p['categories']})
+

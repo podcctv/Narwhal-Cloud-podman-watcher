@@ -1840,6 +1840,7 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         "outbound_unique_ips": 0,
         "outbound_unique_ports": 0,
         "outbound_syn_sent_unique_ips": 0,
+        "outbound_top_ips": [],
         "outbound_top_ports": [],
         "sensitive_outbound_ports": [],
         "suspicious_outbound_connections": 0,
@@ -1934,6 +1935,7 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
     outbound_ips = set()
     outbound_ports = set()
     outbound_syn_sent_ips = set()
+    outbound_ip_stats: Dict[str, Dict[str, Any]] = {}
     outbound_port_stats: Dict[int, Dict[str, Any]] = {}
     sensitive_port_labels = {
         22: "SSH",
@@ -1999,6 +2001,17 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         if not _is_trackable_ip(remote_ip):
             continue
         outbound_ips.add(remote_ip)
+        ostat = outbound_ip_stats.setdefault(
+            remote_ip,
+            {"connections": 0, "established_connections": 0, "syn_sent_connections": 0, "ports": set()},
+        )
+        ostat["connections"] += 1
+        if remote_port > 0:
+            ostat["ports"].add(remote_port)
+        if state == "01" or proto == "udp":
+            ostat["established_connections"] += 1
+        elif proto == "tcp" and state == "02":
+            ostat["syn_sent_connections"] += 1
         if proto == "tcp" and state == "02":
             outbound_syn_sent_ips.add(remote_ip)
         if remote_port > 0:
@@ -2025,6 +2038,20 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
             scan_unique_ports_max = len(ports)
             scan_source_ip = source_ip
 
+    outbound_top_ips = [
+        {
+            "ip": ip,
+            "connections": int(info["connections"]),
+            "established_connections": int(info["established_connections"]),
+            "syn_sent_connections": int(info["syn_sent_connections"]),
+            "ports": sorted(info["ports"])[:6],
+        }
+        for ip, info in sorted(
+            outbound_ip_stats.items(),
+            key=lambda item: (int(item[1]["connections"]), int(item[1]["established_connections"])),
+            reverse=True,
+        )[:20]
+    ]
     outbound_top_ports = [
         {
             "port": port,
@@ -2083,6 +2110,7 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
             "outbound_unique_ips": len(outbound_ips),
             "outbound_unique_ports": len(outbound_ports),
             "outbound_syn_sent_unique_ips": len(outbound_syn_sent_ips),
+            "outbound_top_ips": outbound_top_ips,
             "outbound_top_ports": outbound_top_ports,
             "sensitive_outbound_ports": sensitive_outbound_ports,
             "suspicious_outbound_connections": suspicious_connections,
@@ -2716,8 +2744,32 @@ def _apply_host_conntrack_security(
         return
     security["inbound_ip_observation"] = "host_conntrack"
     security["inbound_unique_ips"] = len(source_connections)
+    conntrack_established_ips = sum(
+        1 for sig in source_signals.values() if int(sig.get("tcp_established_flows") or 0) > 0
+    )
+    conntrack_syn_recv_ips = sum(
+        1
+        for sig in source_signals.values()
+        if int(sig.get("tcp_established_flows") or 0) == 0
+        and (
+            int(sig.get("tcp_handshake_pending_flows") or 0) > 0
+            or int(sig.get("tcp_unreplied_flows") or 0) > 0
+        )
+    )
+    if conntrack_established_ips > int(security.get("inbound_established_unique_ips") or 0):
+        security["inbound_established_unique_ips"] = conntrack_established_ips
+    if conntrack_syn_recv_ips > int(security.get("inbound_syn_recv_unique_ips") or 0):
+        security["inbound_syn_recv_unique_ips"] = conntrack_syn_recv_ips
     security["inbound_top_ips"] = [
-        {"ip": ip, "connections": count}
+        {
+            "ip": ip,
+            "connections": count,
+            "established_connections": int((source_signals.get(ip) or {}).get("tcp_established_flows") or 0),
+            "syn_recv_connections": (
+                int((source_signals.get(ip) or {}).get("tcp_handshake_pending_flows") or 0)
+                + int((source_signals.get(ip) or {}).get("tcp_unreplied_flows") or 0)
+            ),
+        }
         for ip, count in sorted(source_connections.items(), key=lambda item: item[1], reverse=True)[:20]
     ]
     normalized_signals = []
@@ -4200,6 +4252,212 @@ def _collect_memory_guard(containers: List[Dict[str, object]], interval_seconds:
         print(f"memory guard collection failed: {error}")
 
 
+_COUNTRY_NAMES_ZH = {
+    "CN": "中国",
+    "HK": "中国香港",
+    "TW": "中国台湾",
+    "MO": "中国澳门",
+    "US": "美国",
+    "JP": "日本",
+    "SG": "新加坡",
+    "KR": "韩国",
+    "DE": "德国",
+    "GB": "英国",
+    "FR": "法国",
+    "NL": "荷兰",
+    "RU": "俄罗斯",
+    "CA": "加拿大",
+    "AU": "澳大利亚",
+    "IN": "印度",
+    "BR": "巴西",
+    "MY": "马来西亚",
+    "TH": "泰国",
+    "VN": "越南",
+    "ID": "印尼",
+    "PH": "菲律宾",
+    "TR": "土耳其",
+    "IT": "意大利",
+    "ES": "西班牙",
+    "SE": "瑞典",
+    "CH": "瑞士",
+    "PL": "波兰",
+    "UA": "乌克兰",
+    "ZA": "南非",
+    "AE": "阿联酋",
+    "SA": "沙特",
+    "MX": "墨西哥",
+    "AR": "阿根廷",
+    "CL": "智利",
+}
+
+
+def _format_geoip_badge(detail: Dict[str, Any]) -> Tuple[str, str, str, str, str, str, str]:
+    country = str(detail.get("country") or "UN").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", country):
+        country = "UN"
+    country_name = _COUNTRY_NAMES_ZH.get(country, country if country != "UN" else "")
+    region = str(detail.get("region") or "").strip()[:80]
+    city = str(detail.get("city") or "").strip()[:80]
+    isp = str(detail.get("isp") or "").strip()[:120]
+    raw_asn = str(detail.get("asn") or "").strip()[:40]
+    asn = (f"AS{raw_asn}" if raw_asn and not raw_asn.upper().startswith("AS") else raw_asn.upper()) if raw_asn else ""
+
+    loc_parts: List[str] = []
+    if country_name:
+        loc_parts.append(country_name)
+    if region and region.lower() not in {country.lower(), country_name.lower()}:
+        loc_parts.append(region)
+    elif city and city.lower() not in {country.lower(), country_name.lower()}:
+        loc_parts.append(city)
+
+    isp_parts: List[str] = []
+    if isp:
+        isp_parts.append(isp)
+    if asn:
+        isp_parts.append(asn)
+
+    loc_text = "·".join(loc_parts)
+    isp_text = " ".join(isp_parts)
+    if loc_text and isp_text:
+        geo_label = f"{loc_text} · {isp_text}"
+    elif loc_text:
+        geo_label = loc_text
+    elif isp_text:
+        geo_label = isp_text
+    else:
+        geo_label = ""
+    return country, country_name, region, city, isp, asn, geo_label
+
+
+def _enrich_socket_ips_geoip(security: Dict[str, object], allow_network: bool = True) -> None:
+    """Populate country, province/region, and ISP/ASN metadata on top inbound/outbound socket IPs."""
+    if not isinstance(security, dict):
+        return
+    comm_sockets = security.get("communication_sockets") if isinstance(security.get("communication_sockets"), list) else []
+    inbound_top = security.get("inbound_top_ips") if isinstance(security.get("inbound_top_ips"), list) else []
+    outbound_top = security.get("outbound_top_ips") if isinstance(security.get("outbound_top_ips"), list) else []
+
+    if not outbound_top and comm_sockets:
+        out_map: Dict[str, Dict[str, Any]] = {}
+        for sock in comm_sockets:
+            if not isinstance(sock, dict) or sock.get("direction") != "outbound":
+                continue
+            rip = str(sock.get("remote_ip") or "")
+            if not _is_trackable_ip(rip):
+                continue
+            _, rport = _parse_socket_endpoint(str(sock.get("remote") or ""))
+            state_str = str(sock.get("state") or "").upper()
+            info = out_map.setdefault(
+                rip,
+                {"connections": 0, "established_connections": 0, "syn_sent_connections": 0, "ports": set()},
+            )
+            info["connections"] += 1
+            if rport > 0:
+                info["ports"].add(rport)
+            if state_str in ("ESTAB", "ESTABLISHED") or sock.get("proto") == "udp":
+                info["established_connections"] += 1
+            elif state_str in ("SYN-SENT", "SYN_SENT"):
+                info["syn_sent_connections"] += 1
+        outbound_top = [
+            {
+                "ip": ip,
+                "connections": int(info["connections"]),
+                "established_connections": int(info["established_connections"]),
+                "syn_sent_connections": int(info["syn_sent_connections"]),
+                "ports": sorted(info["ports"])[:6],
+            }
+            for ip, info in sorted(
+                out_map.items(),
+                key=lambda item: (int(item[1]["connections"]), int(item[1]["established_connections"])),
+                reverse=True,
+            )[:20]
+        ]
+        security["outbound_top_ips"] = outbound_top
+
+    if not inbound_top and comm_sockets:
+        in_map: Dict[str, Dict[str, Any]] = {}
+        for sock in comm_sockets:
+            if not isinstance(sock, dict) or sock.get("direction") != "inbound":
+                continue
+            rip = str(sock.get("remote_ip") or "")
+            if not _is_trackable_ip(rip):
+                continue
+            state_str = str(sock.get("state") or "").upper()
+            info = in_map.setdefault(
+                rip,
+                {"connections": 0, "established_connections": 0, "syn_recv_connections": 0},
+            )
+            info["connections"] += 1
+            if state_str in ("ESTAB", "ESTABLISHED"):
+                info["established_connections"] += 1
+            elif state_str in ("SYN-RECV", "SYN_RECV"):
+                info["syn_recv_connections"] += 1
+        inbound_top = [
+            {
+                "ip": ip,
+                "connections": int(info["connections"]),
+                "established_connections": int(info["established_connections"]),
+                "syn_recv_connections": int(info["syn_recv_connections"]),
+            }
+            for ip, info in sorted(
+                in_map.items(),
+                key=lambda item: (int(item[1]["connections"]), int(item[1]["established_connections"])),
+                reverse=True,
+            )[:20]
+        ]
+        security["inbound_top_ips"] = inbound_top
+
+    candidate_ips: List[str] = []
+    for item in list(inbound_top[:8]) + list(outbound_top[:8]):
+        if not isinstance(item, dict):
+            continue
+        ip_str = str(item.get("ip") or "").strip()
+        if not _is_public_source_ip(ip_str):
+            continue
+        if not (item.get("isp") or item.get("region") or item.get("geo_label")):
+            candidate_ips.append(ip_str)
+
+    resolved_map: Dict[str, Dict[str, str]] = {}
+    if candidate_ips:
+        if allow_network:
+            resolved_map = _geoip_detail_map(candidate_ips)
+        else:
+            now_mono = time.monotonic()
+            local_countries = _geoip_local_country_batch(candidate_ips)
+            for ip_str in dict.fromkeys(candidate_ips):
+                cached = _geoip_detail_cache.get(ip_str)
+                if cached and cached[1] > now_mono:
+                    resolved_map[ip_str] = dict(cached[0])
+                elif local_countries.get(ip_str):
+                    resolved_map[ip_str] = {
+                        "country": str(local_countries[ip_str]),
+                        "region": "",
+                        "city": "",
+                        "isp": "",
+                        "asn": "",
+                    }
+
+    for ip_list in (inbound_top[:10], outbound_top[:10]):
+        for item in ip_list:
+            if not isinstance(item, dict):
+                continue
+            ip_str = str(item.get("ip") or "").strip()
+            if not ip_str:
+                continue
+            merged = dict(resolved_map.get(ip_str) or {})
+            for k in ("country", "region", "city", "isp", "asn"):
+                if item.get(k) and not merged.get(k):
+                    merged[k] = str(item.get(k))
+            country, country_name, region, city, isp, asn, geo_label = _format_geoip_badge(merged)
+            item["country"] = country
+            item["country_name"] = country_name
+            item["region"] = region
+            item["city"] = city
+            item["isp"] = isp
+            item["asn"] = asn
+            item["geo_label"] = geo_label
+
+
 def _fmt_rate_bps(bps: float) -> str:
     val = max(0.0, float(bps or 0.0))
     if val >= 1024 * 1024:
@@ -4218,29 +4476,42 @@ def _evaluate_socket_abuse(
     tx_pps: float = 0.0,
 ) -> Dict[str, object]:
     """Evaluate 4-dimension socket & SOCKS/proxy abuse evidence (observation-only)."""
+    _enrich_socket_ips_geoip(security, allow_network=False)
     cm = security.get("connection_metrics") if isinstance(security.get("connection_metrics"), dict) else {}
     tcp_states = security.get("tcp_states") if isinstance(security.get("tcp_states"), dict) else {}
     raw_conn_count = int(container.get("conn_count") or 0)
     cm_total = int(cm.get("total") or 0)
-    total_sockets = max(raw_conn_count, cm_total)
 
-    tcp_established = int(
+    incoming_established = int(security.get("incoming_established") or 0)
+    outbound_established = int(security.get("outbound_established") or 0)
+
+    raw_tcp_est = int(
         cm["tcp_established"]
         if "tcp_established" in cm
         else tcp_states.get("established") or 0
     )
-    tcp_time_wait = int(
+    tcp_established = max(
+        raw_tcp_est,
+        int(tcp_states.get("established") or 0),
+        incoming_established + outbound_established,
+    )
+    raw_tcp_tw = int(
         cm["tcp_time_wait"]
         if "tcp_time_wait" in cm
         else tcp_states.get("time_wait") or 0
     )
+    tcp_time_wait = max(raw_tcp_tw, int(tcp_states.get("time_wait") or 0))
     tcp_syn_sent = int(security.get("syn_sent_count") or tcp_states.get("syn_sent") or 0)
     tcp_syn_recv = int(security.get("syn_recv_count") or tcp_states.get("syn_recv") or 0)
     tcp_close_wait = int(tcp_states.get("close_wait") or 0)
     tcp_fin_wait = int(tcp_states.get("fin_wait1") or 0) + int(tcp_states.get("fin_wait2") or 0)
     udp_sockets = int(cm.get("udp_sockets") or 0)
+    total_sockets = max(
+        raw_conn_count,
+        cm_total,
+        tcp_established + tcp_time_wait + tcp_syn_sent + tcp_syn_recv + tcp_close_wait + tcp_fin_wait + udp_sockets,
+    )
 
-    incoming_established = int(security.get("incoming_established") or 0)
     inbound_unique_ips = int(security.get("inbound_unique_ips") or 0)
     inbound_established_ips = int(security.get("inbound_established_unique_ips") or 0)
     inbound_syn_recv_ips = int(security.get("inbound_syn_recv_unique_ips") or 0)
@@ -4250,11 +4521,15 @@ def _evaluate_socket_abuse(
         else []
     )
 
-    outbound_established = int(security.get("outbound_established") or 0)
     outbound_unique_ips = int(security.get("outbound_unique_ips") or 0)
     outbound_unique_ports = int(security.get("outbound_unique_ports") or 0)
     outbound_syn_sent_ips = int(security.get("outbound_syn_sent_unique_ips") or 0)
     suspicious_outbound = int(security.get("suspicious_outbound_connections") or 0)
+    outbound_top_ips = (
+        security.get("outbound_top_ips")
+        if isinstance(security.get("outbound_top_ips"), list)
+        else []
+    )
     sensitive_outbound_ports = (
         security.get("sensitive_outbound_ports")
         if isinstance(security.get("sensitive_outbound_ports"), list)
@@ -4368,7 +4643,9 @@ def _evaluate_socket_abuse(
             })
 
         # Category 3: High outbound fanout / P2P / crawler abuse
-        if outbound_unique_ips >= 120 and (udp_sockets >= 100 or outbound_unique_ports >= 60 or outbound_established >= 120):
+        # Require multi-port fanout (>=30 ports), high UDP sockets (>=80), or extreme IP count (>=300)
+        # so normal web/CDN browsing across 2 ports (80/443) does not trigger false positives.
+        if outbound_unique_ips >= 120 and (udp_sockets >= 80 or outbound_unique_ports >= 30 or outbound_unique_ips >= 300):
             categories.append({
                 "code": "p2p_or_outbound_fanout_abuse",
                 "title": "高散度出站连接 / 疑似 P2P 扩散",
@@ -4430,12 +4707,55 @@ def _evaluate_socket_abuse(
         )
 
     top_ip_items = []
-    for item in inbound_top_ips[:5]:
+    top_inbound_ip_details = []
+    for item in inbound_top_ips[:6]:
         if isinstance(item, dict) and item.get("ip"):
             ip_str = str(item.get("ip"))
             est_c = int(item.get("established_connections") or 0)
             tot_c = int(item.get("connections") or 0)
-            top_ip_items.append(f"{ip_str}(已建连{est_c}/总{tot_c})")
+            geo_label = str(item.get("geo_label") or "").strip()
+            geo_part = f" [{geo_label}]" if geo_label else ""
+            top_ip_items.append(f"{ip_str}{geo_part}(已建连{est_c}/总{tot_c})")
+            top_inbound_ip_details.append({
+                "ip": ip_str,
+                "connections": tot_c,
+                "established_connections": est_c,
+                "syn_recv_connections": int(item.get("syn_recv_connections") or 0),
+                "country": str(item.get("country") or "UN"),
+                "country_name": str(item.get("country_name") or ""),
+                "region": str(item.get("region") or ""),
+                "city": str(item.get("city") or ""),
+                "isp": str(item.get("isp") or ""),
+                "asn": str(item.get("asn") or ""),
+                "geo_label": geo_label,
+            })
+
+    top_outbound_ip_items = []
+    top_outbound_ip_details = []
+    for item in outbound_top_ips[:6]:
+        if isinstance(item, dict) and item.get("ip"):
+            ip_str = str(item.get("ip"))
+            est_c = int(item.get("established_connections") or 0)
+            tot_c = int(item.get("connections") or 0)
+            ports_list = [int(p) for p in (item.get("ports") or []) if str(p).isdigit()][:4]
+            geo_label = str(item.get("geo_label") or "").strip()
+            geo_part = f" [{geo_label}]" if geo_label else ""
+            port_part = f"·端口{'/'.join(str(p) for p in ports_list)}" if ports_list else ""
+            top_outbound_ip_items.append(f"{ip_str}{geo_part}(活跃{est_c}/总{tot_c}{port_part})")
+            top_outbound_ip_details.append({
+                "ip": ip_str,
+                "connections": tot_c,
+                "established_connections": est_c,
+                "syn_sent_connections": int(item.get("syn_sent_connections") or 0),
+                "ports": ports_list,
+                "country": str(item.get("country") or "UN"),
+                "country_name": str(item.get("country_name") or ""),
+                "region": str(item.get("region") or ""),
+                "city": str(item.get("city") or ""),
+                "isp": str(item.get("isp") or ""),
+                "asn": str(item.get("asn") or ""),
+                "geo_label": geo_label,
+            })
 
     if socks_detected and (inbound_established_ips >= 6 or socks_auth_mode in ("no_auth", "weak_password")):
         dim2_risk = "high"
@@ -4548,6 +4868,7 @@ def _evaluate_socket_abuse(
                 "socks_auth_mode": socks_auth_mode,
                 "hy2_detected": hy2_detected,
                 "top_ips": top_ip_items,
+                "top_ip_details": top_inbound_ip_details,
                 "listening_ports": listening_ports,
             },
         },
@@ -4565,6 +4886,8 @@ def _evaluate_socket_abuse(
                 "sensitive_ports": sensitive_outbound_ports[:8],
                 "top_ports": outbound_top_ports[:6],
                 "top_processes": top_procs,
+                "top_outbound_ips": top_outbound_ip_items,
+                "top_ip_details": top_outbound_ip_details,
             },
         },
         {
@@ -4632,6 +4955,7 @@ def _evaluate_socket_abuse(
         f"【维度③ 出站与进程】出站活跃 {outbound_established} 条 · 外部目标 {outbound_unique_ips} IP / {outbound_unique_ports} 端口 · 敏感端口连接 {suspicious_outbound} 条"
         + (f" ({', '.join(high_risk_ports_hit[:3])})" if high_risk_ports_hit else "")
         + (f"｜常连端口: {', '.join(top_port_labels[:4])}" if top_port_labels else "")
+        + (f"｜Top 出站目标: {', '.join(top_outbound_ip_items[:3])}" if top_outbound_ip_items else "")
         + (f"｜主进程: {', '.join(proc_labels[:2])}" if proc_labels else ""),
         f"【维度④ 包速率与带宽】出站 {_fmt_rate_bps(tx_bps)} ({tx_pps:.0f} pps"
         + (f" · 均包长 {avg_tx_pkt:.0f} B" if avg_tx_pkt > 0 else "")
@@ -4653,9 +4977,16 @@ def _evaluate_socket_abuse(
         + f" / 入栈 {rx_pps:.0f} pps。"
     )
 
+    existing_eval = security.get("socket_abuse") if isinstance(security.get("socket_abuse"), dict) else {}
+    evaluated_at = int(existing_eval.get("evaluated_at") or cm.get("observed_at") or 0)
+    if evaluated_at <= 0:
+        try:
+            evaluated_at = int(time.time())
+        except StopIteration:
+            evaluated_at = 0
     return {
         "schema": 1,
-        "evaluated_at": int(time.time()),
+        "evaluated_at": evaluated_at,
         "valid_evidence": has_socket_evidence,
         "suspected": suspected,
         "verdict": verdict,
@@ -5594,7 +5925,8 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             )
             out_sens_alert["socket_abuse"] = socket_abuse
             alerts.append(out_sens_alert)
-        if socket_abuse.get("suspected") is True:
+        is_frozen = bool((security.get("freeze_guard") or {}).get("frozen")) if isinstance(security.get("freeze_guard"), dict) else False
+        if socket_abuse.get("suspected") is True and not is_frozen:
             cat_titles = [
                 str(c.get("title") or "")
                 for c in (socket_abuse.get("categories") if isinstance(socket_abuse.get("categories"), list) else [])
@@ -8916,6 +9248,19 @@ def collect_runman_report(
         'sensitive_file_events': file_guard.scan_container_sensitive_drops(int(container.get('pid') or 0), runtime='runman', name=str(container.get('name') or '')) if file_guard is not None else [],
         'microburst': microburst_guard.detect_microburst('runman', str(container.get('name') or ''), 0, 0, traffic_rx, traffic_tx) if microburst_guard is not None else {},
     })
+    _enrich_socket_ips_geoip(security, allow_network=True)
+    security['socket_abuse'] = _evaluate_socket_abuse(
+        {
+            'conn_count': total_connections if metrics.get('valid') is True else int(report.get('conn_count') or 0),
+            'net_rx_bps': net_rx_bps,
+            'net_tx_bps': net_tx_bps,
+        },
+        security,
+        rx_bps=net_rx_bps,
+        tx_bps=net_tx_bps,
+        rx_pps=float(raw_metrics.get('net_rx_packets_per_second') or security.get('net_rx_pps') or 0.0),
+        tx_pps=float(raw_metrics.get('net_tx_packets_per_second') or security.get('net_tx_pps') or 0.0),
+    )
     existing_disk = report.get('container_disk') if isinstance(report.get('container_disk'), dict) else {}
     existing_fs = existing_disk.get('fs') if isinstance(existing_disk.get('fs'), dict) else {}
     merged_fs = dict(existing_fs)
@@ -9814,6 +10159,7 @@ def collect_container(
             "microburst": microburst_guard.detect_microburst(runtime_name, name, rx_packet_total, tx_packet_total, rx_total, tx_total) if microburst_guard is not None else {},
         }
     )
+    _enrich_socket_ips_geoip(socket_security, allow_network=True)
     socket_security["socket_abuse"] = _evaluate_socket_abuse(
         {"conn_count": conn_count, "net_rx_bps": net_rx, "net_tx_bps": net_tx},
         socket_security,
@@ -12695,18 +13041,60 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             return False, "container_freeze module unavailable"
         runtime_kind = str(action.get("runtime") or "").strip().lower()
         container_name = str(action.get("container_name") or "").strip()
+        project = str(action.get("project") or "").strip()
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
         pid = int(params.get("pid") or 0)
         instance_id = str(params.get("instance_id") or "")
+        if pid <= 1:
+            if runtime_kind == "incus":
+                runtime_bin = get_runtime_bins().get("incus", "")
+                if runtime_bin:
+                    pid = _incus_instance_pid(runtime_bin, container_name, project)
+            elif runtime_kind == "runman":
+                if not instance_id:
+                    instance_id = str(_runman_instance_generations.get(container_name) or "")
+                if instance_id:
+                    try:
+                        live = network_quarantine.RunmanIsolation(container_name, instance_id).inspect()
+                        pid = int(live.get("init_pid") or 0)
+                    except Exception:
+                        pass
+            elif runtime_kind in ("podman", "docker"):
+                runtime_bin = get_runtime_bins().get(runtime_kind, "")
+                if runtime_bin:
+                    raw_pid = run([runtime_bin, "inspect", "--format", "{{.State.Pid}}", container_name]).strip()
+                    if raw_pid.isdigit():
+                        pid = int(raw_pid)
         return container_freeze.freeze_container(runtime_kind, container_name, pid, instance_id=instance_id)
     if action_type == "unfreeze_container":
         if container_freeze is None:
             return False, "container_freeze module unavailable"
         runtime_kind = str(action.get("runtime") or "").strip().lower()
         container_name = str(action.get("container_name") or "").strip()
+        project = str(action.get("project") or "").strip()
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
         pid = int(params.get("pid") or 0)
         instance_id = str(params.get("instance_id") or "")
+        if pid <= 1:
+            if runtime_kind == "incus":
+                runtime_bin = get_runtime_bins().get("incus", "")
+                if runtime_bin:
+                    pid = _incus_instance_pid(runtime_bin, container_name, project)
+            elif runtime_kind == "runman":
+                if not instance_id:
+                    instance_id = str(_runman_instance_generations.get(container_name) or "")
+                if instance_id:
+                    try:
+                        live = network_quarantine.RunmanIsolation(container_name, instance_id).inspect()
+                        pid = int(live.get("init_pid") or 0)
+                    except Exception:
+                        pass
+            elif runtime_kind in ("podman", "docker"):
+                runtime_bin = get_runtime_bins().get(runtime_kind, "")
+                if runtime_bin:
+                    raw_pid = run([runtime_bin, "inspect", "--format", "{{.State.Pid}}", container_name]).strip()
+                    if raw_pid.isdigit():
+                        pid = int(raw_pid)
         return container_freeze.unfreeze_container(runtime_kind, container_name, pid, instance_id=instance_id)
     if action_type == "apply_udp_blackhole":
         if udp_guard is None:

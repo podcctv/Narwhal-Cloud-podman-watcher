@@ -2,6 +2,25 @@
 
 更新时间：2026-11-06（Asia/Shanghai）
 
+## Socket 滥用复核处置按钮（封禁 / 忽略 / 跳过本次）与采集 IP 国家·省份·运营商 (ISP/ASN) 归属匹配（v1.8.14）
+
+- **需求背景**：
+  - 用户要求在 `疑似 Socket / 代理连接滥用` 人工复核告警卡片上直接增加 **「封禁」**、**「忽略」**、**「跳过本次」** 三个快捷处置按钮。
+  - 同时要求对采集到的入站与出站公网 IP 自动匹配并展示 **国家 · 省份/地区 · 运营商 (ISP/ASN)**。
+  - 修复截图案例中 `runman` 容器四维判断卡片：① 状态拆解连接数与出站活跃数口径对齐；② 区分正常双端口（如 `80/443` CDN/Web 节点）高外部 IP 访问与真正的多端口/高 UDP P2P 扩散。
+- **全链路落地实现**：
+  1. **「封禁 / 忽略 / 跳过本次」快捷处置闭环 (`SecurityAlertSection.tsx`, `AlertHistoryView.tsx`, `server/app.py`, `client/agent.py`)**：
+     - **封禁 (`freeze_container`)**：一键向节点下发容器挂起冻结指令（支持 `incus`、`podman`、`runman`，Agent 自动按运行时解析当前容器 `pid` 与 `instance_id` 执行 cgroup / runtime 挂起定格），并将告警状态更新为 `remediated`（已处理），已冻结容器不再重复触发 `socket_abuse_suspected`。
+     - **忽略 (`allow_silent`)**：建立静音放行规则，持续忽略该容器的同类观察提醒（可在告警历史随时恢复提醒）。
+     - **跳过本次 (`dismiss_once`)**：仅跳过本轮活动告警，后续风险特征变化时仍可再次提醒。
+  2. **采集 IP 国家 · 省份/地区 · 运营商 (ISP/ASN) 自动富化 (`client/agent.py`, `SocketAbuseEvidence.tsx`)**：
+     - `_collect_socket_security` 与 `_apply_host_conntrack_security` 同步采集入站 `inbound_top_ips` 与出站 `outbound_top_ips`（含总连接数、已建连数、`SYN_RECV` / `SYN_SENT` 数及目标端口）。
+     - 新增 `_enrich_socket_ips_geoip` 与 `_format_geoip_badge`：结合本地 TTL 缓存、公网 IP 归属查询（`ipwho.is`）与 MaxMind 离线库回退，将采集到的入站/出站 Top 公网 IP 自动解析为 `国家·省份/地区 · 运营商 ASxxxx`（如 `中国·江苏省 · China Mobile AS9808`、`美国·California · Cloudflare, Inc. AS13335`）。
+     - 前端 `SocketAbuseEvidence.tsx` 在维度 2（入站并发业务源）和维度 3（出站目标与进程画像）中直接渲染每个采集 IP 的连接明细与 **国家 · 省份 · 运营商 (ISP/ASN)** 徽章。
+  3. **四维指标口径对齐与 P2P 散度规则收敛 (`client/agent.py`)**：
+     - `collect_runman_report` 在合并 `host_conntrack` 后重新执行 GeoIP 富化与 `_evaluate_socket_abuse`，并自动对齐 `tcp_established` 与 `total_sockets` 下界，消除状态拆解 `ESTABLISHED 4` 与出站活跃 `191` 不一致的问题。
+     - 收敛 `p2p_or_outbound_fanout_abuse` 判定条件：要求 `outbound_unique_ips >= 120` 且同时满足 `udp_sockets >= 80` 或 `outbound_unique_ports >= 30` 或 `outbound_unique_ips >= 300`，避免仅访问 2 个 Web/CDN 端口（80/443）的正常代理或爬虫被误判为 P2P 扩散。
+
 ## Socket / SOCKS 连接滥用四维检测与判断依据引擎（v1.8.13 · 人工核验观察模式）
 
 - **需求背景**：

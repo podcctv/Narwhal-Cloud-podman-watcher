@@ -373,6 +373,22 @@ export interface ContainerSecurity {
   [key: string]: any;
 }
 
+export interface SocketAbuseIpDetail {
+  ip: string;
+  connections: number;
+  established_connections?: number;
+  syn_recv_connections?: number;
+  syn_sent_connections?: number;
+  ports?: number[];
+  country?: string;
+  country_name?: string;
+  region?: string;
+  city?: string;
+  isp?: string;
+  asn?: string;
+  geo_label?: string;
+}
+
 export interface SocketAbuseCategory {
   code: string;
   title: string;
