@@ -202,7 +202,7 @@ export interface ContainerSecurity {
     error?: string;
     source_limit?: number;
     source_limit_enforced?: boolean;
-    source_policy?: 'first_five_enforced' | 'observe_only';
+    source_policy?: 'first_five_enforced' | 'observe_only' | 'active_limit_enforced';
     sources?: { ip: string; first_seen: number }[];
     blocked?: Record<string, { first_seen: number; last_seen: number; packets: number }>;
     limited?: boolean;

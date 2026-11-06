@@ -224,7 +224,7 @@ class LinuxTests(unittest.TestCase):
     def test_source_ip_count_never_blocks_but_tcp_cap_still_limits_new_flows(self):
         with tempfile.TemporaryDirectory() as tmp:
             nft=mock.Mock();nft.digests={}
-            g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=nft,queues=mock.Mock())
+            g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=nft,queues=mock.Mock(),source_limit=0)
             c={'runtime':'incus','project':'default','name':'test'}
             now=int(time.time());sources=[f'192.0.2.{n}' for n in range(1,6)]
             nft.live.return_value=set(sources)
@@ -242,6 +242,47 @@ class LinuxTests(unittest.TestCase):
             self.assertFalse(g.decision(queue,raw))
             self.assertEqual(state.data['tcp_denied'],1)
             self.assertNotIn('198.51.100.6',state.data['blocked'])
+
+    def test_source_limit_enforced_blocks_eleventh_source_and_emits_alert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nft=mock.Mock();nft.digests={}
+            g=guard.Guard(journal=guard.isolation.Journal(str(Path(tmp)/'state.json')),nft=nft,queues=mock.Mock())
+            c={'runtime':'incus','project':'default','name':'test'}
+            now=int(time.time());sources=[f'192.0.2.{n}' for n in range(1,11)]
+            nft.live.return_value=set(sources)
+            snap={'instance_id':'a'*36,'ips':['10.9.0.2'],'interfaces':['br-test'],'epoch':'boot:net:pid','flows':{flow(i) for i in range(10)},'inbound':sources}
+            g.update(c,snap,now)
+            state=next(iter(g.states.values()))
+            self.assertEqual(len(state.data['sources']),10)
+            self.assertEqual(g.source_limit,10)
+            raw11=bytearray(24);raw11[0]=0x45;raw11[9]=6
+            raw11[12:16]=socket.inet_aton('198.51.100.11');raw11[16:20]=socket.inet_aton('10.9.0.2');raw11[20:24]=struct.pack('!HH',123,443)
+            queue=next(iter(g.records.values()))['queue']
+            self.assertFalse(g.decision(queue,raw11))
+            self.assertIn('198.51.100.11',state.data['blocked'])
+            self.assertEqual(state.data['blocked_packets'],1)
+            self.assertFalse(g.decision(queue,raw11))
+            self.assertEqual(state.data['blocked_packets'],2)
+            self.assertEqual(state.data['blocked']['198.51.100.11']['packets'],2)
+            raw1=bytearray(24);raw1[0]=0x45;raw1[9]=6
+            raw1[12:16]=socket.inet_aton('192.0.2.1');raw1[16:20]=socket.inet_aton('10.9.0.2');raw1[20:24]=struct.pack('!HH',123,443)
+            self.assertTrue(g.decision(queue,raw1))
+            alerts=list(g.alerts(c))
+            self.assertEqual(len(alerts),1)
+            alert=alerts[0]
+            self.assertEqual(alert['type'],'inbound_source_blocked')
+            self.assertIn('10',alert['title'])
+            self.assertIn('198.51.100.11',alert['message'])
+            for i in range(2, 11):
+                state.admit_source(f'192.0.2.{i}', now + 50)
+            idle_now=now+130
+            accepted,changed=state.admit_source('198.51.100.12',idle_now)
+            self.assertTrue(accepted)
+            self.assertTrue(changed)
+            self.assertEqual(len(state.data['sources']),10)
+            ips=[x['ip'] for x in state.data['sources']]
+            self.assertIn('198.51.100.12',ips)
+            self.assertNotIn('192.0.2.1',ips)
 
 
 class PasarTests(unittest.TestCase):

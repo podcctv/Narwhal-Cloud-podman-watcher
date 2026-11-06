@@ -96,7 +96,7 @@ asyncio.run(main())'''
             assert connect('10.244.239.2','192.0.2.99','nwtest-target'),'outbound reply incorrectly treated as incoming source'
             state=next(iter(g.states.values()));record=next(iter(g.records.values()))
             print('PROBE tcp-cap',flush=True)
-            assert len(state.data['sources'])<=5
+            assert len(state.data['sources'])<=10
             # 500 real open sockets, followed by an actual rejected 501st flow.
             hold="import socket,sys;s=[]\nfor i in range(500):\n c=socket.socket();c.settimeout(2);c.bind(('192.0.2.11',0));c.connect(('10.244.239.2',45556));c.sendall(b'x');assert c.recv(1)==b'x';s.append(c)\nprint('500-ready',flush=True)\nsys.stdin.readline();s.pop().close();print('499-ready',flush=True);sys.stdin.readline()"
             process=subprocess.Popen(['ip','netns','exec','nwtest-client',sys.executable,'-u','-c',hold],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)

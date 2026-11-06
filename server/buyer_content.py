@@ -152,8 +152,15 @@ def issue(alert, details):
     if kind in {'inbound_source_blocked','tcp_concurrency_limited','admission_unverified'}:
         data=details.get('admission') or {}
         if kind=='inbound_source_blocked':
-            sources='、'.join(clean(x.get('ip'),50) for x in data.get('sources',[])[:5])
-            blocked='、'.join(clean(x,50) for x in list(data.get('blocked',{}))[:5])
+            limit = data.get('source_limit') or 10
+            sources='、'.join(clean(x.get('ip'),50) for x in data.get('sources',[])[:limit])
+            blocked='、'.join(clean(x,50) for x in list(data.get('blocked',{}))[:limit])
+            if data.get('source_limit_enforced'):
+                return (
+                    f'活跃入站来源达到 {limit} IP 上限，已阻断新连接',
+                    f"当前容器限制最多同时保持 {limit} 个活跃入站来源 IP，超出上限的新连接已被自动阻断。当前允许来源：{sources or '无'}；被阻断来源：{blocked or '详见管理面板'}。不影响已有活跃连接；空闲来源闲置满 120 秒后将自动释放名额。",
+                    '如需允许多人或多 IP 同时接入，请联系管理员调整容器入站来源配额；请检查是否有未授权扫描或连接占用名额。'
+                )
             return '旧版来源数量规则曾拒绝新连接', f"旧版 Agent 当时按最多 5 个来源放行，并拒绝后续新增来源。放行来源：{sources or '详见管理面板'}；被拒绝来源：{blocked or '详见管理面板'}。来源 IP 数量不能证明恶意或客户违规；当前版本不会仅按来源数量封禁。", '这是历史处置记录，不代表当前仍在拦截。请结合业务访问日志核实；如有正常用户连接受影响，请联系管理员。'
         if kind=='tcp_concurrency_limited':
             return '服务器同时连接过多，已启用保护', f"TCP 当前 {fmt(data.get('tcp_connections'))} 条，新连接上限 500 条；最少限制 30 分钟，已追加 {fmt(data.get('extensions'))} 次。已有连接会自然回落；复查仍达到 500 条会再追加 30 分钟。", '请停止不需要的任务或异常连接；有效采样持续低于 500 条至少 2 分钟，且本轮期限已到，才会解除限制。'

@@ -68,30 +68,40 @@ def normalized_alert(value):
         data['failure_code']=code if code in ADMISSION_FAILURES else 'unknown'
         data['failure_stage']=stage if stage in ADMISSION_STAGES else 'unknown'
         data['error']=f"{ADMISSION_STAGES[data['failure_stage']]}未通过：{ADMISSION_FAILURES[data['failure_code']]}"
-    # Older agents enforced the first-five source rule and do not send this
-    # field. Keep their actual status visible; new agents explicitly report
-    # observation-only source handling.
     source_limit_enforced = source.get('source_limit_enforced') is not False
+    raw_limit = source.get('source_limit')
+    source_limit = int(raw_limit) if raw_limit is not None else (10 if source_limit_enforced else 5)
+    default_policy = 'active_limit_enforced' if (source_limit_enforced and raw_limit is not None) else ('first_five_enforced' if source_limit_enforced else 'observe_only')
+    source_policy = source.get('source_policy') or default_policy
     data.update(state=source.get('state') if source.get('state') in {'enforced','unverified','unavailable'} else 'unverified',
-                limited=source.get('limited') is True,source_limit=5,
+                limited=source.get('limited') is True,source_limit=source_limit,
                 source_limit_enforced=source_limit_enforced,
-                source_policy='first_five_enforced' if source_limit_enforced else 'observe_only',
+                source_policy=source_policy,
                 tcp_limit=500 if source.get('limited') is True else None)
     data['sources']=[];data['blocked']={}
     try:
-        for item in source.get('sources',[])[:5]:
+        max_sources = max(5, source_limit) if source_limit_enforced else 5
+        for item in source.get('sources',[])[:max_sources]:
             data['sources'].append({'ip':str(ipaddress.ip_address(item['ip'])),'first_seen':max(0,int(item['first_seen']))})
         for ip,item in list(source.get('blocked',{}).items())[:32]:
             data['blocked'][str(ipaddress.ip_address(ip))]={k:max(0,min(int(item.get(k,0)),10**15)) for k in ('first_seen','last_seen','packets')}
     except (ValueError,TypeError,KeyError,AttributeError):raise HTTPException(400,'invalid bounded source facts')
     if kind!='admission_unverified' and (data['state']!='enforced' or abs(time.time()-data.get('observed_at',0))>30):
         raise HTTPException(400,'fresh verified enforcement receipt required')
-    titles={'inbound_source_blocked':'旧版来源数量策略拒绝过新连接','tcp_concurrency_limited':'TCP 新连接上限已设为 500','admission_unverified':'容器网络保护未确认生效'}
-    messages={'inbound_source_blocked':f"保留先观测到的 {len(data['sources'])} 个来源，拒绝新增来源；不影响母鸡及其他容器。",
-        'tcp_concurrency_limited':f"TCP 当前 {data.get('tcp_connections',0)} 条，新连接上限 500，已续期 {data.get('extensions',0)} 次。已有连接自然回落，通知失败不影响保护。"}
+    titles={
+        'inbound_source_blocked': f'单容器入站已达 {source_limit} IP 上限并阻断新连接',
+        'tcp_concurrency_limited': 'TCP 新连接上限已设为 500',
+        'admission_unverified': '容器网络保护未确认生效',
+    }
+    messages={
+        'inbound_source_blocked': f"活跃入站来源已达上限 {source_limit} 个，已阻断超出上限的新来源连接；不影响已有连接及其他容器。",
+        'tcp_concurrency_limited': f"TCP 当前 {data.get('tcp_connections',0)} 条，新连接上限 500，已续期 {data.get('extensions',0)} 次。已有连接自然回落，通知失败不影响保护。",
+    }
     message=(f"{ADMISSION_STAGES[data['failure_stage']]}未通过：{ADMISSION_FAILURES[data['failure_code']]}这表示保护状态待核实，不代表已确认攻击，也不能认定保护已生效。"
         if kind=='admission_unverified' else messages[kind])
-    clean.update(title=titles[kind],message=message,admission=data,value=data.get('tcp_connections',0) if kind=='tcp_concurrency_limited' else len(data['sources'])+len(data['blocked']))
+    clean.update(title=titles[kind],message=message,admission=data,
+                 threshold=source_limit if (kind=='inbound_source_blocked' and raw_limit is not None) else clean['threshold'],
+                 value=data.get('tcp_connections',0) if kind=='tcp_concurrency_limited' else len(data['sources'])+len(data['blocked']))
     return clean
 
 

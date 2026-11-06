@@ -1,7 +1,10 @@
 """Private nftables forward-only tables and bounded NFQUEUE admission.
 
-No INPUT/OUTPUT hooks, no flush ruleset, no shell, no queue bypass. nftables
-changes are atomic. A queue without its worker rejects unknown/new traffic.
+No INPUT/OUTPUT hooks, no flush ruleset, no shell. nftables changes are atomic.
+The TCP-concurrency queue has no bypass: without its worker it rejects new
+traffic. The active-source limit is a fairness limiter, not a security
+boundary, so its queue uses ``bypass``: if the Agent is stopped or restarting,
+new sources are accepted rather than locking customers out.
 """
 import ctypes as C
 import ctypes.util
@@ -52,7 +55,18 @@ def packet(raw):
     return src,dst,proto,sport,dport
 
 
-def rules(table, ips, queue, sources, limited=False, management_ports=(), interfaces=()):
+def _source_ips(sources):
+    result={4:[],6:[]}
+    for item in sources or ():
+        value=item.get('ip') if isinstance(item,dict) else item
+        try:addr=ipaddress.ip_address(value)
+        except (TypeError,ValueError):continue
+        if addr.is_loopback or addr.is_unspecified or addr.is_multicast or addr.is_link_local:continue
+        if str(addr) not in result[addr.version]:result[addr.version].append(str(addr))
+    return result
+
+
+def rules(table, ips, queue, sources, limited=False, management_ports=(), interfaces=(), source_limit=0, source_idle=120):
     if not re.fullmatch(r'nwguard_[a-f0-9]{16}',table) or not 20000<=queue<60000 or queue%2:
         raise ValueError('invalid rule identity')
     by_family = {4:[],6:[]}
@@ -65,10 +79,20 @@ def rules(table, ips, queue, sources, limited=False, management_ports=(), interf
         raise ValueError('container addresses unavailable')
     if not interfaces or len(interfaces)>8 or any(not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',x) for x in interfaces):
         raise ValueError('verified private veth required')
+    if type(source_limit) is not int or not 0<=source_limit<=64 or type(source_idle) is not int or not 30<=source_idle<=3600:
+        raise ValueError('invalid source limit')
     devices='{ '+', '.join('"'+x+'"' for x in interfaces)+' }'
-    lines=[f'add table inet {table}',
-           f'add chain inet {table} incoming',f'add chain inet {table} outgoing',
-           f'add chain inet {table} forward {{ type filter hook forward priority -20; policy accept; }}']
+    lines=[f'add table inet {table}']
+    if source_limit:
+        # Kernel fast path: admitted sources are refreshed on every packet and
+        # expire after `source_idle` seconds of silence, freeing their slot.
+        # Only the Agent adds elements; `size` is a hard memory bound.
+        for family,kind in ((4,'ipv4_addr'),(6,'ipv6_addr')):
+            lines.append(f'add set inet {table} sources{family} {{ type {kind}; flags dynamic,timeout; timeout {source_idle}s; size 256; }}')
+        for family,values in _source_ips(sources).items():
+            if values:lines.append(f'add element inet {table} sources{family} {{ '+', '.join(values[:source_limit])+' }')
+    lines.extend([f'add chain inet {table} incoming',f'add chain inet {table} outgoing',
+           f'add chain inet {table} forward {{ type filter hook forward priority -20; policy accept; }}'])
     for family, values in by_family.items():
         if not values:
             continue
@@ -82,12 +106,25 @@ def rules(table, ips, queue, sources, limited=False, management_ports=(), interf
         if len(ports)>8 or any(type(p) is not int or not 1<=p<=65535 for p in ports):
             raise ValueError('invalid management ports')
         lines.append(f'add rule inet {table} incoming meta l4proto tcp tcp dport {{ '+', '.join(map(str,ports))+' } return')
+    if source_limit:
+        for family in (4,6):
+            kind='ip' if family==4 else 'ip6'
+            lines.append(f'add rule inet {table} incoming {kind} saddr @sources{family} update @sources{family} {{ {kind} saddr timeout {source_idle}s }}')
+        # Established/related packets are never re-judged: existing
+        # connections are not cut when the limit is reached.
+        lines.append(f'add rule inet {table} incoming ct state != new return')
     if limited:
         lines.append(f'add rule inet {table} incoming meta l4proto tcp ct state new queue num {queue}')
         lines.append(f'add rule inet {table} outgoing meta l4proto tcp ct state new queue num {queue+1}')
-    # Source-IP counts are not identity or abuse evidence. Pass all other
-    # traffic; only the independently verified TCP concurrency policy queues
-    # new TCP flows when it is active.
+    if source_limit:
+        for family in (4,6):
+            kind='ip' if family==4 else 'ip6'
+            lines.append(f'add rule inet {table} incoming {kind} saddr @sources{family} return')
+        # Only the first packet of a flow from an unknown source reaches the
+        # Agent, which admits it into a free slot or drops it.
+        lines.append(f'add rule inet {table} incoming ct state new queue num {queue} bypass')
+    # Without the source limit, all other traffic passes; only the
+    # independently verified TCP concurrency policy queues new TCP flows.
     lines.extend([f'add rule inet {table} incoming return',f'add rule inet {table} outgoing return'])
     return '\n'.join(lines)+'\n'
 
@@ -97,8 +134,8 @@ class NFT:
         self.run=runner
         self.digests={}
 
-    def apply(self, table, ips, queue, sources, limited=False, management_ports=(), interfaces=()):
-        text=rules(table,ips,queue,sources,limited,management_ports,interfaces)
+    def apply(self, table, ips, queue, sources, limited=False, management_ports=(), interfaces=(), source_limit=0, source_idle=120):
+        text=rules(table,ips,queue,sources,limited,management_ports,interfaces,source_limit,source_idle)
         try:
             self.run(['nft','list','table','inet',table])
         except RuntimeError:

@@ -48,12 +48,13 @@ def failure_details(error, stage):
 
 
 class Guard:
-    def __init__(self, journal=None, nft=None, queues=None):
+    def __init__(self, journal=None, nft=None, queues=None, source_limit=None):
         self.journal=journal or isolation.Journal('/var/lib/narwhal-monitor/admission.json')
         self.records=self.journal.read()
         self.nft=nft or linux.NFT()
         self.queues=queues
-        self.states={key:policy.Policy(value.get('policy')) for key,value in self.records.items()}
+        self.source_limit=policy.source_limit_from_env() if source_limit is None else source_limit
+        self.states={key:policy.Policy(value.get('policy'), source_limit=self.source_limit) for key,value in self.records.items()}
         self.by_queue={}
         self.lock=threading.RLock()
         self.results={}
@@ -82,10 +83,14 @@ class Guard:
                 return False
             if direction=='out':
                 return True
-            # Source addresses are not authenticated users. A scanner, NAT,
-            # mobile hand-off, or legitimate multi-egress client can all
-            # produce multiple IPs; only the separate TCP concurrency rule
-            # may reject a flow here.
+            accepted,changed=state.admit_source(src,now)
+            if not accepted:
+                return False
+            if changed:
+                try:self.save()
+                except Exception:pass
+                try:self.nft.admit(record['table'],policy.address(src))
+                except Exception:pass
             return True
 
     def start(self):
@@ -139,7 +144,7 @@ class Guard:
                 record={'table':'nwguard_'+digest[:16],'queue':queue,'ips':ips,'container':{k:container[k] for k in ('runtime','project','name','id') if k in container},
                         'verified_at':now,'epoch':epoch,'interfaces':interfaces,'pid':snapshot.get('pid')}
                 self.records[key]=record
-                self.states[key]=policy.Policy()
+                self.states[key]=policy.Policy(source_limit=self.source_limit)
             self.by_queue[record['queue']]=(key,'in')
             self.by_queue[record['queue']+1]=(key,'out')
         # Queue registration may deliver packets, whose callback owns self.lock.
@@ -153,12 +158,12 @@ class Guard:
             changed=state.observe(snapshot['flows'],snapshot['inbound'],live,now,epoch=epoch)
             digest=self.nft.digests.get(record['table'])
             digest=digest if isinstance(digest,str) else ''
-            desired=hashlib.sha256(json.dumps([ips,interfaces,epoch,bool(state.data.get('limited'))],sort_keys=True).encode()).hexdigest()
+            desired=hashlib.sha256(json.dumps([ips,interfaces,epoch,bool(state.data.get('limited')),self.source_limit],sort_keys=True).encode()).hexdigest()
             changed=changed or fresh or record.get('dirty') or record.get('disabled') or not digest or record.get('fingerprint')!=digest or record.get('applied_config')!=desired
             record.update(ips=ips,epoch=epoch,verified_at=now,interfaces=interfaces,pid=snapshot.get('pid'))
             self.save()
             if changed:
-                self.nft.apply(record['table'],ips,record['queue'],state.data['sources'],state.data.get('limited',False),interfaces=interfaces)
+                self.nft.apply(record['table'],ips,record['queue'],state.data['sources'],state.data.get('limited',False),interfaces=interfaces,source_limit=self.source_limit,source_idle=policy.SOURCE_IDLE)
             # Readback is required; a missing/overwritten table is never green.
             self.nft.live(record['table'])
             digest=self.nft.digests.get(record['table'])
@@ -166,8 +171,8 @@ class Guard:
             record['applied_config']=desired
             record.pop('dirty',None);record.pop('disabled',None)
             self.save()
-            result={**state.status(),'instance_id':identity,'state':'enforced','source_limit':5,
-                    'source_limit_enforced':False,'source_policy':'observe_only',
+            result={**state.status(),'instance_id':identity,'state':'enforced','source_limit':self.source_limit if self.source_limit>0 else 5,
+                    'source_limit_enforced':self.source_limit>0,'source_policy':'active_limit_enforced' if self.source_limit>0 else 'observe_only',
                     'tcp_limit':500 if state.data.get('limited') else None,'observed_at':now}
             self.results[(runtime,project,name)]=result
             return result
@@ -255,6 +260,14 @@ class Guard:
             result.append({**base,'type':'tcp_concurrency_limited','severity':'warning','title':'TCP 并发已限制为 500',
                 'message':f"当前 TCP 并发 {status.get('tcp_connections',0)}；新连接上限 500，本轮复查时间 {status.get('review_at')}，已续期 {status.get('extensions',0)} 次；已有连接自然回落。",
                 'value':status.get('tcp_connections',0),'threshold':500})
+        if status.get('source_limit_enforced'):
+            active={ip:v for ip,v in status.get('blocked',{}).items() if time.time()-v.get('last_seen',0)<120}
+            if active:
+                limit=status.get('source_limit',10)
+                blocked_ips='、'.join(list(active.keys())[:5])
+                result.append({**base,'type':'inbound_source_blocked','severity':'warning','title':f'单容器入站已达 {limit} IP 上限并阻断新连接',
+                    'message':f"当前活跃入站来源已达上限 {limit} 个；已阻断 {len(active)} 个超限新来源。拦截来源示例：{blocked_ips}。已有连接不受影响；来源闲置 2 分钟后自动释放名额。",
+                    'value':len(status.get('sources',[]))+len(active),'threshold':limit})
         return result
 
 _guard=None
