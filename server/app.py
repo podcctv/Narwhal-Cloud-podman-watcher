@@ -1060,7 +1060,7 @@ def queue_connection_alert_deep_samples(
         """
         SELECT * FROM security_alerts
         WHERE host_id=? AND alert_type IN (
-              'container_connection_count','inbound_ip_fanout','socks_inbound_fanout'
+              'container_connection_count','inbound_ip_fanout','socks_inbound_fanout','socket_abuse_suspected'
           )
           AND status='active' AND last_seen=?
         """,

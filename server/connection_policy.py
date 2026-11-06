@@ -205,10 +205,31 @@ def enrich_alerts(alerts, containers):
         obs = a.get('observation') or {}
         if a.get('type') == 'ops_policy_signal' and key in dedicated and obs.get('signals', {}).get('connections') and not any(v for k, v in obs.get('signals', {}).items() if k != 'connections'):
             continue
+        c = by_key.get(key, {})
+        c_sec = c.get('security', {}) if isinstance(c.get('security'), dict) else {}
         if a.get('type') == 'container_connection_count':
-            c = by_key.get(key, {})
             a['connection_policy'] = c.get('connection_policy', {})
-            a['connection_metrics'] = c.get('security', {}).get('connection_metrics', {})
+            a['connection_metrics'] = c_sec.get('connection_metrics', {})
+            if isinstance(c_sec.get('socket_abuse'), dict):
+                a['socket_abuse'] = c_sec['socket_abuse']
+        elif a.get('type') == 'ops_policy_signal' and obs.get('signals', {}).get('connections'):
+            if isinstance(c_sec.get('connection_metrics'), dict):
+                a['connection_metrics'] = c_sec['connection_metrics']
+            socket_abuse = c_sec.get('socket_abuse') if isinstance(c_sec.get('socket_abuse'), dict) else a.get('socket_abuse')
+            if isinstance(socket_abuse, dict):
+                a['socket_abuse'] = socket_abuse
+                if isinstance(obs, dict):
+                    obs = dict(obs)
+                    obs['socket_abuse'] = socket_abuse
+                    a['observation'] = obs
+                compact = str(socket_abuse.get('compact_basis_text') or '').strip()
+                if compact and compact not in str(a.get('message') or ''):
+                    a['message'] = f"{str(a.get('message') or '').strip()} {compact}".strip()
+        elif a.get('type') in {'socket_abuse_suspected', 'socks_inbound_fanout', 'inbound_ip_fanout', 'outbound_fanout', 'outbound_sensitive_ports'}:
+            if isinstance(c_sec.get('connection_metrics'), dict) and not a.get('connection_metrics'):
+                a['connection_metrics'] = c_sec['connection_metrics']
+            if isinstance(c_sec.get('socket_abuse'), dict) and not a.get('socket_abuse'):
+                a['socket_abuse'] = c_sec['socket_abuse']
         result.append(a)
     return result
 

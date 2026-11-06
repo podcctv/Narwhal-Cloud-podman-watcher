@@ -19,6 +19,7 @@ import { UserNoticeAction } from '../alerts/UserNoticeAction';
 import { isProtectionOnlySignal } from '../alerts/protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from '../alerts/connectionEvidence';
 import { ProtocolGuardEvidence } from '../alerts/ProtocolGuardEvidence';
+import { SocketAbuseEvidence } from '../alerts/SocketAbuseEvidence';
 import { hasRemediationEvidence } from '../alerts/remediationEvidence';
 
 interface SecurityAlertSectionProps {
@@ -224,6 +225,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 <p className="text-xs leading-relaxed text-slate-200">
                   {alert.message}
                 </p>
+                <SocketAbuseEvidence alert={alert} />
                 <ProtocolGuardEvidence alert={alert} />
                 {protectionOnly && (
                   <div className="rounded-xl border border-sky-800/70 bg-sky-950/25 px-3.5 py-2.5 text-[11px] leading-relaxed text-slate-300">

@@ -209,3 +209,111 @@ class ConnectionPolicyTests(unittest.TestCase):
             with self.subTest(change=change), mock.patch.object(agent.time,'time',return_value=1000), mock.patch.object(agent,'get_runtime_bins',return_value={'incus':'incus'}), mock.patch.object(agent,'_incus_instance_pid',return_value=123), mock.patch.object(agent,'_collect_socket_security',return_value={'connection_metrics':fresh}), mock.patch.object(agent,'_run_action_command') as runner:
                 self.assertFalse(agent.execute_security_action(a)[0])
                 runner.assert_not_called()
+
+    def test_socket_abuse_distinguishes_benign_time_wait_from_socks_and_scan_abuse(self):
+        benign_container = {
+            'name': 'd56f4a3b-b116-45fb-906f-55cf18600616',
+            'runtime': 'incus',
+            'project': 'default',
+            'conn_count': 2030,
+            'net_rx_bps': 250000,
+            'net_tx_bps': 480000,
+            'security': {
+                'connection_metrics': {
+                    'schema': 1,
+                    'valid': True,
+                    'total': 2030,
+                    'tcp_total': 1972,
+                    'tcp_established': 180,
+                    'tcp_pending': 2,
+                    'tcp_time_wait': 1790,
+                    'udp_sockets': 58,
+                },
+                'tcp_states': {'established': 180, 'time_wait': 1790, 'syn_recv': 2},
+                'incoming_established': 42,
+                'inbound_unique_ips': 4,
+                'inbound_established_unique_ips': 2,
+                'inbound_syn_recv_unique_ips': 2,
+                'outbound_established': 138,
+                'outbound_unique_ips': 24,
+                'outbound_unique_ports': 3,
+                'suspicious_outbound_connections': 0,
+                'net_rx_pps': 95,
+                'net_tx_pps': 120,
+                'communication_processes': [{'process': 'xray', 'pid': 321, 'inbound_connections': 42, 'outbound_connections': 138}],
+            },
+        }
+        benign_eval = agent._evaluate_socket_abuse(
+            benign_container,
+            benign_container['security'],
+            rx_bps=250000,
+            tx_bps=480000,
+            rx_pps=95,
+            tx_pps=120,
+        )
+        self.assertFalse(benign_eval['suspected'])
+        self.assertEqual(benign_eval['verdict'], 'benign_high_sockets')
+        self.assertIn('倾向非滥用', benign_eval['compact_basis_text'])
+        self.assertEqual(len(benign_eval['dimensions']), 4)
+
+        benign_container['security']['socket_abuse'] = benign_eval
+        ops_alert = {
+            'runtime': 'incus',
+            'project': 'default',
+            'container_name': benign_container['name'],
+            'type': 'ops_policy_signal',
+            'message': 'socket 总数 2030，提醒门槛 500。此策略用于提醒，自动停机由独立的连续超标保护规则决定。',
+            'observation': {'signals': {'connections': True}},
+        }
+        enriched = policy.enrich_alerts([ops_alert], [benign_container])[0]
+        self.assertIn('【四维判断依据】', enriched['message'])
+        self.assertEqual(enriched['socket_abuse']['verdict'], 'benign_high_sockets')
+
+        socks_container = {
+            'name': 'socks-shared-node',
+            'runtime': 'incus',
+            'project': 'default',
+            'conn_count': 860,
+            'net_rx_bps': 1200000,
+            'net_tx_bps': 1500000,
+            'security': {
+                'connection_metrics': {
+                    'schema': 1,
+                    'valid': True,
+                    'total': 860,
+                    'tcp_total': 820,
+                    'tcp_established': 620,
+                    'tcp_pending': 10,
+                    'tcp_time_wait': 190,
+                    'udp_sockets': 40,
+                },
+                'tcp_states': {'established': 620, 'time_wait': 190, 'syn_sent': 38, 'syn_recv': 6},
+                'syn_sent_count': 38,
+                'outbound_syn_sent_unique_ips': 22,
+                'incoming_established': 310,
+                'inbound_unique_ips': 20,
+                'inbound_established_unique_ips': 16,
+                'inbound_syn_recv_unique_ips': 4,
+                'outbound_established': 310,
+                'outbound_unique_ips': 95,
+                'outbound_unique_ports': 18,
+                'suspicious_outbound_connections': 9,
+                'sensitive_outbound_ports': [
+                    {'port': 22, 'service': 'SSH', 'connections': 14, 'established': 2, 'syn_sent': 12, 'unique_ips': 9},
+                    {'port': 3389, 'service': 'RDP', 'connections': 7, 'established': 1, 'syn_sent': 6, 'unique_ips': 6},
+                ],
+                'socks_proxy': {'detected': True, 'auth_mode': 'no_auth'},
+                'net_rx_pps': 580,
+                'net_tx_pps': 640,
+            },
+        }
+        with mock.patch.dict(agent.os.environ, {'SECURITY_MONITOR_ENABLED': 'true', 'SECURITY_ACCESS_LOG_PATHS': ''}, clear=False):
+            summary = agent.collect_security_summary([socks_container], 60)
+        abuse_alerts = [a for a in summary['alerts'] if a['type'] == 'socket_abuse_suspected']
+        self.assertEqual(len(abuse_alerts), 1)
+        self.assertTrue(abuse_alerts[0]['protection_only'])
+        self.assertFalse(abuse_alerts[0]['auto_stop_eligible'])
+        codes = {c['code'] for c in abuse_alerts[0]['socket_abuse']['categories']}
+        self.assertIn('shared_proxy_socks_abuse', codes)
+        self.assertIn('outbound_scan_bruteforce', codes)
+        self.assertIn('【四维判断依据】', abuse_alerts[0]['message'])

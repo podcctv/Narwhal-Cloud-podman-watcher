@@ -1826,6 +1826,7 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         'connection_metrics': {'schema': 1, 'valid': False},
         "tcp_states": {},
         "syn_recv_count": 0,
+        "syn_sent_count": 0,
         "incoming_established": 0,
         "inbound_unique_ips": 0,
         "inbound_established_unique_ips": 0,
@@ -1838,6 +1839,9 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         "outbound_established": 0,
         "outbound_unique_ips": 0,
         "outbound_unique_ports": 0,
+        "outbound_syn_sent_unique_ips": 0,
+        "outbound_top_ports": [],
+        "sensitive_outbound_ports": [],
         "suspicious_outbound_connections": 0,
         "scan_unique_ports_max": 0,
         "scan_source_ip": "",
@@ -1929,6 +1933,22 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
     tcp_states: Dict[str, int] = {}
     outbound_ips = set()
     outbound_ports = set()
+    outbound_syn_sent_ips = set()
+    outbound_port_stats: Dict[int, Dict[str, Any]] = {}
+    sensitive_port_labels = {
+        22: "SSH",
+        23: "Telnet",
+        25: "SMTP",
+        445: "SMB",
+        465: "SMTPS",
+        587: "SMTP-Sub",
+        1433: "MSSQL",
+        3306: "MySQL",
+        3389: "RDP",
+        5432: "PostgreSQL",
+        6379: "Redis",
+        6667: "IRC",
+    }
     inbound_source_ports: Dict[str, set] = {}
     inbound_ip_connections: Dict[str, int] = {}
     inbound_ip_established: Dict[str, int] = {}
@@ -1979,8 +1999,20 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
         if not _is_trackable_ip(remote_ip):
             continue
         outbound_ips.add(remote_ip)
+        if proto == "tcp" and state == "02":
+            outbound_syn_sent_ips.add(remote_ip)
         if remote_port > 0:
             outbound_ports.add(remote_port)
+            pstat = outbound_port_stats.setdefault(
+                remote_port,
+                {"connections": 0, "established": 0, "syn_sent": 0, "ips": set()},
+            )
+            pstat["connections"] += 1
+            pstat["ips"].add(remote_ip)
+            if state == "01" or proto == "udp":
+                pstat["established"] += 1
+            elif proto == "tcp" and state == "02":
+                pstat["syn_sent"] += 1
         if state == "01" or proto == "udp":
             outbound_established += 1
             if remote_port in suspicious_ports:
@@ -1993,10 +2025,43 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
             scan_unique_ports_max = len(ports)
             scan_source_ip = source_ip
 
+    outbound_top_ports = [
+        {
+            "port": port,
+            "service": sensitive_port_labels.get(port, ""),
+            "connections": int(info["connections"]),
+            "established": int(info["established"]),
+            "syn_sent": int(info["syn_sent"]),
+            "unique_ips": len(info["ips"]),
+        }
+        for port, info in sorted(
+            outbound_port_stats.items(),
+            key=lambda item: (int(item[1]["connections"]), len(item[1]["ips"])),
+            reverse=True,
+        )[:10]
+    ]
+    sensitive_outbound_ports = [
+        {
+            "port": port,
+            "service": sensitive_port_labels[port],
+            "connections": int(info["connections"]),
+            "established": int(info["established"]),
+            "syn_sent": int(info["syn_sent"]),
+            "unique_ips": len(info["ips"]),
+        }
+        for port, info in sorted(
+            outbound_port_stats.items(),
+            key=lambda item: (int(item[1]["connections"]), len(item[1]["ips"])),
+            reverse=True,
+        )
+        if port in sensitive_port_labels
+    ]
+
     result.update(
         {
             "tcp_states": tcp_states,
             "syn_recv_count": syn_recv,
+            "syn_sent_count": int(tcp_states.get("syn_sent", 0)),
             "incoming_established": incoming_established,
             "inbound_unique_ips": len(inbound_source_ports),
             "inbound_established_unique_ips": len(inbound_established_ips),
@@ -2017,6 +2082,9 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
             "outbound_established": outbound_established,
             "outbound_unique_ips": len(outbound_ips),
             "outbound_unique_ports": len(outbound_ports),
+            "outbound_syn_sent_unique_ips": len(outbound_syn_sent_ips),
+            "outbound_top_ports": outbound_top_ports,
+            "sensitive_outbound_ports": sensitive_outbound_ports,
             "suspicious_outbound_connections": suspicious_connections,
             "scan_unique_ports_max": scan_unique_ports_max,
             "scan_source_ip": scan_source_ip,
@@ -4132,6 +4200,477 @@ def _collect_memory_guard(containers: List[Dict[str, object]], interval_seconds:
         print(f"memory guard collection failed: {error}")
 
 
+def _fmt_rate_bps(bps: float) -> str:
+    val = max(0.0, float(bps or 0.0))
+    if val >= 1024 * 1024:
+        return f"{val / (1024 * 1024):.2f} MB/s"
+    if val >= 1024:
+        return f"{val / 1024:.1f} KB/s"
+    return f"{val:.0f} B/s"
+
+
+def _evaluate_socket_abuse(
+    container: Dict[str, object],
+    security: Dict[str, object],
+    rx_bps: float = 0.0,
+    tx_bps: float = 0.0,
+    rx_pps: float = 0.0,
+    tx_pps: float = 0.0,
+) -> Dict[str, object]:
+    """Evaluate 4-dimension socket & SOCKS/proxy abuse evidence (observation-only)."""
+    cm = security.get("connection_metrics") if isinstance(security.get("connection_metrics"), dict) else {}
+    tcp_states = security.get("tcp_states") if isinstance(security.get("tcp_states"), dict) else {}
+    raw_conn_count = int(container.get("conn_count") or 0)
+    cm_total = int(cm.get("total") or 0)
+    total_sockets = max(raw_conn_count, cm_total)
+
+    tcp_established = int(
+        cm["tcp_established"]
+        if "tcp_established" in cm
+        else tcp_states.get("established") or 0
+    )
+    tcp_time_wait = int(
+        cm["tcp_time_wait"]
+        if "tcp_time_wait" in cm
+        else tcp_states.get("time_wait") or 0
+    )
+    tcp_syn_sent = int(security.get("syn_sent_count") or tcp_states.get("syn_sent") or 0)
+    tcp_syn_recv = int(security.get("syn_recv_count") or tcp_states.get("syn_recv") or 0)
+    tcp_close_wait = int(tcp_states.get("close_wait") or 0)
+    tcp_fin_wait = int(tcp_states.get("fin_wait1") or 0) + int(tcp_states.get("fin_wait2") or 0)
+    udp_sockets = int(cm.get("udp_sockets") or 0)
+
+    incoming_established = int(security.get("incoming_established") or 0)
+    inbound_unique_ips = int(security.get("inbound_unique_ips") or 0)
+    inbound_established_ips = int(security.get("inbound_established_unique_ips") or 0)
+    inbound_syn_recv_ips = int(security.get("inbound_syn_recv_unique_ips") or 0)
+    inbound_top_ips = (
+        security.get("inbound_top_ips")
+        if isinstance(security.get("inbound_top_ips"), list)
+        else []
+    )
+
+    outbound_established = int(security.get("outbound_established") or 0)
+    outbound_unique_ips = int(security.get("outbound_unique_ips") or 0)
+    outbound_unique_ports = int(security.get("outbound_unique_ports") or 0)
+    outbound_syn_sent_ips = int(security.get("outbound_syn_sent_unique_ips") or 0)
+    suspicious_outbound = int(security.get("suspicious_outbound_connections") or 0)
+    sensitive_outbound_ports = (
+        security.get("sensitive_outbound_ports")
+        if isinstance(security.get("sensitive_outbound_ports"), list)
+        else []
+    )
+    outbound_top_ports = (
+        security.get("outbound_top_ports")
+        if isinstance(security.get("outbound_top_ports"), list)
+        else []
+    )
+
+    socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
+    socks_detected = bool(socks_proxy.get("detected"))
+    socks_auth_mode = str(socks_proxy.get("auth_mode") or "none")
+    hy2_info = security.get("hy2_protocol") if isinstance(security.get("hy2_protocol"), dict) else {}
+    hy2_detected = bool(hy2_info.get("detected"))
+
+    comm_procs = (
+        security.get("communication_processes")
+        if isinstance(security.get("communication_processes"), list)
+        else []
+    )
+    top_procs = [
+        {
+            "process": str(item.get("process") or "unknown")[:60],
+            "pid": int(item.get("pid") or 0),
+            "inbound_connections": int(item.get("inbound_connections") or 0),
+            "outbound_connections": int(item.get("outbound_connections") or 0),
+        }
+        for item in comm_procs[:5]
+        if isinstance(item, dict) and item.get("process")
+    ]
+    listening_ports = [
+        int(p)
+        for p in (security.get("listening_ports") if isinstance(security.get("listening_ports"), list) else [])
+        if isinstance(p, (int, str)) and str(p).isdigit()
+    ][:12]
+
+    has_socket_evidence = bool(
+        cm.get("valid") is True
+        or tcp_states
+        or cm_total > 0
+        or inbound_established_ips > 0
+        or sensitive_outbound_ports
+        or socks_detected
+    )
+
+    denom = max(total_sockets, tcp_established + tcp_time_wait + tcp_syn_sent + tcp_syn_recv + udp_sockets, 1)
+    time_wait_ratio = round(tcp_time_wait / denom, 3)
+    established_ratio = round(tcp_established / denom, 3)
+    avg_tx_pkt = round(tx_bps / tx_pps, 1) if tx_pps > 0 else 0.0
+
+    # Evaluate 4 concrete abuse categories when socket evidence is present
+    categories: List[Dict[str, object]] = []
+    high_risk_ports_hit = []
+    for item in sensitive_outbound_ports:
+        if not isinstance(item, dict):
+            continue
+        p = int(item.get("port") or 0)
+        svc = str(item.get("service") or p)
+        conns = int(item.get("connections") or 0)
+        u_ips = int(item.get("unique_ips") or 0)
+        s_sent = int(item.get("syn_sent") or 0)
+        if p in {23, 25, 445, 465, 587, 1433, 3389, 6379, 6667} and (conns >= 3 or u_ips >= 3):
+            high_risk_ports_hit.append(f"{p}/{svc}({conns}条,{u_ips}IP)")
+        elif p in {22, 3306, 5432} and (u_ips >= 5 or s_sent >= 5):
+            high_risk_ports_hit.append(f"{p}/{svc}({conns}条,{u_ips}IP,SYN_SENT {s_sent})")
+
+    if has_socket_evidence:
+        # Category 1: Outbound port scan / brute-force
+        if (
+            (tcp_syn_sent >= 20 and (outbound_syn_sent_ips >= 8 or outbound_unique_ips >= 15))
+            or high_risk_ports_hit
+            or (suspicious_outbound >= 5 and (bool(tcp_states) or cm.get("valid") is True or bool(sensitive_outbound_ports)))
+        ):
+            reasons = []
+            if tcp_syn_sent >= 20:
+                reasons.append(f"主动出站握手未完成 SYN_SENT 达 {tcp_syn_sent} 个（涉及 {max(outbound_syn_sent_ips, outbound_unique_ips)} 个目标 IP）")
+            if high_risk_ports_hit:
+                reasons.append(f"命中高危敏感出站端口：{', '.join(high_risk_ports_hit[:4])}")
+            elif suspicious_outbound >= 5:
+                reasons.append(f"敏感端口出站连接数达 {suspicious_outbound} 条")
+            categories.append({
+                "code": "outbound_scan_bruteforce",
+                "title": "对外端口扫描 / 敏感端口爆破",
+                "severity": "critical",
+                "value": max(tcp_syn_sent, suspicious_outbound, len(high_risk_ports_hit)),
+                "threshold": 20 if tcp_syn_sent >= 20 else 5,
+                "reason": "；".join(reasons),
+            })
+
+        # Category 2: Shared proxy / SOCKS multi-IP abuse
+        if (
+            (socks_detected and (inbound_established_ips >= 6 or (socks_auth_mode in ("no_auth", "weak_password") and incoming_established >= 10)))
+            or (inbound_established_ips >= 10 and (incoming_established >= 50 or outbound_established >= 50 or outbound_unique_ips >= 35))
+        ):
+            reasons = []
+            if socks_detected:
+                reasons.append(f"已识别 SOCKS5 代理服务（认证模式：{socks_auth_mode}）")
+            reasons.append(
+                f"入站真实已建立 TCP 连接 (ESTABLISHED) 的公网来源达 {inbound_established_ips} 个 IP"
+                f"（入站活跃连接 {incoming_established} 条，出站活跃 {outbound_established} 条 / 目标 {outbound_unique_ips} IP）"
+            )
+            categories.append({
+                "code": "shared_proxy_socks_abuse",
+                "title": "多人共享 SOCKS / 代理节点滥用",
+                "severity": "critical" if (inbound_established_ips >= 15 or socks_auth_mode in ("no_auth", "weak_password")) else "warning",
+                "value": max(inbound_established_ips, incoming_established),
+                "threshold": 6 if socks_detected else 10,
+                "reason": "；".join(reasons),
+            })
+
+        # Category 3: High outbound fanout / P2P / crawler abuse
+        if outbound_unique_ips >= 120 and (udp_sockets >= 100 or outbound_unique_ports >= 60 or outbound_established >= 120):
+            categories.append({
+                "code": "p2p_or_outbound_fanout_abuse",
+                "title": "高散度出站连接 / 疑似 P2P 扩散",
+                "severity": "warning",
+                "value": outbound_unique_ips,
+                "threshold": 120,
+                "reason": (
+                    f"同时向 {outbound_unique_ips} 个外部 IP（跨 {outbound_unique_ports} 个端口）建立连接，"
+                    f"出站活跃 {outbound_established} 条，UDP Socket {udp_sockets} 个"
+                ),
+            })
+
+        # Category 4: High socket count + high small-packet flood
+        if total_sockets >= 400 and tx_pps >= 1500 and 0 < avg_tx_pkt <= 160:
+            categories.append({
+                "code": "high_socket_packet_flood",
+                "title": "高连接伴随高频小包泛洪",
+                "severity": "critical",
+                "value": int(round(tx_pps)),
+                "threshold": 1500,
+                "reason": (
+                    f"Socket 总数 {total_sockets} 的同时，出站包速率达 {tx_pps:.0f} pps 且均包长仅 {avg_tx_pkt:.0f} B"
+                ),
+            })
+
+    suspected = len(categories) > 0
+
+    # Build the 4 structured dimensions
+    if tcp_syn_sent >= 20:
+        dim1_risk = "high"
+        dim1_summary = (
+            f"主动向外握手未完成 (SYN_SENT) 达 {tcp_syn_sent} 个（覆盖 {max(outbound_syn_sent_ips, outbound_unique_ips)} 个目标 IP），"
+            f"存在明显对外扫描或爆破特征"
+        )
+    elif total_sockets >= 300 and time_wait_ratio >= 0.50:
+        dim1_risk = "low"
+        dim1_summary = (
+            f"TIME_WAIT 短连接回收堆积占比达 {time_wait_ratio * 100:.0f}% ({tcp_time_wait}/{total_sockets})，"
+            f"真实并发活跃 ESTABLISHED 仅 {tcp_established} 个（代理转发后等待内核 60s 回收属常见现象）"
+        )
+    elif tcp_syn_recv >= 30 and tcp_syn_recv > tcp_established:
+        dim1_risk = "low"
+        dim1_summary = (
+            f"入站半连接 SYN_RECV 达 {tcp_syn_recv} 个（来源 {inbound_syn_recv_ips} IP），"
+            f"主要为外部互联网被动扫描探测，非容器主动滥用"
+        )
+    elif tcp_established >= 400:
+        dim1_risk = "medium"
+        dim1_summary = (
+            f"真实并发活跃连接 ESTABLISHED 达 {tcp_established} 个（入站 {incoming_established} / 出站 {outbound_established}），"
+            f"TIME_WAIT {tcp_time_wait} 个，UDP {udp_sockets} 个"
+        )
+    else:
+        dim1_risk = "low"
+        dim1_summary = (
+            f"总计 {total_sockets} (ESTABLISHED {tcp_established} [{established_ratio * 100:.0f}%] · "
+            f"TIME_WAIT {tcp_time_wait} [{time_wait_ratio * 100:.0f}%] · SYN_SENT {tcp_syn_sent} · "
+            f"SYN_RECV {tcp_syn_recv} · UDP {udp_sockets})"
+        )
+
+    top_ip_items = []
+    for item in inbound_top_ips[:5]:
+        if isinstance(item, dict) and item.get("ip"):
+            ip_str = str(item.get("ip"))
+            est_c = int(item.get("established_connections") or 0)
+            tot_c = int(item.get("connections") or 0)
+            top_ip_items.append(f"{ip_str}(已建连{est_c}/总{tot_c})")
+
+    if socks_detected and (inbound_established_ips >= 6 or socks_auth_mode in ("no_auth", "weak_password")):
+        dim2_risk = "high"
+        dim2_summary = (
+            f"已识别 SOCKS5 服务（认证：{socks_auth_mode}），且有 {inbound_established_ips} 个公网 IP 保持真实已建立连接"
+            f"（入站活跃 {incoming_established} 条），高度疑似多人共享或公共代理滥用"
+        )
+    elif inbound_established_ips >= 10:
+        dim2_risk = "high" if (incoming_established >= 50 or outbound_established >= 50) else "medium"
+        dim2_summary = (
+            f"真实已建立 TCP 连接的公网来源达 {inbound_established_ips} 个 IP（已过滤 {inbound_syn_recv_ips} 个仅 SYN 探测 IP），"
+            f"入站活跃连接 {incoming_established} 条，超出单容器 10 IP 正常并发基线"
+        )
+    elif inbound_established_ips <= 5 and total_sockets >= 400:
+        dim2_risk = "low"
+        dim2_summary = (
+            f"虽然总 Socket 达 {total_sockets}，但真实已建连入站来源仅 {inbound_established_ips} 个公网 IP"
+            f"（入站活跃 {incoming_established} 条），属少数客户端高频并发复用（如单人代理加载网页/分片流媒体），非多人共享机场"
+        )
+    else:
+        dim2_risk = "low"
+        dim2_summary = (
+            f"真实已建连入站来源 {inbound_established_ips} 个公网 IP（入站活跃 {incoming_established} 条，"
+            f"未完成握手探测 {inbound_syn_recv_ips} 个 IP），处于正常范围"
+        )
+
+    proc_labels = [
+        f"{p['process']}(PID {p['pid']}, 入{p['inbound_connections']}/出{p['outbound_connections']})"
+        for p in top_procs[:3]
+    ]
+    top_port_labels = [
+        f"{p['port']}{'/' + p['service'] if p.get('service') else ''}({p['connections']}条/{p['unique_ips']}IP)"
+        for p in outbound_top_ports[:5]
+        if isinstance(p, dict)
+    ]
+
+    if high_risk_ports_hit or (suspicious_outbound >= 5 and has_socket_evidence):
+        dim3_risk = "high"
+        dim3_summary = (
+            f"检测到异常高危敏感端口出站：{', '.join(high_risk_ports_hit[:4]) or f'{suspicious_outbound} 条连接'}；"
+            f"出站活跃 {outbound_established} 条 / 目标 {outbound_unique_ips} IP"
+            + (f"；主通信进程 {', '.join(proc_labels)}" if proc_labels else "")
+        )
+    elif outbound_unique_ips >= 120:
+        dim3_risk = "high" if (udp_sockets >= 100 or outbound_unique_ports >= 60) else "medium"
+        dim3_summary = (
+            f"同时连接 {outbound_unique_ips} 个外部目标 IP（跨 {outbound_unique_ports} 个端口），"
+            f"出站活跃 {outbound_established} 条，散度较高"
+            + (f"；主通信进程 {', '.join(proc_labels)}" if proc_labels else "")
+        )
+    else:
+        dim3_risk = "low"
+        dim3_summary = (
+            f"出站活跃 {outbound_established} 条 · 外部目标 {outbound_unique_ips} IP / {outbound_unique_ports} 端口 · "
+            f"敏感端口连接 {suspicious_outbound} 条"
+            + (f" · 常连端口 {', '.join(top_port_labels[:3])}" if top_port_labels else "")
+            + (f" · 主进程 {', '.join(proc_labels[:2])}" if proc_labels else "")
+        )
+
+    if tx_pps >= 1500 and 0 < avg_tx_pkt <= 160:
+        dim4_risk = "high"
+        dim4_summary = (
+            f"出站包速率达 {tx_pps:.0f} pps 且平均包长仅 {avg_tx_pkt:.0f} B（出站 {_fmt_rate_bps(tx_bps)}），"
+            f"呈现典型高频小包探测/泛洪特征"
+        )
+    elif tx_pps >= 800 and avg_tx_pkt >= 500:
+        dim4_risk = "low"
+        dim4_summary = (
+            f"出站 {_fmt_rate_bps(tx_bps)} ({tx_pps:.0f} pps · 均包长 {avg_tx_pkt:.0f} B) · "
+            f"入站 {_fmt_rate_bps(rx_bps)} ({rx_pps:.0f} pps)，属正常大包吞吐传输"
+        )
+    else:
+        dim4_risk = "low"
+        dim4_summary = (
+            f"出站 {_fmt_rate_bps(tx_bps)} ({tx_pps:.0f} pps"
+            + (f" · 均包长 {avg_tx_pkt:.0f} B" if avg_tx_pkt > 0 else "")
+            + f") · 入站 {_fmt_rate_bps(rx_bps)} ({rx_pps:.0f} pps)，未见高频小包泛洪"
+        )
+
+    dimensions = [
+        {
+            "key": "state_breakdown",
+            "title": "1. 连接状态拆解 (TCP States & UDP)",
+            "risk": dim1_risk,
+            "summary": dim1_summary,
+            "metrics": {
+                "total": total_sockets,
+                "tcp_established": tcp_established,
+                "tcp_time_wait": tcp_time_wait,
+                "tcp_syn_sent": tcp_syn_sent,
+                "tcp_syn_recv": tcp_syn_recv,
+                "tcp_close_wait": tcp_close_wait,
+                "tcp_fin_wait": tcp_fin_wait,
+                "udp_sockets": udp_sockets,
+                "time_wait_ratio": time_wait_ratio,
+                "established_ratio": established_ratio,
+            },
+        },
+        {
+            "key": "inbound_fanout",
+            "title": "2. 入站并发业务源 (排除未建连扫描)",
+            "risk": dim2_risk,
+            "summary": dim2_summary,
+            "metrics": {
+                "inbound_established_unique_ips": inbound_established_ips,
+                "inbound_syn_recv_unique_ips": inbound_syn_recv_ips,
+                "inbound_unique_ips": inbound_unique_ips,
+                "incoming_established": incoming_established,
+                "socks_detected": socks_detected,
+                "socks_auth_mode": socks_auth_mode,
+                "hy2_detected": hy2_detected,
+                "top_ips": top_ip_items,
+                "listening_ports": listening_ports,
+            },
+        },
+        {
+            "key": "outbound_profile",
+            "title": "3. 出站目标与进程画像 (端口/散度/归属)",
+            "risk": dim3_risk,
+            "summary": dim3_summary,
+            "metrics": {
+                "outbound_established": outbound_established,
+                "outbound_unique_ips": outbound_unique_ips,
+                "outbound_unique_ports": outbound_unique_ports,
+                "outbound_syn_sent_unique_ips": outbound_syn_sent_ips,
+                "suspicious_outbound_connections": suspicious_outbound,
+                "sensitive_ports": sensitive_outbound_ports[:8],
+                "top_ports": outbound_top_ports[:6],
+                "top_processes": top_procs,
+            },
+        },
+        {
+            "key": "traffic_profile",
+            "title": "4. 包速率与带宽特征 (PPS & 均包长)",
+            "risk": dim4_risk,
+            "summary": dim4_summary,
+            "metrics": {
+                "rx_bps": round(rx_bps, 1),
+                "tx_bps": round(tx_bps, 1),
+                "rx_pps": round(rx_pps, 1),
+                "tx_pps": round(tx_pps, 1),
+                "avg_tx_packet_size": avg_tx_pkt,
+            },
+        },
+    ]
+
+    if suspected:
+        verdict = "suspected_abuse"
+        cat_titles = [str(c["title"]) for c in categories]
+        severity = "critical" if any(c.get("severity") == "critical" for c in categories) else "warning"
+        verdict_label = f"疑似滥用 · 待人工复核 ({' / '.join(cat_titles)})"
+        conclusion = (
+            f"综合四维判断：命中【{'、'.join(cat_titles)}】特征；"
+            + "；".join(str(c["reason"]) for c in categories)
+            + "。（当前为人工核验观察模式，未执行自动停机或自动封禁）"
+        )
+        primary_value = int(max((int(c.get("value") or 0) for c in categories), default=total_sockets))
+        primary_threshold = int(categories[0].get("threshold") or 1)
+    elif total_sockets >= 400:
+        verdict = "benign_high_sockets"
+        severity = "info"
+        verdict_label = "倾向非滥用 · 正常业务/连接回收堆积"
+        reasons_benign = []
+        if time_wait_ratio >= 0.50:
+            reasons_benign.append(f"TIME_WAIT 短连接回收占比达 {time_wait_ratio * 100:.0f}% ({tcp_time_wait}/{total_sockets})，真实活跃 ESTABLISHED 仅 {tcp_established} 个")
+        if inbound_established_ips <= 5:
+            reasons_benign.append(f"入站真实已建连来源仅 {inbound_established_ips} 个公网 IP（属单用户/少数客户端高频并发复用，非多人共享）")
+        if tcp_syn_sent < 20 and suspicious_outbound < 5 and not high_risk_ports_hit:
+            reasons_benign.append(f"无对外端口扫描 (SYN_SENT {tcp_syn_sent}) 与高危端口爆破 (敏感连接 {suspicious_outbound})")
+        conclusion = (
+            "综合四维判断：倾向非滥用（"
+            + ("；".join(reasons_benign) if reasons_benign else f"ESTABLISHED {tcp_established} / TIME_WAIT {tcp_time_wait} / 入站已建连 {inbound_established_ips} IP")
+            + "）。单凭 Socket 总数高不判定为违规。"
+        )
+        primary_value = total_sockets
+        primary_threshold = 500
+    else:
+        verdict = "normal"
+        severity = "info"
+        verdict_label = "正常连接分布"
+        conclusion = (
+            f"综合四维判断：未发现 Socket 或代理连接滥用特征"
+            f"（总计 {total_sockets}，ESTABLISHED {tcp_established}，入站已建连 {inbound_established_ips} IP）。"
+        )
+        primary_value = total_sockets
+        primary_threshold = 500
+
+    judgment_basis = [
+        f"【结论】{verdict_label} —— {conclusion}",
+        f"【维度① 状态拆解】总计 {total_sockets}｜ESTABLISHED {tcp_established} ({established_ratio * 100:.0f}%) · TIME_WAIT {tcp_time_wait} ({time_wait_ratio * 100:.0f}%) · SYN_SENT {tcp_syn_sent} · SYN_RECV {tcp_syn_recv} · CLOSE_WAIT {tcp_close_wait} · UDP {udp_sockets}",
+        f"【维度② 入站并发源】真实已建连 {inbound_established_ips} 个公网 IP（入站活跃 {incoming_established} 条，未完成握手 SYN_RECV {inbound_syn_recv_ips} IP）"
+        + (f"｜SOCKS5 已识别 (认证: {socks_auth_mode})" if socks_detected else "")
+        + (f"｜Top 来源: {', '.join(top_ip_items[:4])}" if top_ip_items else ""),
+        f"【维度③ 出站与进程】出站活跃 {outbound_established} 条 · 外部目标 {outbound_unique_ips} IP / {outbound_unique_ports} 端口 · 敏感端口连接 {suspicious_outbound} 条"
+        + (f" ({', '.join(high_risk_ports_hit[:3])})" if high_risk_ports_hit else "")
+        + (f"｜常连端口: {', '.join(top_port_labels[:4])}" if top_port_labels else "")
+        + (f"｜主进程: {', '.join(proc_labels[:2])}" if proc_labels else ""),
+        f"【维度④ 包速率与带宽】出站 {_fmt_rate_bps(tx_bps)} ({tx_pps:.0f} pps"
+        + (f" · 均包长 {avg_tx_pkt:.0f} B" if avg_tx_pkt > 0 else "")
+        + f") · 入站 {_fmt_rate_bps(rx_bps)} ({rx_pps:.0f} pps)",
+    ]
+
+    compact_basis_text = (
+        f"【四维判断依据】结论：{verdict_label}｜"
+        f"①状态拆解：总计 {total_sockets} (ESTABLISHED {tcp_established} [{established_ratio * 100:.0f}%] · "
+        f"TIME_WAIT {tcp_time_wait} [{time_wait_ratio * 100:.0f}%] · SYN_SENT {tcp_syn_sent} · "
+        f"SYN_RECV {tcp_syn_recv} · UDP {udp_sockets})｜"
+        f"②入站并发源：真实已建连 {inbound_established_ips} 个公网 IP (入站活跃 {incoming_established} 条"
+        + (f"，SOCKS5[{socks_auth_mode}]" if socks_detected else "")
+        + f")｜③出站与进程：出站活跃 {outbound_established} 条 / 目标 {outbound_unique_ips} IP / 敏感端口 {suspicious_outbound} 条"
+        + (f" [{', '.join(high_risk_ports_hit[:2])}]" if high_risk_ports_hit else "")
+        + (f" (主进程 {top_procs[0]['process']})" if top_procs else "")
+        + f"｜④包速率：出栈 {tx_pps:.0f} pps"
+        + (f" (均包长 {avg_tx_pkt:.0f} B)" if avg_tx_pkt > 0 else "")
+        + f" / 入栈 {rx_pps:.0f} pps。"
+    )
+
+    return {
+        "schema": 1,
+        "evaluated_at": int(time.time()),
+        "valid_evidence": has_socket_evidence,
+        "suspected": suspected,
+        "verdict": verdict,
+        "verdict_label": verdict_label,
+        "severity": severity,
+        "conclusion": conclusion,
+        "primary_value": primary_value,
+        "primary_threshold": primary_threshold,
+        "categories": categories,
+        "dimensions": dimensions,
+        "judgment_basis": judgment_basis,
+        "compact_basis_text": compact_basis_text,
+    }
+
+
 def collect_security_summary(containers: List[Dict[str, object]], interval_seconds: float, incus_runtime_health: Dict[str, object] | None = None) -> Dict[str, object]:
     global _pending_firewall_event_cursor
     enabled = os.getenv("SECURITY_MONITOR_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
@@ -4538,24 +5077,38 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         summary["syn_recv_count"] = int(summary["syn_recv_count"]) + syn_recv
 
         conn_count = int(container.get("conn_count") or 0)
+        socket_abuse = _evaluate_socket_abuse(
+            container,
+            security,
+            rx_bps=rx_bps,
+            tx_bps=tx_bps,
+            rx_pps=rx_pps,
+            tx_pps=tx_pps,
+        )
+        security["socket_abuse"] = socket_abuse
         if admission_guard.status(container) and security.get('connection_metrics',{}).get('valid') is True:
             metric=security['connection_metrics']
             conn_count=int(metric.get('tcp_established') or 0)+int(metric.get('tcp_pending') or 0)
         if conn_count > conn_warning:
             critical = conn_count > conn_critical
-            alerts.append(
-                _security_alert(
-                    "container_connection_count",
-                    "critical" if critical else "warning",
-                    "容器连接数严重过高" if critical else "容器连接数过高",
-                    f"容器当前连接数 {conn_count} 超过"
-                    f"{'严重告警' if critical else '告警'}阈值 "
-                    f"{int(conn_critical if critical else conn_warning)}",
-                    conn_count,
-                    conn_critical if critical else conn_warning,
-                    container,
-                )
+            conn_msg = (
+                f"容器当前连接数 {conn_count} 超过"
+                f"{'严重告警' if critical else '告警'}阈值 "
+                f"{int(conn_critical if critical else conn_warning)}"
             )
+            if socket_abuse.get("valid_evidence") and socket_abuse.get("compact_basis_text"):
+                conn_msg = f"{conn_msg}。{socket_abuse['compact_basis_text']}"
+            conn_alert = _security_alert(
+                "container_connection_count",
+                "critical" if critical else "warning",
+                "容器连接数严重过高" if critical else "容器连接数过高",
+                conn_msg,
+                conn_count,
+                conn_critical if critical else conn_warning,
+                container,
+            )
+            conn_alert["socket_abuse"] = socket_abuse
+            alerts.append(conn_alert)
 
         if rx_bps >= ddos_rx_bps:
             alerts.append(
@@ -4987,20 +5540,20 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
             socks_hint = "；已识别 SOCKS 服务，此告警替代通用入站 IP 告警" if socks_detected else ""
             established_ips = int(security.get("inbound_established_unique_ips") or 0)
             pending_ips = int(security.get("inbound_syn_recv_unique_ips") or 0)
-            alerts.append(
-                _security_alert(
-                    alert_type,
-                    "warning",
-                    alert_title,
-                    f"容器当前观察到 {inbound_unique_ips} 个入站来源 IP；其中有已建立 TCP 连接的来源 "
-                    f"{established_ips} 个，SYN_RECV 握手未完成来源 {pending_ips} 个。"
-                    f"来源 IP 数不等于真实用户数，单凭数量不会自动限制；请结合端口扫描线索、进程归属和应用认证日志核实。"
-                    f"超过提醒阈值 {int(inbound_unique_ip_threshold)}{process_hint}{socks_hint}",
-                    inbound_unique_ips,
-                    inbound_unique_ip_threshold,
-                    container,
-                )
+            fanout_alert = _security_alert(
+                alert_type,
+                "warning",
+                alert_title,
+                f"容器当前观察到 {inbound_unique_ips} 个入站来源 IP；其中有已建立 TCP 连接的来源 "
+                f"{established_ips} 个，SYN_RECV 握手未完成来源 {pending_ips} 个。"
+                f"来源 IP 数不等于真实用户数，单凭数量不会自动限制；请结合端口扫描线索、进程归属和应用认证日志核实。"
+                f"超过提醒阈值 {int(inbound_unique_ip_threshold)}{process_hint}{socks_hint}",
+                inbound_unique_ips,
+                inbound_unique_ip_threshold,
+                container,
             )
+            fanout_alert["socket_abuse"] = socket_abuse
+            alerts.append(fanout_alert)
         scan_count = int(security.get("scan_unique_ports_max") or 0)
         if scan_count >= scan_ports:
             source_ip = str(security.get("scan_source_ip") or "unknown")
@@ -5018,29 +5571,53 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         unique_ips = int(security.get("outbound_unique_ips") or 0)
         suspicious_connections = int(security.get("suspicious_outbound_connections") or 0)
         if unique_ips >= abuse_unique_ips:
-            alerts.append(
-                _security_alert(
-                    "outbound_fanout",
-                    "warning",
-                    "疑似出站滥用",
-                    f"容器同时连接 {unique_ips} 个外部 IP，可能存在代理滥用或扫描",
-                    unique_ips,
-                    abuse_unique_ips,
-                    container,
-                )
+            out_fanout_alert = _security_alert(
+                "outbound_fanout",
+                "warning",
+                "疑似出站滥用",
+                f"容器同时连接 {unique_ips} 个外部 IP，可能存在代理滥用或扫描",
+                unique_ips,
+                abuse_unique_ips,
+                container,
             )
+            out_fanout_alert["socket_abuse"] = socket_abuse
+            alerts.append(out_fanout_alert)
         if suspicious_connections >= abuse_suspicious:
-            alerts.append(
-                _security_alert(
-                    "outbound_sensitive_ports",
-                    "critical",
-                    "敏感端口出站连接异常",
-                    f"敏感出站端口连接数 {suspicious_connections} 超过阈值 {int(abuse_suspicious)}",
-                    suspicious_connections,
-                    abuse_suspicious,
-                    container,
-                )
+            out_sens_alert = _security_alert(
+                "outbound_sensitive_ports",
+                "critical",
+                "敏感端口出站连接异常",
+                f"敏感出站端口连接数 {suspicious_connections} 超过阈值 {int(abuse_suspicious)}",
+                suspicious_connections,
+                abuse_suspicious,
+                container,
             )
+            out_sens_alert["socket_abuse"] = socket_abuse
+            alerts.append(out_sens_alert)
+        if socket_abuse.get("suspected") is True:
+            cat_titles = [
+                str(c.get("title") or "")
+                for c in (socket_abuse.get("categories") if isinstance(socket_abuse.get("categories"), list) else [])
+                if isinstance(c, dict) and c.get("title")
+            ]
+            abuse_alert = _security_alert(
+                "socket_abuse_suspected",
+                str(socket_abuse.get("severity") or "warning"),
+                f"疑似 Socket / 代理连接滥用（待人工复核：{'、'.join(cat_titles) or '异常连接特征'}）",
+                f"{socket_abuse.get('conclusion', '')} {socket_abuse.get('compact_basis_text', '')}".strip(),
+                int(socket_abuse.get("primary_value") or conn_count or 1),
+                int(socket_abuse.get("primary_threshold") or 1),
+                container,
+            )
+            abuse_alert.update(
+                {
+                    "socket_abuse": socket_abuse,
+                    "connection_metrics": connection_metrics,
+                    "protection_only": True,
+                    "auto_stop_eligible": False,
+                }
+            )
+            alerts.append(abuse_alert)
         if tx_bps >= abuse_tx_bps:
             alerts.append(
                 _security_alert(
@@ -9236,6 +9813,14 @@ def collect_container(
             "sensitive_file_events": file_guard.scan_container_sensitive_drops(pid, runtime=runtime_name, name=name) if file_guard is not None else [],
             "microburst": microburst_guard.detect_microburst(runtime_name, name, rx_packet_total, tx_packet_total, rx_total, tx_total) if microburst_guard is not None else {},
         }
+    )
+    socket_security["socket_abuse"] = _evaluate_socket_abuse(
+        {"conn_count": conn_count, "net_rx_bps": net_rx, "net_tx_bps": net_tx},
+        socket_security,
+        rx_bps=net_rx,
+        tx_bps=net_tx,
+        rx_pps=net_rx_pps,
+        tx_pps=net_tx_pps,
     )
     cpu_pressure_percent = cpu_percent
     if cpu_percent <= 0 and float(top_cpu_process.get("cpu_percent") or 0) > 0:

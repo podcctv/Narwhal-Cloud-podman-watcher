@@ -369,7 +369,42 @@ export interface ContainerSecurity {
   host_conntrack_snapshot_truncated?: boolean;
   communication_snapshot_count?: number;
   communication_snapshot_truncated?: boolean;
+  socket_abuse?: SocketAbuseAssessment;
   [key: string]: any;
+}
+
+export interface SocketAbuseCategory {
+  code: string;
+  title: string;
+  severity: 'critical' | 'warning' | 'info' | string;
+  value: number;
+  threshold: number;
+  reason: string;
+}
+
+export interface SocketAbuseDimension {
+  key: 'state_breakdown' | 'inbound_fanout' | 'outbound_profile' | 'traffic_profile' | string;
+  title: string;
+  risk: 'high' | 'medium' | 'low' | string;
+  summary: string;
+  metrics?: Record<string, any>;
+}
+
+export interface SocketAbuseAssessment {
+  schema?: number;
+  evaluated_at?: number;
+  valid_evidence?: boolean;
+  suspected?: boolean;
+  verdict?: 'suspected_abuse' | 'benign_high_sockets' | 'normal' | string;
+  verdict_label?: string;
+  severity?: 'critical' | 'warning' | 'info' | string;
+  conclusion?: string;
+  primary_value?: number;
+  primary_threshold?: number;
+  categories?: SocketAbuseCategory[];
+  dimensions?: SocketAbuseDimension[];
+  judgment_basis?: string[];
+  compact_basis_text?: string;
 }
 
 export interface LatestResponse {

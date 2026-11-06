@@ -33,7 +33,7 @@ PROTECTION_ONLY_ALERT_TYPES = frozenset({
     "outbound_packet_abuse", "outbound_connection_churn", "outbound_connection_failures",
     "udp_outbound_flood", "hy2_high_concurrency", "hy2_abnormal_throttle",
     "traffic_imbalance", "ops_policy_signal", "ops_bandwidth_saturation",
-    "ops_baseline_anomaly", "ops_connection_guard",
+    "ops_baseline_anomaly", "ops_connection_guard", "socket_abuse_suspected",
 })
 RESOURCE_PROTECTION_ALERT_TYPES = frozenset({"cpu_pressure_protection", "memory_pressure_protection", "io_pressure_protection"})
 NON_ABUSE_ALERT_TYPES = PROTECTION_ONLY_ALERT_TYPES | RESOURCE_PROTECTION_ALERT_TYPES

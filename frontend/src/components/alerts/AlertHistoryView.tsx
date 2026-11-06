@@ -19,6 +19,7 @@ import { UserNoticeAction } from './UserNoticeAction';
 import { isProtectionOnlySignal } from './protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from './connectionEvidence';
 import { ProtocolGuardEvidence } from './ProtocolGuardEvidence';
+import { SocketAbuseEvidence } from './SocketAbuseEvidence';
 import { hasRemediationEvidence } from './remediationEvidence';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 
@@ -391,6 +392,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                     <p className="text-xs text-slate-300 leading-relaxed">
                       {alert.message}
                     </p>
+                    <SocketAbuseEvidence alert={alert} />
                     <ProtocolGuardEvidence alert={alert} />
                     {protectionOnly && (
                       <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2 text-[11px] leading-relaxed text-slate-300">

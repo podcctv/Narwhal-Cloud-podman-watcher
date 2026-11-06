@@ -17,7 +17,7 @@ const PROTECTION_ONLY_ALERT_TYPES = new Set([
   'outbound_packet_abuse', 'outbound_connection_churn', 'outbound_connection_failures',
   'udp_outbound_flood', 'hy2_high_concurrency', 'hy2_abnormal_throttle',
   'traffic_imbalance', 'ops_policy_signal', 'ops_bandwidth_saturation',
-  'ops_baseline_anomaly', 'ops_connection_guard',
+  'ops_baseline_anomaly', 'ops_connection_guard', 'socket_abuse_suspected',
 ]);
 
 const RESOURCE_PROTECTION_ALERT_TYPES = new Set([

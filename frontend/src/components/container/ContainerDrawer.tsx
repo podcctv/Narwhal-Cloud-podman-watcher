@@ -30,6 +30,7 @@ import { DiagnosticPanel } from './DiagnosticPanel';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { AdmissionStatus } from './AdmissionStatus';
 import { ConnectionEvidenceTimeline } from './ConnectionEvidenceTimeline';
+import { SocketAbuseEvidence } from '../alerts/SocketAbuseEvidence';
 import { hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard } from '../dashboard/ContainerStateBadges';
 import { evaluateContainerRisk } from '../dashboard/HostContainerList';
 
@@ -795,6 +796,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                         </div>
                         <h4 className="mt-2 text-xs font-semibold text-slate-100">{alert.title || alert.type}</h4>
                         <p className="mt-1 break-words text-[11px] leading-relaxed text-slate-300">{alert.message}</p>
+                        <SocketAbuseEvidence alert={alert} compact />
                         {(alert.value != null || alert.threshold != null) && (
                           <p className="mt-1 text-[10px] tabular-nums text-slate-400">
                             {alert.value != null ? `当前值：${formatAlertValue(alert.value)}` : ''}
@@ -806,6 +808,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     ))}
                   </ul>
                 )}
+                {sec?.socket_abuse && <SocketAbuseEvidence assessment={sec.socket_abuse} />}
               </section>
             )}
 

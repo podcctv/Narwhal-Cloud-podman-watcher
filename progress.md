@@ -2,6 +2,32 @@
 
 更新时间：2026-11-06（Asia/Shanghai）
 
+## Socket / SOCKS 连接滥用四维检测与判断依据引擎（v1.8.13 · 人工核验观察模式）
+
+- **需求背景**：
+  - 单纯的 `socket 总数`（如 `ops_policy_signal`: `socket 总数 2030，提醒门槛 500`）混杂了 `TIME_WAIT` 短连接回收堆积与外部被动扫描 `SYN_RECV`，不能直接据此判定滥用。
+  - 用户要求按四维逻辑部署 Socket / SOCKS 滥用检测，在出现异常或高连接提醒时输出详细的**四维判断依据**，先由人工核对真实案例是否准确，后续再开启自动化处置。
+- **全链路落地实现**：
+  1. **底层 `/proc/<pid>/net` 证据增强 (`client/agent.py`: `_collect_socket_security`)**：
+     - 新增 `syn_sent_count`、`outbound_syn_sent_unique_ips`（主动向外发起握手未完成的目标 IP 数）、`outbound_top_ports` 与 `sensitive_outbound_ports`（針對 `22/SSH, 23/Telnet, 25/SMTP, 445/SMB, 465/SMTPS, 587/SMTP-Sub, 1433/MSSQL, 3306/MySQL, 3389/RDP, 5432/PostgreSQL, 6379/Redis, 6667/IRC` 的连接数、活跃数、`SYN_SENT` 数与独立 IP 散度统计）。
+  2. **四维交叉分析与分类判决引擎 (`client/agent.py`: `_evaluate_socket_abuse`)**：
+     - 输出四大结构化维度（`dimensions`）与详细判断依据（`judgment_basis` / `compact_basis_text`）：
+       - **① 连接状态拆解 (`state_breakdown`)**：区分 `ESTABLISHED` 真实活跃连接、`TIME_WAIT` 短连接等待内核回收占比、`SYN_SENT` 主动向外扫描与 `SYN_RECV` 外部入站探测。
+       - **② 入站并发业务源 (`inbound_fanout`)**：聚焦 `inbound_established_unique_ips`（已排除仅 SYN 探测的扫描 IP）、入站活跃连接数、Top 来源 IP 与 SOCKS5 协议/认证状态。
+       - **③ 出站目标与进程画像 (`outbound_profile`)**：分析外部目标 IP/端口散度、高危敏感端口命中明细及容器内主通信进程（`process/PID`）。
+       - **④ 包速率与带宽特征 (`traffic_profile`)**：结合 `tx_pps` / `rx_pps` 与出站平均包长（`avg_tx_packet_size`）区分正常大包流媒体转发与高频小包扫描/泛洪。
+     - 自动识别四大滥用形态（命中时产生 `socket_abuse_suspected` 观察告警，设置 `protection_only=True`、`auto_stop_eligible=False`，不自动停机或封禁）：
+       - `outbound_scan_bruteforce`（对外端口扫描 / 敏感端口爆破）
+       - `shared_proxy_socks_abuse`（多人共享 SOCKS / 代理节点滥用）
+       - `p2p_or_outbound_fanout_abuse`（高散度出站连接 / 疑似 P2P 扩散）
+       - `high_socket_packet_flood`（高连接伴随高频小包泛洪）
+     - 对高 Socket 但未命中滥用特征的实例（如 `TIME_WAIT` 占比高、入站已建连仅 1~5 个 IP），明确给出 `倾向非滥用 · 正常业务/连接回收堆积`（`benign_high_sockets`）结论与具体排除理由。
+  3. **服务端运维信号与连接告警证据注入 (`server/operations.py`, `server/connection_policy.py`, `server/app.py`, `server/buyer_notifications.py`)**：
+     - `ops_policy_signal`（`实例使用情况超出提醒范围`）、`container_connection_count`、`socks_inbound_fanout`、`inbound_ip_fanout`、`outbound_fanout`、`outbound_sensitive_ports` 及 `socket_abuse_suspected` 全面附带 `socket_abuse` 四维证据，并在提醒文案中直接展示 `【四维判断依据】`。
+     - `socket_abuse_suspected` 纳入自动触发有界深度取证（`queue_connection_alert_deep_samples`）及 `PROTECTION_ONLY_ALERT_TYPES`。
+  4. **前端「Socket / 代理连接四维判断依据」可视化卡片 (`SocketAbuseEvidence.tsx`, `AlertHistoryView.tsx`, `SecurityAlertSection.tsx`, `ContainerDrawer.tsx`)**：
+     - 在告警历史、仪表盘实时安全告警以及容器详情抽屉中直接渲染四维判断依据卡片，清晰展示结论标签、命中规则说明及 4 个维度的风险等级与核心指标药丸。
+
 ## 容器真实业务并发 IP 限制 · 业务端口聚焦与抗公网扫描 DoS 架构（v1.8.12）
 
 - **需求背景**：

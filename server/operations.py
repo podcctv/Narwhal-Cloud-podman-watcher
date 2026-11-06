@@ -472,14 +472,23 @@ def ingest(conn, host_id, node_id, ts, data):
                 event(conn, entity, str(alert.get("type", "security")), ts, {"severity": alert.get("severity"), "message": str(alert.get("message", ""))[:500]})
         if data.get("security", {}).get("enabled") is True and number(c.get("security", {}).get("process_count")) > 0:
             recheck(conn, entity, c, alerts, ts)
-        access = c.get("security", {}).get("access_log", {})
+        c_sec = c.get("security") if isinstance(c.get("security"), dict) else {}
+        access = c_sec.get("access_log", {}) if isinstance(c_sec.get("access_log"), dict) else {}
         signals = {"connections": values[1] >= rules["connections"], "rx_bps": values[0] >= rules["rx_bps"], "http_rps": number(access.get("requests_per_second")) >= rules["http_rps"]}
         if sample_valid:
             severe = values[1]>=rules["connections"]*2 or values[0]>=rules["rx_bps"]*2 or number(access.get("requests_per_second"))>=rules["http_rps"]*2
-            event(conn, entity, "policy_signal", ts, {"signals": signals,"profile":rules["profile"],
-                  "values":{"connections":values[1],"rx_bps":values[0],"http_rps":number(access.get('requests_per_second'))},
-                  "thresholds":{k:rules[k] for k in ('connections','rx_bps','http_rps')},
-                  "severity":"critical" if severe else "warning"}, any(signals.values()) and rules.get("silent_until",0)<ts)
+            policy_payload = {
+                "signals": signals,
+                "profile": rules["profile"],
+                "values": {"connections": values[1], "rx_bps": values[0], "http_rps": number(access.get('requests_per_second'))},
+                "thresholds": {k: rules[k] for k in ('connections', 'rx_bps', 'http_rps')},
+                "severity": "critical" if severe else "warning",
+            }
+            if isinstance(c_sec.get("socket_abuse"), dict):
+                policy_payload["socket_abuse"] = c_sec["socket_abuse"]
+            if isinstance(c_sec.get("connection_metrics"), dict):
+                policy_payload["connection_metrics"] = c_sec["connection_metrics"]
+            event(conn, entity, "policy_signal", ts, policy_payload, any(signals.values()) and rules.get("silent_until",0)<ts)
         # Close only security episodes proven absent in a complete fresh scan.
         if number(c.get("security", {}).get("process_count")) > 0 and data.get("security", {}).get("enabled") is True:
             current={str(a.get("type")) for a in alerts if (a.get("runtime"),a.get("project",""),a.get("container_name")) == (c.get("runtime"),c.get("project",""),c.get("name"))}
@@ -666,7 +675,15 @@ def ingest(conn, host_id, node_id, ts, data):
             facts = [f"{labels[k]} {payload.get('values', {}).get(k, 0):g}，提醒门槛 {payload.get('thresholds', {}).get(k, 0):g}" for k in labels if payload.get('signals', {}).get(k)]
             title = '实例使用情况超出提醒范围'
             message = '；'.join(facts) + '。此策略用于提醒，自动停机由独立的连续超标保护规则决定。'
-        generated.append({"runtime":parts[1],"project":parts[2],"container_name":parts[3],"type":"ops_"+row["kind"],"severity":payload.get("severity","warning"),"title":title,"message":message,"observation":payload,"data_stale":payload['data_stale'],"value":payload.get('rate_mbps',0),"threshold":payload.get('capacity_mbps',0)*payload.get('ratio',0)})
+            socket_abuse = payload.get('socket_abuse') if isinstance(payload.get('socket_abuse'), dict) else {}
+            if payload.get('signals', {}).get('connections') and socket_abuse.get('compact_basis_text'):
+                message = f"{message} {socket_abuse['compact_basis_text']}"
+        alert_item = {"runtime":parts[1],"project":parts[2],"container_name":parts[3],"type":"ops_"+row["kind"],"severity":payload.get("severity","warning"),"title":title,"message":message,"observation":payload,"data_stale":payload['data_stale'],"value":payload.get('rate_mbps',0),"threshold":payload.get('capacity_mbps',0)*payload.get('ratio',0)}
+        if isinstance(payload.get("socket_abuse"), dict):
+            alert_item["socket_abuse"] = payload["socket_abuse"]
+        if isinstance(payload.get("connection_metrics"), dict):
+            alert_item["connection_metrics"] = payload["connection_metrics"]
+        generated.append(alert_item)
     return generated
 
 
