@@ -381,6 +381,9 @@ export interface SocketAbuseIpDetail {
   syn_recv_connections?: number;
   syn_sent_connections?: number;
   ports?: number[];
+  local_ports?: number[];
+  network_kind?: 'relay' | 'datacenter' | 'access' | 'unknown' | string;
+  network_label?: string;
   country?: string;
   country_name?: string;
   region?: string;
@@ -388,6 +391,58 @@ export interface SocketAbuseIpDetail {
   isp?: string;
   asn?: string;
   geo_label?: string;
+}
+
+export interface SocketAbuseProcessCommand {
+  pid: number;
+  process: string;
+  command: string;
+  listeners?: string[];
+  forwards?: string[];
+}
+
+export interface SocketAbuseSourceNetwork {
+  label: string;
+  kind: 'relay' | 'datacenter' | 'access' | 'unknown' | string;
+  asn?: string;
+  isp?: string;
+  ips: number;
+  established_connections: number;
+  sample_ips?: string[];
+}
+
+export interface SocketAbuseOutboundPort {
+  port: number;
+  label?: string;
+  connections: number;
+  unique_ips: number;
+  share: number;
+}
+
+export interface SocketAbuseScenario {
+  key: string;
+  label: string;
+  likelihood: 'high' | 'medium' | 'low' | string;
+  basis: string;
+}
+
+export interface SocketAbuseInvestigation {
+  schema?: number;
+  source_networks?: SocketAbuseSourceNetwork[];
+  estimated_independent_sources?: { low: number; high: number };
+  relay_ips?: number;
+  relay_share?: number;
+  classified_ips?: number;
+  outbound_port_mix?: SocketAbuseOutboundPort[];
+  outbound_web_share?: number;
+  outbound_orgs?: Array<{ org: string; asn?: string; ips: number; connections: number }>;
+  proxy_symmetry?: number;
+  proxy_like?: boolean;
+  direction_ratio?: number;
+  proxy_processes?: SocketAbuseProcessCommand[];
+  has_forward_chain?: boolean;
+  scenarios?: SocketAbuseScenario[];
+  notes?: string[];
 }
 
 export interface SocketAbuseCategory {
@@ -420,6 +475,7 @@ export interface SocketAbuseAssessment {
   primary_threshold?: number;
   categories?: SocketAbuseCategory[];
   dimensions?: SocketAbuseDimension[];
+  investigation?: SocketAbuseInvestigation;
   judgment_basis?: string[];
   compact_basis_text?: string;
 }

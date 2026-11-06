@@ -2099,6 +2099,7 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
                     "connections": count,
                     "established_connections": inbound_ip_established.get(ip, 0),
                     "syn_recv_connections": inbound_ip_syn_recv.get(ip, 0),
+                    "local_ports": sorted(int(p) for p in inbound_source_ports.get(ip, set()) if int(p) > 0)[:6],
                 }
                 for ip, count in sorted(
                     inbound_ip_connections.items(), key=lambda item: item[1], reverse=True
@@ -4385,9 +4386,12 @@ def _enrich_socket_ips_geoip(security: Dict[str, object], allow_network: bool = 
             state_str = str(sock.get("state") or "").upper()
             info = in_map.setdefault(
                 rip,
-                {"connections": 0, "established_connections": 0, "syn_recv_connections": 0},
+                {"connections": 0, "established_connections": 0, "syn_recv_connections": 0, "local_ports": set()},
             )
             info["connections"] += 1
+            _, lport = _parse_socket_endpoint(str(sock.get("local") or ""))
+            if lport > 0:
+                info["local_ports"].add(lport)
             if state_str in ("ESTAB", "ESTABLISHED"):
                 info["established_connections"] += 1
             elif state_str in ("SYN-RECV", "SYN_RECV"):
@@ -4398,6 +4402,7 @@ def _enrich_socket_ips_geoip(security: Dict[str, object], allow_network: bool = 
                 "connections": int(info["connections"]),
                 "established_connections": int(info["established_connections"]),
                 "syn_recv_connections": int(info["syn_recv_connections"]),
+                "local_ports": sorted(info["local_ports"])[:6],
             }
             for ip, info in sorted(
                 in_map.items(),
@@ -4465,6 +4470,276 @@ def _fmt_rate_bps(bps: float) -> str:
     if val >= 1024:
         return f"{val / 1024:.1f} KB/s"
     return f"{val:.0f} B/s"
+
+
+_PROXY_LISTEN_FLAGS = {"-L", "--listen", "-l", "--local", "-listen"}
+_PROXY_FORWARD_FLAGS = {"-F", "--forward", "-forward", "--upstream", "--proxy"}
+
+
+def _socks_process_commands(process_output: str, pids: set) -> List[Dict[str, object]]:
+    """Return redacted launch arguments, listener specs, and upstream chains for proxy PIDs."""
+    wanted = {int(p) for p in (pids or set()) if int(p or 0) > 1}
+    if not wanted or not isinstance(process_output, str):
+        return []
+    rows: List[Dict[str, object]] = []
+    seen: set = set()
+    for line in process_output.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        if pid not in wanted or pid in seen:
+            continue
+        seen.add(pid)
+        # `ps -eo pid=,stat=,comm=,args=` puts stat second; the fallback omits it.
+        if len(parts) == 4 and re.fullmatch(r"[A-Za-z<+lNsI]{1,6}", parts[1] or ""):
+            process, args = parts[2], parts[3]
+        else:
+            process, args = parts[1], " ".join(parts[2:])
+        command = _redact_process_command(args)
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        listeners: List[str] = []
+        forwards: List[str] = []
+        for index, token in enumerate(tokens):
+            flag, _, inline = token.partition("=")
+            value = inline if inline else (tokens[index + 1] if index + 1 < len(tokens) else "")
+            if flag in _PROXY_LISTEN_FLAGS and value:
+                listeners.append(value[:160])
+            elif flag in _PROXY_FORWARD_FLAGS and value:
+                forwards.append(value[:160])
+        rows.append({
+            "pid": pid,
+            "process": str(process)[:60],
+            "command": command[:400],
+            "listeners": listeners[:6],
+            "forwards": forwards[:6],
+        })
+        if len(rows) >= 4:
+            break
+    return rows
+
+
+_RELAY_NETWORKS_V4 = (("104.28.0.0/16", "Cloudflare WARP 中继出口"),)
+_RELAY_NETWORKS_V6 = (("2a09:bac0::/29", "Cloudflare WARP 中继出口"),)
+_DATACENTER_KEYWORDS = (
+    "amazon", "aws", "google", "microsoft", "azure", "oracle", "digitalocean", "ovh", "hetzner",
+    "linode", "akamai", "vultr", "choopa", "alibaba", "aliyun", "tencent", "m247", "leaseweb",
+    "contabo", "datacamp", "cdn77", "fastly", "hostinger", "colocrossing", "psychz", "cogent",
+)
+_OUTBOUND_PORT_LABELS = {
+    443: "HTTPS", 80: "HTTP", 53: "DNS", 853: "DoT", 8443: "HTTPS-Alt", 8080: "HTTP-Alt",
+    5228: "Google FCM/Play", 5222: "XMPP/推送", 5223: "Apple APNs", 3478: "STUN/WebRTC",
+    22: "SSH", 25: "SMTP", 465: "SMTPS", 587: "SMTP-Sub", 993: "IMAPS", 995: "POP3S",
+    1935: "RTMP", 6881: "BitTorrent", 51413: "BitTorrent", 123: "NTP",
+}
+
+
+def _classify_source_network(ip: str, isp: str = "", asn: str = "") -> Tuple[str, str]:
+    """Classify an inbound source network without treating relays as independent users."""
+    try:
+        addr = ipaddress.ip_address(str(ip or "").strip())
+    except ValueError:
+        return "unknown", ""
+    for cidr, label in (_RELAY_NETWORKS_V6 if addr.version == 6 else _RELAY_NETWORKS_V4):
+        if addr in ipaddress.ip_network(cidr):
+            return "relay", label
+    asn_upper = str(asn or "").upper()
+    isp_lower = str(isp or "").lower()
+    if asn_upper == "AS36183":
+        return "relay", "iCloud Private Relay 中继"
+    if "cloudflare" in isp_lower or asn_upper in {"AS13335", "AS209242"}:
+        return "relay", "Cloudflare 网络"
+    if any(keyword in isp_lower for keyword in _DATACENTER_KEYWORDS):
+        return "datacenter", "数据中心 / IDC"
+    if isp_lower:
+        return "access", "接入网 (家宽 / 移动)"
+    return "unknown", ""
+
+
+def _source_network_key(ip: str, kind: str, label: str, asn: str, isp: str) -> str:
+    if kind == "relay":
+        return f"relay:{label}"
+    try:
+        addr = ipaddress.ip_address(str(ip or "").strip())
+        prefix = ipaddress.ip_network(f"{addr}/{48 if addr.version == 6 else 24}", strict=False)
+    except ValueError:
+        prefix = None
+    return f"{asn or isp or 'unknown'}:{prefix}"
+
+
+def _build_socket_investigation(
+    security: Dict[str, object],
+    inbound_top_ips: List[Dict[str, object]],
+    outbound_top_ips: List[Dict[str, object]],
+    outbound_top_ports: List[Dict[str, object]],
+    incoming_established: int,
+    outbound_established: int,
+    inbound_established_ips: int,
+    outbound_unique_ips: int,
+    socks_detected: bool,
+    socks_auth_mode: str,
+    rx_bps: float,
+    tx_bps: float,
+) -> Dict[str, object]:
+    """Structured, observation-only context that helps an operator judge proxy usage."""
+    groups: Dict[str, Dict[str, object]] = {}
+    relay_ips = 0
+    classified = 0
+    for item in inbound_top_ips[:20]:
+        if not isinstance(item, dict) or not item.get("ip"):
+            continue
+        ip_str = str(item.get("ip"))
+        if not _is_public_source_ip(ip_str):
+            continue
+        isp = str(item.get("isp") or "")
+        asn = str(item.get("asn") or "")
+        kind, label = _classify_source_network(ip_str, isp, asn)
+        item["network_kind"] = kind
+        item["network_label"] = label
+        classified += 1
+        if kind == "relay":
+            relay_ips += 1
+        key = _source_network_key(ip_str, kind, label, asn, isp)
+        group = groups.setdefault(key, {
+            "label": label or isp or asn or "未知网络",
+            "kind": kind,
+            "asn": asn,
+            "isp": isp,
+            "ips": 0,
+            "established_connections": 0,
+            "sample_ips": [],
+        })
+        group["ips"] = int(group["ips"]) + 1
+        group["established_connections"] = int(group["established_connections"]) + int(item.get("established_connections") or 0)
+        if len(group["sample_ips"]) < 3:
+            group["sample_ips"].append(ip_str)
+    source_networks = sorted(groups.values(), key=lambda g: (int(g["ips"]), int(g["established_connections"])), reverse=True)[:8]
+    estimated_low = max(1, len(groups)) if classified else 0
+    estimated_high = max(estimated_low, inbound_established_ips)
+    relay_share = round(relay_ips / classified, 3) if classified else 0.0
+
+    total_port_conns = sum(int(p.get("connections") or 0) for p in outbound_top_ports if isinstance(p, dict))
+    port_mix = []
+    for p in outbound_top_ports[:6]:
+        if not isinstance(p, dict):
+            continue
+        port = int(p.get("port") or 0)
+        conns = int(p.get("connections") or 0)
+        port_mix.append({
+            "port": port,
+            "label": _OUTBOUND_PORT_LABELS.get(port, str(p.get("service") or "")),
+            "connections": conns,
+            "unique_ips": int(p.get("unique_ips") or 0),
+            "share": round(conns / total_port_conns, 3) if total_port_conns else 0.0,
+        })
+    web_conns = sum(int(p["connections"]) for p in port_mix if p["port"] in (80, 443, 8080, 8443))
+    web_share = round(web_conns / total_port_conns, 3) if total_port_conns else 0.0
+
+    org_map: Dict[str, Dict[str, object]] = {}
+    for item in outbound_top_ips[:20]:
+        if not isinstance(item, dict):
+            continue
+        org = str(item.get("isp") or "").strip() or "未解析归属"
+        entry = org_map.setdefault(org[:48], {"org": org[:48], "asn": str(item.get("asn") or ""), "ips": 0, "connections": 0})
+        entry["ips"] = int(entry["ips"]) + 1
+        entry["connections"] = int(entry["connections"]) + int(item.get("connections") or 0)
+    outbound_orgs = sorted(org_map.values(), key=lambda e: (int(e["connections"]), int(e["ips"])), reverse=True)[:6]
+
+    pair_max = max(incoming_established, outbound_established, 1)
+    symmetry = round(min(incoming_established, outbound_established) / pair_max, 3) if incoming_established and outbound_established else 0.0
+    proxy_like = bool(socks_detected or (incoming_established >= 10 and outbound_established >= 10 and symmetry >= 0.6))
+    direction_ratio = round(tx_bps / rx_bps, 2) if rx_bps > 0 else 0.0
+
+    socks_proxy = security.get("socks_proxy") if isinstance(security.get("socks_proxy"), dict) else {}
+    proxy_processes = [
+        p for p in (socks_proxy.get("process_commands") if isinstance(socks_proxy.get("process_commands"), list) else [])
+        if isinstance(p, dict)
+    ][:4]
+    has_forward_chain = any(p.get("forwards") for p in proxy_processes)
+    relay_labels = sorted({str(g["label"]) for g in groups.values() if g["kind"] == "relay"})
+
+    def level(score: int) -> str:
+        return "high" if score >= 2 else "medium" if score == 1 else "low"
+
+    scenarios = []
+    personal_score = (2 if relay_share >= 0.6 and estimated_low <= 2 else 1 if relay_share >= 0.3 or estimated_low <= 2 else 0) if proxy_like else 0
+    scenarios.append({
+        "key": "personal_relay_proxy",
+        "label": "个人自用代理（含 WARP/中继二级代理）",
+        "likelihood": level(personal_score),
+        "basis": (
+            f"{relay_ips}/{classified} 个来源 IP 属中继网络，估算独立来源网络 {estimated_low} 个"
+            + ("，出站以 HTTPS 为主" if web_share >= 0.6 else "")
+        ),
+    })
+    share_score = 2 if estimated_low >= 6 else 1 if estimated_low >= 3 or (inbound_established_ips >= 6 and relay_share < 0.6) else 0
+    scenarios.append({
+        "key": "multi_device_sharing",
+        "label": "多设备共用 / 小规模共享",
+        "likelihood": level(share_score),
+        "basis": f"已建连来源 {inbound_established_ips} 个 IP、{estimated_low} 个独立网络，入站活跃 {incoming_established} 条",
+    })
+    commercial_score = 2 if estimated_low >= 8 and (incoming_established >= 150 or tx_bps >= 5 * 1024 * 1024) else 1 if estimated_low >= 5 and incoming_established >= 60 else 0
+    scenarios.append({
+        "key": "commercial_proxy_exit",
+        "label": "商业共享 / 机场出口",
+        "likelihood": level(commercial_score),
+        "basis": f"独立来源网络 {estimated_low} 个，出站 {_fmt_rate_bps(tx_bps)}，入站活跃 {incoming_established} 条",
+    })
+    automation_score = 1 if outbound_unique_ips >= 80 and estimated_low <= 2 else 0
+    scenarios.append({
+        "key": "automation_relay",
+        "label": "自动化程序 / 爬虫中转",
+        "likelihood": level(automation_score),
+        "basis": f"出站目标 {outbound_unique_ips} 个 IP，Web 端口占比 {web_share * 100:.0f}%，来源网络 {estimated_low} 个",
+    })
+
+    notes: List[str] = []
+    if relay_ips:
+        notes.append(
+            f"{relay_ips} 个来源 IP 属 {'、'.join(relay_labels) or '中继'}；同一用户经中继重连或多出口会表现为多个 IP，不能按独立用户计数。"
+        )
+    if proxy_like and symmetry:
+        notes.append(
+            f"入站 {incoming_established} / 出站 {outbound_established} 条活跃连接，对称度 {symmetry * 100:.0f}%，符合 TCP 代理一进一出转发特征。"
+        )
+    if rx_bps > 0 and tx_bps > 0:
+        if 0.67 <= direction_ratio <= 1.5:
+            notes.append(f"出站 {_fmt_rate_bps(tx_bps)} 与入站 {_fmt_rate_bps(rx_bps)} 基本持平，连接数比带宽消耗更突出。")
+        else:
+            notes.append(f"出站 {_fmt_rate_bps(tx_bps)} / 入站 {_fmt_rate_bps(rx_bps)}（约 {direction_ratio:.1f} 倍）。")
+    if port_mix:
+        top = port_mix[0]
+        notes.append(f"出站以 {top['port']}{('/' + top['label']) if top['label'] else ''} 为主（占 {top['share'] * 100:.0f}%），共 {outbound_unique_ips} 个目标 IP。")
+    if any(p["port"] == 5228 for p in port_mix):
+        notes.append("5228 为 Google FCM 推送常用端口，只能说明有持续联网应用，不足以证明运行模拟器。")
+    if socks_detected and socks_auth_mode in ("unknown", ""):
+        notes.append("SOCKS5 认证模式 unknown 表示未能读取配置，不等于无密码开放代理。")
+    if has_forward_chain:
+        notes.append("代理进程带有上游转发 (-F) 参数，可能为多级代理 / 中转链路。")
+    notes.append("以上为连接特征推测，未通过应用日志还原，不作为认定用户身份或处罚的依据。")
+
+    return {
+        "schema": 1,
+        "source_networks": source_networks,
+        "estimated_independent_sources": {"low": estimated_low, "high": estimated_high},
+        "relay_ips": relay_ips,
+        "relay_share": relay_share,
+        "classified_ips": classified,
+        "outbound_port_mix": port_mix,
+        "outbound_web_share": web_share,
+        "outbound_orgs": outbound_orgs,
+        "proxy_symmetry": symmetry,
+        "proxy_like": proxy_like,
+        "direction_ratio": direction_ratio,
+        "proxy_processes": proxy_processes,
+        "has_forward_chain": has_forward_chain,
+        "scenarios": scenarios,
+        "notes": notes[:8],
+    }
 
 
 def _evaluate_socket_abuse(
@@ -4671,6 +4946,23 @@ def _evaluate_socket_abuse(
                 ),
             })
 
+    investigation = _build_socket_investigation(
+        security, inbound_top_ips, outbound_top_ips, outbound_top_ports,
+        incoming_established, outbound_established, inbound_established_ips,
+        outbound_unique_ips, socks_detected, socks_auth_mode, rx_bps, tx_bps,
+    )
+    relay_low = int((investigation.get("estimated_independent_sources") or {}).get("low") or 0)
+    for category in categories:
+        if category.get("code") != "shared_proxy_socks_abuse":
+            continue
+        if int(investigation.get("relay_ips") or 0) > 0:
+            category["reason"] = (
+                str(category.get("reason") or "")
+                + f"；其中 {investigation.get('relay_ips')} 个来源 IP 属中继网络，估算独立来源网络约 {relay_low} 个"
+            )
+        if relay_low <= 2 and socks_auth_mode not in ("no_auth", "weak_password"):
+            category["severity"] = "warning"
+
     suspected = len(categories) > 0
 
     # Build the 4 structured dimensions
@@ -4708,7 +5000,7 @@ def _evaluate_socket_abuse(
 
     top_ip_items = []
     top_inbound_ip_details = []
-    for item in inbound_top_ips[:6]:
+    for item in inbound_top_ips[:8]:
         if isinstance(item, dict) and item.get("ip"):
             ip_str = str(item.get("ip"))
             est_c = int(item.get("established_connections") or 0)
@@ -4721,6 +5013,9 @@ def _evaluate_socket_abuse(
                 "connections": tot_c,
                 "established_connections": est_c,
                 "syn_recv_connections": int(item.get("syn_recv_connections") or 0),
+                "local_ports": [int(p) for p in (item.get("local_ports") or []) if str(p).isdigit()][:4],
+                "network_kind": str(item.get("network_kind") or ""),
+                "network_label": str(item.get("network_label") or ""),
                 "country": str(item.get("country") or "UN"),
                 "country_name": str(item.get("country_name") or ""),
                 "region": str(item.get("region") or ""),
@@ -4732,7 +5027,7 @@ def _evaluate_socket_abuse(
 
     top_outbound_ip_items = []
     top_outbound_ip_details = []
-    for item in outbound_top_ips[:6]:
+    for item in outbound_top_ips[:8]:
         if isinstance(item, dict) and item.get("ip"):
             ip_str = str(item.get("ip"))
             est_c = int(item.get("established_connections") or 0)
@@ -4997,6 +5292,7 @@ def _evaluate_socket_abuse(
         "primary_threshold": primary_threshold,
         "categories": categories,
         "dimensions": dimensions,
+        "investigation": investigation,
         "judgment_basis": judgment_basis,
         "compact_basis_text": compact_basis_text,
     }
@@ -8070,6 +8366,10 @@ def collect_panel_pairing_indicators(
     result["socks_proxy"] = {
         "detected": bool(socks_process_matches),
         "process_matches": socks_process_matches,
+        "process_commands": _socks_process_commands(
+            process_output,
+            {int(m.get("pid") or 0) for m in socks_process_matches if isinstance(m, dict)},
+        ),
         "config_files": socks_config.get("config_files", []),
         "auth_mode": socks_auth_mode,
         "inbound_endpoints": endpoints,
@@ -10225,7 +10525,8 @@ def _redact_process_command(command: str) -> str:
             r"\1 [REDACTED]",
             value,
         )
-    value = re.sub(r"(?i)(https?://[^\s:/]+:)[^@\s]+@", r"\1[REDACTED]@", value)
+    value = re.sub(r"(?i)([a-z][a-z0-9+.\-]{1,30}://[^\s:/@]+:)[^@\s]+@", r"\1[REDACTED]@", value)
+    value = re.sub(r"(?i)([?&](?:auth|key|secret|token|password|pass|psk)=)[^&\s]+", r"\1[REDACTED]", value)
     return value[:500]
 
 
