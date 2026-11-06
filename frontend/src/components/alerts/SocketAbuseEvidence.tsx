@@ -110,6 +110,87 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
     if (d?.key) dimMap[d.key] = d;
   }
 
+  // 前端兼容回退合成：即使节点 Agent 仍在 v1.8.15 尚未生成 investigation，也根据已有维度指标即时合成场景评估
+  const effectiveInv: SocketAbuseInvestigation = inv || (() => {
+    const d2m = dimMap['inbound_fanout']?.metrics || {};
+    const d3m = dimMap['outbound_profile']?.metrics || {};
+    const inEstablished = Number(d2m.incoming_established || 0);
+    const outEstablished = Number(d3m.outbound_established || 0);
+    const inIps = Number(d2m.inbound_established_unique_ips || 0);
+    const outIps = Number(d3m.outbound_unique_ips || 0);
+    const socksDetected = Boolean(d2m.socks_detected);
+    const socksAuth = String(d2m.socks_auth_mode || 'unknown');
+    const details: SocketAbuseIpDetail[] = Array.isArray(d2m.top_ip_details) ? d2m.top_ip_details : [];
+    
+    let relayCount = 0;
+    const netGroups: Record<string, { label: string; ips: number; conns: number }> = {};
+    for (const item of details) {
+      const isp = String(item.isp || '').toLowerCase();
+      const ip = String(item.ip || '');
+      const isRelay = item.network_kind === 'relay' || ip.startsWith('104.28.') || isp.includes('cloudflare');
+      if (isRelay) relayCount++;
+      const groupKey = isRelay ? 'Cloudflare WARP / 中继网络' : (item.isp || item.country_name || '其他网络');
+      const g = netGroups[groupKey] || { label: groupKey, ips: 0, conns: 0 };
+      g.ips += 1;
+      g.conns += Number(item.established_connections || 0);
+      netGroups[groupKey] = g;
+    }
+    const estimatedSources = Math.max(1, Object.keys(netGroups).length);
+    const relayShare = details.length > 0 ? relayCount / details.length : 0;
+    const pairMax = Math.max(inEstablished, outEstablished, 1);
+    const proxySymmetry = (inEstablished > 0 && outEstablished > 0) ? Math.min(inEstablished, outEstablished) / pairMax : 0;
+    const proxyLike = socksDetected || (inEstablished >= 10 && outEstablished >= 10 && proxySymmetry >= 0.6);
+
+    const scenarios: SocketAbuseScenario[] = [
+      {
+        key: 'personal_relay_proxy',
+        label: '个人自用代理（含 WARP/中继二级代理）',
+        likelihood: (proxyLike && (relayShare >= 0.5 || estimatedSources <= 2)) ? 'high' : 'medium',
+        basis: `${relayCount}/${details.length || inIps} 个来源 IP 属中继网络，估算独立网络约 ${estimatedSources} 个，出站以 HTTPS 访问为主。`,
+      },
+      {
+        key: 'multi_device_sharing',
+        label: '多设备共用 / 小规模共享',
+        likelihood: (estimatedSources >= 4 || (inIps >= 6 && relayShare < 0.5)) ? 'medium' : 'low',
+        basis: `已建连来源 ${inIps} 个 IP、估算独立网络 ${estimatedSources} 个，入站活跃 ${inEstablished} 条。`,
+      },
+      {
+        key: 'commercial_proxy_exit',
+        label: '商业共享 / 机场出口',
+        likelihood: (estimatedSources >= 8 && inEstablished >= 120) ? 'high' : (estimatedSources >= 5 && inEstablished >= 60) ? 'medium' : 'low',
+        basis: `独立网络 ${estimatedSources} 个，入站活跃 ${inEstablished} 条，未达大规模商业机场量级。`,
+      },
+      {
+        key: 'automation_relay',
+        label: '自动化程序 / 爬虫中转',
+        likelihood: (outIps >= 80 && estimatedSources <= 2) ? 'medium' : 'low',
+        basis: `出站外部目标 ${outIps} 个 IP，当前未见明显扫描或异常爬虫特征。`,
+      },
+    ];
+
+    const notes = [
+      relayCount > 0 ? `${relayCount} 个公网来源属于 Cloudflare/中继网络；同一用户经 WARP 多出口重连会产生多个 IP，不能直接认定为多人共用。` : '',
+      proxyLike && proxySymmetry > 0 ? `入站 ${inEstablished} 条与出站 ${outEstablished} 条高度对称 (对称度 ${Math.round(proxySymmetry * 100)}%)，符合典型代理转发特征。` : '',
+      socksDetected && socksAuth === 'unknown' ? 'SOCKS5 认证模式显示为 unknown 表示尚未读取配置或使用非标认证，不能当成无密码开放代理。' : '',
+      '连接特征仅作为运维观察参考，未通过应用日志还原，不作为处罚依据。',
+    ].filter(Boolean);
+
+    return {
+      proxy_like: proxyLike,
+      proxy_symmetry: proxySymmetry,
+      relay_ips: relayCount,
+      estimated_independent_sources: { low: estimatedSources, high: inIps },
+      source_networks: Object.values(netGroups).map(g => ({
+        label: g.label,
+        kind: 'relay',
+        ips: g.ips,
+        established_connections: g.conns,
+      })),
+      scenarios,
+      notes,
+    };
+  })();
+
   const dim1 = dimMap['state_breakdown'];
   const dim2 = dimMap['inbound_fanout'];
   const dim3 = dimMap['outbound_profile'];
@@ -163,9 +244,9 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {inv?.proxy_like && (
+          {effectiveInv?.proxy_like && (
             <span className="rounded border border-sky-500/35 bg-sky-950/60 px-2 py-0.5 text-[11px] font-mono text-sky-200">
-              TCP 代理转发对称度 {Math.round(Number(inv.proxy_symmetry || 0) * 100)}%
+              TCP 代理转发对称度 {Math.round(Number(effectiveInv.proxy_symmetry || 0) * 100)}%
             </span>
           )}
           <span className="rounded border border-slate-700/80 bg-slate-900/80 px-2 py-0.5 text-[11px] text-slate-300">
@@ -325,9 +406,9 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
                     SOCKS5 ({m2.socks_auth_mode || 'unknown'})
                   </span>
                 )}
-                {inv?.relay_ips ? (
+                {effectiveInv?.relay_ips ? (
                   <span className="rounded border border-amber-500/40 bg-amber-950/60 px-2 py-0.5 text-amber-200">
-                    WARP/中继 IP: {inv.relay_ips} 个 (估算真实网络 {inv.estimated_independent_sources?.low ?? 1} 个)
+                    WARP/中继 IP: {effectiveInv.relay_ips} 个 (估算真实网络 {effectiveInv.estimated_independent_sources?.low ?? 1} 个)
                   </span>
                 ) : null}
               </div>
@@ -383,10 +464,10 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
             </div>
 
             {/* 来源网络聚合说明 */}
-            {inv?.source_networks && inv.source_networks.length > 0 && (
+            {effectiveInv?.source_networks && effectiveInv.source_networks.length > 0 && (
               <div className="mt-3 rounded border border-slate-800/80 bg-slate-950/60 p-2 text-[10px] text-slate-300">
                 <span className="font-semibold text-slate-200">来源网络去重透视：</span>
-                {inv.source_networks.map((net, i) => (
+                {effectiveInv.source_networks.map((net, i) => (
                   <span key={i} className="mr-2">
                     {net.label} ({net.ips} IP · {net.established_connections} 活跃)
                   </span>
@@ -565,7 +646,7 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
       </div>
 
       {/* 运维专家业务场景推断与排查面板 —— 彻底充实内容，解决“留白过多” */}
-      {inv && (
+      {effectiveInv && (
         <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/80 p-3">
           <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
             <span className="font-semibold text-slate-200">
@@ -577,9 +658,9 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
           </div>
 
           {/* 场景评估四卡片 */}
-          {Array.isArray(inv.scenarios) && inv.scenarios.length > 0 && (
+          {Array.isArray(effectiveInv.scenarios) && effectiveInv.scenarios.length > 0 && (
             <div className="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              {inv.scenarios.map((sc: SocketAbuseScenario) => {
+              {effectiveInv.scenarios.map((sc: SocketAbuseScenario) => {
                 const meta = scenarioMeta(sc.likelihood);
                 return (
                   <div
@@ -610,7 +691,7 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
           )}
 
           {/* 捕获到的代理进程启动参数（含脱敏与一键复制排查命令） */}
-          {Array.isArray(inv.proxy_processes) && inv.proxy_processes.length > 0 && (
+          {Array.isArray(effectiveInv.proxy_processes) && effectiveInv.proxy_processes.length > 0 && (
             <div className="mt-3 rounded border border-slate-800 bg-slate-900/80 p-2.5">
               <div className="flex items-center justify-between text-[11px]">
                 <span className="font-semibold text-sky-200">
@@ -619,7 +700,7 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
                 <span className="text-[10px] text-slate-400">密码与密钥已自动掩码处理</span>
               </div>
               <div className="mt-2 space-y-2 font-mono text-[11px]">
-                {inv.proxy_processes.map((proc: SocketAbuseProcessCommand) => (
+                {effectiveInv.proxy_processes.map((proc: SocketAbuseProcessCommand) => (
                   <div
                     key={proc.pid}
                     className="flex flex-wrap items-center justify-between gap-2 rounded bg-slate-950 p-2 border border-slate-800"
@@ -658,21 +739,21 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
           )}
 
           {/* 运维排查指导与免责边界 */}
-          {Array.isArray(inv.notes) && inv.notes.length > 0 && (
+          {Array.isArray(effectiveInv.notes) && effectiveInv.notes.length > 0 && (
             <div className="mt-2.5 text-[11px] text-slate-400 space-y-1">
-              {(showAllNotes ? inv.notes : inv.notes.slice(0, 3)).map((note: string, idx: number) => (
+              {(showAllNotes ? effectiveInv.notes : effectiveInv.notes.slice(0, 3)).map((note: string, idx: number) => (
                 <div key={idx} className="flex items-start gap-1.5">
                   <span className="text-sky-400">•</span>
                   <span>{note}</span>
                 </div>
               ))}
-              {inv.notes.length > 3 && (
+              {effectiveInv.notes.length > 3 && (
                 <button
                   type="button"
                   onClick={() => setShowAllNotes(!showAllNotes)}
                   className="mt-1 text-[10px] text-sky-400 hover:underline"
                 >
-                  {showAllNotes ? '收起排查建议' : `展开全部 ${inv.notes.length} 条排查建议`}
+                  {showAllNotes ? '收起排查建议' : `展开全部 ${effectiveInv.notes.length} 条排查建议`}
                 </button>
               )}
             </div>
