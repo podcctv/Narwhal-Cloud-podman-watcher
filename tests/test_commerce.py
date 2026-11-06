@@ -450,5 +450,54 @@ class CommerceHTTPTests(unittest.TestCase):
         self.assertTrue(self.client.get("/api/v1/commerce/overview").json()["stale"])
 
 
+    def test_daily_and_monthly_analytics(self):
+        self.login(viewer=True)
+        self.save()
+        self.seed()
+        daily = self.client.get("/api/v1/commerce/daily-analytics").json()
+        self.assertIn("daily", daily)
+        self.assertIn("today_summary", daily)
+        self.assertTrue(len(daily["daily"]) > 0)
+
+        monthly = self.client.get("/api/v1/commerce/monthly-analytics").json()
+        self.assertIsInstance(monthly, list)
+        self.assertTrue(len(monthly) > 0)
+        self.assertIn("orders_count", monthly[0])
+
+    def test_risk_analysis_and_loyalty_users(self):
+        self.login(viewer=True)
+        self.save()
+        self.seed()
+        risk = self.client.get("/api/v1/commerce/risk-analysis").json()
+        self.assertIn("abnormal_machines", risk)
+        self.assertIn("abnormal_users", risk)
+        self.assertIn("watchlist", risk)
+
+        loyalty = self.client.get("/api/v1/commerce/loyalty-users").json()
+        self.assertIsInstance(loyalty, list)
+
+    def test_notification_settings_persistence(self):
+        self.login(viewer=True)
+        settings = self.client.get("/api/v1/commerce/notification-settings").json()
+        self.assertTrue(settings["auto_sync"])
+        self.assertEqual(settings["interval_seconds"], 300)
+
+        update_res = self.client.post("/api/v1/commerce/notification-settings", json={
+            "auto_sync": True,
+            "interval_seconds": 600,
+            "tg_notify_orders": True,
+            "tg_notify_refunds": True,
+            "tg_daily_digest": True,
+            "tg_monthly_digest": False,
+            "digest_hour": 9
+        }, headers=self.headers).json()
+        self.assertTrue(update_res["ok"])
+
+        updated = self.client.get("/api/v1/commerce/notification-settings").json()
+        self.assertEqual(updated["interval_seconds"], 600)
+        self.assertEqual(updated["digest_hour"], 9)
+        self.assertFalse(updated["tg_monthly_digest"])
+
+
 if __name__ == "__main__":
     unittest.main()

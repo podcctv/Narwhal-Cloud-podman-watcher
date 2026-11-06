@@ -6732,9 +6732,29 @@ async def security_action_result(
     return signed_json_response({"ok": True, "action_id": action_id}, x_timestamp)
 
 
+def broadcast_commerce_telegram(text: str, parse_mode: str = "HTML") -> int:
+    conn = db()
+    try:
+        bots = conn.execute("SELECT id, token, target FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
+    finally:
+        conn.close()
+    sent_count = 0
+    for bot in bots:
+        try:
+            target_chat_id, thread_id = _parse_telegram_target(bot["target"])
+            payload = {"chat_id": target_chat_id, "text": text, "parse_mode": parse_mode}
+            if thread_id is not None:
+                payload["message_thread_id"] = thread_id
+            _telegram_api(bot["token"], "sendMessage", payload)
+            sent_count += 1
+        except Exception as exc:
+            logger.warning("Failed to send commerce notification via bot %s: %s", bot["id"], exc)
+    return sent_count
+
+
 operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup_old_reports, lambda: APP_VERSION, lambda: DASHBOARD_USERNAME)
 disk_cleanup.attach(app,db)
-commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD))
+commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD), broadcast_commerce_telegram)
 tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
 gfw_monitor.attach(app, db, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)

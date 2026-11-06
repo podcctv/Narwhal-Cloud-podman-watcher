@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
@@ -59,6 +59,23 @@ def initialize(conn):
         upstream_user TEXT NOT NULL, updated_at INTEGER NOT NULL,
         synced_at INTEGER NOT NULL DEFAULT 0, snapshot TEXT, last_error TEXT NOT NULL DEFAULT '',
         binding TEXT NOT NULL DEFAULT '', sync_token TEXT NOT NULL DEFAULT '', sync_started INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS commerce_notification_settings(
+        username TEXT PRIMARY KEY,
+        auto_sync INTEGER NOT NULL DEFAULT 1,
+        interval_seconds INTEGER NOT NULL DEFAULT 300,
+        tg_notify_orders INTEGER NOT NULL DEFAULT 1,
+        tg_notify_refunds INTEGER NOT NULL DEFAULT 1,
+        tg_daily_digest INTEGER NOT NULL DEFAULT 1,
+        tg_monthly_digest INTEGER NOT NULL DEFAULT 1,
+        digest_hour INTEGER NOT NULL DEFAULT 8,
+        last_sync_at INTEGER NOT NULL DEFAULT 0,
+        last_daily_digest_date TEXT NOT NULL DEFAULT '',
+        last_monthly_digest_date TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS commerce_notified_events(
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        notified_at INTEGER NOT NULL)""")
 
 
 def cipher(database_path):
@@ -182,6 +199,93 @@ class Client:
             if isinstance(exc, CommerceError):
                 raise
             raise CommerceError("上游连接或响应异常，旧数据已保留") from None
+
+    def post(self, path, payload):
+        remaining = self.deadline - time.monotonic()
+        with self.lock:
+            if remaining <= 0 or self.requests >= 250:
+                raise CommerceError("请求超过安全预算，请稍后重试")
+            self.requests += 1
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            BASE + path,
+            data=data,
+            headers={
+                "Authorization": "Bearer " + self.key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Narwhal-Monitor-Commerce/1",
+            },
+            method="POST",
+        )
+        try:
+            with self.transport_slots:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CommerceError("请求超过安全预算，请稍后重试")
+                with self.opener_factory().open(req, timeout=min(25, remaining)) as response:
+                    raw = response.read(2_000_001)
+            with self.lock:
+                self.bytes += len(raw)
+            payload_data = json.loads(raw, parse_float=Decimal)
+            if not isinstance(payload_data, dict) or payload_data.get("code", 0) not in (0, 200) or payload_data.get("success") is False:
+                msg = payload_data.get("msg") or "上游拒绝请求"
+                raise CommerceError(f"上游操作失败：{msg}")
+            return payload_data.get("data")
+        except urllib.error.HTTPError as exc:
+            try:
+                err_raw = exc.read(4096)
+                err_data = json.loads(err_raw)
+                err_msg = err_data.get("msg") or f"HTTP {exc.code}"
+            except Exception:
+                err_msg = f"HTTP {exc.code}"
+            raise CommerceError(f"上游请求失败：{err_msg}") from None
+        except Exception as exc:
+            if isinstance(exc, CommerceError):
+                raise
+            raise CommerceError("上游连接异常，请稍后重试") from None
+
+    def delete(self, path):
+        remaining = self.deadline - time.monotonic()
+        with self.lock:
+            if remaining <= 0 or self.requests >= 250:
+                raise CommerceError("请求超过安全预算，请稍后重试")
+            self.requests += 1
+        req = urllib.request.Request(
+            BASE + path,
+            headers={
+                "Authorization": "Bearer " + self.key,
+                "Accept": "application/json",
+                "User-Agent": "Narwhal-Monitor-Commerce/1",
+            },
+            method="DELETE",
+        )
+        try:
+            with self.transport_slots:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CommerceError("请求超时，请稍后重试")
+                with self.opener_factory().open(req, timeout=min(25, remaining)) as response:
+                    raw = response.read(2_000_001)
+            with self.lock:
+                self.bytes += len(raw)
+            payload_data = json.loads(raw, parse_float=Decimal) if raw else {"code": 0}
+            if not isinstance(payload_data, dict) or payload_data.get("code", 0) not in (0, 200) or payload_data.get("success") is False:
+                msg = payload_data.get("msg") or "上游拒绝请求"
+                raise CommerceError(f"上游操作失败：{msg}")
+            return payload_data.get("data")
+        except urllib.error.HTTPError as exc:
+            try:
+                err_raw = exc.read(4096)
+                err_data = json.loads(err_raw)
+                err_msg = err_data.get("msg") or f"HTTP {exc.code}"
+            except Exception:
+                err_msg = f"HTTP {exc.code}"
+            raise CommerceError(f"上游请求失败：{err_msg}") from None
+        except Exception as exc:
+            if isinstance(exc, CommerceError):
+                raise
+            raise CommerceError("上游连接异常，请稍后重试") from None
 
     def pages(self, path, field, paged=True):
         rows, seen, expected = [], set(), None
@@ -390,7 +494,7 @@ def snapshot(client, account):
             "machine_name": text(details.get("machine_name")),
             "amount": money(raw.get("amount")), "balance_type": text(raw.get("balance_type"), 30),
             "balance_after": money(raw.get("balance_after")), "created_at": timestamp(raw.get("created_at"))})
-    return {"profile": account, "machines": machines, "orders": orders, "transactions": transactions,
+    return {"profile": account, "machines": machines, "vms": vms, "orders": orders, "transactions": transactions,
             "source": BASE, "documentation": DOC, "currency": "USD"}
 
 
@@ -424,7 +528,490 @@ def analyse(data, start=0, end=253402300799, machine="", kind="", offset=0, limi
             "offset": offset, "limit": limit, "timezone": "UTC"}
 
 
-def attach(app, db, database_path, credentials):
+def compute_daily_analytics(snapshot, days_limit=30):
+    orders = snapshot.get("orders", [])
+    transactions = snapshot.get("transactions", [])
+
+    daily = {}
+    for o in orders:
+        status = str(o.get("status") or "").lower()
+        typ = str(o.get("type") or "").lower()
+        amt = Decimal(str(o.get("amount") or "0"))
+        day = datetime.fromtimestamp(o["created_at"], timezone.utc).strftime("%Y-%m-%d")
+        item = daily.setdefault(day, {
+            "date": day, "orders_count": 0, "orders_amount": Decimal(0),
+            "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
+            "renewals_count": 0, "purchases_count": 0
+        })
+        if status == "completed":
+            if typ in ("purchase", "buy"):
+                item["orders_count"] += 1
+                item["purchases_count"] += 1
+                item["orders_amount"] += amt
+                item["net_revenue"] += amt
+            elif typ in ("renew", "renewal"):
+                item["orders_count"] += 1
+                item["renewals_count"] += 1
+                item["orders_amount"] += amt
+                item["net_revenue"] += amt
+            elif typ == "refund":
+                item["refunds_count"] += 1
+                item["refunds_amount"] += abs(amt)
+                item["net_revenue"] -= abs(amt)
+
+    for t in transactions:
+        typ = str(t.get("type") or "").lower()
+        amt = Decimal(str(t.get("amount") or "0"))
+        day = datetime.fromtimestamp(t["created_at"], timezone.utc).strftime("%Y-%m-%d")
+        item = daily.setdefault(day, {
+            "date": day, "orders_count": 0, "orders_amount": Decimal(0),
+            "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
+            "renewals_count": 0, "purchases_count": 0
+        })
+        if typ in ("refund", "escrow_deduct"):
+            item["refunds_amount"] += abs(amt)
+            item["net_revenue"] -= abs(amt)
+
+    result = []
+    for day in sorted(daily.keys(), reverse=True)[:days_limit]:
+        row = daily[day]
+        total_ops = row["orders_count"] + row["refunds_count"]
+        rate = round(float(row["refunds_count"] / total_ops * 100), 2) if total_ops > 0 else 0.0
+        result.append({
+            "date": row["date"],
+            "orders_count": row["orders_count"],
+            "purchases_count": row["purchases_count"],
+            "renewals_count": row["renewals_count"],
+            "orders_amount": format(row["orders_amount"], "f"),
+            "refunds_count": row["refunds_count"],
+            "refunds_amount": format(row["refunds_amount"], "f"),
+            "net_revenue": format(row["net_revenue"], "f"),
+            "refund_rate": rate
+        })
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today_data = daily.get(today_str, {"orders_count": 0, "orders_amount": Decimal(0), "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0)})
+    yesterday_data = daily.get(yesterday_str, {"orders_count": 0, "orders_amount": Decimal(0), "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0)})
+
+    today_summary = {
+        "today_date": today_str,
+        "gmv": format(today_data["orders_amount"], "f"),
+        "orders_count": today_data["orders_count"],
+        "refunds_count": today_data["refunds_count"],
+        "refunds_amount": format(today_data["refunds_amount"], "f"),
+        "net_revenue": format(today_data["net_revenue"], "f"),
+        "yesterday_gmv": format(yesterday_data["orders_amount"], "f"),
+        "yesterday_net": format(yesterday_data["net_revenue"], "f"),
+    }
+    return {"daily": result, "today_summary": today_summary}
+
+
+def compute_monthly_analytics(snapshot, months_limit=12):
+    orders = snapshot.get("orders", [])
+    transactions = snapshot.get("transactions", [])
+    machines_map = {m["id"]: m.get("name") or m["id"] for m in snapshot.get("machines", [])}
+
+    monthly = {}
+    machine_sales = {}
+    for o in orders:
+        status = str(o.get("status") or "").lower()
+        typ = str(o.get("type") or "").lower()
+        amt = Decimal(str(o.get("amount") or "0"))
+        month = datetime.fromtimestamp(o["created_at"], timezone.utc).strftime("%Y-%m")
+        mid = o.get("machine_id") or "unknown"
+        item = monthly.setdefault(month, {
+            "month": month, "orders_count": 0, "orders_amount": Decimal(0),
+            "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
+            "renewals_count": 0, "purchases_count": 0
+        })
+        if status == "completed":
+            if typ in ("purchase", "buy", "renew", "renewal"):
+                item["orders_count"] += 1
+                if typ in ("purchase", "buy"):
+                    item["purchases_count"] += 1
+                else:
+                    item["renewals_count"] += 1
+                item["orders_amount"] += amt
+                item["net_revenue"] += amt
+                machine_sales[month, mid] = machine_sales.get((month, mid), Decimal(0)) + amt
+            elif typ == "refund":
+                item["refunds_count"] += 1
+                item["refunds_amount"] += abs(amt)
+                item["net_revenue"] -= abs(amt)
+
+    for t in transactions:
+        typ = str(t.get("type") or "").lower()
+        amt = Decimal(str(t.get("amount") or "0"))
+        month = datetime.fromtimestamp(t["created_at"], timezone.utc).strftime("%Y-%m")
+        item = monthly.setdefault(month, {
+            "month": month, "orders_count": 0, "orders_amount": Decimal(0),
+            "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
+            "renewals_count": 0, "purchases_count": 0
+        })
+        if typ in ("refund", "escrow_deduct"):
+            item["refunds_amount"] += abs(amt)
+            item["net_revenue"] -= abs(amt)
+
+    result = []
+    for month in sorted(monthly.keys(), reverse=True)[:months_limit]:
+        row = monthly[month]
+        total_ops = row["orders_count"] + row["refunds_count"]
+        rate = round(float(row["refunds_count"] / total_ops * 100), 2) if total_ops > 0 else 0.0
+        m_list = []
+        for (mth, mid), samt in machine_sales.items():
+            if mth == month:
+                m_list.append({"machine_id": mid, "machine_name": machines_map.get(mid, mid), "amount": format(samt, "f")})
+        m_list.sort(key=lambda x: Decimal(x["amount"]), reverse=True)
+        result.append({
+            "month": row["month"],
+            "orders_count": row["orders_count"],
+            "purchases_count": row["purchases_count"],
+            "renewals_count": row["renewals_count"],
+            "orders_amount": format(row["orders_amount"], "f"),
+            "refunds_count": row["refunds_count"],
+            "refunds_amount": format(row["refunds_amount"], "f"),
+            "net_revenue": format(row["net_revenue"], "f"),
+            "refund_rate": rate,
+            "top_machines": m_list[:5]
+        })
+    return result
+
+
+def compute_risk_analysis(snapshot, conn=None):
+    machines = snapshot.get("machines", [])
+    orders = snapshot.get("orders", [])
+    transactions = snapshot.get("transactions", [])
+    vms = snapshot.get("vms", [])
+
+    user_dir = {}
+    if conn:
+        try:
+            ud_rows = conn.execute("SELECT user_id, user_email, user_name FROM buyer_user_directory WHERE user_id<>''").fetchall()
+            user_dir = {str(r[0]): {"user_email": str(r[1] or ""), "user_name": str(r[2] or "")} for r in ud_rows}
+        except Exception:
+            pass
+
+    # 1. Abnormal machines
+    machine_stats = {}
+    for m in machines:
+        machine_stats[m["id"]] = {
+            "machine_id": m["id"],
+            "machine_name": m.get("name") or m["id"],
+            "region": m.get("region") or "",
+            "orders_count": 0,
+            "refunds_count": 0,
+            "refund_amount": Decimal(0),
+            "orders_amount": Decimal(0)
+        }
+
+    for o in orders:
+        mid = o.get("machine_id")
+        if mid and mid in machine_stats:
+            typ = str(o.get("type") or "").lower()
+            amt = Decimal(str(o.get("amount") or "0"))
+            if typ in ("purchase", "buy", "renew", "renewal") and o.get("status") == "completed":
+                machine_stats[mid]["orders_count"] += 1
+                machine_stats[mid]["orders_amount"] += amt
+            elif typ == "refund":
+                machine_stats[mid]["refunds_count"] += 1
+                machine_stats[mid]["refund_amount"] += abs(amt)
+
+    for t in transactions:
+        mid = t.get("machine_id")
+        if mid and mid in machine_stats:
+            typ = str(t.get("type") or "").lower()
+            amt = Decimal(str(t.get("amount") or "0"))
+            if typ in ("refund", "escrow_deduct"):
+                machine_stats[mid]["refund_amount"] += abs(amt)
+
+    abnormal_machines = []
+    for mid, stat in machine_stats.items():
+        total_ops = stat["orders_count"] + stat["refunds_count"]
+        rate = round(float(stat["refunds_count"] / total_ops * 100), 2) if total_ops > 0 else 0.0
+        is_abnormal = (rate >= 15.0 and stat["refunds_count"] >= 2) or stat["refunds_count"] >= 3
+        stat["refund_rate"] = rate
+        stat["is_abnormal"] = is_abnormal
+        stat["refund_amount"] = format(stat["refund_amount"], "f")
+        stat["orders_amount"] = format(stat["orders_amount"], "f")
+        stat["suggestion"] = "退款率偏高，建议核查机房线路稳定性、IP是否被墙或宿主负载，通常非单买家责任" if is_abnormal else "退款率正常"
+        abnormal_machines.append(stat)
+    abnormal_machines.sort(key=lambda x: (x["is_abnormal"], float(x["refund_rate"])), reverse=True)
+
+    # 2. Abnormal users & Watchlist
+    vm_user_map = {v["id"]: v["user_id"] for v in vms if v.get("id") and v.get("user_id")}
+    user_records = {}
+
+    vm_purchase_time = {}
+    for o in sorted(orders, key=lambda x: x["created_at"]):
+        vid = o.get("vm_id")
+        uid = vm_user_map.get(vid, "")
+        if not uid and not vid:
+            continue
+        effective_uid = uid or f"vm-user:{vid}"
+        rec = user_records.setdefault(effective_uid, {
+            "user_id": effective_uid,
+            "user_name": user_dir.get(effective_uid, {}).get("user_name", ""),
+            "user_email": user_dir.get(effective_uid, {}).get("user_email", ""),
+            "total_purchases": 0,
+            "total_refunds": 0,
+            "quick_refunds": 0,
+            "total_spent": Decimal(0),
+            "total_refunded": Decimal(0),
+            "sample_vm_id": vid or ""
+        })
+        if vid and not rec["sample_vm_id"]:
+            rec["sample_vm_id"] = vid
+
+        typ = str(o.get("type") or "").lower()
+        amt = Decimal(str(o.get("amount") or "0"))
+        if typ in ("purchase", "buy") and o.get("status") == "completed":
+            rec["total_purchases"] += 1
+            rec["total_spent"] += amt
+            if vid:
+                vm_purchase_time[vid] = o["created_at"]
+        elif typ == "refund":
+            rec["total_refunds"] += 1
+            rec["total_refunded"] += abs(amt)
+            if vid and vid in vm_purchase_time:
+                if o["created_at"] - vm_purchase_time[vid] <= 86400:
+                    rec["quick_refunds"] += 1
+
+    abnormal_users = []
+    for uid, r in user_records.items():
+        if r["total_purchases"] == 0 and r["total_refunds"] == 0:
+            continue
+        total_ops = r["total_purchases"] + r["total_refunds"]
+        rate = round(float(r["total_refunds"] / total_ops * 100), 2) if total_ops > 0 else 0.0
+        risk_tags = []
+        if r["quick_refunds"] >= 1:
+            risk_tags.append(f"极速买退 ({r['quick_refunds']}次<24h)")
+        if rate >= 50.0 and r["total_refunds"] >= 2:
+            risk_tags.append(f"高退款率 ({rate}%)")
+        if r["total_refunds"] >= 3:
+            risk_tags.append(f"频繁退款 ({r['total_refunds']}次)")
+
+        is_abnormal = bool(risk_tags)
+        item = {
+            "user_id": uid,
+            "user_name": r["user_name"] or (uid[:8] + "..." if len(uid) > 12 else uid),
+            "user_email": r["user_email"] or "未登记邮箱",
+            "total_purchases": r["total_purchases"],
+            "total_refunds": r["total_refunds"],
+            "refund_rate": rate,
+            "quick_refunds": r["quick_refunds"],
+            "total_spent": format(r["total_spent"], "f"),
+            "total_refunded": format(r["total_refunded"], "f"),
+            "risk_tags": risk_tags,
+            "is_abnormal": is_abnormal,
+            "sample_vm_id": r["sample_vm_id"]
+        }
+        abnormal_users.append(item)
+
+    abnormal_users.sort(key=lambda x: (x["is_abnormal"], len(x["risk_tags"]), float(x["refund_rate"])), reverse=True)
+    watchlist = [u for u in abnormal_users if u["is_abnormal"]]
+
+    return {
+        "abnormal_machines": abnormal_machines,
+        "abnormal_users": abnormal_users,
+        "watchlist": watchlist
+    }
+
+
+def compute_loyalty_users(snapshot, conn=None):
+    profile_data = snapshot.get("profile", {})
+    owner_id = profile_data.get("id", "")
+    vms = snapshot.get("vms", [])
+    orders = snapshot.get("orders", [])
+    machines_map = {m["id"]: m.get("name") or m["id"] for m in snapshot.get("machines", [])}
+
+    user_dir = {}
+    if conn:
+        try:
+            ud_rows = conn.execute("SELECT user_id, user_email, user_name FROM buyer_user_directory WHERE user_id<>''").fetchall()
+            user_dir = {str(r[0]): {"user_email": str(r[1] or ""), "user_name": str(r[2] or "")} for r in ud_rows}
+        except Exception:
+            pass
+
+    now_ts = int(time.time())
+    users_vms = {}
+    for v in vms:
+        uid = v.get("user_id")
+        if not uid or uid == owner_id:
+            continue
+        v_copy = {
+            "id": v["id"],
+            "machine_id": v.get("machine_id", ""),
+            "machine_name": machines_map.get(v.get("machine_id", ""), "未知母鸡"),
+            "price_monthly": v.get("price_monthly"),
+            "expires_at": v.get("expires_at", 0),
+            "days_remaining": max(0, (v.get("expires_at", 0) - now_ts) // 86400)
+        }
+        users_vms.setdefault(uid, []).append(v_copy)
+
+    user_renewals = {}
+    user_spent = {}
+    user_earliest_order = {}
+    vm_user_map = {v["id"]: v["user_id"] for v in vms if v.get("id") and v.get("user_id")}
+
+    for o in orders:
+        vid = o.get("vm_id")
+        uid = vm_user_map.get(vid)
+        if not uid or uid == owner_id:
+            continue
+        typ = str(o.get("type") or "").lower()
+        amt = Decimal(str(o.get("amount") or "0"))
+        if o.get("status") == "completed":
+            user_spent[uid] = user_spent.get(uid, Decimal(0)) + amt
+            created = o.get("created_at", now_ts)
+            if uid not in user_earliest_order or created < user_earliest_order[uid]:
+                user_earliest_order[uid] = created
+            if typ in ("renew", "renewal"):
+                user_renewals[uid] = user_renewals.get(uid, 0) + 1
+
+    loyalty_list = []
+    for uid, vm_list in users_vms.items():
+        renew_cnt = user_renewals.get(uid, 0)
+        spent = user_spent.get(uid, Decimal(0))
+        earliest = user_earliest_order.get(uid, now_ts - 86400 * 30)
+        tenure_days = max(1, (now_ts - earliest) // 86400)
+
+        if tenure_days >= 180 or renew_cnt >= 6:
+            tier = "diamond"
+        elif tenure_days >= 60 or renew_cnt >= 2:
+            tier = "gold"
+        else:
+            tier = "silver"
+
+        loyalty_list.append({
+            "user_id": uid,
+            "user_name": user_dir.get(uid, {}).get("user_name") or (uid[:8] + "..."),
+            "user_email": user_dir.get(uid, {}).get("user_email") or "未登记邮箱",
+            "loyalty_tier": tier,
+            "active_vms_count": len(vm_list),
+            "vms": vm_list,
+            "estimated_tenure_days": tenure_days,
+            "renewal_count": renew_cnt,
+            "total_spent": format(spent, "f"),
+            "sample_vm_id": vm_list[0]["id"] if vm_list else ""
+        })
+
+    tier_order = {"diamond": 0, "gold": 1, "silver": 2, "watchlist": 3}
+    loyalty_list.sort(key=lambda x: (tier_order.get(x["loyalty_tier"], 9), -x["estimated_tenure_days"]))
+    return loyalty_list
+
+
+def process_commerce_events(username, data, db, send_telegram):
+    if not send_telegram:
+        return
+    conn = db()
+    try:
+        settings_row = conn.execute("SELECT * FROM commerce_notification_settings WHERE username=?", (username,)).fetchone()
+        settings = dict(settings_row) if settings_row else {
+            "tg_notify_orders": 1, "tg_notify_refunds": 1, "auto_sync": 1
+        }
+        known_rows = conn.execute("SELECT event_id FROM commerce_notified_events").fetchall()
+        known_ids = {r[0] for r in known_rows}
+
+        orders = data.get("orders", [])
+        transactions = data.get("transactions", [])
+
+        if not known_ids:
+            initial = [(o["id"], "order", int(time.time())) for o in orders if o.get("id")]
+            initial += [(t["id"], "transaction", int(time.time())) for t in transactions if t.get("id")]
+            if initial:
+                conn.executemany("INSERT OR IGNORE INTO commerce_notified_events(event_id, event_type, notified_at) VALUES(?,?,?)", initial)
+                conn.commit()
+            return
+
+        machines = {m["id"]: m.get("name") or m["id"] for m in data.get("machines", [])}
+        new_events = []
+
+        for o in orders:
+            oid = o.get("id")
+            if not oid or oid in known_ids:
+                continue
+            otype = str(o.get("type") or "").lower()
+            ostatus = str(o.get("status") or "").lower()
+            mname = o.get("machine_name") or machines.get(o.get("machine_id", ""), "未知母鸡")
+            vmid = o.get("vm_id") or ""
+            amount = o.get("amount") or "0"
+            created_at = o.get("created_at") or int(time.time())
+            time_str = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            if ostatus == "completed" and otype in ("purchase", "buy", "renew", "renewal"):
+                if settings.get("tg_notify_orders", 1):
+                    type_label = "新买入" if otype in ("purchase", "buy") else "续费"
+                    vm_short = f"<code>{vmid[:8]}...</code>" if vmid else "无"
+                    msg = (
+                        f"🛒 <b>【Narwhal 经营动态 · {type_label}订单】</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🖥️ <b>母鸡</b>：<code>{mname}</code>\n"
+                        f"📦 <b>小鸡</b>：{vm_short}\n"
+                        f"💵 <b>金额</b>：<code>${amount} USD</code> (状态: {ostatus})\n"
+                        f"🔖 <b>订单号</b>：<code>#{oid[:8]}</code>\n"
+                        f"⏰ <b>时间</b>：{time_str}"
+                    )
+                    try:
+                        send_telegram(msg, parse_mode="HTML")
+                    except Exception:
+                        pass
+                new_events.append((oid, "order", int(time.time())))
+            elif otype == "refund":
+                if settings.get("tg_notify_refunds", 1):
+                    msg = (
+                        f"⚠️ <b>【Narwhal 经营动态 · 订单退款提醒】</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🖥️ <b>母鸡</b>：<code>{mname}</code>\n"
+                        f"💸 <b>退款金额</b>：<code>-${abs(float(amount)):.2f} USD</code>\n"
+                        f"🔖 <b>退款单号</b>：<code>#{oid[:8]}</code>\n"
+                        f"⏰ <b>时间</b>：{time_str}"
+                    )
+                    try:
+                        send_telegram(msg, parse_mode="HTML")
+                    except Exception:
+                        pass
+                new_events.append((oid, "order", int(time.time())))
+            else:
+                new_events.append((oid, "order", int(time.time())))
+
+        for t in transactions:
+            tid = t.get("id")
+            if not tid or tid in known_ids:
+                continue
+            ttype = str(t.get("type") or "").lower()
+            if ttype in ("refund", "escrow_deduct"):
+                if settings.get("tg_notify_refunds", 1):
+                    mname = t.get("machine_name") or machines.get(t.get("machine_id", ""), "未知母鸡")
+                    amount = t.get("amount") or "0"
+                    created_at = t.get("created_at") or int(time.time())
+                    time_str = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    balance_after = t.get("balance_after") or "0"
+                    msg = (
+                        f"⚠️ <b>【Narwhal 经营动态 · 托管资金退款/扣减】</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🖥️ <b>涉及母鸡</b>：<code>{mname}</code>\n"
+                        f"💸 <b>扣减金额</b>：<code>{amount} USD</code>\n"
+                        f"🏦 <b>变动后余额</b>：<code>${balance_after} USD</code>\n"
+                        f"🔖 <b>流水号</b>：<code>#{tid[:8]}</code>\n"
+                        f"⏰ <b>时间</b>：{time_str}"
+                    )
+                    try:
+                        send_telegram(msg, parse_mode="HTML")
+                    except Exception:
+                        pass
+                new_events.append((tid, "transaction", int(time.time())))
+            else:
+                new_events.append((tid, "transaction", int(time.time())))
+
+        if new_events:
+            conn.executemany("INSERT OR IGNORE INTO commerce_notified_events(event_id, event_type, notified_at) VALUES(?,?,?)", new_events)
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def attach(app, db, database_path, credentials, send_telegram=None):
     router = APIRouter(prefix="/api/v1/commerce")
 
     def binding(conn, username):
@@ -440,6 +1027,16 @@ def attach(app, db, database_path, credentials):
             return dict(row) if row else None
         finally:
             conn.close()
+
+    def client_for_user(username):
+        row = read(username)
+        if not row:
+            raise HTTPException(409, "请先配置个人 API Key")
+        try:
+            key = cipher(database_path()).decrypt(row["encrypted_key"].encode()).decode()
+            return Client(key), row
+        except (InvalidToken, UnicodeError):
+            raise HTTPException(409, "无法解密个人 API Key，请重新配置")
 
     @router.get("/settings")
     def settings(request: Request):
@@ -480,7 +1077,6 @@ def attach(app, db, database_path, credentials):
             conn.execute("BEGIN IMMEDIATE")
             if not captured_binding or binding(conn, request.state.dashboard_user) != captured_binding:
                 raise HTTPException(409, "登录账号已变化，请重新登录")
-            # A new key never inherits another upstream account's data or errors.
             conn.execute("INSERT INTO commerce_accounts(username,encrypted_key,revision,upstream_user,updated_at,binding) VALUES(?,?,?,?,?,?) ON CONFLICT(username) DO UPDATE SET encrypted_key=excluded.encrypted_key,revision=excluded.revision,upstream_user=excluded.upstream_user,updated_at=excluded.updated_at,binding=excluded.binding,synced_at=0,snapshot=NULL,last_error='',sync_token='',sync_started=0",
                 (request.state.dashboard_user, encrypted, str(uuid.uuid4()), account["id"], int(time.time()), captured_binding))
             conn.commit()
@@ -493,6 +1089,7 @@ def attach(app, db, database_path, credentials):
         conn = db()
         try:
             conn.execute("DELETE FROM commerce_accounts WHERE username=?", (request.state.dashboard_user,))
+            conn.execute("DELETE FROM commerce_notification_settings WHERE username=?", (request.state.dashboard_user,))
             conn.commit()
         finally:
             conn.close()
@@ -517,6 +1114,10 @@ def attach(app, db, database_path, credentials):
                 conn.commit()
             finally:
                 conn.close()
+            try:
+                process_commerce_events(username, data, db, send_telegram)
+            except Exception:
+                pass
             return {"ok": True}
         except Exception as exc:
             message = str(exc) if isinstance(exc, CommerceError) else "同步异常，旧数据已保留；请重试或联系管理员"
@@ -576,5 +1177,303 @@ def attach(app, db, database_path, credentials):
         if not row or not row["snapshot"]:
             raise HTTPException(409, "请先同步个人经营数据")
         return analyse(json.loads(row["snapshot"]), start, end, machine, kind, offset, limit, ledger)
+
+    @router.get("/notification-settings")
+    def get_notification_settings(request: Request):
+        username = request.state.dashboard_user
+        conn = db()
+        try:
+            r = conn.execute("SELECT * FROM commerce_notification_settings WHERE username=?", (username,)).fetchone()
+            if not r:
+                return {
+                    "auto_sync": True,
+                    "interval_seconds": 300,
+                    "tg_notify_orders": True,
+                    "tg_notify_refunds": True,
+                    "tg_daily_digest": True,
+                    "tg_monthly_digest": True,
+                    "digest_hour": 8,
+                    "last_sync_at": 0,
+                    "last_daily_digest_date": "",
+                    "last_monthly_digest_date": ""
+                }
+            return {
+                "auto_sync": bool(r["auto_sync"]),
+                "interval_seconds": int(r["interval_seconds"]),
+                "tg_notify_orders": bool(r["tg_notify_orders"]),
+                "tg_notify_refunds": bool(r["tg_notify_refunds"]),
+                "tg_daily_digest": bool(r["tg_daily_digest"]),
+                "tg_monthly_digest": bool(r["tg_monthly_digest"]),
+                "digest_hour": int(r["digest_hour"]),
+                "last_sync_at": int(r["last_sync_at"]),
+                "last_daily_digest_date": str(r["last_daily_digest_date"] or ""),
+                "last_monthly_digest_date": str(r["last_monthly_digest_date"] or "")
+            }
+        finally:
+            conn.close()
+
+    @router.post("/notification-settings")
+    async def save_notification_settings(request: Request):
+        username = request.state.dashboard_user
+        payload = await request.json()
+        auto_sync = 1 if payload.get("auto_sync", True) else 0
+        interval = max(60, min(86400, int(payload.get("interval_seconds", 300))))
+        tg_orders = 1 if payload.get("tg_notify_orders", True) else 0
+        tg_refunds = 1 if payload.get("tg_notify_refunds", True) else 0
+        tg_daily = 1 if payload.get("tg_daily_digest", True) else 0
+        tg_monthly = 1 if payload.get("tg_monthly_digest", True) else 0
+        digest_hour = max(0, min(23, int(payload.get("digest_hour", 8))))
+
+        conn = db()
+        try:
+            conn.execute(
+                "INSERT INTO commerce_notification_settings(username, auto_sync, interval_seconds, tg_notify_orders, tg_notify_refunds, tg_daily_digest, tg_monthly_digest, digest_hour, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(username) DO UPDATE SET "
+                "auto_sync=excluded.auto_sync, interval_seconds=excluded.interval_seconds, "
+                "tg_notify_orders=excluded.tg_notify_orders, tg_notify_refunds=excluded.tg_notify_refunds, "
+                "tg_daily_digest=excluded.tg_daily_digest, tg_monthly_digest=excluded.tg_monthly_digest, "
+                "digest_hour=excluded.digest_hour, updated_at=excluded.updated_at",
+                (username, auto_sync, interval, tg_orders, tg_refunds, tg_daily, tg_monthly, digest_hour, int(time.time()))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True}
+
+    @router.post("/test-telegram")
+    def test_telegram_notification(request: Request):
+        if not send_telegram:
+            raise HTTPException(400, "尚未配置可用的 Telegram Bot，请先在通知设置中添加 Telegram 机器人")
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        msg = (
+            "🔔 <b>【Narwhal 经营分析 · Telegram 播报通道测试】</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ 您的经营变动推送与每日/每月简报机器人已就绪！\n"
+            f"👤 <b>操作者</b>：<code>{request.state.dashboard_user}</code>\n"
+            f"⏰ <b>测试时间</b>：{now_str}\n"
+            "💡 当平台产生新的买入订单或退款流水时，将通过此频道实时向您推送。"
+        )
+        count = send_telegram(msg, parse_mode="HTML")
+        if count == 0:
+            raise HTTPException(400, "没有已启用的有效 Telegram Bot，请检查机器人的 Token 和 Target 配置")
+        return {"ok": True, "sent_count": count}
+
+    @router.get("/daily-analytics")
+    def daily_analytics(request: Request, days: int = 30):
+        row = read(request.state.dashboard_user)
+        if not row or not row["snapshot"]:
+            raise HTTPException(409, "请先同步个人经营数据")
+        return compute_daily_analytics(json.loads(row["snapshot"]), days_limit=max(1, min(days, 90)))
+
+    @router.get("/monthly-analytics")
+    def monthly_analytics(request: Request, months: int = 12):
+        row = read(request.state.dashboard_user)
+        if not row or not row["snapshot"]:
+            raise HTTPException(409, "请先同步个人经营数据")
+        return compute_monthly_analytics(json.loads(row["snapshot"]), months_limit=max(1, min(months, 24)))
+
+    @router.get("/risk-analysis")
+    def risk_analysis(request: Request):
+        row = read(request.state.dashboard_user)
+        if not row or not row["snapshot"]:
+            raise HTTPException(409, "请先同步个人经营数据")
+        conn = db()
+        try:
+            return compute_risk_analysis(json.loads(row["snapshot"]), conn=conn)
+        finally:
+            conn.close()
+
+    @router.get("/loyalty-users")
+    def loyalty_users(request: Request):
+        row = read(request.state.dashboard_user)
+        if not row or not row["snapshot"]:
+            raise HTTPException(409, "请先同步个人经营数据")
+        conn = db()
+        try:
+            return compute_loyalty_users(json.loads(row["snapshot"]), conn=conn)
+        finally:
+            conn.close()
+
+    @router.post("/compensate")
+    async def compensate_vm(request: Request):
+        body = await request.json()
+        vid = identity(body.get("vm_id"))
+        days = int(body.get("days", 0))
+        if days < 1 or days > 365:
+            raise HTTPException(400, "赠送时长天数必须在 1 到 365 天之间")
+        client, row = client_for_user(request.state.dashboard_user)
+        try:
+            result = client.post(f"/vms/{vid}/compensate", {"days": days})
+            return {"ok": True, "result": result}
+        except CommerceError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @router.get("/blocked-users")
+    def get_blocked_users(request: Request, page: int = 1, page_size: int = 100):
+        client, row = client_for_user(request.state.dashboard_user)
+        try:
+            data = client.get(f"/machines/blocked-users?page={page}&page_size={page_size}")
+            return {"ok": True, **data}
+        except CommerceError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @router.post("/block-user")
+    async def block_user(request: Request):
+        body = await request.json()
+        vid = identity(body.get("vm_id"))
+        reason = text(body.get("reason", "频繁买退/恶意滥用"), 500)
+        client, row = client_for_user(request.state.dashboard_user)
+        try:
+            result = client.post(f"/vms/{vid}/block-user", {"reason": reason})
+            return {"ok": True, "result": result}
+        except CommerceError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @router.delete("/blocked-users/{user_id}")
+    def unblock_user(user_id: str, request: Request):
+        uid = identity(user_id)
+        client, row = client_for_user(request.state.dashboard_user)
+        try:
+            client.delete(f"/machines/blocked-users/{uid}")
+            return {"ok": True}
+        except CommerceError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    async def _auto_sync_loop():
+        while True:
+            try:
+                await asyncio.sleep(30)
+                conn = db()
+                try:
+                    rows = conn.execute(
+                        "SELECT s.username, s.auto_sync, s.interval_seconds, s.tg_notify_orders, "
+                        "s.tg_notify_refunds, s.tg_daily_digest, s.tg_monthly_digest, s.digest_hour, "
+                        "s.last_sync_at, s.last_daily_digest_date, s.last_monthly_digest_date, "
+                        "a.encrypted_key, a.revision, a.upstream_user, a.snapshot, a.sync_token, a.sync_started "
+                        "FROM commerce_notification_settings s "
+                        "JOIN commerce_accounts a ON a.username = s.username "
+                        "WHERE s.auto_sync = 1"
+                    ).fetchall()
+                finally:
+                    conn.close()
+
+                now_ts = int(time.time())
+                now_utc = datetime.now(timezone.utc)
+                now_bj = now_utc + timedelta(hours=8)
+                today_bj_str = now_bj.strftime("%Y-%m-%d")
+                this_month_bj_str = now_bj.strftime("%Y-%m")
+
+                for r in rows:
+                    username = r["username"]
+                    interval = max(60, int(r["interval_seconds"] or 300))
+                    last_sync = int(r["last_sync_at"] or 0)
+                    sync_token = str(r["sync_token"] or "")
+                    sync_started = int(r["sync_started"] or 0)
+
+                    if (now_ts - last_sync >= interval) and (not sync_token or (now_ts - sync_started >= 240)):
+                        if _slots.acquire(False):
+                            try:
+                                new_token = str(uuid.uuid4())
+                                conn = db()
+                                try:
+                                    conn.execute(
+                                        "UPDATE commerce_accounts SET sync_token=?, sync_started=?, last_error='' WHERE username=? AND revision=?",
+                                        (new_token, now_ts, username, r["revision"])
+                                    )
+                                    conn.execute(
+                                        "UPDATE commerce_notification_settings SET last_sync_at=? WHERE username=?",
+                                        (now_ts, username)
+                                    )
+                                    conn.commit()
+                                finally:
+                                    conn.close()
+                                await asyncio.to_thread(synchronize, username, dict(r), new_token)
+                            except Exception:
+                                _slots.release()
+
+                    if r["tg_daily_digest"] and send_telegram and r["snapshot"]:
+                        target_hour = int(r["digest_hour"] if r["digest_hour"] is not None else 8)
+                        if now_bj.hour == target_hour and r["last_daily_digest_date"] != today_bj_str:
+                            try:
+                                snap = json.loads(r["snapshot"])
+                                daily_info = compute_daily_analytics(snap, days_limit=7)
+                                today_sum = daily_info["today_summary"]
+                                risk_info = compute_risk_analysis(snap)
+                                ab_machines_cnt = sum(1 for m in risk_info.get("abnormal_machines", []) if m.get("is_abnormal"))
+                                ab_users_cnt = len(risk_info.get("watchlist", []))
+
+                                ab_notice = "🟢 各母鸡与买家退款指标平稳"
+                                if ab_machines_cnt > 0 or ab_users_cnt > 0:
+                                    ab_notice = f"⚠️ 发现 {ab_machines_cnt} 台退款偏高母鸡，{ab_users_cnt} 位重点关注买家"
+
+                                sold_total = sum(m.get("sold_current", 0) for m in snap.get("machines", []))
+                                machines_total = len(snap.get("machines", []))
+
+                                msg = (
+                                    f"📊 <b>【Narwhal 每日经营简报】（{today_bj_str}）</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"💰 <b>今日总收入 (GMV)</b>：<code>${today_sum['gmv']} USD</code> ({today_sum['orders_count']} 笔订单)\n"
+                                    f"💸 <b>今日退款支出</b>：<code>${today_sum['refunds_amount']} USD</code> ({today_sum['refunds_count']} 笔退款)\n"
+                                    f"📈 <b>今日净收益</b>：<code>${today_sum['net_revenue']} USD</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🖥️ <b>在售母鸡概况</b>：{machines_total} 台母鸡在售 · 当前售出 {sold_total} 台小鸡\n"
+                                    f"🚨 <b>经营风控</b>：{ab_notice}\n"
+                                    f"⏰ <b>播报时间</b>：{now_bj.strftime('%H:%M:%S')} (UTC+8)"
+                                )
+                                send_telegram(msg, parse_mode="HTML")
+                                conn = db()
+                                try:
+                                    conn.execute(
+                                        "UPDATE commerce_notification_settings SET last_daily_digest_date=? WHERE username=?",
+                                        (today_bj_str, username)
+                                    )
+                                    conn.commit()
+                                finally:
+                                    conn.close()
+                            except Exception:
+                                pass
+
+                    if r["tg_monthly_digest"] and send_telegram and r["snapshot"]:
+                        if now_bj.day == 1 and now_bj.hour == 9 and r["last_monthly_digest_date"] != this_month_bj_str:
+                            try:
+                                snap = json.loads(r["snapshot"])
+                                monthly_info = compute_monthly_analytics(snap, months_limit=2)
+                                if monthly_info:
+                                    last_m = monthly_info[0]
+                                    top_m_text = "\n".join([f"  • {m['machine_name']}：${m['amount']} USD" for m in last_m.get("top_machines", [])[:3]]) or "  • 暂无明细"
+                                    msg = (
+                                        f"🗓️ <b>【Narwhal 每月经营报表】（{last_m['month']}）</b>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"💰 <b>全月销售额 (GMV)</b>：<code>${last_m['orders_amount']} USD</code> ({last_m['orders_count']} 笔订单)\n"
+                                        f"💸 <b>全月总退款</b>：<code>${last_m['refunds_amount']} USD</code> ({last_m['refunds_count']} 笔退款)\n"
+                                        f"💵 <b>全月净收入</b>：<code>${last_m['net_revenue']} USD</code>\n"
+                                        f"📉 <b>全月退款率</b>：<code>{last_m['refund_rate']}%</code>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"🏆 <b>热销母鸡排行</b>：\n{top_m_text}\n"
+                                        f"⏰ <b>发布时间</b>：{now_bj.strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)"
+                                    )
+                                    send_telegram(msg, parse_mode="HTML")
+                                conn = db()
+                                try:
+                                    conn.execute(
+                                        "UPDATE commerce_notification_settings SET last_monthly_digest_date=? WHERE username=?",
+                                        (this_month_bj_str, username)
+                                    )
+                                    conn.commit()
+                                finally:
+                                    conn.close()
+                            except Exception:
+                                pass
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(5)
+
+    @app.on_event('startup')
+    async def _start_commerce_background_tasks():
+        _bg_task = asyncio.create_task(_auto_sync_loop())
+        _tasks.add(_bg_task)
+        _bg_task.add_done_callback(_tasks.discard)
 
     app.include_router(router)

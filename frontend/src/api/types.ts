@@ -1436,3 +1436,136 @@ export interface ReachabilityClusterSummary {
   items: ReachabilitySummaryItem[];
   quota?: ReachabilityQuotaInfo;
 }
+
+export interface CommerceAutoSyncSettings {
+  auto_sync: boolean;
+  interval_seconds: number;
+  tg_notify_orders: boolean;
+  tg_notify_refunds: boolean;
+  tg_daily_digest: boolean;
+  tg_monthly_digest: boolean;
+  digest_hour: number;
+  last_sync_at: number;
+  last_daily_digest_date: string;
+  last_monthly_digest_date: string;
+}
+
+export interface DailyAnalyticsItem {
+  date: string;
+  orders_count: number;
+  purchases_count: number;
+  renewals_count: number;
+  orders_amount: string;
+  refunds_count: number;
+  refunds_amount: string;
+  net_revenue: string;
+  refund_rate: number;
+}
+
+export interface DailyTodaySummary {
+  today_date: string;
+  gmv: string;
+  orders_count: number;
+  refunds_count: number;
+  refunds_amount: string;
+  net_revenue: string;
+  yesterday_gmv: string;
+  yesterday_net: string;
+}
+
+export interface DailyAnalyticsResponse {
+  daily: DailyAnalyticsItem[];
+  today_summary: DailyTodaySummary;
+}
+
+export interface MonthlyTopMachine {
+  machine_id: string;
+  machine_name: string;
+  amount: string;
+}
+
+export interface MonthlyAnalyticsItem {
+  month: string;
+  orders_count: number;
+  purchases_count: number;
+  renewals_count: number;
+  orders_amount: string;
+  refunds_count: number;
+  refunds_amount: string;
+  net_revenue: string;
+  refund_rate: number;
+  top_machines: MonthlyTopMachine[];
+}
+
+export interface AbnormalRefundMachine {
+  machine_id: string;
+  machine_name: string;
+  region: string;
+  orders_count: number;
+  refunds_count: number;
+  refund_rate: number;
+  refund_amount: string;
+  orders_amount: string;
+  is_abnormal: boolean;
+  suggestion: string;
+}
+
+export interface AbnormalRefundUser {
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  total_purchases: number;
+  total_refunds: number;
+  refund_rate: number;
+  quick_refunds: number;
+  total_spent: string;
+  total_refunded: string;
+  risk_tags: string[];
+  is_abnormal: boolean;
+  sample_vm_id: string;
+}
+
+export interface RiskAnalysisResponse {
+  abnormal_machines: AbnormalRefundMachine[];
+  abnormal_users: AbnormalRefundUser[];
+  watchlist: AbnormalRefundUser[];
+}
+
+export interface LoyaltyVM {
+  id: string;
+  machine_id: string;
+  machine_name: string;
+  price_monthly: string | null;
+  expires_at: number;
+  days_remaining: number;
+}
+
+export interface LoyaltyUserItem {
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  loyalty_tier: 'diamond' | 'gold' | 'silver' | 'watchlist';
+  active_vms_count: number;
+  vms: LoyaltyVM[];
+  estimated_tenure_days: number;
+  renewal_count: number;
+  total_spent: string;
+  sample_vm_id: string;
+}
+
+export interface BlockedUserItem {
+  id: string;
+  owner_id: string;
+  user_id: string;
+  user_name: string;
+  vm_id: string | null;
+  reason: string;
+  created_at: number;
+}
+
+export interface BlockedUsersResponse {
+  items: BlockedUserItem[];
+  total: number;
+  page: number;
+}
+
