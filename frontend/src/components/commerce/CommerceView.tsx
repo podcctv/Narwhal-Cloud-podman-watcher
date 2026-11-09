@@ -194,6 +194,24 @@ export function CommerceView() {
     return () => clearInterval(interval);
   }, [settings?.configured, settings?.synced_at, busy]);
 
+  // Auto-sync on page entry if snapshot is stale or older than 5 minutes
+  const entrySyncTriggered = useRef(false);
+  useEffect(() => {
+    if (!overview || entrySyncTriggered.current) return;
+    if (!settings?.configured || settings?.syncing || busy) return;
+    const age = Math.floor(Date.now() / 1000) - (overview.synced_at || 0);
+    if (overview.stale || age >= 300 || !overview.available) {
+      entrySyncTriggered.current = true;
+      request<{ ok: boolean; syncing: boolean }>('/api/v1/commerce/sync', { method: 'POST' })
+        .then(() => {
+          setSettings(prev => prev ? { ...prev, syncing: true } : prev);
+        })
+        .catch(() => {
+          // If a sync is already running in background, that's fine
+        });
+    }
+  }, [overview, settings?.configured, settings?.syncing, busy]);
+
   useEffect(() => {
     setHistory(null); setHistoryError('');
     if (!overview?.available) return;

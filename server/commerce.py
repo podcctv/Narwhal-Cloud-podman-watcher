@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import http.client
 import json
+import logging
 import os
 import re
 import stat
@@ -26,6 +27,8 @@ from urllib.parse import urlencode
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, HTTPException, Request
+
+logger = logging.getLogger("narwhal.commerce")
 
 BASE = "https://api.fuckip.me/api/v1"
 DOC = "https://api.fuckip.me/openapi.yaml"
@@ -1328,6 +1331,7 @@ def attach(app, db, database_path, credentials, send_telegram=None):
         return {"ok": True}
 
     def synchronize(username, row, token):
+        start_t = time.monotonic()
         try:
             try:
                 key = cipher(database_path()).decrypt(row["encrypted_key"].encode()).decode()
@@ -1341,18 +1345,22 @@ def attach(app, db, database_path, credentials, send_telegram=None):
                 raise CommerceError("无法解密个人密钥，请恢复主密钥或重新配置 API Key") from None
             conn = db()
             try:
+                effective_binding = str(row.get("binding") or binding(conn, username) or "")
                 conn.execute("UPDATE commerce_accounts SET snapshot=?,synced_at=?,last_error='',sync_token='' WHERE username=? AND revision=? AND sync_token=? AND binding=?",
-                    (encoded, int(time.time()), username, row["revision"], token, binding(conn, username)))
+                    (encoded, int(time.time()), username, row["revision"], token, effective_binding))
                 conn.commit()
             finally:
                 conn.close()
             try:
                 process_commerce_events(username, data, db, send_telegram)
-            except Exception:
-                pass
+            except Exception as ev_err:
+                logger.warning("Failed processing commerce events for %s: %s", username, ev_err)
+            elapsed = time.monotonic() - start_t
+            logger.info("Commerce sync succeeded for %s (upstream user=%s, elapsed=%.2fs)", username, row.get("upstream_user"), elapsed)
             return {"ok": True}
         except Exception as exc:
             message = str(exc) if isinstance(exc, CommerceError) else "同步异常，旧数据已保留；请重试或联系管理员"
+            logger.warning("Commerce sync failed for %s: %s", username, exc)
             conn = db()
             try:
                 conn.execute("UPDATE commerce_accounts SET last_error=?,sync_token='' WHERE username=? AND revision=? AND sync_token=?", (message, username, row["revision"], token))
@@ -1589,7 +1597,7 @@ def attach(app, db, database_path, credentials, send_telegram=None):
                         "COALESCE(s.last_sync_at, 0) as last_sync_at, "
                         "COALESCE(s.last_daily_digest_date, '') as last_daily_digest_date, "
                         "COALESCE(s.last_monthly_digest_date, '') as last_monthly_digest_date, "
-                        "a.encrypted_key, a.revision, a.upstream_user, a.snapshot, a.sync_token, a.sync_started "
+                        "a.encrypted_key, a.revision, a.upstream_user, a.snapshot, a.sync_token, a.sync_started, a.binding "
                         "FROM commerce_accounts a "
                         "LEFT JOIN commerce_notification_settings s ON a.username = s.username "
                         "WHERE a.encrypted_key IS NOT NULL AND a.encrypted_key != '' AND COALESCE(s.auto_sync, 1) = 1"
@@ -1614,6 +1622,7 @@ def attach(app, db, database_path, credentials, send_telegram=None):
                         if _slots.acquire(False):
                             try:
                                 new_token = str(uuid.uuid4())
+                                logger.info("Auto-sync scheduled for %s (interval=%ds, last_sync=%ds ago)", username, interval, now_ts - last_sync)
                                 conn = db()
                                 try:
                                     conn.execute(
@@ -1629,7 +1638,8 @@ def attach(app, db, database_path, credentials, send_telegram=None):
                                 finally:
                                     conn.close()
                                 await asyncio.to_thread(synchronize, username, dict(r), new_token)
-                            except Exception:
+                            except Exception as sync_exc:
+                                logger.warning("Auto-sync trigger error for %s: %s", username, sync_exc)
                                 _slots.release()
 
                     if r["tg_daily_digest"] and send_telegram and r["snapshot"]:
