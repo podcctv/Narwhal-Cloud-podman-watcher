@@ -1306,6 +1306,11 @@ def attach(app, db, database_path, credentials, send_telegram=None):
                 raise HTTPException(409, "登录账号已变化，请重新登录")
             conn.execute("INSERT INTO commerce_accounts(username,encrypted_key,revision,upstream_user,updated_at,binding) VALUES(?,?,?,?,?,?) ON CONFLICT(username) DO UPDATE SET encrypted_key=excluded.encrypted_key,revision=excluded.revision,upstream_user=excluded.upstream_user,updated_at=excluded.updated_at,binding=excluded.binding,synced_at=0,snapshot=NULL,last_error='',sync_token='',sync_started=0",
                 (request.state.dashboard_user, encrypted, str(uuid.uuid4()), account["id"], int(time.time()), captured_binding))
+            conn.execute(
+                "INSERT INTO commerce_notification_settings(username, auto_sync, interval_seconds, tg_notify_orders, tg_notify_refunds, tg_daily_digest, tg_monthly_digest, digest_hour, updated_at) "
+                "VALUES(?,1,300,1,1,1,1,8,?) ON CONFLICT(username) DO NOTHING",
+                (request.state.dashboard_user, int(time.time()))
+            )
             conn.commit()
         finally:
             conn.close()
@@ -1574,13 +1579,20 @@ def attach(app, db, database_path, credentials, send_telegram=None):
                 conn = db()
                 try:
                     rows = conn.execute(
-                        "SELECT s.username, s.auto_sync, s.interval_seconds, s.tg_notify_orders, "
-                        "s.tg_notify_refunds, s.tg_daily_digest, s.tg_monthly_digest, s.digest_hour, "
-                        "s.last_sync_at, s.last_daily_digest_date, s.last_monthly_digest_date, "
+                        "SELECT a.username, COALESCE(s.auto_sync, 1) as auto_sync, "
+                        "COALESCE(s.interval_seconds, 300) as interval_seconds, "
+                        "COALESCE(s.tg_notify_orders, 1) as tg_notify_orders, "
+                        "COALESCE(s.tg_notify_refunds, 1) as tg_notify_refunds, "
+                        "COALESCE(s.tg_daily_digest, 1) as tg_daily_digest, "
+                        "COALESCE(s.tg_monthly_digest, 1) as tg_monthly_digest, "
+                        "COALESCE(s.digest_hour, 8) as digest_hour, "
+                        "COALESCE(s.last_sync_at, 0) as last_sync_at, "
+                        "COALESCE(s.last_daily_digest_date, '') as last_daily_digest_date, "
+                        "COALESCE(s.last_monthly_digest_date, '') as last_monthly_digest_date, "
                         "a.encrypted_key, a.revision, a.upstream_user, a.snapshot, a.sync_token, a.sync_started "
-                        "FROM commerce_notification_settings s "
-                        "JOIN commerce_accounts a ON a.username = s.username "
-                        "WHERE s.auto_sync = 1"
+                        "FROM commerce_accounts a "
+                        "LEFT JOIN commerce_notification_settings s ON a.username = s.username "
+                        "WHERE a.encrypted_key IS NOT NULL AND a.encrypted_key != '' AND COALESCE(s.auto_sync, 1) = 1"
                     ).fetchall()
                 finally:
                     conn.close()
@@ -1609,8 +1621,9 @@ def attach(app, db, database_path, credentials, send_telegram=None):
                                         (new_token, now_ts, username, r["revision"])
                                     )
                                     conn.execute(
-                                        "UPDATE commerce_notification_settings SET last_sync_at=? WHERE username=?",
-                                        (now_ts, username)
+                                        "INSERT INTO commerce_notification_settings(username, last_sync_at, updated_at) "
+                                        "VALUES(?,?,?) ON CONFLICT(username) DO UPDATE SET last_sync_at=excluded.last_sync_at",
+                                        (username, now_ts, now_ts)
                                     )
                                     conn.commit()
                                 finally:

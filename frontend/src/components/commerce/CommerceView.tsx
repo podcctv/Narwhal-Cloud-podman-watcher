@@ -180,6 +180,20 @@ export function CommerceView() {
     return () => { controller.abort(); clearTimeout(timer); };
   }, [settings?.syncing, busy]);
 
+  // Periodic check to silently update UI when background auto-sync completes
+  useEffect(() => {
+    if (!settings?.configured || busy) return;
+    const interval = setInterval(async () => {
+      try {
+        const state = await request<Settings>('/api/v1/commerce/settings');
+        if (state.synced_at && state.synced_at !== settings.synced_at) {
+          setRevision(r => r + 1);
+        }
+      } catch {}
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [settings?.configured, settings?.synced_at, busy]);
+
   useEffect(() => {
     setHistory(null); setHistoryError('');
     if (!overview?.available) return;
@@ -320,10 +334,24 @@ export function CommerceView() {
           <h2 className="text-xl font-bold">经营分析与运营中台</h2>
           <p className="mt-1 text-sm text-slate-400">母鸡出租现状 · 智能买退风控 · 用户忠诚度评估 · 实时 Telegram 经营通知</p>
         </div>
-        <button className={button + ' flex items-center gap-2'} disabled={!settings?.configured || !!busy || settings.syncing} onClick={() => act('sync')}>
-          <RefreshCw className={'h-4 w-4 ' + (busy || settings?.syncing ? 'motion-safe:animate-spin' : '')} />
-          {busy || settings?.syncing ? '正在处理…' : '同步经营数据'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {settings?.configured && autoSyncSettings && (
+            autoSyncSettings.auto_sync ? (
+              <span className="hidden sm:inline-flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-950/60 border border-emerald-500/40 px-2.5 py-1.5 rounded-lg">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                后台自动定时同步中 ({Math.round(autoSyncSettings.interval_seconds / 60)} 分钟/次)
+              </span>
+            ) : (
+              <span className="hidden sm:inline-flex text-xs text-slate-400 bg-slate-800/40 border border-slate-700/50 px-2.5 py-1.5 rounded-lg">
+                后台自动同步未开启
+              </span>
+            )
+          )}
+          <button className={button + ' flex items-center gap-2'} disabled={!settings?.configured || !!busy || settings.syncing} onClick={() => act('sync')}>
+            <RefreshCw className={'h-4 w-4 ' + (busy || settings?.syncing ? 'motion-safe:animate-spin' : '')} />
+            {busy || settings?.syncing ? '正在处理…' : '立即手动同步'}
+          </button>
+        </div>
       </div>
 
       {error && <p role="alert" className="rounded-xl border border-rose-500/40 bg-rose-950/40 p-4 text-sm text-rose-200">{error}</p>}
@@ -399,14 +427,19 @@ export function CommerceView() {
             </div>
           ) : (
             <>
-              <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
                 <span>上次成功同步：{date(overview.synced_at)} UTC</span>
                 <span>· 上游快照，非实时财务报表 · USD</span>
+                {autoSyncSettings?.auto_sync && (
+                  <span className="text-emerald-400 text-[11px] bg-emerald-950/50 border border-emerald-500/30 px-1.5 py-0.5 rounded">
+                    ● 后台按每 {Math.round(autoSyncSettings.interval_seconds / 60)} 分钟自动同步并静默刷新
+                  </span>
+                )}
               </div>
               {overview.stale && (
                 <p role="status" className="flex gap-2 rounded-xl border border-amber-500/40 bg-amber-950/30 p-3 text-sm text-amber-200">
                   <AlertTriangle className="h-5 w-5 shrink-0" />
-                  {overview.last_error || '数据已超过 15 分钟，请手动同步获取最新情况。'} 当前仍展示上次成功快照。
+                  {overview.last_error || (autoSyncSettings?.auto_sync ? '快照数据超过 15 分钟未刷新，后台正在等待下个轮询周期自动重试，也可点击上方“立即手动同步”。' : '数据已超过 15 分钟，请手动同步获取最新情况或至“同步与推送设置”开启自动定时同步。')} 当前仍展示上次成功快照。
                 </p>
               )}
               <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5" aria-label="当前账号快照">
