@@ -13238,8 +13238,10 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
                 raise network_quarantine.QuarantineError('unsupported runtime')
             guard = abuse_guard.engine()
             with guard.lock:
-                network_quarantine.release(guard.journal, key, driver)
+                release_result = network_quarantine.release(guard.journal, key, driver)
                 guard.forget(target, identity)
+            if isinstance(release_result, dict) and release_result.get('container_deleted'):
+                return True, 'container_deleted_verified old_instance_absent=true old_journal_cleared=true'
             return True, 'Network quarantine released; data preserved; fresh prohibited activity will be isolated again'
         except (network_quarantine.QuarantineError, OSError, ValueError):
             return False, 'Network restore could not be verified; inspect the recovery journal; no data deleted'
@@ -13266,6 +13268,8 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
             with guard.lock:
                 replacement_id = network_quarantine.retire_replaced(guard.journal, key, driver)
                 guard.forget_replaced(target, identity)
+            if replacement_id == 'none':
+                return True, 'replacement_verified current_instance_id=none container_deleted=true old_instance_absent=true old_journal_cleared=true'
             return True, f'replacement_verified current_instance_id={replacement_id} old_instance_absent=true old_journal_cleared=true'
         except (network_quarantine.QuarantineError, OSError, ValueError):
             return False, 'Container replacement could not be verified; old quarantine remains pending; no replacement network changed'

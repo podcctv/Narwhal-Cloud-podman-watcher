@@ -29,6 +29,12 @@ class FakeIncus:
 
     def request(self, method, path, data=None, etag=None):
         self.calls.append((method, path, copy.deepcopy(data), etag))
+        if path.startswith('/1.0/instances?recursion=2'):
+            if self.item is None:
+                return [], None
+            return [{'name': 'customer', 'config': self.item['config']}], None
+        if self.item is None and path.startswith('/1.0/instances/customer'):
+            raise q.QuarantineError('Incus API request failed: status 404')
         if path.endswith('/state'):
             expanded = {**self.profile, **self.item['devices']}
             return {'network': {v.get('name') or self.item['config'].get('volatile.'+key+'.name'):
@@ -66,6 +72,8 @@ class FakePodman:
 
     def __call__(self, command):
         self.calls.append(command)
+        if getattr(self, 'deleted', False):
+            return False, 'Error: no such container'
         if command[1] == 'inspect':
             return True, json.dumps([self.item])
         network, identity = command[-2:]
@@ -94,12 +102,22 @@ class FakeRunmanConnection:
         self.body = None
 
     def request(self, method, path, body=None, headers=None):
+        if method == 'GET' and path.startswith('/v1/inventory'):
+            self.body = {'action': 'inventory'}
+            return
         if method != 'POST' or path != '/v1/network-quarantine':
-            raise AssertionError('unexpected Runman request')
+            raise AssertionError('unexpected Runman request: ' + f'{method} {path}')
         self.body = json.loads(body)
 
     def getresponse(self):
-        action = self.body['action']
+        action = self.body.get('action')
+        if action == 'inventory':
+            items = []
+            if not self.state.get('deleted', False):
+                items.append({'id': '11111111-2222-3333-4444-555555555555', 'instance_id': self.state.get('instance_id', '')})
+            return type('Response', (), {'status': 200, 'read': lambda _self, _limit: json.dumps({'schema': 1, 'items': items}).encode()})()
+        if self.state.get('deleted', False):
+            raise q.QuarantineError('Runman network quarantine request was not confirmed')
         if action == 'isolate':
             self.state.update(isolated=True, interface_up=False)
         elif action == 'release':
@@ -317,6 +335,44 @@ class NetworkQuarantineTests(unittest.TestCase):
         runner.fail_network = None
         q.quarantine(self.journal, key, driver, EVIDENCE)
         self.assertEqual(runner.item['NetworkSettings']['Networks'], {})
+
+    def test_incus_deleted_container_recovery_and_replacement(self):
+        api = FakeIncus()
+        driver = q.IncusIsolation(api, 'customer', INSTANCE_ID)
+        key = q.target('incus', '', 'customer', INSTANCE_ID)
+        q.quarantine(self.journal, key, driver, EVIDENCE)
+        self.assertIn(key, self.journal.read())
+        api.item = None  # User deleted container
+        self.assertEqual(driver.prove_replaced(), 'none')
+        release_res = q.release(self.journal, key, driver)
+        self.assertTrue(release_res.get('container_deleted'))
+        self.assertEqual(self.journal.read(), {})
+
+    def test_podman_deleted_container_recovery_and_replacement(self):
+        runner = FakePodman()
+        driver = q.PodmanIsolation(runner, 'podman', 'customer', PODMAN_ID)
+        key = q.target('podman', '', 'customer', PODMAN_ID)
+        q.quarantine(self.journal, key, driver, EVIDENCE)
+        self.assertIn(key, self.journal.read())
+        runner.deleted = True
+        self.assertEqual(driver.prove_replaced(), 'none')
+        release_res = q.release(self.journal, key, driver)
+        self.assertTrue(release_res.get('container_deleted'))
+        self.assertEqual(self.journal.read(), {})
+
+    def test_runman_deleted_container_recovery_and_replacement(self):
+        FakeRunmanConnection.state = {'instance_id': '22222222-2222-4222-8222-222222222222', 'isolated': False,
+                                      'interface_up': True, 'running': True, 'ok': True, 'init_pid': 123}
+        driver = q.RunmanIsolation('11111111-2222-3333-4444-555555555555', '22222222-2222-4222-8222-222222222222')
+        key = q.target('runman', 'default', driver.name, driver.instance_id)
+        with mock.patch.object(q, '_UnixHTTP', FakeRunmanConnection):
+            q.quarantine(self.journal, key, driver, EVIDENCE)
+            self.assertIn(key, self.journal.read())
+            FakeRunmanConnection.state['deleted'] = True
+            self.assertEqual(driver.prove_replaced(), 'none')
+            release_res = q.release(self.journal, key, driver)
+            self.assertTrue(release_res.get('container_deleted'))
+            self.assertEqual(self.journal.read(), {})
 
     def test_invalid_target_protected_management_and_unsafe_evidence_rejected(self):
         for runtime, name, identity in (('docker', 'customer', PODMAN_ID), ('incus', 'x;evil', INSTANCE_ID),

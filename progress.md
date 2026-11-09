@@ -1,6 +1,22 @@
 # 当前进展与待办
 
-更新时间：2026-11-06（Asia/Shanghai）
+更新时间：2026-11-09（Asia/Shanghai）
+
+## 已删除容器违规隔离归档闭环与经营退款极速买退对冲校准（v1.8.18）
+
+- **需求背景**：
+  1. **隔离容器被用户删除导致恢复流程卡死**：部分容器在收到违规通知后，用户直接在控制台删除了容器。此时宿主机上原容器已不复存在，管理员在面板中点击「容器已重装：核验并归档旧隔离」或「复核并恢复原实例网络」时，因各运行时驱动严格检查目标容器存在性而抛错，导致状态始终卡在 `未能验证旧容器身份已被替换；隔离记录仍待管理员复核，未改动任何容器网络。`。
+  2. **月度经营退款数字虚高与对冲校准**：上游账单中，买家频繁在 24 小时内（通常 5~10 分钟）进行极速买退换 IP（`escrow_in` 搭配 $\ge 80\%$ 金额的 `escrow_deduct`），旧版逻辑将所有 `escrow_deduct` 简单计为退款，导致退款数字被重复试用放大数倍，GMV 与净收益失真。
+- **全链路落地与功能实现**：
+  1. **跨运行时旧实例缺席证明与删除归档闭环 (`client/network_quarantine.py`, `client/agent.py`, `server/abuse_api.py`, `QuarantinePanel.tsx`)**：
+     - **Incus 驱动**：`prove_replaced()` 与 `release()` 在容器 404 时遍历 `/1.0/instances?recursion=2`；若旧 `instance_id` 与容器名均不存在，确认已被用户销毁并返回 `'none'`，不再强制要求新容器存在。
+     - **Podman 驱动**：在容器名 inspect 失败且 `inspect self.instance_id` 返回 `no such container` 时，安全确认为已删除，返回 `'none'`。
+     - **Runman 驱动**：新增 `inventory()` 机制查询 `/v1/inventory`；当 `/v1/network-quarantine` 因容器销毁报错时，若库存中旧 `instance_id` 及 VM UUID 均已消失，安全确认为已删除，返回 `'none'`。
+     - **服务端与 Agent 协议放宽**：回执支持 `container_deleted=true` 与 `current_instance_id=none`，自动将告警与隔离记录归档为 `replaced` 并置为 `resolved`，提示语更新为 `管理员复核确认旧实例及容器已被用户删除；旧隔离记录已归档`。
+     - **前端交互**：按钮与弹窗文案更新为「容器已重装或已删除：核验并归档旧隔离」，解除了管理员卡死死锁。
+  2. **卖家 Escrow 账本智能对冲分类与真实经营统计 (`server/commerce.py`)**：
+     - 新增 `_classify_seller_escrow` 机制，精准配对 24 小时内的极速试用换 IP（`escrow_in` 与 `escrow_deduct` 差额），将洗牌试用从有效 GMV 和退款中剥离，仅保留真正的中途退款，彻底消除退款虚高。
+     - 深度富化母鸡维度风控与买家重点关注列表，正确绑定历史交易记录与已购在期 VM。
 
 ## 经营分析与运营中台全面强化：自动同步、TG实时提醒、日报月报、异常退款风控、一键拉黑与忠诚度奖励（v1.8.17）
 

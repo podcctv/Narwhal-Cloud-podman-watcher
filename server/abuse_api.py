@@ -123,20 +123,33 @@ def queue_replacement_review(conn, alert_id, requested_by, queue, now=None):
     }, requested_by)
 
 
-def record_release_result(conn, row, params, status, now):
+def record_release_result(conn, row, params, status, now, message=''):
     if row['action_type'] != 'release_network_quarantine' or status not in {'succeeded', 'failed'}:
         return
-    state = 'released' if status == 'succeeded' else 'release_failed'
+    old_identity = str(params.get('instance_id') or '')
+    is_deleted = 'container_deleted' in str(message or '')
+    state = 'replaced' if is_deleted else ('released' if status == 'succeeded' else 'release_failed')
     conn.execute('UPDATE network_quarantines SET status=?,updated_at=? WHERE alert_id=? AND instance_id=?',
-                 (state, now, row['alert_id'], params.get('instance_id')))
+                 (state, now, row['alert_id'], old_identity))
     old = conn.execute('SELECT details_json FROM security_alerts WHERE id=?', (row['alert_id'],)).fetchone()
     if old:
         details = json.loads(old[0] or '{}')
-        details.setdefault('network_quarantine', {}).update(status=state, ingress_blocked=False, egress_blocked=False)
-        message = ('管理员已解除隔离，正在重新监测；不等于风险已恢复，若再次命中将重新隔离。'
-                   if status == 'succeeded' else '解除隔离未能完整验证，需要人工检查；未删除容器或数据。')
+        details.setdefault('network_quarantine', {}).update(
+            status=state, ingress_blocked=False, egress_blocked=False,
+            container_deleted=is_deleted,
+        )
+        if is_deleted:
+            result_message = (
+                f'管理员复核确认旧实例 {old_identity} 及其容器已被用户删除；'
+                '旧隔离记录已归档，无需恢复网络。'
+            )
+        else:
+            result_message = (
+                '管理员已解除隔离，正在重新监测；不等于风险已恢复，若再次命中将重新隔离。'
+                if status == 'succeeded' else '解除隔离未能完整验证，需要人工检查；未删除容器或数据。'
+            )
         conn.execute('UPDATE security_alerts SET details_json=?,message=?,status=? WHERE id=?',
-                     (json.dumps(details, ensure_ascii=False), message, 'resolved' if status == 'succeeded' else 'active', row['alert_id']))
+                     (json.dumps(details, ensure_ascii=False), result_message, 'resolved' if status == 'succeeded' else 'active', row['alert_id']))
 
 
 def record_replacement_result(conn, row, params, status, now, message=''):
@@ -148,14 +161,14 @@ def record_replacement_result(conn, row, params, status, now, message=''):
         (row['alert_id'], old_identity),
     ).fetchone()
     proof = re.fullmatch(
-        r'replacement_verified current_instance_id=([A-Za-z0-9-]{12,100}) '
-        r'old_instance_absent=true old_journal_cleared=true',
+        r'replacement_verified current_instance_id=([A-Za-z0-9-]{4,100}) '
+        r'(?:container_deleted=true )?old_instance_absent=true old_journal_cleared=true',
         str(message or '').strip(),
     )
     new_identity = proof.group(1) if proof else ''
     if status == 'succeeded' and (
         not quarantine or quarantine['status'] in {'released', 'replaced'}
-        or not new_identity or new_identity == old_identity
+        or not new_identity or (new_identity != 'none' and new_identity == old_identity)
     ):
         status = 'failed'
         conn.execute(
@@ -170,14 +183,22 @@ def record_replacement_result(conn, row, params, status, now, message=''):
         )
         if old:
             details = json.loads(old[0] or '{}')
+            is_deleted = new_identity == 'none' or 'container_deleted=true' in str(message or '')
             details.setdefault('network_quarantine', {}).update(
                 status='replaced', ingress_blocked=False, egress_blocked=False,
                 replaced_instance_id=new_identity, replacement_verified_at=now,
+                container_deleted=is_deleted,
             )
-            result_message = (
-                f'管理员复核确认旧实例 {old_identity} 已不存在；新实例 {new_identity} 未被改动。'
-                '旧隔离记录已归档；新实例仍会按当前身份持续监测。'
-            )
+            if is_deleted:
+                result_message = (
+                    f'管理员复核确认旧实例 {old_identity} 及其容器已被用户删除；'
+                    '旧隔离记录已归档，不再占用资源配额。'
+                )
+            else:
+                result_message = (
+                    f'管理员复核确认旧实例 {old_identity} 已不存在；新实例 {new_identity} 未被改动。'
+                    '旧隔离记录已归档；新实例仍会按当前身份持续监测。'
+                )
             conn.execute(
                 "UPDATE security_alerts SET details_json=?,message=?,status='resolved' WHERE id=?",
                 (json.dumps(details, ensure_ascii=False), result_message, row['alert_id']),

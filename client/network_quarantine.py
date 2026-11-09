@@ -162,23 +162,35 @@ class IncusIsolation:
         return item, etag
 
     def prove_replaced(self):
-        """Prove the named instance is new and the quarantined UUID is gone."""
-        current, _ = self.api.request('GET', self.path)
-        current_id = str(current.get('config', {}).get('volatile.uuid') or '')
-        if not re.fullmatch(r'[A-Za-z0-9-]{12,100}', current_id) or current_id == self.instance_id:
-            raise QuarantineError('Incus replacement identity could not be verified')
+        """Prove the named instance is new or deleted, and the quarantined UUID is gone."""
+        current = None
+        try:
+            current, _ = self.api.request('GET', self.path)
+        except QuarantineError as exc:
+            if 'status 404' in str(exc):
+                current = None
+            else:
+                raise
         instances, _ = self.api.request('GET', '/1.0/instances?recursion=2')
         if not isinstance(instances, list):
             raise QuarantineError('Incus instance inventory could not be verified')
-        found_current = False
         for instance in instances:
             if not isinstance(instance, dict):
                 raise QuarantineError('Incus instance inventory was invalid')
             identity = str((instance.get('config') or {}).get('volatile.uuid') or '')
             if identity == self.instance_id:
                 raise QuarantineError('old Incus instance still exists')
+        if current is None:
+            return 'none'
+        current_id = str(current.get('config', {}).get('volatile.uuid') or '')
+        if not re.fullmatch(r'[A-Za-z0-9-]{12,100}', current_id) or current_id == self.instance_id:
+            raise QuarantineError('Incus replacement identity could not be verified')
+        found_current = False
+        for instance in instances:
+            identity = str((instance.get('config') or {}).get('volatile.uuid') or '')
             if instance.get('name') == self.name and identity == current_id:
                 found_current = True
+                break
         if not found_current:
             raise QuarantineError('replacement was not present in the Incus project inventory')
         return current_id
@@ -278,7 +290,18 @@ class IncusIsolation:
                     raise QuarantineError('original guest interface is still up')
 
     def release(self, backup):
-        item, etag = self.inspect()
+        try:
+            item, etag = self.inspect()
+        except QuarantineError as exc:
+            if 'status 404' in str(exc):
+                instances, _ = self.api.request('GET', '/1.0/instances?recursion=2')
+                if isinstance(instances, list) and not any(
+                    str((inst.get('config') or {}).get('volatile.uuid') or '') == self.instance_id
+                    or inst.get('name') == self.name
+                    for inst in instances if isinstance(inst, dict)
+                ):
+                    return {'status': 'deleted', 'container_deleted': True}
+            raise
         devices = copy.deepcopy(item.get('devices', {}))
         for key, original in backup['original'].items():
             if devices.get(key) != {'type': 'none'}:
@@ -351,16 +374,13 @@ class PodmanIsolation:
         return item
 
     def prove_replaced(self):
-        """Prove the name points to a different ID and the old ID is absent."""
+        """Prove the name points to a different ID or was deleted, and the old ID is absent."""
+        current_id = None
         try:
             current = json.loads(self.command(podman_inspect_args(self.name)))[0]
-        except (ValueError, IndexError, TypeError):
-            raise QuarantineError('invalid Podman replacement inspection') from None
-        current_id = str(current.get('Id') or current.get('ID') or '')
-        if not re.fullmatch(r'[0-9a-fA-F]{12,64}', current_id):
-            raise QuarantineError('Podman replacement identity could not be verified')
-        if current_id.lower().startswith(self.instance_id.lower()) or self.instance_id.lower().startswith(current_id.lower()):
-            raise QuarantineError('Podman container identity did not change')
+            current_id = str(current.get('Id') or current.get('ID') or '')
+        except (QuarantineError, ValueError, IndexError, TypeError):
+            current_id = None
         ok, output = self.run([self.binary, 'inspect', '--type', 'container', '--format', '{{.Id}}', self.instance_id])
         if ok:
             old_ids = [line.strip().lower() for line in str(output or '').splitlines() if line.strip()]
@@ -369,6 +389,12 @@ class PodmanIsolation:
             raise QuarantineError('Podman returned an unexpected old-container identity')
         if not re.search(r'(?i)(no such object|no such container|no container with name or id|not found)', str(output or '')):
             raise QuarantineError('Podman could not prove the old container absent')
+        if current_id is None:
+            return 'none'
+        if not re.fullmatch(r'[0-9a-fA-F]{12,64}', current_id):
+            raise QuarantineError('Podman replacement identity could not be verified')
+        if current_id.lower().startswith(self.instance_id.lower()) or self.instance_id.lower().startswith(current_id.lower()):
+            raise QuarantineError('Podman container identity did not change')
         return current_id
 
     def snapshot(self):
@@ -389,7 +415,13 @@ class PodmanIsolation:
             raise QuarantineError('Podman networks remain attached')
 
     def release(self, backup):
-        self.verify(backup)
+        try:
+            self.verify(backup)
+        except QuarantineError:
+            ok, output = self.run([self.binary, 'inspect', '--type', 'container', '--format', '{{.Id}}', self.instance_id])
+            if not ok and re.search(r'(?i)(no such object|no such container|no container with name or id|not found)', str(output or '')):
+                return {'status': 'deleted', 'container_deleted': True}
+            raise
         restored = []
         try:
             for name, network in backup['networks'].items():
@@ -480,20 +512,65 @@ class RunmanIsolation:
         if state['running'] is not True or state['isolated'] is not True or state['interface_up'] is not False:
             raise QuarantineError('Runman quarantine is not active on the host veth')
 
+    def inventory(self):
+        connection = _UnixHTTP(self.socket_path)
+        connection.timeout = 15
+        try:
+            connection.request('GET', '/v1/inventory', headers={'Connection': 'close'})
+            response = connection.getresponse()
+            raw = response.read(2 * 1024 * 1024 + 1)
+            if response.status != 200 or len(raw) > 2 * 1024 * 1024:
+                raise QuarantineError('Runman inventory request failed')
+            body = json.loads(raw.decode('utf-8')) if raw else {}
+            if not isinstance(body, dict) or body.get('schema') != 1 or not isinstance(body.get('items'), list):
+                raise QuarantineError('Runman inventory schema invalid')
+            return body['items']
+        except (OSError, ValueError, UnicodeDecodeError, http.client.HTTPException):
+            raise QuarantineError('Runman inventory socket unavailable or invalid') from None
+        finally:
+            connection.close()
+
     def release(self, backup):
         if not isinstance(backup, dict) or backup.get('interface_was_up') is not True:
             raise QuarantineError('Runman quarantine recovery state is invalid')
-        self.verify(backup)
+        try:
+            self.verify(backup)
+        except QuarantineError:
+            items = self.inventory()
+            if not any(
+                str(item.get('instance_id') or '') == self.instance_id
+                or str(item.get('id') or '').lower() == self.name.lower()
+                for item in items if isinstance(item, dict)
+            ):
+                return {'status': 'deleted', 'container_deleted': True}
+            raise
         state = self.command('release')
         if state['isolated'] is not False or (state['running'] and not state['interface_up']):
             raise QuarantineError('Runman network release readback mismatch')
 
     def prove_replaced(self):
-        state = self.command('replacement')
-        generation = str(state.get('instance_id') or '')
-        if not generation or generation == self.instance_id:
-            raise QuarantineError('Runman replacement generation could not be verified')
-        return generation
+        try:
+            state = self.command('replacement')
+            generation = str(state.get('instance_id') or '')
+            if generation and generation != self.instance_id:
+                return generation
+        except QuarantineError:
+            pass
+
+        items = self.inventory()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            gen = str(item.get('instance_id') or '')
+            if gen == self.instance_id:
+                raise QuarantineError('old Runman instance still exists')
+            vm_id = str(item.get('id') or '').lower()
+            if vm_id == self.name.lower():
+                if gen and gen != self.instance_id:
+                    return gen
+                raise QuarantineError('Runman container identity did not change')
+
+        return 'none'
 
 
 def quarantine(journal, key, driver, evidence):
@@ -528,8 +605,9 @@ def release(journal, key, driver):
         entry = entries.get(key)
         if not entry:
             raise QuarantineError('no quarantine recovery record')
+        driver_res = None
         try:
-            driver.release(entry['backup'])
+            driver_res = driver.release(entry['backup'])
         except QuarantineError as exc:
             entry.update(status='release_failed', last_error=str(exc))
             try:
@@ -540,7 +618,10 @@ def release(journal, key, driver):
             raise
         entries.pop(key)
         journal.write(entries)
-        return {'status': 'released', 'data_preserved': True}
+        res = {'status': 'released', 'data_preserved': True}
+        if isinstance(driver_res, dict) and driver_res.get('container_deleted'):
+            res['container_deleted'] = True
+        return res
 
 
 def retire_replaced(journal, key, driver):

@@ -489,11 +489,20 @@ def snapshot(client, account):
         if identity(raw.get("user_id")) != account["id"]:
             continue
         details = raw.get("data") if isinstance(raw.get("data"), dict) else {}
-        transactions.append({"id": identity(raw["id"]), "type": text(raw.get("type"), 40),
+        vid = ""
+        if details.get("vm_id"):
+            try:
+                vid = identity(details["vm_id"])
+            except CommerceError:
+                vid = ""
+        tx_item = {"id": identity(raw["id"]), "type": text(raw.get("type"), 40),
             "machine_id": identity(details["machine_id"]) if details.get("machine_id") else "",
             "machine_name": text(details.get("machine_name")),
             "amount": money(raw.get("amount")), "balance_type": text(raw.get("balance_type"), 30),
-            "balance_after": money(raw.get("balance_after")), "created_at": timestamp(raw.get("created_at"))})
+            "balance_after": money(raw.get("balance_after")), "created_at": timestamp(raw.get("created_at"))}
+        if vid:
+            tx_item["vm_id"] = vid
+        transactions.append(tx_item)
     return {"profile": account, "machines": machines, "vms": vms, "orders": orders, "transactions": transactions,
             "source": BASE, "documentation": DOC, "currency": "USD"}
 
@@ -528,49 +537,135 @@ def analyse(data, start=0, end=253402300799, machine="", kind="", offset=0, limi
             "offset": offset, "limit": limit, "timezone": "UTC"}
 
 
+def _has_seller_escrow(transactions):
+    return any(
+        str(t.get("type") or "").lower() in ("escrow_in", "escrow_renew", "escrow_deduct")
+        for t in transactions
+    )
+
+
+def _classify_seller_escrow(transactions, start_ts=0):
+    """Classify seller escrow ledger into retained purchases, renewals, mid-term refunds, and 24h quick-trial washes.
+
+    When a buyer purchases a VM (`escrow_in`) and refunds it within 24 hours on the same machine
+    for >=80% of the purchase amount (`escrow_deduct`), the pair is a quick-trial / IP-swap wash.
+    Cancelling matched washes from both effective GMV and effective refund expenditure prevents
+    repeated trial re-creations from inflating monthly refund figures by 3x-5x while keeping
+    exact net revenue intact.
+    """
+    txs = sorted(
+        [t for t in transactions if int(t.get("created_at") or 0) >= start_ts],
+        key=lambda x: (int(x.get("created_at") or 0), str(x.get("id") or ""))
+    )
+    recent_ins = {}
+    records = []
+    for t in txs:
+        typ = str(t.get("type") or "").lower()
+        if typ not in ("escrow_in", "escrow_renew", "escrow_deduct", "compensation"):
+            continue
+        amt = Decimal(str(t.get("amount") or "0"))
+        ts = int(t.get("created_at") or 0)
+        mid = str(t.get("machine_id") or "unknown")
+        vid = str(t.get("vm_id") or "")
+        day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+        month = day[:7]
+        rec = {
+            "id": str(t.get("id") or ""),
+            "type": typ,
+            "amt": amt,
+            "abs_amt": abs(amt),
+            "ts": ts,
+            "day": day,
+            "month": month,
+            "mid": mid,
+            "vid": vid,
+            "quick_wash": False,
+            "wash_partner": None,
+        }
+        records.append(rec)
+        if typ == "escrow_in" and amt > 0:
+            recent_ins.setdefault(mid, []).append(rec)
+        elif typ == "escrow_deduct":
+            d_amt = abs(amt)
+            candidates = recent_ins.get(mid, [])
+            matched = None
+            for c in reversed(candidates):
+                if c["quick_wash"]:
+                    continue
+                if vid and c["vid"] and vid != c["vid"]:
+                    continue
+                if 0 <= ts - c["ts"] <= 86400 and Decimal("0.80") * c["amt"] <= d_amt <= c["amt"]:
+                    matched = c
+                    break
+            if matched is not None:
+                matched["quick_wash"] = True
+                matched["wash_partner"] = rec
+                rec["quick_wash"] = True
+                rec["wash_partner"] = matched
+    return records
+
+
 def compute_daily_analytics(snapshot, days_limit=30):
     orders = snapshot.get("orders", [])
     transactions = snapshot.get("transactions", [])
 
     daily = {}
-    for o in orders:
-        status = str(o.get("status") or "").lower()
-        typ = str(o.get("type") or "").lower()
-        amt = Decimal(str(o.get("amount") or "0"))
-        day = datetime.fromtimestamp(o["created_at"], timezone.utc).strftime("%Y-%m-%d")
-        item = daily.setdefault(day, {
+
+    def ensure_day(day):
+        return daily.setdefault(day, {
             "date": day, "orders_count": 0, "orders_amount": Decimal(0),
             "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
-            "renewals_count": 0, "purchases_count": 0
+            "renewals_count": 0, "purchases_count": 0,
+            "quick_trials_count": 0, "quick_trials_amount": Decimal(0),
         })
-        if status == "completed":
-            if typ in ("purchase", "buy"):
-                item["orders_count"] += 1
-                item["purchases_count"] += 1
-                item["orders_amount"] += amt
-                item["net_revenue"] += amt
-            elif typ in ("renew", "renewal"):
+
+    if _has_seller_escrow(transactions):
+        for rec in _classify_seller_escrow(transactions):
+            item = ensure_day(rec["day"])
+            typ = rec["type"]
+            if typ == "escrow_in":
+                item["net_revenue"] += rec["amt"]
+                if not rec["quick_wash"]:
+                    item["orders_count"] += 1
+                    item["purchases_count"] += 1
+                    item["orders_amount"] += rec["amt"]
+            elif typ == "escrow_renew":
                 item["orders_count"] += 1
                 item["renewals_count"] += 1
-                item["orders_amount"] += amt
-                item["net_revenue"] += amt
-            elif typ == "refund":
-                item["refunds_count"] += 1
-                item["refunds_amount"] += abs(amt)
-                item["net_revenue"] -= abs(amt)
-
-    for t in transactions:
-        typ = str(t.get("type") or "").lower()
-        amt = Decimal(str(t.get("amount") or "0"))
-        day = datetime.fromtimestamp(t["created_at"], timezone.utc).strftime("%Y-%m-%d")
-        item = daily.setdefault(day, {
-            "date": day, "orders_count": 0, "orders_amount": Decimal(0),
-            "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
-            "renewals_count": 0, "purchases_count": 0
-        })
-        if typ in ("refund", "escrow_deduct"):
-            item["refunds_amount"] += abs(amt)
-            item["net_revenue"] -= abs(amt)
+                item["orders_amount"] += rec["amt"]
+                item["net_revenue"] += rec["amt"]
+            elif typ == "escrow_deduct":
+                item["net_revenue"] -= rec["abs_amt"]
+                if rec["quick_wash"]:
+                    item["quick_trials_count"] += 1
+                    item["quick_trials_amount"] += rec["abs_amt"]
+                else:
+                    item["refunds_count"] += 1
+                    item["refunds_amount"] += rec["abs_amt"]
+            elif typ == "compensation":
+                item["net_revenue"] -= rec["abs_amt"]
+    else:
+        for o in orders:
+            status = str(o.get("status") or "").lower()
+            typ = str(o.get("type") or "").lower()
+            amt = Decimal(str(o.get("amount") or "0"))
+            day = datetime.fromtimestamp(o["created_at"], timezone.utc).strftime("%Y-%m-%d")
+            item = ensure_day(day)
+            if status == "completed":
+                if typ in ("purchase", "buy"):
+                    item["orders_count"] += 1
+                    item["purchases_count"] += 1
+                    item["orders_amount"] += amt
+                    item["net_revenue"] += amt
+                elif typ in ("renew", "renewal"):
+                    item["orders_count"] += 1
+                    item["renewals_count"] += 1
+                    item["orders_amount"] += amt
+                    item["net_revenue"] += amt
+                elif typ == "refund":
+                    item["refunds_count"] += 1
+                    item["refunds_amount"] += abs(amt)
+                    item["net_revenue"] -= abs(amt)
 
     result = []
     for day in sorted(daily.keys(), reverse=True)[:days_limit]:
@@ -586,13 +681,20 @@ def compute_daily_analytics(snapshot, days_limit=30):
             "refunds_count": row["refunds_count"],
             "refunds_amount": format(row["refunds_amount"], "f"),
             "net_revenue": format(row["net_revenue"], "f"),
-            "refund_rate": rate
+            "refund_rate": rate,
+            "quick_trials_count": row["quick_trials_count"],
+            "quick_trials_amount": format(row["quick_trials_amount"], "f"),
         })
 
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    today_data = daily.get(today_str, {"orders_count": 0, "orders_amount": Decimal(0), "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0)})
-    yesterday_data = daily.get(yesterday_str, {"orders_count": 0, "orders_amount": Decimal(0), "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0)})
+    empty_day = {
+        "orders_count": 0, "orders_amount": Decimal(0),
+        "refunds_count": 0, "refunds_amount": Decimal(0),
+        "net_revenue": Decimal(0), "quick_trials_count": 0, "quick_trials_amount": Decimal(0),
+    }
+    today_data = daily.get(today_str, empty_day)
+    yesterday_data = daily.get(yesterday_str, empty_day)
 
     today_summary = {
         "today_date": today_str,
@@ -603,6 +705,8 @@ def compute_daily_analytics(snapshot, days_limit=30):
         "net_revenue": format(today_data["net_revenue"], "f"),
         "yesterday_gmv": format(yesterday_data["orders_amount"], "f"),
         "yesterday_net": format(yesterday_data["net_revenue"], "f"),
+        "quick_trials_count": today_data["quick_trials_count"],
+        "quick_trials_amount": format(today_data["quick_trials_amount"], "f"),
     }
     return {"daily": result, "today_summary": today_summary}
 
@@ -614,44 +718,66 @@ def compute_monthly_analytics(snapshot, months_limit=12):
 
     monthly = {}
     machine_sales = {}
-    for o in orders:
-        status = str(o.get("status") or "").lower()
-        typ = str(o.get("type") or "").lower()
-        amt = Decimal(str(o.get("amount") or "0"))
-        month = datetime.fromtimestamp(o["created_at"], timezone.utc).strftime("%Y-%m")
-        mid = o.get("machine_id") or "unknown"
-        item = monthly.setdefault(month, {
-            "month": month, "orders_count": 0, "orders_amount": Decimal(0),
-            "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
-            "renewals_count": 0, "purchases_count": 0
-        })
-        if status == "completed":
-            if typ in ("purchase", "buy", "renew", "renewal"):
-                item["orders_count"] += 1
-                if typ in ("purchase", "buy"):
-                    item["purchases_count"] += 1
-                else:
-                    item["renewals_count"] += 1
-                item["orders_amount"] += amt
-                item["net_revenue"] += amt
-                machine_sales[month, mid] = machine_sales.get((month, mid), Decimal(0)) + amt
-            elif typ == "refund":
-                item["refunds_count"] += 1
-                item["refunds_amount"] += abs(amt)
-                item["net_revenue"] -= abs(amt)
 
-    for t in transactions:
-        typ = str(t.get("type") or "").lower()
-        amt = Decimal(str(t.get("amount") or "0"))
-        month = datetime.fromtimestamp(t["created_at"], timezone.utc).strftime("%Y-%m")
-        item = monthly.setdefault(month, {
+    def ensure_month(month):
+        return monthly.setdefault(month, {
             "month": month, "orders_count": 0, "orders_amount": Decimal(0),
             "refunds_count": 0, "refunds_amount": Decimal(0), "net_revenue": Decimal(0),
-            "renewals_count": 0, "purchases_count": 0
+            "renewals_count": 0, "purchases_count": 0,
+            "quick_trials_count": 0, "quick_trials_amount": Decimal(0),
         })
-        if typ in ("refund", "escrow_deduct"):
-            item["refunds_amount"] += abs(amt)
-            item["net_revenue"] -= abs(amt)
+
+    if _has_seller_escrow(transactions):
+        for rec in _classify_seller_escrow(transactions):
+            month = rec["month"]
+            mid = rec["mid"]
+            item = ensure_month(month)
+            typ = rec["type"]
+            if typ == "escrow_in":
+                item["net_revenue"] += rec["amt"]
+                if not rec["quick_wash"]:
+                    item["orders_count"] += 1
+                    item["purchases_count"] += 1
+                    item["orders_amount"] += rec["amt"]
+                    machine_sales[month, mid] = machine_sales.get((month, mid), Decimal(0)) + rec["amt"]
+            elif typ == "escrow_renew":
+                item["orders_count"] += 1
+                item["renewals_count"] += 1
+                item["orders_amount"] += rec["amt"]
+                item["net_revenue"] += rec["amt"]
+                machine_sales[month, mid] = machine_sales.get((month, mid), Decimal(0)) + rec["amt"]
+            elif typ == "escrow_deduct":
+                item["net_revenue"] -= rec["abs_amt"]
+                if rec["quick_wash"]:
+                    item["quick_trials_count"] += 1
+                    item["quick_trials_amount"] += rec["abs_amt"]
+                else:
+                    item["refunds_count"] += 1
+                    item["refunds_amount"] += rec["abs_amt"]
+            elif typ == "compensation":
+                item["net_revenue"] -= rec["abs_amt"]
+    else:
+        for o in orders:
+            status = str(o.get("status") or "").lower()
+            typ = str(o.get("type") or "").lower()
+            amt = Decimal(str(o.get("amount") or "0"))
+            month = datetime.fromtimestamp(o["created_at"], timezone.utc).strftime("%Y-%m")
+            mid = o.get("machine_id") or "unknown"
+            item = ensure_month(month)
+            if status == "completed":
+                if typ in ("purchase", "buy", "renew", "renewal"):
+                    item["orders_count"] += 1
+                    if typ in ("purchase", "buy"):
+                        item["purchases_count"] += 1
+                    else:
+                        item["renewals_count"] += 1
+                    item["orders_amount"] += amt
+                    item["net_revenue"] += amt
+                    machine_sales[month, mid] = machine_sales.get((month, mid), Decimal(0)) + amt
+                elif typ == "refund":
+                    item["refunds_count"] += 1
+                    item["refunds_amount"] += abs(amt)
+                    item["net_revenue"] -= abs(amt)
 
     result = []
     for month in sorted(monthly.keys(), reverse=True)[:months_limit]:
@@ -660,7 +786,7 @@ def compute_monthly_analytics(snapshot, months_limit=12):
         rate = round(float(row["refunds_count"] / total_ops * 100), 2) if total_ops > 0 else 0.0
         m_list = []
         for (mth, mid), samt in machine_sales.items():
-            if mth == month:
+            if mth == month and samt > 0:
                 m_list.append({"machine_id": mid, "machine_name": machines_map.get(mid, mid), "amount": format(samt, "f")})
         m_list.sort(key=lambda x: Decimal(x["amount"]), reverse=True)
         result.append({
@@ -673,6 +799,8 @@ def compute_monthly_analytics(snapshot, months_limit=12):
             "refunds_amount": format(row["refunds_amount"], "f"),
             "net_revenue": format(row["net_revenue"], "f"),
             "refund_rate": rate,
+            "quick_trials_count": row["quick_trials_count"],
+            "quick_trials_amount": format(row["quick_trials_amount"], "f"),
             "top_machines": m_list[:5]
         })
     return result
@@ -685,14 +813,27 @@ def compute_risk_analysis(snapshot, conn=None):
     vms = snapshot.get("vms", [])
 
     user_dir = {}
+    vm_target_map = {}
     if conn:
         try:
             ud_rows = conn.execute("SELECT user_id, user_email, user_name FROM buyer_user_directory WHERE user_id<>''").fetchall()
             user_dir = {str(r[0]): {"user_email": str(r[1] or ""), "user_name": str(r[2] or "")} for r in ud_rows}
         except Exception:
             pass
+        try:
+            bt_rows = conn.execute("SELECT vm_id, user_id, user_email, user_name FROM buyer_targets WHERE vm_id<>'' AND user_id<>''").fetchall()
+            for r in bt_rows:
+                vid, uid, uemail, uname = str(r[0]), str(r[1]), str(r[2] or ""), str(r[3] or "")
+                vm_target_map[vid] = uid
+                if uid not in user_dir or (not user_dir[uid].get("user_email") and uemail):
+                    user_dir[uid] = {
+                        "user_email": uemail or user_dir.get(uid, {}).get("user_email", ""),
+                        "user_name": uname or user_dir.get(uid, {}).get("user_name", ""),
+                    }
+        except Exception:
+            pass
 
-    # 1. Abnormal machines
+    # 1. Abnormal machines (focused on recent 30-day window & excluding 24h trial washes)
     machine_stats = {}
     for m in machines:
         machine_stats[m["id"]] = {
@@ -702,44 +843,73 @@ def compute_risk_analysis(snapshot, conn=None):
             "orders_count": 0,
             "refunds_count": 0,
             "refund_amount": Decimal(0),
-            "orders_amount": Decimal(0)
+            "orders_amount": Decimal(0),
+            "quick_trial_count": 0,
+            "quick_trial_amount": Decimal(0),
         }
 
-    for o in orders:
-        mid = o.get("machine_id")
-        if mid and mid in machine_stats:
-            typ = str(o.get("type") or "").lower()
-            amt = Decimal(str(o.get("amount") or "0"))
-            if typ in ("purchase", "buy", "renew", "renewal") and o.get("status") == "completed":
+    seller_mode = _has_seller_escrow(transactions)
+    if seller_mode:
+        max_ts = max((int(t.get("created_at") or 0) for t in transactions), default=int(time.time()))
+        cutoff_30d = max(0, max_ts - 30 * 86400)
+        for rec in _classify_seller_escrow(transactions, start_ts=cutoff_30d):
+            mid = rec["mid"]
+            if mid not in machine_stats:
+                continue
+            typ = rec["type"]
+            if typ == "escrow_in":
+                if not rec["quick_wash"]:
+                    machine_stats[mid]["orders_count"] += 1
+                    machine_stats[mid]["orders_amount"] += rec["amt"]
+            elif typ == "escrow_renew":
                 machine_stats[mid]["orders_count"] += 1
-                machine_stats[mid]["orders_amount"] += amt
-            elif typ == "refund":
-                machine_stats[mid]["refunds_count"] += 1
-                machine_stats[mid]["refund_amount"] += abs(amt)
-
-    for t in transactions:
-        mid = t.get("machine_id")
-        if mid and mid in machine_stats:
-            typ = str(t.get("type") or "").lower()
-            amt = Decimal(str(t.get("amount") or "0"))
-            if typ in ("refund", "escrow_deduct"):
-                machine_stats[mid]["refund_amount"] += abs(amt)
+                machine_stats[mid]["orders_amount"] += rec["amt"]
+            elif typ == "escrow_deduct":
+                if rec["quick_wash"]:
+                    machine_stats[mid]["quick_trial_count"] += 1
+                    machine_stats[mid]["quick_trial_amount"] += rec["abs_amt"]
+                else:
+                    machine_stats[mid]["refunds_count"] += 1
+                    machine_stats[mid]["refund_amount"] += rec["abs_amt"]
+    else:
+        for o in orders:
+            mid = o.get("machine_id")
+            if mid and mid in machine_stats:
+                typ = str(o.get("type") or "").lower()
+                amt = Decimal(str(o.get("amount") or "0"))
+                if typ in ("purchase", "buy", "renew", "renewal") and o.get("status") == "completed":
+                    machine_stats[mid]["orders_count"] += 1
+                    machine_stats[mid]["orders_amount"] += amt
+                elif typ == "refund":
+                    machine_stats[mid]["refunds_count"] += 1
+                    machine_stats[mid]["refund_amount"] += abs(amt)
 
     abnormal_machines = []
     for mid, stat in machine_stats.items():
         total_ops = stat["orders_count"] + stat["refunds_count"]
         rate = round(float(stat["refunds_count"] / total_ops * 100), 2) if total_ops > 0 else 0.0
-        is_abnormal = (rate >= 15.0 and stat["refunds_count"] >= 2) or stat["refunds_count"] >= 3
+        if seller_mode:
+            is_abnormal = (rate >= 30.0 and stat["refunds_count"] >= 5) or (rate >= 25.0 and stat["refund_amount"] >= Decimal("8"))
+        else:
+            is_abnormal = (rate >= 15.0 and stat["refunds_count"] >= 2) or stat["refunds_count"] >= 3
         stat["refund_rate"] = rate
         stat["is_abnormal"] = is_abnormal
         stat["refund_amount"] = format(stat["refund_amount"], "f")
         stat["orders_amount"] = format(stat["orders_amount"], "f")
-        stat["suggestion"] = "退款率偏高，建议核查机房线路稳定性、IP是否被墙或宿主负载，通常非单买家责任" if is_abnormal else "退款率正常"
+        stat["quick_trial_amount"] = format(stat["quick_trial_amount"], "f")
+        if is_abnormal:
+            trial_note = f"（已剔除 {stat['quick_trial_count']} 次 24h 秒退试用）" if stat["quick_trial_count"] else ""
+            stat["suggestion"] = f"近30天中途退订率偏高{trial_note}，建议核查机房线路稳定性、IP墙况或宿主负载"
+        else:
+            trial_note = f"（另有 {stat['quick_trial_count']} 次 24h 内秒退换IP已冲销）" if stat["quick_trial_count"] else ""
+            stat["suggestion"] = f"近30天中途退订处于合理范围{trial_note}"
         abnormal_machines.append(stat)
-    abnormal_machines.sort(key=lambda x: (x["is_abnormal"], float(x["refund_rate"])), reverse=True)
+    abnormal_machines.sort(key=lambda x: (x["is_abnormal"], float(x["refund_amount"]), float(x["refund_rate"])), reverse=True)
 
     # 2. Abnormal users & Watchlist
     vm_user_map = {v["id"]: v["user_id"] for v in vms if v.get("id") and v.get("user_id")}
+    for vid, uid in vm_target_map.items():
+        vm_user_map.setdefault(vid, uid)
     user_records = {}
 
     vm_purchase_time = {}
@@ -777,12 +947,40 @@ def compute_risk_analysis(snapshot, conn=None):
                 if o["created_at"] - vm_purchase_time[vid] <= 86400:
                     rec["quick_refunds"] += 1
 
+    if seller_mode:
+        for rec_tx in _classify_seller_escrow(transactions):
+            vid = rec_tx["vid"]
+            if not vid:
+                continue
+            uid = vm_user_map.get(vid, "")
+            if not uid:
+                continue
+            rec = user_records.setdefault(uid, {
+                "user_id": uid,
+                "user_name": user_dir.get(uid, {}).get("user_name", ""),
+                "user_email": user_dir.get(uid, {}).get("user_email", ""),
+                "total_purchases": 0,
+                "total_refunds": 0,
+                "quick_refunds": 0,
+                "total_spent": Decimal(0),
+                "total_refunded": Decimal(0),
+                "sample_vm_id": vid,
+            })
+            if rec_tx["type"] == "escrow_in":
+                rec["total_purchases"] += 1
+                rec["total_spent"] += rec_tx["amt"]
+            elif rec_tx["type"] == "escrow_deduct":
+                rec["total_refunds"] += 1
+                rec["total_refunded"] += rec_tx["abs_amt"]
+                if rec_tx["quick_wash"]:
+                    rec["quick_refunds"] += 1
+
     abnormal_users = []
     for uid, r in user_records.items():
         if r["total_purchases"] == 0 and r["total_refunds"] == 0:
             continue
-        total_ops = r["total_purchases"] + r["total_refunds"]
-        rate = round(float(r["total_refunds"] / total_ops * 100), 2) if total_ops > 0 else 0.0
+        base_ops = max(r["total_purchases"], r["total_refunds"], 1)
+        rate = min(100.0, round(float(r["total_refunds"] / base_ops * 100), 2))
         risk_tags = []
         if r["quick_refunds"] >= 1:
             risk_tags.append(f"极速买退 ({r['quick_refunds']}次<24h)")
@@ -823,6 +1021,7 @@ def compute_loyalty_users(snapshot, conn=None):
     owner_id = profile_data.get("id", "")
     vms = snapshot.get("vms", [])
     orders = snapshot.get("orders", [])
+    transactions = snapshot.get("transactions", [])
     machines_map = {m["id"]: m.get("name") or m["id"] for m in snapshot.get("machines", [])}
 
     user_dir = {}
@@ -830,6 +1029,17 @@ def compute_loyalty_users(snapshot, conn=None):
         try:
             ud_rows = conn.execute("SELECT user_id, user_email, user_name FROM buyer_user_directory WHERE user_id<>''").fetchall()
             user_dir = {str(r[0]): {"user_email": str(r[1] or ""), "user_name": str(r[2] or "")} for r in ud_rows}
+        except Exception:
+            pass
+        try:
+            bt_rows = conn.execute("SELECT user_id, user_email, user_name FROM buyer_targets WHERE user_id<>''").fetchall()
+            for r in bt_rows:
+                uid, uemail, uname = str(r[0]), str(r[1] or ""), str(r[2] or "")
+                if uid not in user_dir or (not user_dir[uid].get("user_email") and uemail):
+                    user_dir[uid] = {
+                        "user_email": uemail or user_dir.get(uid, {}).get("user_email", ""),
+                        "user_name": uname or user_dir.get(uid, {}).get("user_name", ""),
+                    }
         except Exception:
             pass
 
@@ -869,10 +1079,27 @@ def compute_loyalty_users(snapshot, conn=None):
             if typ in ("renew", "renewal"):
                 user_renewals[uid] = user_renewals.get(uid, 0) + 1
 
+    for t in transactions:
+        vid = t.get("vm_id")
+        uid = vm_user_map.get(vid) if vid else None
+        if not uid or uid == owner_id:
+            continue
+        typ = str(t.get("type") or "").lower()
+        amt = Decimal(str(t.get("amount") or "0"))
+        if typ in ("escrow_in", "escrow_renew") and amt > 0:
+            user_spent[uid] = user_spent.get(uid, Decimal(0)) + amt
+            created = t.get("created_at", now_ts)
+            if uid not in user_earliest_order or created < user_earliest_order[uid]:
+                user_earliest_order[uid] = created
+            if typ == "escrow_renew":
+                user_renewals[uid] = user_renewals.get(uid, 0) + 1
+
     loyalty_list = []
     for uid, vm_list in users_vms.items():
         renew_cnt = user_renewals.get(uid, 0)
         spent = user_spent.get(uid, Decimal(0))
+        if spent == Decimal(0):
+            spent = sum(Decimal(str(v.get("price_monthly") or "0")) for v in vm_list)
         earliest = user_earliest_order.get(uid, now_ts - 86400 * 30)
         tenure_days = max(1, (now_ts - earliest) // 86400)
 

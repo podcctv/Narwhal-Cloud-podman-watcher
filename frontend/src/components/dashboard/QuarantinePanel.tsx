@@ -164,13 +164,13 @@ export const QuarantinePanel: React.FC<{
                 ))}
               </ul>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />解除隔离只恢复原实例网络；容器已重装时请走身份核验，不会改动新实例网络。</p>
+                <p className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />解除隔离只恢复原实例网络；容器已重装或已删除时请走身份核验，不会改动新实例网络。</p>
                 <div className="flex flex-wrap gap-2">
                   <button type="button" disabled={hostStale || busy || pending || role !== 'admin'} onClick={() => { setSelectedAction('release'); setSelected(item); }} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-500/60 bg-sky-950 px-4 text-xs font-semibold text-sky-100 hover:bg-sky-900 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50" title={role !== 'admin' ? '仅管理员可复核隔离事件' : undefined}>
                     <UnlockKeyhole className="h-4 w-4" aria-hidden="true" />{releasePending ? '等待网络恢复回执' : '复核并恢复原实例网络'}
                   </button>
-                  <button type="button" disabled={hostStale || busy || pending || role !== 'admin' || !item.replacement_review_supported} onClick={() => { setSelectedAction('replace'); setSelected(item); }} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-500/60 bg-amber-950/60 px-4 text-xs font-semibold text-amber-100 hover:bg-amber-900/70 focus:outline-hidden focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50" title={role !== 'admin' ? '仅管理员可复核隔离事件' : !item.replacement_review_supported ? `需要 Client 1.7.188 或更新版本；当前 ${item.host_agent_version || '未知'}` : '核验当前实例 ID 与隔离记录不同，且旧实例已不存在'}>
-                    <Archive className="h-4 w-4" aria-hidden="true" />{replacementPending ? '等待身份核验回执' : '容器已重装：核验并归档旧隔离'}
+                  <button type="button" disabled={hostStale || busy || pending || role !== 'admin' || !item.replacement_review_supported} onClick={() => { setSelectedAction('replace'); setSelected(item); }} className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-500/60 bg-amber-950/60 px-4 text-xs font-semibold text-amber-100 hover:bg-amber-900/70 focus:outline-hidden focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50" title={role !== 'admin' ? '仅管理员可复核隔离事件' : !item.replacement_review_supported ? `需要 Client 1.7.188 或更新版本；当前 ${item.host_agent_version || '未知'}` : '核验当前实例 ID 与隔离记录不同，或旧容器已被删除'}>
+                    <Archive className="h-4 w-4" aria-hidden="true" />{replacementPending ? '等待身份核验回执' : '容器已重装或已删除：核验并归档旧隔离'}
                   </button>
                 </div>
               </div>
@@ -180,8 +180,8 @@ export const QuarantinePanel: React.FC<{
           );
         })}
       </div>
-      <ConfirmDialog open={!!selected} title={selectedAction === 'replace' ? '确认容器已重装并核验旧实例？' : '确认已完成排查并解除隔离？'} description={selectedAction === 'replace'
-        ? '节点将核对当前容器 ID 与旧隔离 ID，只有当前 ID 不同且旧实例已从运行时消失时才归档旧隔离。此操作不恢复、不修改新容器网络；验证失败时告警继续保留。'
+      <ConfirmDialog open={!!selected} title={selectedAction === 'replace' ? '确认容器已重装或已删除并核验旧实例？' : '确认已完成排查并解除隔离？'} description={selectedAction === 'replace'
+        ? '节点将核对当前容器 ID 与旧隔离 ID。若容器已被删除销毁或已分配新实例 ID，且旧实例已从运行时完全消失，将安全归档旧隔离记录并解除告警；验证失败时告警继续保留。'
         : '将恢复该实例隔离前的受管网络连接，可能重新开放公网服务。容器与磁盘不会删除。请先通过宿主机控制台处置违规程序；若再次命中确凿特征，会重新隔离并告警。解除操作不等于风险已复查通过。'} confirmLabel={selectedAction === 'replace' ? '确认核验并归档旧隔离' : '确认复核并恢复网络'} tone="danger" isSubmitting={busy} onConfirm={() => void submitReview()} onCancel={() => { if (!busy) { setSelected(null); setSelectedAction(null); } }} />
     </section>
   );

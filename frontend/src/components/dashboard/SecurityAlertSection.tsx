@@ -285,7 +285,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                       </div>
                       <div className="mt-1 text-[11px] text-slate-400">
                         {prohibitedActivity
-                          ? '请到上方隔离复核区选择恢复原实例网络，或在容器已重装时核验旧实例身份。此类告警不能通过放行、忽略或普通标记解决。'
+                          ? '请到上方隔离复核区选择恢复原实例网络，或在容器已重装/已删除时核验旧实例身份。此类告警不能通过放行、忽略或普通标记解决。'
                           : '请根据回执检查节点版本、权限及残留守护进程后重试。标记已解决只归档告警，不会清理程序；风险仍存在时会再次告警。'}
                       </div>
                     </div>

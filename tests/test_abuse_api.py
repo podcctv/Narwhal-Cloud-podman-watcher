@@ -183,6 +183,38 @@ class AbuseAPITests(unittest.TestCase):
         self.assertIn('不等于风险已恢复', record['message'])
         self.assertEqual(json.loads(record['details_json'])['network_quarantine']['status'], 'released')
 
+    def test_record_replacement_result_when_container_deleted(self):
+        self.emit()
+        alert_id = self.conn.execute('SELECT alert_id FROM network_quarantines').fetchone()[0]
+        row = {'id': 999, 'action_type': 'confirm_replaced_network_quarantine', 'alert_id': alert_id}
+        message = 'replacement_verified current_instance_id=none container_deleted=true old_instance_absent=true old_journal_cleared=true'
+        abuse_api.record_replacement_result(self.conn, row, {'instance_id': 'a'*64}, 'succeeded', self.now, message)
+        self.conn.commit()
+        record = self.conn.execute('SELECT * FROM security_alerts').fetchone()
+        self.assertEqual(record['status'], 'resolved')
+        self.assertIn('已被用户删除', record['message'])
+        details = json.loads(record['details_json'])
+        self.assertEqual(details['network_quarantine']['status'], 'replaced')
+        self.assertTrue(details['network_quarantine']['container_deleted'])
+        q_row = self.conn.execute('SELECT status FROM network_quarantines').fetchone()
+        self.assertEqual(q_row[0], 'replaced')
+
+    def test_record_release_result_when_container_deleted(self):
+        self.emit()
+        alert_id = self.conn.execute('SELECT alert_id FROM network_quarantines').fetchone()[0]
+        row = {'action_type': 'release_network_quarantine', 'alert_id': alert_id}
+        message = 'container_deleted_verified old_instance_absent=true old_journal_cleared=true'
+        abuse_api.record_release_result(self.conn, row, {'instance_id': 'a'*64}, 'succeeded', self.now, message)
+        self.conn.commit()
+        record = self.conn.execute('SELECT * FROM security_alerts').fetchone()
+        self.assertEqual(record['status'], 'resolved')
+        self.assertIn('已被用户删除', record['message'])
+        details = json.loads(record['details_json'])
+        self.assertEqual(details['network_quarantine']['status'], 'replaced')
+        self.assertTrue(details['network_quarantine']['container_deleted'])
+        q_row = self.conn.execute('SELECT status FROM network_quarantines').fetchone()
+        self.assertEqual(q_row[0], 'replaced')
+
     def test_telegram_card_reports_isolation_not_recovery_even_if_alert_archived(self):
         value=alert();value['abuse_evidence'][0].update(pending_attempts=48,vertical_ports=48,pending_ratio=1)
         self.emit(value)

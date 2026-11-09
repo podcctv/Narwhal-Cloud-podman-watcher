@@ -6720,7 +6720,7 @@ async def security_action_result(
                 operations.track_recheck(conn, action_id, now)
             if row['alert_id'] is not None:
                 investigation.sync_states(conn, host_id, now, alert_id=row['alert_id'])
-            abuse_api.record_release_result(conn, row, params, status, now)
+            abuse_api.record_release_result(conn, row, params, status, now, message)
             abuse_api.record_replacement_result(conn, row, params, status, now, message)
             conn.commit()
     finally:
