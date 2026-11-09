@@ -395,7 +395,7 @@ def install_shell(container, entries, checked_exec, version, now):
         return False, False
     files = [('/etc/narwhal-banner.sh', shell_renderer(str(container['name']), entries, version, now), '644'),
              ('/etc/profile.d/90-narwhal-banner.sh', shell_hook(), '644'), ('/root/.bashrc', rc, None)]
-    commands = ["set -eu; for tool in awk stty date base64 gzip cmp; do command -v \"$tool\" >/dev/null || exit 1; done; [ ! -L /etc/profile.d ]; mkdir -p /etc/profile.d; changed=0"]
+    commands = ["set -eu; for tool in awk date base64 gzip cmp; do command -v \"$tool\" >/dev/null || exit 1; done; [ ! -L /etc/profile.d ]; mkdir -p /etc/profile.d; changed=0"]
     for path, content, mode in files:
         owned = '' if path == '/root/.bashrc' else f"if [ -e {path} ]; then grep -q '^# NARWHAL MANAGED INTERACTIVE BANNER v1$' {path} || exit 1; fi; "
         commands.append(f"[ ! -L {path} ]; [ ! -e {path} ] || [ -f {path} ]; " + owned +
@@ -472,6 +472,7 @@ cleanup() {
     "$sshd" -t -f "$cfg" >/dev/null 2>&1 || true
     if command -v systemctl >/dev/null 2>&1; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; fi
     if command -v service >/dev/null 2>&1; then service ssh reload >/dev/null 2>&1 || service sshd reload >/dev/null 2>&1 || true; fi
+    if command -v rc-service >/dev/null 2>&1; then rc-service ssh reload 2>/dev/null || rc-service sshd reload 2>/dev/null || true; fi
   fi
   rm -f "$backup_drop" "$backup_banner"
   return "$rc"
@@ -500,6 +501,17 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 if [ "$reloaded" -eq 0 ] && command -v service >/dev/null 2>&1; then
   service ssh reload >/dev/null 2>&1 && reloaded=1 || service sshd reload >/dev/null 2>&1 && reloaded=1 || true
+fi
+if [ "$reloaded" -eq 0 ] && command -v rc-service >/dev/null 2>&1; then
+  rc-service ssh reload >/dev/null 2>&1 && reloaded=1 || rc-service sshd reload >/dev/null 2>&1 && reloaded=1 || true
+fi
+if [ "$reloaded" -eq 0 ]; then
+  sshd_pid=$(pgrep -o -x sshd 2>/dev/null || true)
+  [ -n "$sshd_pid" ] || [ ! -f /var/run/sshd.pid ] || sshd_pid=$(cat /var/run/sshd.pid 2>/dev/null || true)
+  [ -n "$sshd_pid" ] || [ ! -f /run/sshd.pid ] || sshd_pid=$(cat /run/sshd.pid 2>/dev/null || true)
+  if [ -n "$sshd_pid" ] && kill -HUP "$sshd_pid" 2>/dev/null; then
+    reloaded=1
+  fi
 fi
 [ "$reloaded" -eq 1 ] || { echo NARWHAL_SSH_BANNER_STATE=reload_unavailable; exit 1; }
 actual=$("$sshd" -T -f "$cfg" 2>/dev/null | awk 'tolower($1)=="banner" {print $2; exit}')
@@ -789,11 +801,11 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
                         raise OSError("MOTD 写后校验失败")
                     changed=True
                 delivery.update(status="written" if changed else "unchanged",method="runtime_atomic")
-            except (OSError,ValueError):
+            except (OSError,ValueError) as exc:
                 delivery.update(
                     status="written" if shell_ok else "failed",
                     method="interactive_shell" if shell_ok else "unavailable",
-                    error="Runman MOTD 写入 / 校验失败；仅在代次校验通过时通过 guest exec 创建，普通文件或符号链接检查未通过",
+                    error=str(exc) if str(exc) else "Runman MOTD 写入 / 校验失败；仅在代次校验通过时通过 guest exec 创建，普通文件或符号链接检查未通过",
                 )
         else:
             try:

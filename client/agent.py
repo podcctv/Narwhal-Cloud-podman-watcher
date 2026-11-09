@@ -316,8 +316,10 @@ def _runman_exec_request(
         error = str(result.get("stderr") or result.get("message") or "")
         if response.status != 200 or result.get("ok") is not True:
             return False, (output or error or "Runman guest execution failed")[:8000]
-        if result.get("instance_id") != instance_id or result.get("exit_code") != 0:
-            return False, "Runman guest execution identity or exit status was not confirmed"
+        if result.get("instance_id") != instance_id:
+            return False, "Runman guest execution identity was not confirmed"
+        if result.get("exit_code") != 0:
+            return False, (output or error or f"Runman guest command exited with code {result.get('exit_code')}")[:8000]
         return True, output
     except (OSError, ValueError, http.client.HTTPException):
         return False, "Runman guest execution socket unavailable or timed out"

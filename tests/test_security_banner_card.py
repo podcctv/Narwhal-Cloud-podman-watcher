@@ -303,6 +303,8 @@ class CardTests(unittest.TestCase):
         self.assertIn('preserved_operator_config', script)
         self.assertIn('cmp -s "$tmp_banner" "$banner"', script)
         self.assertNotIn('>> /etc/ssh/sshd_config', script)
+        self.assertIn('rc-service', script)
+        self.assertIn('kill -HUP "$sshd_pid"', script)
         shell = shutil.which('sh') or ('C:/Program Files/Git/bin/bash.exe' if Path('C:/Program Files/Git/bin/bash.exe').is_file() else '')
         if shell:
             parsed = subprocess.run([shell, '-n'], input=script, text=True, capture_output=True, timeout=10)
@@ -310,6 +312,10 @@ class CardTests(unittest.TestCase):
         runner.return_value = (True, 'NARWHAL_SSH_BANNER_STATE=preserved_operator_config')
         preserved = banner.install_ssh_banner(container, 'plain banner', runner)
         self.assertEqual(preserved['state'], 'preserved_operator_config')
+        runner.return_value = (False, 'NARWHAL_SSH_BANNER_STATE=reload_unavailable')
+        failed = banner.install_ssh_banner(container, 'plain banner', runner)
+        self.assertEqual(failed['state'], 'reload_unavailable')
+        self.assertEqual(failed['reason'], 'reload_unavailable')
 
 
 @unittest.skipUnless(os.name == 'posix', 'PTY requires POSIX')
