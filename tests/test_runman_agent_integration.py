@@ -214,6 +214,23 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
             self.assertEqual(agent._checked_banner_exec(container, "id"), (True, "ok"))
         execute.assert_called_once_with(container["name"], "generation-1", "id", agent._runtime_command_timeout())
 
+    def test_runman_banner_exec_without_runtime_bin_and_fallback_generation(self):
+        vm_id = "11111111-2222-3333-4444-555555555555"
+        container = {"name": vm_id, "runtime": "runman"}
+        with mock.patch.dict(agent._runman_instance_generations, {vm_id: "gen-fallback"}):
+            with mock.patch.object(agent, "_runman_exec_request", return_value=(True, "ok")) as execute:
+                self.assertEqual(agent._checked_banner_exec(container, "uname -a"), (True, "ok"))
+            execute.assert_called_once_with(vm_id, "gen-fallback", "uname -a", agent._runtime_command_timeout())
+
+    def test_runman_dynamic_sock_discovery_in_cached_runtime_bins(self):
+        agent._runtime_bins = {"podman": "podman"}
+        with mock.patch.object(agent.os.path, "exists", return_value=True), \
+             mock.patch.object(agent.os, "name", "posix"), \
+             mock.patch.object(agent.socket, "AF_UNIX", 1, create=True):
+            bins = agent.get_runtime_bins()
+            self.assertEqual(bins.get("runman"), "runman")
+            self.assertEqual(bins.get("podman"), "podman")
+
     def test_runman_in_runtime_bins_without_warning(self):
         with mock.patch.dict(os.environ, {"CONTAINER_RUNTIMES": "runman"}):
             with mock.patch.object(agent.os.path, "exists", return_value=True), \

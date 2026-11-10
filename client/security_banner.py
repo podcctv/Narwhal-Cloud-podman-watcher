@@ -527,7 +527,8 @@ echo NARWHAL_SSH_BANNER_STATE=active
     state = match.group(1) if match else "failed"
     if not ok and state == "active":
         state = "failed"
-    return {"state": state, "reason": "" if state == "active" else state}
+    reason = "" if state == "active" else (match.group(1) if match else str(output or "failed")[:200])
+    return {"state": state, "reason": reason}
 
 
 def merge(original, banner):
@@ -789,16 +790,16 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
             try:
                 ok,original=checked_exec(container,"[ ! -L /etc/motd ] && { [ ! -e /etc/motd ] || [ -f /etc/motd ]; } && { [ ! -f /etc/motd ] || [ $(wc -c < /etc/motd) -le 65536 ]; } && { cat /etc/motd 2>/dev/null || [ ! -e /etc/motd ]; }")
                 if not ok:
-                    raise OSError("容器 MOTD 读取失败")
+                    raise OSError(f"容器 MOTD 读取失败: {original}" if original else "容器 MOTD 读取失败")
                 content=merge(original,banner)
                 if original!=content:
                     command="set -eu; [ ! -L /etc/motd ]; t=$(mktemp /etc/.narwhal-motd.XXXXXX); trap 'rm -f -- \"$t\"' EXIT; if [ -f /etc/motd ]; then cp -p /etc/motd \"$t\"; else chmod 644 \"$t\"; fi; printf '%s' "+shlex.quote(content)+" > \"$t\"; mv -f -- \"$t\" /etc/motd"
                     ok,_=checked_exec(container,command)
                     if not ok:
-                        raise OSError("容器 MOTD 写入失败")
+                        raise OSError(f"容器 MOTD 写入失败: {_}" if _ else "容器 MOTD 写入失败")
                     ok,check=checked_exec(container,"cat /etc/motd")
                     if not ok or check!=content:
-                        raise OSError("MOTD 写后校验失败")
+                        raise OSError(f"MOTD 写后校验失败: {check}" if check else "MOTD 写后校验失败")
                     changed=True
                 delivery.update(status="written" if changed else "unchanged",method="runtime_atomic")
             except (OSError,ValueError) as exc:
@@ -811,20 +812,20 @@ def update(container, alerts, threat_types, checked_exec, server_states, version
             try:
                 ok,original=checked_exec(container,"[ ! -L /etc/motd ] && { [ ! -e /etc/motd ] || [ -f /etc/motd ]; } && { [ ! -f /etc/motd ] || [ $(wc -c < /etc/motd) -le 65536 ]; } && { cat /etc/motd 2>/dev/null || [ ! -e /etc/motd ]; }")
                 if not ok:
-                    raise OSError("容器 MOTD 读取失败")
+                    raise OSError(f"容器 MOTD 读取失败: {original}" if original else "容器 MOTD 读取失败")
                 content=merge(original,banner)
                 if original!=content:
                     command="set -eu; [ ! -L /etc/motd ]; t=$(mktemp /etc/.narwhal-motd.XXXXXX); trap 'rm -f -- \"$t\"' EXIT; if [ -f /etc/motd ]; then cp -p /etc/motd \"$t\"; else chmod 644 \"$t\"; fi; printf '%s' "+shlex.quote(content)+" > \"$t\"; mv -f -- \"$t\" /etc/motd"
                     ok,_=checked_exec(container,command)
                     if not ok:
-                        raise OSError("容器 MOTD 写入失败")
+                        raise OSError(f"容器 MOTD 写入失败: {_}" if _ else "容器 MOTD 写入失败")
                     ok,check=checked_exec(container,"cat /etc/motd")
                     if not ok or check!=content:
-                        raise OSError("MOTD 写后校验失败")
+                        raise OSError(f"MOTD 写后校验失败: {check}" if check else "MOTD 写后校验失败")
                     changed=True
                 delivery.update(status="written" if changed else "unchanged",method="runtime_atomic")
-            except (OSError,ValueError):
-                delivery.update(status="failed",error="MOTD 写入 / 校验失败；原内容或符号链接已保留")
+            except (OSError,ValueError) as exc:
+                delivery.update(status="failed",error=f"MOTD 写入 / 校验失败: {exc}" if str(exc) else "MOTD 写入 / 校验失败；原内容或符号链接已保留")
     delivery["state_persisted"]=persisted
     if shell_ok or delivery.get('status') in {'written','unchanged'}:
         delivery['format_version'] = 2

@@ -206,6 +206,13 @@ def get_runtime_bins() -> Dict[str, str]:
     """
     global _runtime_bins
     if _runtime_bins is not None:
+        if (
+            "runman" not in _runtime_bins
+            and os.name == "posix"
+            and hasattr(socket, "AF_UNIX")
+            and os.path.exists("/run/narwhal-agent/connlimit.sock")
+        ):
+            _runtime_bins["runman"] = "runman"
         return dict(_runtime_bins)
 
     configured = os.getenv("CONTAINER_RUNTIMES", "auto").strip().lower()
@@ -3829,19 +3836,21 @@ def _build_motd_content(current_content, banner):
 
 def _checked_banner_exec(container, command):
     runtime_kind = str(container.get("runtime") or "")
+    if runtime_kind == "runman":
+        name = str(container.get("name") or "")
+        instance_id = str(container.get("instance_id") or _runman_instance_generations.get(name, "") or "")
+        return _runman_exec_request(
+            name,
+            instance_id,
+            str(command),
+            _runtime_command_timeout(),
+        )
     runtime_bin = str(container.get("runtime_bin") or
                       (get_runtime_bins().get(runtime_kind, "") if runtime_kind else get_container_bin()))
     if runtime_kind and _runtime_kind(runtime_bin) != runtime_kind:
         return False, ""
     if not runtime_bin:
         return False, ""
-    if runtime_kind == "runman":
-        return _runman_exec_request(
-            str(container.get("name") or ""),
-            str(container.get("instance_id") or ""),
-            str(command),
-            _runtime_command_timeout(),
-        )
     try:
         result = subprocess.run(_runtime_exec_cmd(runtime_bin, str(container.get("name") or ""), command, str(container.get("project") or "")), capture_output=True, text=True, timeout=_runtime_command_timeout())
         return result.returncode == 0, result.stdout
@@ -9588,6 +9597,7 @@ def collect_runman_report(
         'name': str(container.get('name') or ''),
         'image': str(container.get('image') or ''),
         'runtime': 'runman',
+        'runtime_bin': 'runman',
         'project': 'default',
         'status': str(container.get('status') or 'unknown'),
         'instance_id': instance_id,
