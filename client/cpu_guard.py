@@ -64,6 +64,63 @@ def _host_cpu_pressure(
     return True, psi_some, "host_busy_and_psi_confirmed"
 
 
+def _container_cpu_pressure_confirmed(
+    container: dict[str, Any],
+    host_cpu: dict[str, Any],
+    metrics_cpu: float,
+    effective_cpus: float,
+    saturation: float,
+    high_threshold: float,
+    host_threshold: float,
+    host_psi_threshold: float,
+    host_pressure_confirmed: bool,
+    host_pressure_basis: str,
+) -> tuple[bool, str, bool]:
+    """Confirm whether container + host CPU saturation warrants CPU guard tracking/protection.
+
+    On 1-core hosts (e.g. 1 vCPU VPS like JINX) or when a single runaway container
+    pins CPU at 85-100%, kernel `/proc/pressure/cpu` `some avg10` can stay below 5%
+    when no other runnable host threads are competing on the runqueue, even though
+    the container has saturated host CPU capacity.
+    """
+    if host_cpu.get("status") != "ready":
+        return False, host_pressure_basis, False
+    busy = _finite_number(host_cpu.get("busy_percent"), -1.0)
+    logical_cpus = max(1, int(_finite_number(host_cpu.get("logical_cpus"), float(os.cpu_count() or 1))))
+    load_1m = _finite_number(host_cpu.get("load_1m"), -1.0)
+    runaway_threshold = min(99.0, max(85.0, high_threshold))
+    is_runaway = bool(
+        metrics_cpu >= runaway_threshold
+        and (
+            saturation * 100.0 >= runaway_threshold
+            or metrics_cpu >= logical_cpus * 75.0
+            or (logical_cpus <= 1 and metrics_cpu >= runaway_threshold)
+        )
+    )
+    if host_pressure_confirmed:
+        return True, host_pressure_basis, is_runaway
+    if busy < host_threshold:
+        return False, host_pressure_basis, False
+    security = container.get("security") if isinstance(container.get("security"), dict) else {}
+    res_pressure = security.get("resource_pressure") if isinstance(security.get("resource_pressure"), dict) else {}
+    cgroup_psi = res_pressure.get("container") if isinstance(res_pressure.get("container"), dict) else {}
+    cgroup_cpu_psi = _psi_avg10(cgroup_psi, "cpu")
+    if cgroup_cpu_psi is not None and cgroup_cpu_psi >= host_psi_threshold:
+        return True, "host_busy_and_container_psi_confirmed", is_runaway
+    if logical_cpus <= 1 and busy >= max(host_threshold, 85.0) and (
+        metrics_cpu >= runaway_threshold or saturation * 100.0 >= runaway_threshold
+    ):
+        return True, "single_core_host_cpu_saturation", True
+    if busy >= max(host_threshold, 85.0) and metrics_cpu >= max(runaway_threshold, logical_cpus * 75.0):
+        return True, "host_dominant_container_cpu_saturation", True
+    if (
+        (busy >= max(95.0, host_threshold) or (busy >= max(host_threshold, 85.0) and load_1m >= float(logical_cpus)))
+        and is_runaway
+    ):
+        return True, "host_extreme_busy_runaway_container", True
+    return False, host_pressure_basis, False
+
+
 def _read_psi(path: str) -> dict[str, Any]:
     """Read Linux PSI averages without treating absent kernel support as zero pressure."""
     result: dict[str, Any] = {}
@@ -524,20 +581,36 @@ def _alert(
     high_samples: int, required_samples: int, duration: int, process: dict[str, Any],
     action: dict[str, Any], instance_id: str, error: str = "", tier: int = 1,
 ) -> dict[str, Any]:
+    watching_only = action.get("watching") is True or action.get("attempted") is False
     limited = action.get("succeeded") is True
     restore_failed = action.get("restore_succeeded") is False
     top_process = process if isinstance(process, dict) else {}
     clean_error = str(error or "").strip()
-    if clean_error:
+    if watching_only and not clean_error:
+        message = str(action.get("message") or "检测到容器 CPU 持续异常高占用，已采样高占用进程并进入自动限额保护观察窗口；没有停止进程或容器。")
+        severity = "warning"
+        title = "持续高 CPU，正在监测并准备限额保护"
+    elif clean_error:
         message = f"主机与容器 CPU 指标已连续达到保护条件，但节点未能确认 CPU 限额生效（{clean_error}）；没有停止进程或容器。"
+        severity = "critical"
+        title = "持续高 CPU，保护需要检查"
     elif restore_failed:
         message = "容器 CPU 已回落，但原配额未能恢复；临时保护限额仍在生效，需要管理员检查。"
+        severity = "critical"
+        title = "持续高 CPU，保护需要检查"
     else:
         message = "容器 CPU 已连续达到保护条件，系统已临时降低该容器 CPU 配额；没有停止进程或容器。" if limited else "容器 CPU 已连续达到保护条件，但未能确认临时 CPU 配额生效；没有停止进程或容器。"
+        severity = "critical" if not limited else "warning"
+        title = "持续高 CPU，已启用临时保护" if limited else "持续高 CPU，保护需要检查"
+    pressure_basis = str(action.get("pressure_basis") or "") or _host_cpu_pressure(
+        host_cpu,
+        min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80))),
+        min(50.0, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5))),
+    )[2]
     entry = {
         "type": "cpu_pressure_protection",
-        "severity": "critical" if (not limited or restore_failed) else "warning",
-        "title": "持续高 CPU，已启用临时保护" if limited and not restore_failed else "持续高 CPU，保护需要检查",
+        "severity": severity,
+        "title": title,
         "message": message,
         "value": round(cpu_percent, 2) if cpu_percent >= 0 else None,
         "threshold": round(threshold_percent, 2) if effective_cpus > 0 else None,
@@ -558,11 +631,7 @@ def _alert(
             "host_psi": host_cpu.get("psi"),
             "host_cpu_psi_some_avg10": _psi_avg10(host_cpu.get("psi"), "cpu"),
             "host_cpu_psi_threshold_percent": round(min(50.0, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5))), 2),
-            "host_pressure_basis": _host_cpu_pressure(
-                host_cpu,
-                min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80))),
-                min(50.0, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_PSI_PERCENT", "5"), 5))),
-            )[2],
+            "host_pressure_basis": pressure_basis,
             "resource_pressure": (container.get("security") or {}).get("resource_pressure") if isinstance(container.get("security"), dict) else None,
             "sample_count": high_samples,
             "required_samples": required_samples,
@@ -572,8 +641,8 @@ def _alert(
             "host_busy_threshold_percent": round(_finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80), 2),
             "top_process": top_process,
             "limit_applied": limited,
-            "tier": max(1, min(3, int(tier or 1))),
-            "tier_percent_of_original": {1: 50, 2: 25, 3: 10}.get(max(1, min(3, int(tier or 1)))),
+            "tier": max(1, min(3, int(tier or 1))) if limited else 0,
+            "tier_percent_of_original": {1: 50, 2: 25, 3: 10}.get(max(1, min(3, int(tier or 1)))) if limited else None,
             "restore_failed": restore_failed,
             "last_error": clean_error,
             "reason_is_user_abuse": False,
@@ -639,7 +708,21 @@ def observe(
         seen.add(key)
         sample_available = container.get("cpu_pressure_sample_available") is True
         metrics_cpu = _finite_number(container.get("cpu_pressure_percent"), -1.0) if sample_available else -1.0
+        if metrics_cpu < 0:
+            fallback_cpu = _finite_number(container.get("cpu_percent"), -1.0)
+            if fallback_cpu > 0:
+                metrics_cpu = fallback_cpu
+                sample_available = True
         effective_cpus = _finite_number(container.get("cpu_effective_cpus"), 0.0)
+        if effective_cpus <= 0:
+            host_logical = max(1.0, _finite_number(host_cpu.get("logical_cpus"), float(os.cpu_count() or 1)))
+            if runtime == "runman":
+                current_limit_raw, limit_err = _read_limit(runtime, binary, project, name, container)
+                if not limit_err and isinstance(current_limit_raw, str):
+                    effective_cpus = _limit_cpus(runtime, current_limit_raw, host_logical)
+            if effective_cpus <= 0:
+                effective_cpus = host_logical
+            container["cpu_effective_cpus"] = effective_cpus
         security = container.get("security") if isinstance(container.get("security"), dict) else {}
         container["security"] = security
         security["resource_pressure"] = _resource_pressure(container, host_cpu.get("psi") or {})
@@ -770,7 +853,23 @@ def observe(
                 applied_cpus = max(0.001, _finite_number(record.get("applied_cpus"), effective_cpus * 0.5))
                 ratio = metrics_cpu / (applied_cpus * 100.0) if metrics_cpu >= 0 else -1.0
                 tier = max(1, min(3, int(record.get("tier") or 1)))
-                high_now = record.get("stage") == "active" and ratio * 100.0 >= high_threshold and host_pressure_confirmed
+                active_pressure_confirmed, active_pressure_basis, _ = _container_cpu_pressure_confirmed(
+                    container,
+                    host_cpu,
+                    metrics_cpu,
+                    applied_cpus,
+                    max(0.0, ratio),
+                    high_threshold,
+                    host_threshold,
+                    host_psi_threshold,
+                    host_pressure_confirmed,
+                    host_pressure_basis,
+                )
+                high_now = (
+                    record.get("stage") == "active"
+                    and ratio * 100.0 >= high_threshold
+                    and (active_pressure_confirmed or ratio >= 0.90)
+                )
                 if high_now and tier < 3:
                     last_high = int(record.get("escalation_last_high") or 0)
                     if last_high <= 0 or timestamp <= last_high or timestamp - last_high > max_gap:
@@ -947,9 +1046,21 @@ def observe(
             candidate = {"stage": "candidate", "high_samples": 0, "high_since": 0, "last_high": 0, "last_attempt": 0}
         saturation = metrics_cpu / (effective_cpus * 100.0) if metrics_cpu >= 0 and effective_cpus > 0 else -1.0
         per_core_pressure = metrics_cpu >= high_threshold
+        pressure_confirmed, container_pressure_basis, is_runaway = _container_cpu_pressure_confirmed(
+            container,
+            host_cpu,
+            metrics_cpu,
+            effective_cpus,
+            saturation,
+            high_threshold,
+            host_threshold,
+            host_psi_threshold,
+            host_pressure_confirmed,
+            host_pressure_basis,
+        )
         qualifies = (
             (saturation * 100.0 >= high_threshold or per_core_pressure)
-            and host_pressure_confirmed
+            and pressure_confirmed
             and effective_cpus > 0
             and host_cpu.get("status") == "ready"
         )
@@ -961,15 +1072,50 @@ def observe(
             else:
                 candidate["high_samples"] = int(candidate.get("high_samples") or 0) + 1
             candidate["last_high"] = timestamp
+            candidate["runaway"] = bool(is_runaway)
+            candidate["pressure_basis"] = container_pressure_basis
+            if is_runaway and "CPU_AUTO_LIMIT_REQUIRED_SECONDS" not in os.environ:
+                runaway_duration = max(
+                    180,
+                    int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RUNAWAY_REQUIRED_SECONDS", "300"), 300)),
+                )
+                candidate_required_duration = min(required_duration, runaway_duration)
+                candidate_min_samples = max(2, int(math.ceil(candidate_required_duration / interval)) + 1)
+            else:
+                candidate_required_duration = required_duration
+                candidate_min_samples = min_samples
+            candidate["required_duration"] = candidate_required_duration
+            candidate["required_samples"] = candidate_min_samples
+            if int(candidate.get("high_samples") or 0) >= 2:
+                if process_sampler is not None and timestamp - int(candidate.get("last_process_sample") or 0) >= 300:
+                    try:
+                        sampled = process_sampler(container)
+                        if isinstance(sampled, dict):
+                            candidate["top_process"] = sampled
+                            candidate["last_process_sample"] = timestamp
+                    except Exception as exc:
+                        candidate["top_process"] = {"available": False, "reason": str(exc)[:200]}
+                if not isinstance(candidate.get("top_process"), dict) or not candidate["top_process"].get("available"):
+                    fallback_top = container.get("top_cpu_process") if isinstance(container.get("top_cpu_process"), dict) else {}
+                    if _finite_number(fallback_top.get("cpu_percent"), 0.0) > 0:
+                        candidate["top_process"] = {
+                            "available": True,
+                            "source": "container_top_cpu_process",
+                            "pid": int(fallback_top.get("pid") or 0),
+                            "cpu_percent": round(_finite_number(fallback_top.get("cpu_percent"), 0.0), 2),
+                            "process": str(fallback_top.get("command") or "").split()[0][:120] if str(fallback_top.get("command") or "").strip() else "unknown",
+                            "command": str(fallback_top.get("command") or "")[:300],
+                        }
             ratio = saturation
             candidates.append((metrics_cpu, container, candidate, {"binary": binary, "runtime": runtime,
                 "project": project, "name": name, "instance_id": instance_id, "effective_cpus": effective_cpus,
                 "cpu_percent": metrics_cpu,
+                "pressure_basis": container_pressure_basis,
                 "trigger_basis": "one_cpu" if per_core_pressure else "configured_capacity"}))
             instances[key] = candidate
             security["cpu_guard"] = {
                 "state": "watching", "high_samples": int(candidate.get("high_samples") or 0),
-                "required_samples": min_samples,
+                "required_samples": candidate_min_samples,
                 "recheck_interval_seconds": int(interval),
                 "confirmed_duration_seconds": max(0, timestamp - int(candidate.get("high_since") or timestamp)),
                 "container_cpu_percent": round(metrics_cpu, 2),
@@ -978,15 +1124,23 @@ def observe(
                 "host_iowait_percent": host_cpu.get("iowait_percent"),
                 "host_cpu_psi_some_avg10": host_cpu_psi,
                 "host_cpu_psi_threshold_percent": host_psi_threshold,
-                "host_pressure_basis": host_pressure_basis,
+                "host_pressure_basis": container_pressure_basis,
                 "host_busy_threshold_percent": host_threshold,
                 "threshold_percent_of_container_capacity": high_threshold,
                 "threshold_percent_of_one_cpu": high_threshold,
                 "trigger_basis": "one_cpu" if per_core_pressure else "configured_capacity",
+                "top_process": candidate.get("top_process") if isinstance(candidate.get("top_process"), dict) else {},
                 "reason_is_user_abuse": False,
             }
         else:
-            instances.pop(key, None)
+            if (
+                (host_cpu.get("status") == "warming" or not sample_available)
+                and int(candidate.get("high_samples") or 0) > 0
+                and timestamp - int(candidate.get("last_high") or 0) <= max_gap
+            ):
+                instances[key] = candidate
+            else:
+                instances.pop(key, None)
             security["cpu_guard"] = {
                 "state": "sampling_unavailable" if not sample_available or effective_cpus <= 0 or host_cpu.get("status") != "ready" else "normal" if saturation < high_threshold / 100.0 and not per_core_pressure else "waiting_for_host_psi" if host_busy >= host_threshold and host_cpu_psi is not None and host_cpu_psi < host_psi_threshold else "waiting_for_host_pressure",
                 "container_cpu_percent": round(metrics_cpu, 2) if metrics_cpu >= 0 else None,
@@ -994,7 +1148,7 @@ def observe(
                 "host_busy_percent": host_cpu.get("busy_percent"),
                 "host_cpu_psi_some_avg10": host_cpu_psi,
                 "host_cpu_psi_threshold_percent": host_psi_threshold,
-                "host_pressure_basis": host_pressure_basis,
+                "host_pressure_basis": container_pressure_basis,
                 "threshold_percent_of_container_capacity": high_threshold,
                 "recheck_interval_seconds": int(interval),
                 "reason_is_user_abuse": False,
@@ -1011,9 +1165,10 @@ def observe(
 
     already_limited = bool(active_keys)
     ready_candidates = [item for item in candidates if
-        int(item[2].get("high_samples") or 0) >= min_samples
-        and timestamp - int(item[2].get("high_since") or timestamp) >= required_duration
+        int(item[2].get("high_samples") or 0) >= int(item[2].get("required_samples") or min_samples)
+        and timestamp - int(item[2].get("high_since") or timestamp) >= int(item[2].get("required_duration") or required_duration)
     ]
+    limited_candidate_instance_id = ""
     if not already_limited and ready_candidates:
         ready_candidates.sort(key=lambda item: item[0], reverse=True)
         _, container, candidate, identity = ready_candidates[0]
@@ -1116,11 +1271,22 @@ def observe(
         alert_type = "cpu_pressure_protection"
         cpu_now = identity["cpu_percent"]
         effective_now = identity["effective_cpus"]
+        limited_candidate_instance_id = instance_id
+        result_action["pressure_basis"] = identity.get("pressure_basis") or host_pressure_basis
+        req_samples_now = int(candidate.get("required_samples") or min_samples)
         container_security = container.get("security") if isinstance(container.get("security"), dict) else {}
+        succeeded_now = result_action.get("succeeded") is True
         container_security["cpu_guard"] = {
-            "state": "limited" if result_action.get("succeeded") is True else "limit_failed",
+            "state": "limited" if succeeded_now else "limit_failed",
+            "original_limit": result_action.get("original_limit"),
+            "active_limit": result_action.get("active_limit"),
+            "expected_limit": result_action.get("active_limit"),
+            "actual_limit": _format_limit(runtime, current_limit) if current_limit is not None else None,
+            "readback_confirmed": succeeded_now,
+            "readback_confirmed_at": timestamp if succeeded_now else 0,
+            "applied_at": timestamp if succeeded_now else 0,
             "high_samples": int(candidate.get("high_samples") or 0),
-            "required_samples": min_samples,
+            "required_samples": req_samples_now,
             "confirmed_duration_seconds": max(0, timestamp - int(candidate.get("high_since") or timestamp)),
             "container_cpu_percent": round(cpu_now, 2),
             "effective_cpus": round(effective_now, 3),
@@ -1129,7 +1295,7 @@ def observe(
             "host_busy_threshold_percent": host_threshold,
             "host_cpu_psi_some_avg10": host_cpu_psi,
             "host_cpu_psi_threshold_percent": host_psi_threshold,
-            "host_pressure_basis": host_pressure_basis,
+            "host_pressure_basis": identity.get("pressure_basis") or host_pressure_basis,
             "threshold_percent_of_one_cpu": high_threshold,
             "tier": 1,
             "tier_percent_of_original": 50,
@@ -1142,11 +1308,48 @@ def observe(
             cpu_percent=cpu_now, effective_cpus=effective_now,
             threshold_percent=(high_threshold if cpu_now >= high_threshold else effective_now * high_threshold),
             high_samples=int(candidate.get("high_samples") or 0),
-            required_samples=min_samples,
+            required_samples=req_samples_now,
             duration=max(0, timestamp - int(candidate.get("high_since") or timestamp)),
             process=process, action=result_action, instance_id=instance_id,
             error=action_error, tier=1))
         # The local runtime action and restore state are durable before any network notification.
+
+    for cpu_val, container, candidate, identity in candidates:
+        cand_instance_id = identity["instance_id"]
+        if cand_instance_id == limited_candidate_instance_id:
+            continue
+        if candidate.get("runaway") is True and int(candidate.get("high_samples") or 0) >= 2:
+            req_samples_cand = int(candidate.get("required_samples") or min_samples)
+            req_duration_cand = int(candidate.get("required_duration") or required_duration)
+            elapsed_cand = max(0, timestamp - int(candidate.get("high_since") or timestamp))
+            process_cand = candidate.get("top_process") if isinstance(candidate.get("top_process"), dict) else {}
+            watching_action = {
+                "attempted": False,
+                "succeeded": False,
+                "watching": True,
+                "pressure_basis": identity.get("pressure_basis") or host_pressure_basis,
+                "message": (
+                    f"检测到容器 CPU 持续异常高占用（{cpu_val:.1f}%），已连续确认 "
+                    f"{int(candidate.get('high_samples') or 0)}/{req_samples_cand} 次采样"
+                    f"（持续 {elapsed_cand}s / 阈值 {req_duration_cand}s），达到持续窗口后将自动应用 cgroup CPU 限额。"
+                ),
+            }
+            alerts.append(_alert(
+                alert_type="cpu_pressure_protection",
+                container=container,
+                host_cpu=host_cpu,
+                cpu_percent=cpu_val,
+                effective_cpus=identity["effective_cpus"],
+                threshold_percent=(high_threshold if cpu_val >= high_threshold else identity["effective_cpus"] * high_threshold),
+                high_samples=int(candidate.get("high_samples") or 0),
+                required_samples=req_samples_cand,
+                duration=elapsed_cand,
+                process=process_cand,
+                action=watching_action,
+                instance_id=cand_instance_id,
+                error="",
+                tier=1,
+            ))
 
     if not state_error:
         try:

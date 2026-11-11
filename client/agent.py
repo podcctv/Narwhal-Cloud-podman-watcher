@@ -111,6 +111,7 @@ _RUNMAN_EXEC_SENTINEL = "__narwhal_runman_exec__"
 _runman_instance_generations: Dict[str, str] = {}
 _net_counters: Dict[str, Dict[str, float]] = {}
 _cpu_counters: Dict[str, Dict[str, float]] = {}
+_proc_cpu_counters: Dict[Tuple[int, str], Tuple[float, float, float]] = {}
 _warned_parse_paths = set()
 _geoip_country_cache: Dict[str, Tuple[str, float]] = {}
 _geoip_detail_cache: Dict[str, Tuple[Dict[str, str], float]] = {}
@@ -733,14 +734,102 @@ def _derive_net_bps(container_key: str, rx_total: int, tx_total: int) -> Tuple[f
 def _derive_cpu_percent(container_key: str, cpu_seconds: float) -> float:
     now = float(time.time())
     prev = _cpu_counters.get(container_key)
-    _cpu_counters[container_key] = {"ts": now, "cpu": float(cpu_seconds)}
     if not prev:
+        _cpu_counters[container_key] = {"ts": now, "cpu": float(cpu_seconds), "last_percent": 0.0}
         return 0.0
     dt = now - float(prev.get("ts", 0.0))
     if dt <= 0:
+        if float(cpu_seconds) == float(prev.get("cpu", 0.0)):
+            return float(prev.get("last_percent", 0.0))
+        _cpu_counters[container_key] = {"ts": now, "cpu": float(cpu_seconds), "last_percent": 0.0}
+        return 0.0
+    if float(cpu_seconds) < float(prev.get("cpu", 0.0)):
+        _cpu_counters[container_key] = {"ts": now, "cpu": float(cpu_seconds), "last_percent": 0.0}
         return 0.0
     delta = max(0.0, float(cpu_seconds) - float(prev.get("cpu", 0.0)))
-    return (delta / dt) * 100.0
+    percent = (delta / dt) * 100.0
+    _cpu_counters[container_key] = {"ts": now, "cpu": float(cpu_seconds), "last_percent": percent}
+    return percent
+
+
+def _sample_cgroup_cpu_metrics(
+    pid: int | str | None,
+    runtime: str,
+    stable_id: str,
+    name: str,
+    *,
+    instance_id: str = "",
+    expected_start_ticks: str = "",
+) -> Dict[str, object]:
+    """Read cgroup v2 cpu.stat usage_usec delta and finite cpu.max quota for a verified container."""
+    result: Dict[str, object] = {
+        "available": False,
+        "cpu_percent": 0.0,
+        "usage_usec": None,
+        "quota_cpus": 0.0,
+    }
+    try:
+        pid_int = int(pid or 0)
+    except (TypeError, ValueError, OverflowError):
+        pid_int = 0
+    if pid_int <= 1:
+        return result
+    target, _ = cpu_guard.resolve_container_cgroup(
+        pid_int,
+        runtime,
+        stable_id or name,
+        name,
+        expected_start_ticks=(str(expected_start_ticks or "") if runtime == "runman" else ""),
+    )
+    if target is None:
+        return result
+
+    try:
+        cpu_max_raw = (target / "cpu.max").read_text(encoding="ascii", errors="ignore").strip()
+        max_match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", cpu_max_raw)
+        if max_match:
+            quota_str, period_str = max_match.groups()
+            period_val = int(period_str)
+            if quota_str != "max" and period_val >= 1000:
+                result["quota_cpus"] = max(0.0, int(quota_str) / float(period_val))
+    except (OSError, ValueError):
+        pass
+
+    try:
+        stat_lines = (target / "cpu.stat").read_text(encoding="ascii", errors="ignore").splitlines()
+    except OSError:
+        return result
+
+    usage_usec: int | None = None
+    user_usec: int | None = None
+    system_usec: int | None = None
+    for raw_line in stat_lines[:32]:
+        parts = raw_line.strip().split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            continue
+        key, val = parts[0], int(parts[1])
+        if key == "usage_usec":
+            usage_usec = val
+            break
+        if key == "user_usec":
+            user_usec = val
+        elif key == "system_usec":
+            system_usec = val
+    if usage_usec is None and (user_usec is not None or system_usec is not None):
+        usage_usec = int(user_usec or 0) + int(system_usec or 0)
+    if usage_usec is None or usage_usec < 0:
+        return result
+
+    counter_id = str(stable_id or name or pid_int)
+    generation_id = str(instance_id or expected_start_ticks or pid_int)
+    cpu_seconds = usage_usec / 1_000_000.0
+    cpu_percent = _derive_cpu_percent(f"cgroup:{runtime}:{counter_id}:{generation_id}", cpu_seconds)
+    result.update(
+        available=True,
+        cpu_percent=round(max(0.0, cpu_percent), 2),
+        usage_usec=usage_usec,
+    )
+    return result
 
 
 def _derive_packet_rates(container_key: str, rx_packets: int, tx_packets: int) -> Tuple[float, float]:
@@ -4199,20 +4288,78 @@ awk -F '\t' -v hz="$ticks" '
 '"""
     output = run(_runtime_exec_cmd(runtime, name, script, project), timeout=10)
     parts = output.strip().split("\t")
-    if len(parts) != 4 or not parts[0].isdigit():
-        return {"available": False, "reason": "未取得完整的进程 CPU 增量采样"}
-    process_name = re.sub(r"[\x00-\x1f\x7f]", " ", parts[1]).strip()[:120] or "unknown"
+    if len(parts) == 4 and parts[0].isdigit():
+        process_name = re.sub(r"[\x00-\x1f\x7f]", " ", parts[1]).strip()[:120] or "unknown"
+        try:
+            sampled_cpu = round(max(0.0, float(parts[2])), 2)
+            sampled_secs = round(max(0.0, float(parts[3])), 2)
+            if sampled_cpu > 0:
+                return {
+                    "available": True,
+                    "pid": int(parts[0]),
+                    "process": process_name,
+                    "cpu_percent": sampled_cpu,
+                    "sampled_seconds": sampled_secs,
+                    "source": "container_proc_stat_delta",
+                }
+        except (ValueError, OverflowError):
+            pass
+
     try:
-        return {
-            "available": True,
-            "pid": int(parts[0]),
-            "process": process_name,
-            "cpu_percent": round(max(0.0, float(parts[2])), 2),
-            "sampled_seconds": round(max(0.0, float(parts[3])), 2),
-            "source": "container_proc_stat_delta",
-        }
-    except (ValueError, OverflowError):
-        return {"available": False, "reason": "进程 CPU 增量采样格式无效"}
+        init_pid = int(container.get("pid") or 0)
+    except (TypeError, ValueError, OverflowError):
+        init_pid = 0
+    if init_pid > 1:
+        _, host_processes = _collect_host_proc_process_snapshot(init_pid, 50)
+        if host_processes:
+            top_host = max(host_processes, key=lambda item: float(item.get("cpu_percent") or 0.0))
+            top_host_cpu = round(max(0.0, float(top_host.get("cpu_percent") or 0.0)), 2)
+            top_host_pid = int(top_host.get("pid") or 0)
+            if top_host_pid > 0 and top_host_cpu > 0:
+                host_proc_name = re.sub(r"[\x00-\x1f\x7f]", " ", str(top_host.get("process") or "unknown")).strip()[:120] or "unknown"
+                return {
+                    "available": True,
+                    "pid": top_host_pid,
+                    "process": host_proc_name,
+                    "cpu_percent": top_host_cpu,
+                    "sampled_seconds": 0.0,
+                    "source": "host_proc_stat",
+                }
+
+    top_proc = container.get("top_cpu_process")
+    if isinstance(top_proc, dict):
+        try:
+            top_pid = int(top_proc.get("pid") or 0)
+            top_cpu = round(max(0.0, float(top_proc.get("cpu_percent") or 0.0)), 2)
+        except (TypeError, ValueError, OverflowError):
+            top_pid, top_cpu = 0, 0.0
+        if top_pid > 0 and top_cpu > 0:
+            raw_cmd = str(top_proc.get("process") or top_proc.get("command") or "").strip()
+            first_token = raw_cmd.split()[0] if raw_cmd else "unknown"
+            proc_name = re.sub(r"[\x00-\x1f\x7f]", " ", posixpath.basename(first_token)).strip()[:120] or "unknown"
+            return {
+                "available": True,
+                "pid": top_pid,
+                "process": proc_name,
+                "cpu_percent": top_cpu,
+                "sampled_seconds": 0.0,
+                "source": "container_top_cpu_process",
+            }
+
+    if len(parts) == 4 and parts[0].isdigit():
+        process_name = re.sub(r"[\x00-\x1f\x7f]", " ", parts[1]).strip()[:120] or "unknown"
+        try:
+            return {
+                "available": True,
+                "pid": int(parts[0]),
+                "process": process_name,
+                "cpu_percent": round(max(0.0, float(parts[2])), 2),
+                "sampled_seconds": round(max(0.0, float(parts[3])), 2),
+                "source": "container_proc_stat_delta",
+            }
+        except (ValueError, OverflowError):
+            return {"available": False, "reason": "进程 CPU 增量采样格式无效"}
+    return {"available": False, "reason": "未取得完整的进程 CPU 增量采样"}
 
 
 def _collect_cpu_guard(containers: List[Dict[str, object]], interval_seconds: float, summary: Dict[str, object], allow_new_limits: bool) -> None:
@@ -6694,7 +6841,7 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     return summary
 
 
-def collect_top_cpu_process(name: str, runtime: str = "", project: str = "") -> Dict[str, object]:
+def collect_top_cpu_process(name: str, runtime: str = "", project: str = "", pid: int = 0) -> Dict[str, object]:
     runtime = runtime or get_container_bin()
     if not runtime:
         return {"pid": 0, "cpu_percent": 0.0, "command": ""}
@@ -6718,10 +6865,21 @@ def collect_top_cpu_process(name: str, runtime: str = "", project: str = "") -> 
         if len(parts) < 3:
             continue
         cpu = _normalize_stat_number(parts[0])
-        pid = int(parts[1]) if parts[1].isdigit() else 0
+        proc_pid = int(parts[1]) if parts[1].isdigit() else 0
         cmd = parts[3] if len(parts) >= 4 else parts[2]
         if cpu >= float(best["cpu_percent"]):
-            best = {"pid": pid, "cpu_percent": cpu, "command": _redact_process_command(cmd)}
+            best = {"pid": proc_pid, "cpu_percent": cpu, "command": _redact_process_command(cmd)}
+    if (int(best.get("pid") or 0) <= 0 or float(best.get("cpu_percent") or 0.0) <= 0.0) and int(pid or 0) > 1:
+        _, host_processes = _collect_host_proc_process_snapshot(int(pid), 50)
+        for proc in host_processes:
+            proc_cpu = round(max(0.0, float(proc.get("cpu_percent") or 0.0)), 2)
+            proc_pid = int(proc.get("pid") or 0)
+            if proc_pid > 0 and proc_cpu > float(best["cpu_percent"]):
+                best = {
+                    "pid": proc_pid,
+                    "cpu_percent": proc_cpu,
+                    "command": _redact_process_command(str(proc.get("command") or proc.get("process") or "")),
+                }
     return best
 
 
@@ -9327,6 +9485,16 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
         pid = raw_item.get('init_pid') if raw_item.get('running') is True else None
         proc_snapshot = _runman_proc_snapshot(pid) if type(pid) is int and pid > 1 else {}
         pid_start_ticks = str(proc_snapshot.get('pid_start_ticks') or '')
+        cgroup_cpu = (
+            _sample_cgroup_cpu_metrics(
+                pid, 'runman', vm_id, vm_id,
+                instance_id=generation, expected_start_ticks=pid_start_ticks,
+            )
+            if type(pid) is int and pid > 1
+            else {'available': False, 'cpu_percent': 0.0, 'usage_usec': None, 'quota_cpus': 0.0}
+        )
+        if cgroup_cpu.get('available') is True:
+            raw_cpu = max(float(raw_cpu), float(cgroup_cpu.get('cpu_percent') or 0.0))
         ips_list = [str(ip)[:64] for ip in raw_item.get('ips', [])[:32]] if isinstance(raw_item.get('ips'), list) else []
         items.append({
             'id': vm_id,
@@ -9347,6 +9515,9 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
             'runman_resources': {
                 'cpu': raw_item.get('cpu') if type(raw_item.get('cpu')) is int else 0,
                 'cpu_percent': raw_cpu,
+                'cgroup_cpu_available': bool(cgroup_cpu.get('available')),
+                'cgroup_cpu_percent': float(cgroup_cpu.get('cpu_percent') or 0.0),
+                'cgroup_quota_cpus': float(cgroup_cpu.get('quota_cpus') or 0.0),
                 'ram_mb': raw_item.get('ram_mb') if type(raw_item.get('ram_mb')) is int else 0,
                 'mem_bytes': raw_item.get('mem_bytes') if type(raw_item.get('mem_bytes')) is int else 0,
                 'mem_limit_bytes': raw_item.get('mem_limit_bytes') if type(raw_item.get('mem_limit_bytes')) is int else 0,
@@ -9450,15 +9621,36 @@ def collect_runman_report(
     container: Dict[str, object], base_report: Dict[str, object] | None = None,
 ) -> Dict[str, object]:
     metrics = container.get('connection_metrics') if isinstance(container.get('connection_metrics'), dict) else {}
-    resources = container.get('runman_resources') if isinstance(container.get('runman_resources'), dict) else {}
+    resources = dict(container.get('runman_resources')) if isinstance(container.get('runman_resources'), dict) else {}
     total_connections = metrics.get('total') if type(metrics.get('total')) is int else 0
     mem_bytes = resources.get('mem_bytes') if type(resources.get('mem_bytes')) is int else 0
     mem_limit = resources.get('mem_limit_bytes') if type(resources.get('mem_limit_bytes')) is int else 0
-    cpu = resources.get('cpu_percent') if type(resources.get('cpu_percent')) in (int, float) else 0.0
-    if not math.isfinite(float(cpu)) or float(cpu) < 0:
-        cpu = 0.0
     stable_id = str(container.get('stable_id') or container.get('id') or '')
     instance_id = str(container.get('instance_id') or '')
+    is_running = str(container.get('status') or '') == 'running'
+    pid_int = int(container.get('pid') or 0) if str(container.get('pid') or '').isdigit() or isinstance(container.get('pid'), int) else 0
+    if is_running and pid_int > 1 and 'cgroup_cpu_available' not in resources:
+        cgroup_cpu = _sample_cgroup_cpu_metrics(
+            pid_int,
+            'runman',
+            stable_id,
+            str(container.get('name') or stable_id),
+            instance_id=instance_id,
+            expected_start_ticks=str(container.get('pid_start_ticks') or ''),
+        )
+        resources['cgroup_cpu_available'] = bool(cgroup_cpu.get('available'))
+        resources['cgroup_cpu_percent'] = float(cgroup_cpu.get('cpu_percent') or 0.0)
+        resources['cgroup_quota_cpus'] = float(cgroup_cpu.get('quota_cpus') or 0.0)
+    raw_cpu = resources.get('cpu_percent') if type(resources.get('cpu_percent')) in (int, float) else 0.0
+    if not math.isfinite(float(raw_cpu)) or float(raw_cpu) < 0:
+        raw_cpu = 0.0
+    cgroup_cpu_pct = resources.get('cgroup_cpu_percent') if type(resources.get('cgroup_cpu_percent')) in (int, float) else 0.0
+    if not math.isfinite(float(cgroup_cpu_pct)) or float(cgroup_cpu_pct) < 0:
+        cgroup_cpu_pct = 0.0
+    cgroup_quota_cpus = resources.get('cgroup_quota_cpus') if type(resources.get('cgroup_quota_cpus')) in (int, float) else 0.0
+    if not math.isfinite(float(cgroup_quota_cpus)) or float(cgroup_quota_cpus) < 0:
+        cgroup_quota_cpus = 0.0
+    cpu = max(float(raw_cpu), float(cgroup_cpu_pct)) if is_running else 0.0
     traffic_valid = (
         resources.get('traffic_counters_available') is True
         or resources.get('net_metrics_available') is True
@@ -9591,6 +9783,51 @@ def collect_runman_report(
         }
     })
     container_disk['fs'] = merged_fs
+    top_cpu_process = report.get('top_cpu_process') if isinstance(report.get('top_cpu_process'), dict) else {}
+    if is_running and pid_int > 1 and float(top_cpu_process.get('cpu_percent') or 0.0) <= 0:
+        proc_snapshot, _ = _collect_host_proc_process_snapshot(pid_int, 50)
+        proc_items = proc_snapshot.get('items') if isinstance(proc_snapshot.get('items'), list) else []
+        if proc_items and isinstance(proc_items[0], dict) and float(proc_items[0].get('cpu_percent') or 0.0) > 0:
+            top_item = proc_items[0]
+            top_cpu_process = {
+                'pid': int(top_item.get('pid') or 0),
+                'cpu_percent': round(max(0.0, float(top_item.get('cpu_percent') or 0.0)), 2),
+                'command': str(top_item.get('command') or top_item.get('process') or '')[:160],
+            }
+    if not top_cpu_process:
+        top_cpu_process = {'pid': 0, 'cpu_percent': 0.0, 'command': ''}
+    base_cpu = float(report.get('cpu_percent') or 0.0) if type(report.get('cpu_percent')) in (int, float) else 0.0
+    if not math.isfinite(base_cpu) or base_cpu < 0:
+        base_cpu = 0.0
+    top_proc_cpu = float(top_cpu_process.get('cpu_percent') or 0.0) if type(top_cpu_process.get('cpu_percent')) in (int, float) else 0.0
+    if not math.isfinite(top_proc_cpu) or top_proc_cpu < 0:
+        top_proc_cpu = 0.0
+    effective_cpu_percent = max(0.0, float(cpu), base_cpu, top_proc_cpu) if is_running else 0.0
+    configured_cpus = float(resources.get('cpu') or 0.0) if type(resources.get('cpu')) in (int, float) else 0.0
+    if not math.isfinite(configured_cpus) or configured_cpus < 0:
+        configured_cpus = 0.0
+    base_effective_cpus = float(report.get('cpu_effective_cpus') or 0.0) if type(report.get('cpu_effective_cpus')) in (int, float) else 0.0
+    if not math.isfinite(base_effective_cpus) or base_effective_cpus < 0:
+        base_effective_cpus = 0.0
+    if configured_cpus > 0 and cgroup_quota_cpus > 0:
+        effective_cpus = min(configured_cpus, float(cgroup_quota_cpus))
+    elif configured_cpus > 0:
+        effective_cpus = configured_cpus
+    elif cgroup_quota_cpus > 0:
+        effective_cpus = float(cgroup_quota_cpus)
+    elif base_effective_cpus > 0:
+        effective_cpus = base_effective_cpus
+    else:
+        effective_cpus = _host_cpu_capacity()
+    cpu_pressure_sample_available = bool(
+        is_running
+        and (
+            type(resources.get('cpu_percent')) in (int, float)
+            or resources.get('cgroup_cpu_available') is True
+            or report.get('cpu_pressure_sample_available') is True
+            or effective_cpu_percent > 0
+        )
+    )
     report.update({
         'id': str(container.get('id') or ''),
         'stable_id': stable_id,
@@ -9604,8 +9841,10 @@ def collect_runman_report(
         'pid': str(container.get('pid') or ''),
         'pid_start_ticks': str(container.get('pid_start_ticks') or ''),
         'monitor_mode': 'runman_guest_exec' if base_report is not None else 'runman_inventory',
-        'cpu_percent': max(0.0, float(cpu)),
-        'cpu_effective_cpus': float(resources.get('cpu') or 0),
+        'cpu_percent': effective_cpu_percent,
+        'cpu_pressure_percent': effective_cpu_percent,
+        'cpu_pressure_sample_available': cpu_pressure_sample_available,
+        'cpu_effective_cpus': effective_cpus,
         'mem_bytes': max(0, mem_bytes),
         'mem_limit_bytes': max(0, mem_limit),
         'mem_percent': (100.0 * mem_bytes / mem_limit) if mem_limit > 0 else 0.0,
@@ -9629,7 +9868,7 @@ def collect_runman_report(
         'udp_country_stats': report.get('udp_country_stats', []),
         'disk': report.get('disk') or collect_disk_alert(),
         'container_disk': container_disk,
-        'top_cpu_process': report.get('top_cpu_process') or {'pid': 0, 'cpu_percent': 0.0, 'command': ''},
+        'top_cpu_process': top_cpu_process,
         'security': security,
         'runman_resources': resources,
         'instance_id': instance_id,
@@ -9827,14 +10066,24 @@ def collect_container(
     elif runtime_name == "runman":
         resources = precomputed_runman_resources if isinstance(precomputed_runman_resources, dict) else {}
         runman_cpu = resources.get("cpu_percent")
+        cgroup_cpu = resources.get("cgroup_cpu_percent")
+        cgroup_quota_cpus = resources.get("cgroup_quota_cpus")
         runman_mem = resources.get("mem_bytes")
         runman_mem_limit = resources.get("mem_limit_bytes")
         runman_rx = resources.get("traffic_in_bytes")
         runman_tx = resources.get("traffic_out_bytes")
+        raw_cpu_val = float(runman_cpu) if type(runman_cpu) in (int, float) and math.isfinite(float(runman_cpu)) and float(runman_cpu) >= 0 else 0.0
+        cgroup_cpu_val = float(cgroup_cpu) if type(cgroup_cpu) in (int, float) and math.isfinite(float(cgroup_cpu)) and float(cgroup_cpu) >= 0 else 0.0
+        configured_cpus = float(resources.get("cpu") or 0.0) if type(resources.get("cpu")) in (int, float) and math.isfinite(float(resources.get("cpu") or 0.0)) and float(resources.get("cpu") or 0.0) > 0 else 0.0
+        quota_cpus = float(cgroup_quota_cpus) if type(cgroup_quota_cpus) in (int, float) and math.isfinite(float(cgroup_quota_cpus)) and float(cgroup_quota_cpus) > 0 else 0.0
+        effective_runman_cpus = min(configured_cpus, quota_cpus) if configured_cpus > 0 and quota_cpus > 0 else (configured_cpus or quota_cpus)
         parsed_stats = {
-            "cpu_percent": float(runman_cpu) if type(runman_cpu) in (int, float) else 0.0,
-            "cpu_effective_cpus": float(resources.get("cpu") or 0),
-            "cpu_sample_available": type(runman_cpu) in (int, float),
+            "cpu_percent": max(raw_cpu_val, cgroup_cpu_val),
+            "cpu_effective_cpus": effective_runman_cpus,
+            "cpu_sample_available": (
+                type(runman_cpu) in (int, float)
+                or resources.get("cgroup_cpu_available") is True
+            ),
             "mem_bytes": int(runman_mem) if type(runman_mem) is int else 0,
             "mem_limit_bytes": int(runman_mem_limit) if type(runman_mem_limit) is int else 0,
             "mem_percent": (
@@ -10028,7 +10277,24 @@ def collect_container(
 
     disk = collect_disk_alert()
     container_disk = collect_container_disk_usage(name, runtime, project)
-    top_cpu_process = collect_top_cpu_process(name, runtime, project)
+    if pid > 1 and (cpu_percent <= 0 or runtime_name == "runman"):
+        cgroup_sample = _sample_cgroup_cpu_metrics(
+            pid,
+            runtime_name,
+            container_id or name,
+            name,
+            instance_id=instance_id,
+            expected_start_ticks=str((precomputed_runman_resources or {}).get("pid_start_ticks") or "") if isinstance(precomputed_runman_resources, dict) else "",
+        )
+        if cgroup_sample.get("available") is True:
+            cpu_pressure_sample_available = True
+            cgroup_pct = float(cgroup_sample.get("cpu_percent") or 0.0)
+            if cgroup_pct > cpu_percent:
+                cpu_percent = cgroup_pct
+            cgroup_quota = float(cgroup_sample.get("quota_cpus") or 0.0)
+            if cgroup_quota > 0 and (cpu_effective_cpus <= 0 or cgroup_quota < cpu_effective_cpus):
+                cpu_effective_cpus = cgroup_quota
+    top_cpu_process = collect_top_cpu_process(name, runtime, project, pid=pid)
     suspicious_processes = collect_suspicious_processes(name, runtime, project)
     panel_pairing = collect_panel_pairing_indicators(name, runtime, project, image, init_pid=pid)
     socks_proxy = panel_pairing.pop("socks_proxy", {})
@@ -10480,9 +10746,11 @@ def collect_container(
         rx_pps=net_rx_pps,
         tx_pps=net_tx_pps,
     )
-    cpu_pressure_percent = cpu_percent
     if cpu_percent <= 0 and float(top_cpu_process.get("cpu_percent") or 0) > 0:
         cpu_percent = float(top_cpu_process.get("cpu_percent") or 0)
+    cpu_pressure_percent = max(cpu_percent, float(top_cpu_process.get("cpu_percent") or 0.0))
+    if cpu_pressure_percent > 0:
+        cpu_pressure_sample_available = True
 
     tcp_rx_bps = float(protocol_rates.get("tcp_rx_bps", net_rx))
     tcp_tx_bps = float(protocol_rates.get("tcp_tx_bps", net_tx))
@@ -10670,7 +10938,26 @@ def _collect_host_proc_process_snapshot(
             try:
                 cpu_seconds = (float(stat_fields[11]) + float(stat_fields[12])) / clock_ticks
                 lifetime = max(0.001, uptime - (float(stat_fields[19]) / clock_ticks))
-                cpu_percent = max(0.0, (cpu_seconds / lifetime) * 100.0)
+                lifetime_cpu_percent = max(0.0, (cpu_seconds / lifetime) * 100.0)
+                delta_cpu_percent = 0.0
+                proc_key = (int(host_pid), str(start_ticks or stat_fields[19]))
+                prev_proc = _proc_cpu_counters.get(proc_key)
+                if prev_proc is not None:
+                    prev_cpu_sec, prev_uptime, prev_pct = prev_proc
+                    dt = uptime - prev_uptime
+                    dcpu = cpu_seconds - prev_cpu_sec
+                    if dt >= 0.5 and dcpu >= 0:
+                        delta_cpu_percent = max(0.0, (dcpu / dt) * 100.0)
+                        _proc_cpu_counters[proc_key] = (cpu_seconds, uptime, delta_cpu_percent)
+                    elif 0 <= dt < 0.5 and dcpu >= 0:
+                        delta_cpu_percent = max(0.0, prev_pct)
+                    else:
+                        _proc_cpu_counters[proc_key] = (cpu_seconds, uptime, 0.0)
+                else:
+                    if len(_proc_cpu_counters) > 10000:
+                        _proc_cpu_counters.clear()
+                    _proc_cpu_counters[proc_key] = (cpu_seconds, uptime, 0.0)
+                cpu_percent = max(lifetime_cpu_percent, delta_cpu_percent)
             except (TypeError, ValueError):
                 pass
         host_processes.append(

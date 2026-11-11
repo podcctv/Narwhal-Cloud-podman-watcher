@@ -326,6 +326,106 @@ class RunmanAgentIntegrationTests(unittest.TestCase):
         self.assertIn("Container runtimes (auto or comma-separated podman,docker,incus,runman)", installer)
         self.assertIn("仅发现并提醒（默认不管理，推荐）", installer)
 
+    def test_runman_cgroup_cpu_stat_fallback_when_api_reports_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cgroup_dir = Path(tmpdir) / "cgroup"
+            cgroup_dir.mkdir(parents=True, exist_ok=True)
+            cpu_stat_file = cgroup_dir / "cpu.stat"
+            cpu_max_file = cgroup_dir / "cpu.max"
+            cpu_max_file.write_text("max 100000\n", encoding="ascii")
+            cpu_stat_file.write_text("usage_usec 10000000\nuser_usec 8000000\nsystem_usec 2000000\n", encoding="ascii")
+
+            vm_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            instance_id = "12345678-1234-4234-8234-123456789abc"
+            agent._cpu_counters.clear()
+
+            container = {
+                "id": vm_id,
+                "stable_id": vm_id,
+                "name": vm_id,
+                "image": "alpine-x-ui",
+                "runtime": "runman",
+                "runtime_bin": "runman",
+                "project": "default",
+                "status": "running",
+                "instance_id": instance_id,
+                "pid": 4321,
+                "pid_start_ticks": "987654",
+                "connection_metrics": {"valid": True, "total": 3},
+                "runman_resources": {
+                    "cpu": 0,
+                    "cpu_percent": 0.0,
+                    "mem_bytes": 128 * 1024 * 1024,
+                    "mem_limit_bytes": 512 * 1024 * 1024,
+                },
+            }
+
+            with mock.patch.object(
+                agent.cpu_guard, "resolve_container_cgroup", return_value=(cgroup_dir, "")
+            ), mock.patch.object(agent, "_host_cpu_capacity", return_value=1.0):
+                with mock.patch.object(agent.time, "time", return_value=1000.0):
+                    first_report = agent.collect_runman_report(container)
+                self.assertEqual(first_report["cpu_percent"], 0.0)
+                self.assertTrue(first_report["cpu_pressure_sample_available"])
+                self.assertEqual(first_report["cpu_effective_cpus"], 1.0)
+
+                # Simulate 10 seconds of wall time with 9.95 seconds of cgroup CPU usage (~99.5% of 1 core)
+                cpu_stat_file.write_text("usage_usec 19950000\nuser_usec 16000000\nsystem_usec 3950000\n", encoding="ascii")
+                with mock.patch.object(agent.time, "time", return_value=1010.0):
+                    second_report = agent.collect_runman_report(container)
+                self.assertAlmostEqual(second_report["cpu_percent"], 99.5, places=1)
+                self.assertAlmostEqual(second_report["cpu_pressure_percent"], 99.5, places=1)
+                self.assertTrue(second_report["cpu_pressure_sample_available"])
+                self.assertEqual(second_report["cpu_effective_cpus"], 1.0)
+
+    def test_host_proc_process_snapshot_tracks_recent_cpu_delta_for_long_lived_process(self):
+        agent._proc_cpu_counters.clear()
+        # Init PID 5000 has a child PID 5001 that started at tick 100 (long-lived: uptime 100,000s)
+        # At sample 1 (uptime=100000.0): utime=1000, stime=200 (12s total over 99999s -> 0.012% lifetime average)
+        # At sample 2 (uptime=100010.0): utime=1950, stime=240 (21.9s total -> +9.9s over 10s = 99.0% delta CPU)
+        state = {
+            "uptime": "100000.0 50000.0\n",
+            "stat_5001": "5001 (xray) R 5000 5000 5000 0 -1 4194304 100 0 0 0 1000 200 0 0 20 0 1 0 100 10000000 1000 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+        }
+
+        def fake_read_proc_text(path: str, limit: int = 8192) -> str:
+            if path == "/proc/uptime":
+                return state["uptime"]
+            if path == "/proc/5000/status":
+                return "Name:\tinit\nState:\tS (sleeping)\nPPid:\t1\nNSpid:\t5000\t1\nUid:\t0\t0\t0\t0\nVmRSS:\t2048 kB\n"
+            if path == "/proc/5001/status":
+                return "Name:\txray\nState:\tR (running)\nPPid:\t5000\nNSpid:\t5001\t42\nUid:\t0\t0\t0\t0\nVmRSS:\t32768 kB\n"
+            if path == "/proc/5000/comm":
+                return "init\n"
+            if path == "/proc/5001/comm":
+                return "xray\n"
+            if path == "/proc/5000/stat":
+                return "5000 (init) S 1 5000 5000 0 -1 4194304 10 0 0 0 10 5 0 0 20 0 1 0 90 1000000 500 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n"
+            if path == "/proc/5001/stat":
+                return state["stat_5001"]
+            return ""
+
+        with mock.patch.object(agent.os.path, "isdir", side_effect=lambda p: p == "/proc/5000"), mock.patch.object(
+            agent.os, "listdir", return_value=["5000", "5001"]
+        ), mock.patch.object(agent, "_read_host_proc_text", side_effect=fake_read_proc_text), mock.patch.object(
+            agent.os, "sysconf", return_value=100, create=True
+        ):
+            snap1, _ = agent._collect_host_proc_process_snapshot(5000, 20)
+            self.assertTrue(snap1["available"])
+            self.assertLess(snap1["items"][0]["cpu_percent"], 1.0)
+
+            state["uptime"] = "100010.0 50000.0\n"
+            state["stat_5001"] = "5001 (xray) R 5000 5000 5000 0 -1 4194304 100 0 0 0 1950 240 0 0 20 0 1 0 100 10000000 1000 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n"
+            snap2, _ = agent._collect_host_proc_process_snapshot(5000, 20)
+            self.assertEqual(snap2["items"][0]["pid"], 42)
+            self.assertEqual(snap2["items"][0]["process"], "xray")
+            self.assertAlmostEqual(snap2["items"][0]["cpu_percent"], 99.0, places=1)
+
+            with mock.patch.object(agent, "run", return_value=""):
+                top_proc = agent.collect_top_cpu_process("vm-1", "runman", "default", pid=5000)
+                self.assertEqual(top_proc["pid"], 42)
+                self.assertAlmostEqual(top_proc["cpu_percent"], 99.0, places=1)
+
 
 if __name__ == "__main__":
     unittest.main()

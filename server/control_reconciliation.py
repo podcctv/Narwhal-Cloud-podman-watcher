@@ -188,7 +188,7 @@ def build_control_reconciliation(
                                ("io_guard", "cgroup_io"), ("admission", "nftables_admission")):
             guard = _mapping(security.get(field))
             state = str(guard.get("state") or "")
-            if not state or state in {"normal", "watching", "disabled", "cooldown", "limit_not_needed", "warming", "candidate"}:
+            if not state or state in {"normal", "watching", "disabled", "cooldown", "limit_not_needed", "warming", "candidate", "waiting_for_host_psi", "waiting_for_host_pressure", "sampling_unavailable"}:
                 continue
             bucket = guard_summary[control]
             if state == "manual_override":
