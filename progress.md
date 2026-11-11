@@ -1,6 +1,20 @@
 # 当前进展与待办
 
-更新时间：2026-11-09（Asia/Shanghai）
+更新时间：2026-11-11（Asia/Shanghai）
+
+## 四维连接证据紧凑折叠卡片重构与单核节点 Runman 持续高 CPU 采样及自动限额修复（v1.8.23）
+
+- **需求背景**：
+  1. 用户反馈 `Socket / 代理连接四维判断依据` 告警卡片高度过高（默认展开 6 张纵向 IP 卡片与 4 张场景评估大卡片导致总高超 800px，且左侧连接状态拆解框存在大面积空白黑洞，来源网络去重标签重复渲染多次）。
+  2. 用户反馈单核节点（如 `JINX` 1 vCPU）上 `runman` Rust 容器 CPU 异常占满 100% 持续 40 分钟未被监测到且未触发自动限制（需人工重启容器恢复）。
+- **全链路落地与修复实现**：
+  1. **四维判断依据卡片紧凑横条化与按需折叠重构 (`SocketAbuseEvidence.tsx`, `SecurityAlertSection.tsx`, `AlertHistoryView.tsx`, `ContainerDrawer.tsx`)**：
+     - **四层紧凑架构（默认高度缩减 $>75\%$）**：顶栏单行汇总结论与代理对称度徽章；4 维核心指标采用 `grid-cols-1 sm:grid-cols-2 lg:grid-cols-4` 等高水平紧凑卡片（含 `tabular-nums` 核心数字、`h-1.5` 状态占比条与单行副指标），彻底消除左右高度失衡与空白黑洞；业务场景评估压缩为单行水平胶囊条（带颜色状态点、概率标签与首要倾向依据）。
+     - **原生 `<details>` 按需披露与双列 IP 网格**：将入站/出站公网 IP 样本、脱敏代理进程启动命令及完整排查说明收纳进原生 `<details>` 折叠面板（`展开 IP 与诊断明细` / `收起明细`，兼顾键盘无障碍与 `Ctrl+F` 页内检索）；展开后 IP 列表采用 `md:grid-cols-2` 紧凑双列网格，并对 `source_networks` 按网络分类标签聚合去重（附 ASN 明细）。
+     - **冗余提示整合**：当告警已携带四维判断依据且无独立深度快照时，将多段式保护说明折叠为单行提示条，并避免抽屉内重复渲染同一四维卡片。
+  2. **Runman 容器 cgroup v2 / 宿主 `/proc` 增量 CPU 采样与单核节点自动 `cpu.max` 限额闭环 (`client/agent.py`, `client/cpu_guard.py`, `server/control_reconciliation.py`)**：
+     - **Runman 多源增量 CPU 采样兜底**：新增 `_sample_cgroup_cpu_metrics` 按代次校验后的容器 cgroup 读取 `cpu.max`（提取 `quota_cpus`）与 `cpu.stat`（计算 `usage_usec` 跨周期增量 CPU%）；`_collect_host_proc_process_snapshot` 新增按 `(host_pid, start_ticks)` 追踪进程级 `(utime+stime)` 增量 CPU%，解决长周期进程（如 `xray`）瞬时满载被生命周期均值稀释及无 `ps -eo pcpu` 时的漏采问题；`collect_runman_report` 与 `collect_container` 统一汇总 API、cgroup 增量与 `top_cpu_process` 并正确透传 `cpu_pressure_percent`、`cpu_pressure_sample_available` 与 `cpu_effective_cpus`。
+     - **单核节点（如 `JINX`）失控 CPU 压力确认与自动限额 (`cpu_guard.py`)**：新增 `_container_cpu_pressure_confirmed`，在单核主机饱和（`single_core_host_cpu_saturation`）、单容器占满主机 $\ge 75\%$ 容量、容器 cgroup CPU PSI 达标或主机高负载（`busy >= 95%` / `load_1m >= logical_cpus`）时确认 CPU 压力，解决单核机器单线程跑满 100% 但内核 `/proc/pressure/cpu` `some avg10 < 5%` 导致计数被清空的问题；支持在 `cpu_effective_cpus <= 0` 时自动回退至 `cpu.max` 或主机逻辑核数，跨短暂 `warming` 周期保留候选计数，连续 2 次采样即抓取 `top_process` 并产生 `warning` 观察告警，满 300s 失控窗口自动下发 Tier 1 `cpu.max`（如单核 `50000 100000`）并完整回填读回验证字段（`readback_confirmed`、`original_limit`、`active_limit`、`actual_limit`）。
 
 ## 经营分析初次进入自动同步补位、后台独立业务日志与会话凭证加固（v1.8.20）
 
