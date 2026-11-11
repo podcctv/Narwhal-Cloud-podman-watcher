@@ -30,7 +30,7 @@ import { DiagnosticPanel } from './DiagnosticPanel';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { AdmissionStatus } from './AdmissionStatus';
 import { ConnectionEvidenceTimeline } from './ConnectionEvidenceTimeline';
-import { SocketAbuseEvidence } from '../alerts/SocketAbuseEvidence';
+import { SocketAbuseEvidence, extractSocketAbuseAssessment } from '../alerts/SocketAbuseEvidence';
 import { hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard } from '../dashboard/ContainerStateBadges';
 import { evaluateContainerRisk } from '../dashboard/HostContainerList';
 
@@ -812,7 +812,9 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     ))}
                   </ul>
                 )}
-                {sec?.socket_abuse && <SocketAbuseEvidence assessment={sec.socket_abuse} />}
+                {sec?.socket_abuse && !containerAlerts.some((alert) => Boolean(extractSocketAbuseAssessment(alert))) && (
+                  <SocketAbuseEvidence assessment={sec.socket_abuse} compact />
+                )}
               </section>
             )}
 

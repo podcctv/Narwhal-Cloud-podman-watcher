@@ -21,7 +21,7 @@ import { UserNoticeAction } from './UserNoticeAction';
 import { isProtectionOnlySignal } from './protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from './connectionEvidence';
 import { ProtocolGuardEvidence } from './ProtocolGuardEvidence';
-import { SocketAbuseEvidence } from './SocketAbuseEvidence';
+import { SocketAbuseEvidence, extractSocketAbuseAssessment } from './SocketAbuseEvidence';
 import { hasRemediationEvidence } from './remediationEvidence';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 
@@ -404,15 +404,23 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                     <SocketAbuseEvidence alert={alert} />
                     <ProtocolGuardEvidence alert={alert} />
                     {protectionOnly && (
-                      <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2 text-[11px] leading-relaxed text-slate-300">
-                        <div className="flex items-center gap-1.5 font-semibold text-sky-200">
-                          <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
-                          仅作为网络保护记录
+                      extractSocketAbuseAssessment(alert) ? (
+                        <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-sky-800/60 bg-sky-950/20 px-3 py-1.5 text-[11px] text-slate-300">
+                          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-sky-300" />
+                          <span className="font-semibold text-sky-200">仅作为网络保护记录：</span>
+                          <span>连接、来源 IP 或流量特征不单独证明用户违规意图，不计入用户异常统计。</span>
                         </div>
-                        <p className="mt-1">
-                          连接、来源 IP 或流量特征不能单独证明用户身份或违规意图；此记录不计入用户异常统计，也不作为滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。
-                        </p>
-                      </div>
+                      ) : (
+                        <div className="rounded-lg border border-sky-800/70 bg-sky-950/25 px-3 py-2 text-[11px] leading-relaxed text-slate-300">
+                          <div className="flex items-center gap-1.5 font-semibold text-sky-200">
+                            <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                            仅作为网络保护记录
+                          </div>
+                          <p className="mt-1">
+                            连接、来源 IP 或流量特征不能单独证明用户身份或违规意图；此记录不计入用户异常统计，也不作为滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。
+                          </p>
+                        </div>
+                      )
                     )}
                     <SocksPasswordReview alert={alert} onRefresh={() => loadData(true)} onToast={onToast} />
                     {!protectionOnly && <UserNoticeAction alertId={alert.id} onToast={onToast} />}

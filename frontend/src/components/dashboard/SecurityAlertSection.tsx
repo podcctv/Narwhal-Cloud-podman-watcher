@@ -19,7 +19,7 @@ import { UserNoticeAction } from '../alerts/UserNoticeAction';
 import { isProtectionOnlySignal } from '../alerts/protectionSignals';
 import { connectionAttributionUnavailable, formatConnectionEvidenceCount, formatConnectionEvidenceRatio } from '../alerts/connectionEvidence';
 import { ProtocolGuardEvidence } from '../alerts/ProtocolGuardEvidence';
-import { SocketAbuseEvidence } from '../alerts/SocketAbuseEvidence';
+import { SocketAbuseEvidence, extractSocketAbuseAssessment } from '../alerts/SocketAbuseEvidence';
 import { hasRemediationEvidence } from '../alerts/remediationEvidence';
 
 interface SecurityAlertSectionProps {
@@ -238,37 +238,45 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 <SocketAbuseEvidence alert={alert} />
                 <ProtocolGuardEvidence alert={alert} />
                 {protectionOnly && (
-                  <div className="rounded-xl border border-sky-800/70 bg-sky-950/25 px-3.5 py-2.5 text-[11px] leading-relaxed text-slate-300">
-                    <div className="flex items-center gap-1.5 font-semibold text-sky-200">
-                      <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
-                      {admissionUnverified ? '保护状态待核实' : '仅作为主机保护信号'}
+                  extractSocketAbuseAssessment(alert) && !deepEvidence && !admissionUnverified ? (
+                    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-sky-800/60 bg-sky-950/20 px-3 py-1.5 text-[11px] text-slate-300">
+                      <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-sky-300" />
+                      <span className="font-semibold text-sky-200">仅作为主机保护信号：</span>
+                      <span>当前数据仅反映连接、流量或访问特征，尚未通过应用认证日志关联具体用户，不作为滥用指控或处罚依据。</span>
                     </div>
-                    <p className="mt-1">
-                      {admissionUnverified
-                        ? '采样或规则校验未通过，当前不能确认防护是否生效；这不代表已确认攻击，也不归因为用户行为。'
-                        : '当前数据只反映连接、流量或访问特征，尚未通过应用/代理认证日志关联到具体用户；不作为用户滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。'}
-                    </p>
-                    {deepEvidence ? (
-                      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-sky-900/70 pt-2 text-slate-300 tabular-nums">
-                        <span>深度快照：{deepEvidence.captured_at_utc8 || '时间未上报'}</span>
-                        <span>入站：{formatConnectionEvidenceCount(deepEvidence.inbound_unique_ips, inboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.inbound_process_count, attributionUnavailable)} 进程</span>
-                        <span>出站：{formatConnectionEvidenceCount(deepEvidence.outbound_unique_ips, outboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.outbound_process_count, attributionUnavailable)} 进程</span>
-                        {attribution && <span>
-                          发起方向：本机进程已确认 {formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)} / 远端发起已确认 {formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)} / 未知 {formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}
-                        </span>}
-                        {probeIpCount > 0 && <span className="text-amber-200">多端口探测线索 {probeIpCount} IP（非攻击定论）</span>}
-                        {attribution && (attributionUnavailable
-                          ? <span className="text-amber-200">连接明细未采集，发起方向与进程归属未知，不能按 0 条判断</span>
-                          : <span>进程/PID 归属 {formatConnectionEvidenceRatio(attribution.process_attributed_sockets, attribution.captured_sockets, false)} 条</span>)}
-                        {attribution?.conntrack_available === false && !attributionUnavailable && <span className="text-amber-200">conntrack 不可用；其余方向只按 socket 状态证据判定</span>}
+                  ) : (
+                    <div className="rounded-xl border border-sky-800/70 bg-sky-950/25 px-3.5 py-2.5 text-[11px] leading-relaxed text-slate-300">
+                      <div className="flex items-center gap-1.5 font-semibold text-sky-200">
+                        <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                        {admissionUnverified ? '保护状态待核实' : '仅作为主机保护信号'}
                       </div>
-                    ) : (
-                      <p className="mt-2 border-t border-sky-900/70 pt-2 text-slate-400">
-                        尚无深度连接快照；目前不能判断连接来源、发起方向或对应进程。
+                      <p className="mt-1">
+                        {admissionUnverified
+                          ? '采样或规则校验未通过，当前不能确认防护是否生效；这不代表已确认攻击，也不归因为用户行为。'
+                          : '当前数据只反映连接、流量或访问特征，尚未通过应用/代理认证日志关联到具体用户；不作为用户滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。'}
                       </p>
-                    )}
-                    <p className="mt-1 text-slate-400">连接方向或进程归属不等于用户身份；需要认证日志才能把行为关联到用户。</p>
-                  </div>
+                      {deepEvidence ? (
+                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-sky-900/70 pt-2 text-slate-300 tabular-nums">
+                          <span>深度快照：{deepEvidence.captured_at_utc8 || '时间未上报'}</span>
+                          <span>入站：{formatConnectionEvidenceCount(deepEvidence.inbound_unique_ips, inboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.inbound_process_count, attributionUnavailable)} 进程</span>
+                          <span>出站：{formatConnectionEvidenceCount(deepEvidence.outbound_unique_ips, outboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.outbound_process_count, attributionUnavailable)} 进程</span>
+                          {attribution && <span>
+                            发起方向：本机进程已确认 {formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)} / 远端发起已确认 {formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)} / 未知 {formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}
+                          </span>}
+                          {probeIpCount > 0 && <span className="text-amber-200">多端口探测线索 {probeIpCount} IP（非攻击定论）</span>}
+                          {attribution && (attributionUnavailable
+                            ? <span className="text-amber-200">连接明细未采集，发起方向与进程归属未知，不能按 0 条判断</span>
+                            : <span>进程/PID 归属 {formatConnectionEvidenceRatio(attribution.process_attributed_sockets, attribution.captured_sockets, false)} 条</span>)}
+                          {attribution?.conntrack_available === false && !attributionUnavailable && <span className="text-amber-200">conntrack 不可用；其余方向只按 socket 状态证据判定</span>}
+                        </div>
+                      ) : (
+                        <p className="mt-2 border-t border-sky-900/70 pt-2 text-slate-400">
+                          尚无深度连接快照；目前不能判断连接来源、发起方向或对应进程。
+                        </p>
+                      )}
+                      <p className="mt-1 text-slate-400">连接方向或进程归属不等于用户身份；需要认证日志才能把行为关联到用户。</p>
+                    </div>
+                  )
                 )}
                 <SocksPasswordReview alert={alert} onRefresh={onRefresh} onToast={onToast} />
 
