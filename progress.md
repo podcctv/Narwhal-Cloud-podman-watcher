@@ -1,6 +1,20 @@
 # 当前进展与待办
 
-更新时间：2026-11-12（Asia/Shanghai）
+更新时间：2026-11-13（Asia/Shanghai）
+
+## 客户端核心采集模块拆分与覆盖升级/回滚跨架构基建加固（v1.8.25）
+
+- **需求背景**：
+  1. 为后续 Rust 渐进式替换（Strangler Fig 路线）铺平道路，需先将 14,595 行单文件 `client/agent.py` 按职责拆分为内聚模块，同时保持现有 `agent.*` 导入、单测 mock 与命令行入口 100% 兼容。
+  2. 原 `scripts/managed-client-update.sh` 存在硬编码 `*.py` 清单与回滚盲区（不备份/不恢复新拆分模块、原生二进制、`narwhal-monitor-client.service` 及更新器自身），且 `install-client.sh` / `update_archive.py` 缺少统一的 `uname -m` 架构归一化校验。
+- **全链路落地与实现**：
+  1. **阶段 1：Python 客户端核心热点模块化拆分 (`client/agent.py`, `client/proc_scanner.py`, `client/geoip_enricher.py`, `client/socket_collector.py`, `client/runtime_drivers.py`)**：
+     - 将 `client/agent.py` 从 14,595 行精简至 9,282 行，拆出 `proc_scanner.py`（667 行，`/proc` 进程树与快照缓存）、`geoip_enricher.py`（550 行，MMDB 查询与 TTL 缓存）、`socket_collector.py`（2,527 行，连接安全、conntrack 与四维滥用评估）及 `runtime_drivers.py`（2,231 行，Podman/Incus/Docker/Runman 运行时发现与 cgroup/容器指标采集）。
+     - `client/agent.py` 保留完整向后兼容重导出与 `client.*`/本地双路径导入回退，并向各拆分模块注册 `globals()` 引用，确保既有 `mock.patch.object(agent, ...)` 与 `spec_from_file_location` 加载用例 100% 兼容。
+  2. **阶段 2：升级/回滚动态化与跨架构分发基建加固 (`scripts/managed-client-update.sh`, `scripts/install-client.sh`, `scripts/update_archive.py`, `tests/test_managed_update_scripts.py`)**：
+     - `managed-client-update.sh` 将 `py_compile`、快照备份与 `restore()` 改为动态遍历 `client/*.py` 与可选 `client/bin/` 二进制，并记录 `installed-files.manifest` / `staged-files.manifest` 以在回滚时清理本次新增文件；同步快照与还原 `/etc/systemd/system/narwhal-monitor-client.service`（回滚后执行 `systemctl daemon-reload`）、`managed-client-update.sh` 与 `update_archive.py`。
+     - `install-client.sh` 与 `update_archive.py` 新增 `normalize_arch`（`x86_64|amd64 -> amd64`，`aarch64|arm64 -> arm64`，未知架构明确报错退出），并在 `install-client.sh update` 中动态同步全部 `client/*.py`、可选 `client/bin/*` 与更新器脚本。
+     - 新增 `tests/test_managed_update_scripts.py` 并更新 `tests/test_managed_upgrade.py`、`tests/test_socks_detector.py` 断言以覆盖动态发现、清单清理、`systemd` 单元回滚与架构归一化测试。
 
 ## Agent 单核 CPU 尖峰消除与 Incus/Runman 多容器争抢及 `/ct` 子 cgroup CPU 保护优化（v1.8.24）
 
