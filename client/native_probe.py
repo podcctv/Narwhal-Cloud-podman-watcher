@@ -109,3 +109,32 @@ def cgroup_metrics(cgroup_dir: str | os.PathLike[str]) -> Dict[str, Any] | None:
     if not cgroup_dir or not is_available():
         return None
     return run_probe(["cgroup-metrics", "--cgroup-dir", str(cgroup_dir)])
+
+
+def proc_sockets(
+    init_pid: int, pids: List[int], max_fds: int = 4096
+) -> Dict[str, Any] | None:
+    """Collect `/proc/<init_pid>/net/*` sockets attributed to `pids` via `narwhal-probe proc-sockets`."""
+    if init_pid <= 0 or not pids or max_fds <= 0 or not is_available():
+        return None
+    clean_pids = [str(int(pid)) for pid in pids if int(pid) > 0]
+    if not clean_pids:
+        return None
+    return run_probe(
+        [
+            "proc-sockets",
+            "--init-pid",
+            str(int(init_pid)),
+            "--pids",
+            ",".join(clean_pids),
+            "--max-fds",
+            str(int(max_fds)),
+        ]
+    )
+
+
+def host_metrics(proc_root: str | os.PathLike[str] = "/proc") -> Dict[str, Any] | None:
+    """Collect host uptime, loadavg, cpu, meminfo, and net/dev via `narwhal-probe host-metrics`."""
+    if not proc_root or not is_available():
+        return None
+    return run_probe(["host-metrics", "--proc-root", str(proc_root)])

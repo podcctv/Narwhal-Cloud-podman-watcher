@@ -2,6 +2,12 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## Phase 3 扩展：`proc-sockets` 与 `host-metrics` Rust 原生探针及 Python 桥接（v1.8.33）
+
+- **进程级 Socket FD 归属探针 (`rust/crates/proc-probe/src/lib.rs`, `rust/crates/narwhal-probe/src/main.rs`)**：在 `proc-probe` 新增 `std`-only、`#![forbid(unsafe_code)]` 的 `collect_proc_sockets` / `collect_proc_sockets_from`，单次读取 `/proc/<init_pid>/net/{tcp,tcp6,udp,udp6}` 并按 `max_fds` 有界扫描 `/proc/<pid>/fd/*` 归属 socket inode，接入 `narwhal-probe proc-sockets` 子命令与 Rust 单测。
+- **宿主机指标采集 Crate (`rust/crates/host-metrics/`, `rust/Cargo.toml`, `rust/crates/narwhal-probe/`)**：新增 `std`-only、零外部依赖的 `host-metrics` crate，单次读取 `/proc/{meminfo,loadavg,uptime,stat,net/dev}` 并输出结构化 JSON，接入 `narwhal-probe host-metrics` 子命令与 Rust 单测。
+- **Python 桥接与全量回退 (`client/host_metrics.py`, `client/native_probe.py`, `client/proc_scanner.py`, `client/agent.py`, `tests/test_native_probe.py`)**：新增 `native_probe.proc_sockets()`、`native_probe.host_metrics()` 与 `client/host_metrics.py`（`agent.collect_host_metrics` 向后兼容重导出），并在 `_collect_host_proc_socket_details` 与 `collect_host_metrics` 中接入原生探针加速及 mock/不可用时的 100% Python 回退路径，补充对应单测。
+
 ## Phase 3 扩展：`cgroup-probe` Rust Crate 与 `cpu_guard` 原生 PSI/stat 采样桥接（v1.8.32）
 
 - **新增 Rust `std`-only Crate (`rust/crates/cgroup-probe/`)**：实现 `#![forbid(unsafe_code)]`、零外部依赖的 `psi-snapshot`（单次调用读取宿主机 `/proc/pressure/{cpu,memory,io}`、`/proc/stat` 与容器 `<cgroup>/{cpu,memory,io}.pressure`）与 `cgroup-metrics`（读取 `cpu.stat`、`cpu.max`、`memory.{current,max,stat}`、`io.stat`），并接入 `narwhal-probe` CLI 与 Rust 单测。

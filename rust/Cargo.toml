@@ -4,6 +4,7 @@ members = [
     "crates/proc-probe",
     "crates/socket-sec",
     "crates/cgroup-probe",
+    "crates/host-metrics",
     "crates/narwhal-probe",
 ]
 

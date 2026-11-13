@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read as _;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 pub fn json_escape(input: &str) -> String {
@@ -372,6 +373,221 @@ pub fn collect_proc_snapshot_from_root(
     out
 }
 
+fn decode_hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let raw = hex.as_bytes();
+    let mut out = Vec::with_capacity(raw.len() / 2);
+    for pair in raw.chunks_exact(2) {
+        let s = std::str::from_utf8(pair).ok()?;
+        let byte = u8::from_str_radix(s, 16).ok()?;
+        out.push(byte);
+    }
+    Some(out)
+}
+
+pub fn decode_hex_ip_port(endpoint: &str, is_v6: bool) -> Option<(String, u16)> {
+    let (ip_hex, port_hex) = endpoint.rsplit_once(':')?;
+    let port = u16::from_str_radix(port_hex, 16).ok()?;
+    let bytes = decode_hex_bytes(ip_hex)?;
+
+    if !is_v6 {
+        if bytes.len() != 4 {
+            return None;
+        }
+        let addr = Ipv4Addr::new(bytes[3], bytes[2], bytes[1], bytes[0]);
+        return Some((addr.to_string(), port));
+    }
+
+    if bytes.len() != 16 {
+        return None;
+    }
+    let mut norm = [0u8; 16];
+    for chunk in 0..4 {
+        let base = chunk * 4;
+        norm[base] = bytes[base + 3];
+        norm[base + 1] = bytes[base + 2];
+        norm[base + 2] = bytes[base + 1];
+        norm[base + 3] = bytes[base];
+    }
+    if norm[..10] == [0u8; 10] && norm[10] == 0xff && norm[11] == 0xff {
+        let mapped = Ipv4Addr::new(norm[12], norm[13], norm[14], norm[15]);
+        return Some((mapped.to_string(), port));
+    }
+    Some((Ipv6Addr::from(norm).to_string(), port))
+}
+
+fn parse_socket_inode(target: &str) -> Option<u64> {
+    let inner = target.strip_prefix("socket:[")?.strip_suffix(']')?;
+    if inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    inner.parse::<u64>().ok()
+}
+
+struct SocketMeta {
+    proto: &'static str,
+    state_hex: String,
+    local_ip: String,
+    local_port: u16,
+    remote_ip: String,
+    remote_port: u16,
+}
+
+struct ProcSocketItem {
+    pid: u32,
+    inode: u64,
+    proto: &'static str,
+    state_hex: String,
+    local_ip: String,
+    local_port: u16,
+    remote_ip: String,
+    remote_port: u16,
+}
+
+pub fn collect_proc_sockets(init_pid: u32, pids: &[u32], max_fds: usize) -> String {
+    collect_proc_sockets_from(Path::new("/proc"), init_pid, pids, max_fds)
+}
+
+pub fn collect_proc_sockets_from(
+    proc_root: &Path,
+    init_pid: u32,
+    pids: &[u32],
+    max_fds: usize,
+) -> String {
+    if init_pid == 0 {
+        return "{\"available\":false,\"inode_count\":0,\"fd_scanned\":0,\"truncated\":false,\"sockets\":[]}".to_string();
+    }
+
+    let net_dir = proc_root.join(init_pid.to_string()).join("net");
+    let tables = [
+        ("tcp", false, "tcp"),
+        ("tcp6", true, "tcp"),
+        ("udp", false, "udp"),
+        ("udp6", true, "udp"),
+    ];
+
+    let mut read_files: usize = 0;
+    let mut inode_map: HashMap<u64, SocketMeta> = HashMap::new();
+
+    for (filename, is_v6, proto) in tables {
+        let Ok(content) = fs::read_to_string(net_dir.join(filename)) else {
+            continue;
+        };
+        read_files += 1;
+        for line in content.lines().skip(1) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() < 10 {
+                continue;
+            }
+            let Some((local_ip, local_port)) = decode_hex_ip_port(parts[1], is_v6) else {
+                continue;
+            };
+            let Some((remote_ip, remote_port)) = decode_hex_ip_port(parts[2], is_v6) else {
+                continue;
+            };
+            let Ok(inode) = parts[9].parse::<u64>() else {
+                continue;
+            };
+            if inode == 0 {
+                continue;
+            }
+            let state_hex = parts[3].to_ascii_uppercase();
+            inode_map.insert(
+                inode,
+                SocketMeta {
+                    proto,
+                    state_hex,
+                    local_ip,
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                },
+            );
+        }
+    }
+
+    if read_files == 0 {
+        return "{\"available\":false,\"inode_count\":0,\"fd_scanned\":0,\"truncated\":false,\"sockets\":[]}".to_string();
+    }
+
+    let inode_count = inode_map.len();
+    let mut fd_scanned: usize = 0;
+    let mut truncated = false;
+    let mut seen: HashSet<(u32, u64)> = HashSet::new();
+    let mut sockets: Vec<ProcSocketItem> = Vec::new();
+
+    'outer: for &pid in pids {
+        let fd_dir = proc_root.join(pid.to_string()).join("fd");
+        let Ok(entries) = fs::read_dir(&fd_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if fd_scanned >= max_fds {
+                truncated = true;
+                break 'outer;
+            }
+            fd_scanned += 1;
+            let Ok(target) = fs::read_link(entry.path()) else {
+                continue;
+            };
+            let Some(target_str) = target.to_str() else {
+                continue;
+            };
+            let Some(inode) = parse_socket_inode(target_str) else {
+                continue;
+            };
+            if let Some(meta) = inode_map.get(&inode) {
+                if seen.insert((pid, inode)) {
+                    sockets.push(ProcSocketItem {
+                        pid,
+                        inode,
+                        proto: meta.proto,
+                        state_hex: meta.state_hex.clone(),
+                        local_ip: meta.local_ip.clone(),
+                        local_port: meta.local_port,
+                        remote_ip: meta.remote_ip.clone(),
+                        remote_port: meta.remote_port,
+                    });
+                }
+            }
+        }
+    }
+
+    sockets.sort_by(|a, b| a.pid.cmp(&b.pid).then_with(|| a.inode.cmp(&b.inode)));
+
+    let mut out = String::with_capacity(128 + sockets.len() * 144);
+    let _ = write!(
+        out,
+        "{{\"available\":true,\"inode_count\":{},\"fd_scanned\":{},\"truncated\":{},\"sockets\":[",
+        inode_count, fd_scanned, truncated,
+    );
+    for (idx, item) in sockets.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"pid\":{},\"inode\":{},\"proto\":\"{}\",\"state_hex\":\"{}\",\"local_ip\":\"{}\",\"local_port\":{},\"remote_ip\":\"{}\",\"remote_port\":{}}}",
+            item.pid,
+            item.inode,
+            item.proto,
+            json_escape(&item.state_hex),
+            json_escape(&item.local_ip),
+            item.local_port,
+            json_escape(&item.remote_ip),
+            item.remote_port,
+        );
+    }
+    out.push_str("]}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +688,136 @@ mod tests {
         assert!(json.contains("\"rss_bytes\":2097152"));
         assert!(json.contains("\"command\":\"/usr/bin/xray -c config.json\""));
         assert!(!json.contains("sshd"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_decode_hex_ip_port() {
+        assert_eq!(
+            decode_hex_ip_port("0100007F:01BB", false),
+            Some(("127.0.0.1".to_string(), 443))
+        );
+        assert_eq!(
+            decode_hex_ip_port("00000000:0000", false),
+            Some(("0.0.0.0".to_string(), 0))
+        );
+        assert_eq!(
+            decode_hex_ip_port("0000000000000000FFFF00000100007F:1F90", true),
+            Some(("127.0.0.1".to_string(), 8080))
+        );
+        assert_eq!(
+            decode_hex_ip_port("00000000000000000000000001000000:0035", true),
+            Some(("::1".to_string(), 53))
+        );
+        assert_eq!(decode_hex_ip_port("bad", false), None);
+        assert_eq!(decode_hex_ip_port("0100007F:ZZZZ", false), None);
+        assert_eq!(decode_hex_ip_port("0100:0050", false), None);
+    }
+
+    #[test]
+    fn test_parse_socket_inode() {
+        assert_eq!(parse_socket_inode("socket:[12345]"), Some(12345));
+        assert_eq!(parse_socket_inode("socket:[0]"), Some(0));
+        assert_eq!(parse_socket_inode("pipe:[12345]"), None);
+        assert_eq!(parse_socket_inode("socket:[]"), None);
+        assert_eq!(parse_socket_inode("socket:[12a4]"), None);
+        assert_eq!(parse_socket_inode("/dev/null"), None);
+    }
+
+    #[test]
+    fn test_collect_proc_sockets_unavailable() {
+        let root = make_temp_proc("sockets_unavail");
+        let json_zero = collect_proc_sockets_from(&root, 0, &[100], 64);
+        assert_eq!(
+            json_zero,
+            "{\"available\":false,\"inode_count\":0,\"fd_scanned\":0,\"truncated\":false,\"sockets\":[]}"
+        );
+
+        let json_missing = collect_proc_sockets_from(&root, 999, &[999], 64);
+        assert_eq!(
+            json_missing,
+            "{\"available\":false,\"inode_count\":0,\"fd_scanned\":0,\"truncated\":false,\"sockets\":[]}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_proc_sockets_net_tables_without_fds() {
+        let root = make_temp_proc("sockets_tables");
+        let net_dir = root.join("100").join("net");
+        fs::create_dir_all(&net_dir).unwrap();
+        fs::write(
+            net_dir.join("tcp"),
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+               0: 0100007F:01BB C0A80102:C822 01 00000000:00000000 00:00000000 00000000  1000        0 55501 1 00000000 0 0 0 0 0\n\
+               1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 0 1 00000000 0 0 0 0 0\n",
+        )
+        .unwrap();
+        fs::write(
+            net_dir.join("udp6"),
+            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+               0: 00000000000000000000000001000000:0035 00000000000000000000000000000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 55502 2\n",
+        )
+        .unwrap();
+
+        let json = collect_proc_sockets_from(&root, 100, &[100], 100);
+        assert!(json.contains("\"available\":true"));
+        assert!(json.contains("\"inode_count\":2"));
+        assert!(json.contains("\"fd_scanned\":0"));
+        assert!(json.contains("\"truncated\":false"));
+        assert!(json.contains("\"sockets\":[]"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_proc_sockets_with_fd_symlinks_and_max_fds() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_proc("sockets_fds");
+        let net_dir = root.join("100").join("net");
+        fs::create_dir_all(&net_dir).unwrap();
+        fs::write(
+            net_dir.join("tcp"),
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+               0: 0100007F:01BB 0200007F:C822 01 00000000:00000000 00:00000000 00000000  1000        0 70001 1\n",
+        )
+        .unwrap();
+        fs::write(
+            net_dir.join("udp"),
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+               0: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 70002 2\n",
+        )
+        .unwrap();
+
+        let fd100 = root.join("100").join("fd");
+        fs::create_dir_all(&fd100).unwrap();
+        symlink("socket:[70001]", fd100.join("3")).unwrap();
+        symlink("socket:[70001]", fd100.join("4")).unwrap();
+        symlink("pipe:[99999]", fd100.join("5")).unwrap();
+
+        let fd101 = root.join("101").join("fd");
+        fs::create_dir_all(&fd101).unwrap();
+        symlink("socket:[70002]", fd101.join("3")).unwrap();
+
+        let json = collect_proc_sockets_from(&root, 100, &[100, 101], 10);
+        assert!(json.contains("\"available\":true"));
+        assert!(json.contains("\"inode_count\":2"));
+        assert!(json.contains("\"fd_scanned\":4"));
+        assert!(json.contains("\"truncated\":false"));
+        assert!(json.contains(
+            "{\"pid\":100,\"inode\":70001,\"proto\":\"tcp\",\"state_hex\":\"01\",\"local_ip\":\"127.0.0.1\",\"local_port\":443,\"remote_ip\":\"127.0.0.2\",\"remote_port\":51234}"
+        ));
+        assert!(json.contains(
+            "{\"pid\":101,\"inode\":70002,\"proto\":\"udp\",\"state_hex\":\"07\",\"local_ip\":\"0.0.0.0\",\"local_port\":53,\"remote_ip\":\"0.0.0.0\",\"remote_port\":0}"
+        ));
+
+        let json_trunc = collect_proc_sockets_from(&root, 100, &[100, 101], 2);
+        assert!(json_trunc.contains("\"fd_scanned\":2"));
+        assert!(json_trunc.contains("\"truncated\":true"));
 
         let _ = fs::remove_dir_all(&root);
     }

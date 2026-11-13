@@ -45,6 +45,11 @@ try:
         _geoip_local_country_batch,
         register_agent_module as _register_geoip_agent_module,
     )
+    from client import host_metrics
+    from client.host_metrics import (
+        collect_host_metrics,
+        register_agent_module as _register_host_metrics_agent_module,
+    )
     from client.proc_scanner import (
         _collect_deep_process_snapshot,
         _collect_host_proc_process_snapshot,
@@ -211,6 +216,11 @@ except ImportError:
         _geoip_local_country_batch,
         register_agent_module as _register_geoip_agent_module,
     )
+    import host_metrics
+    from host_metrics import (
+        collect_host_metrics,
+        register_agent_module as _register_host_metrics_agent_module,
+    )
     from proc_scanner import (
         _collect_deep_process_snapshot,
         _collect_host_proc_process_snapshot,
@@ -353,6 +363,7 @@ _register_geoip_agent_module(globals())
 _register_socket_agent_module(globals())
 _register_runtime_agent_module(globals())
 _register_proc_agent_module(globals())
+_register_host_metrics_agent_module(globals())
 
 try:
     import maxminddb

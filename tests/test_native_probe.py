@@ -426,5 +426,142 @@ class CpuGuardNativeBridgeTests(unittest.TestCase):
         self.assertEqual(res["cpu"]["some"]["avg10"], 11.0)
 
 
+class ProcSocketsAndHostMetricsNativeBridgeTests(unittest.TestCase):
+    def test_proc_sockets_and_host_metrics_cli_args(self):
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "run_probe", return_value={"available": True}
+        ) as run_mock:
+            res1 = native_probe.proc_sockets(42, [42, 100, 0, -1], max_fds=2048)
+            res2 = native_probe.host_metrics(proc_root="/proc")
+        self.assertEqual(res1, {"available": True})
+        self.assertEqual(res2, {"available": True})
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["proc-sockets", "--init-pid", "42", "--pids", "42,100", "--max-fds", "2048"],
+        )
+        self.assertEqual(
+            run_mock.call_args_list[1].args[0],
+            ["host-metrics", "--proc-root", "/proc"],
+        )
+
+        with mock.patch.object(native_probe, "is_available", return_value=True):
+            self.assertIsNone(native_probe.proc_sockets(0, [42]))
+            self.assertIsNone(native_probe.proc_sockets(42, []))
+            self.assertIsNone(native_probe.proc_sockets(42, [0, -5]))
+            self.assertIsNone(native_probe.proc_sockets(42, [42], max_fds=0))
+
+        with mock.patch.object(native_probe, "is_available", return_value=False):
+            self.assertIsNone(native_probe.proc_sockets(42, [42]))
+            self.assertIsNone(native_probe.host_metrics())
+
+    def test_host_metrics_uses_native_probe_and_falls_back(self):
+        from client import host_metrics
+
+        native_payload = {
+            "available": True,
+            "uptime_seconds": 1234.5,
+            "load": {"available": True, "m1": 0.5, "m5": 0.4, "m15": 0.3},
+            "cpu": {"available": True, "total": 1000, "busy": 200, "iowait": 50},
+            "memory": {"available": True, "mem_total_bytes": 1024 * 1024},
+            "net": {"available": True, "rx_bytes": 100, "tx_bytes": 50, "interfaces": []},
+        }
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "host_metrics", return_value=native_payload
+        ) as probe_mock:
+            res = agent.collect_host_metrics()
+        probe_mock.assert_called_once()
+        self.assertEqual(res, native_payload)
+
+        # Fallback to Python when probe returns None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "net").mkdir()
+            (root / "uptime").write_text("456.78 100.0\n", encoding="utf-8")
+            (root / "loadavg").write_text("0.10 0.20 0.30 1/100 123\n", encoding="utf-8")
+            (root / "stat").write_text("cpu  100 0 50 800 50 0 0 0 0 0\n", encoding="utf-8")
+            (root / "meminfo").write_text("MemTotal: 2048 kB\nMemAvailable: 1024 kB\n", encoding="utf-8")
+            (root / "net" / "dev").write_text(
+                "Inter-|   Receive\n"
+                " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets\n"
+                "    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n"
+                "  eth0: 500 5 0 0 0 0 0 0 250 2 0 0 0 0 0 0\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+                native_probe, "host_metrics", return_value=None
+            ):
+                fallback = host_metrics.collect_host_metrics(proc_root=root)
+
+        self.assertTrue(fallback["available"])
+        self.assertAlmostEqual(fallback["uptime_seconds"], 456.78, places=2)
+        self.assertEqual(fallback["load"], {"available": True, "m1": 0.10, "m5": 0.20, "m15": 0.30})
+        self.assertEqual(fallback["cpu"], {"available": True, "total": 1000, "busy": 150, "iowait": 50})
+        self.assertEqual(fallback["memory"]["mem_total_bytes"], 2048 * 1024)
+        self.assertEqual(fallback["memory"]["mem_available_bytes"], 1024 * 1024)
+        self.assertEqual(fallback["net"]["rx_bytes"], 500)
+        self.assertEqual(fallback["net"]["tx_bytes"], 250)
+        self.assertEqual(fallback["net"]["interfaces"], [{"name": "eth0", "rx_bytes": 500, "tx_bytes": 250}])
+
+    def test_proc_socket_details_uses_native_probe_and_falls_back(self):
+        host_processes = [
+            {"host_pid": 500, "pid": 1, "process": "init"},
+            {"host_pid": 501, "pid": 15, "process": "xray"},
+        ]
+        native_payload = {
+            "available": True,
+            "inode_count": 2,
+            "fd_scanned": 5,
+            "truncated": False,
+            "sockets": [
+                {
+                    "pid": 501,
+                    "inode": 2001,
+                    "proto": "tcp",
+                    "state_hex": "01",
+                    "local_ip": "10.0.0.2",
+                    "local_port": 443,
+                    "remote_ip": "8.8.8.8",
+                    "remote_port": 51234,
+                },
+                {
+                    "pid": 501,
+                    "inode": 2002,
+                    "proto": "udp",
+                    "state_hex": "07",
+                    "local_ip": "10.0.0.2",
+                    "local_port": 5353,
+                    "remote_ip": "0.0.0.0",
+                    "remote_port": 0,
+                },
+            ],
+        }
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "proc_sockets", return_value=native_payload
+        ) as probe_mock:
+            res = proc_scanner._collect_host_proc_socket_details(
+                500, host_processes, [443], 20, process_scope_complete=True
+            )
+        probe_mock.assert_called_once_with(500, [500, 501], max_fds=10000)
+        self.assertTrue(res["communication_detail_available"])
+        self.assertEqual(res["communication_owner_attributed_count"], 1)
+        self.assertEqual(len(res["communication_sockets"]), 1)
+        self.assertEqual(len(res["service_listeners"]), 1)
+        self.assertEqual(res["service_listeners"][0]["port"], 5353)
+        self.assertEqual(res["communication_processes"][0]["process"], "xray")
+
+        # Bypass native when os.listdir is mocked and fall back to Python path
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "proc_sockets"
+        ) as probe_skip, mock.patch.object(
+            proc_scanner.os, "listdir", return_value=[]
+        ), mock.patch.object(agent, "_read_host_proc_text", return_value=""):
+            fallback = proc_scanner._collect_host_proc_socket_details(
+                500, host_processes, [443], 20, process_scope_complete=True
+            )
+        probe_skip.assert_not_called()
+        self.assertTrue(fallback["communication_detail_available"])
+        self.assertEqual(fallback["communication_sockets"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

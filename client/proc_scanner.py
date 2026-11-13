@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import os
 import re
@@ -17,7 +18,9 @@ except ImportError:
     import vmess_guard
 
 _ORIG_OS_LISTDIR = os.listdir
+_ORIG_OS_READLINK = os.readlink
 _ORIG_OS_STAT = os.stat
+_ORIG_OPEN = builtins.open
 
 _AGENT_NAMESPACES: List[Dict[str, Any]] = []
 
@@ -504,6 +507,231 @@ def _collect_host_proc_process_snapshot(
     )
 
 
+_SOCKET_STATE_NAMES = {
+    "01": "established", "02": "syn-sent", "03": "syn-recv", "04": "fin-wait-1",
+    "05": "fin-wait-2", "06": "time-wait", "07": "close", "08": "close-wait",
+    "09": "last-ack", "0A": "listen", "0B": "closing",
+}
+
+
+def _has_mocked_socket_primitives(read_proc_fn: Any) -> bool:
+    if read_proc_fn is not _read_host_proc_text:
+        return True
+    if (
+        os.listdir is not _ORIG_OS_LISTDIR
+        or os.readlink is not _ORIG_OS_READLINK
+        or builtins.open is not _ORIG_OPEN
+    ):
+        return True
+    for ns in _AGENT_NAMESPACES:
+        ns_os = ns.get("os")
+        if ns_os is not None and (
+            ns_os is not os
+            or getattr(ns_os, "listdir", None) is not _ORIG_OS_LISTDIR
+            or getattr(ns_os, "readlink", None) is not _ORIG_OS_READLINK
+        ):
+            return True
+    return False
+
+
+def _finalize_host_proc_socket_details(
+    sockets: List[Dict[str, object]],
+    service_listeners: List[Dict[str, object]],
+    socket_fd_references: Dict[Tuple[int, str], Dict[str, int]],
+    snapshot_count: int,
+    snapshot_cap: int,
+    listener_inventory_complete: bool,
+    fd_inventory_complete: bool,
+    owner_count_fn: Any,
+) -> Dict[str, object]:
+    totals: Dict[Tuple[int, str], Dict[str, object]] = {}
+    for item in sockets:
+        key = (int(item.get("pid") or 0), str(item.get("process") or "unknown"))
+        aggregate = totals.setdefault(
+            key,
+            {"pid": key[0], "process": key[1], "inbound_connections": 0, "outbound_connections": 0, "unknown_connections": 0, "remote_ips": set()},
+        )
+        direction = item.get("direction") if item.get("direction") in ("inbound", "outbound") else "unknown"
+        aggregate[f"{direction}_connections"] = int(aggregate[f"{direction}_connections"]) + 1
+        remote_ips = aggregate.get("remote_ips")
+        if isinstance(remote_ips, set):
+            remote_ips.add(str(item.get("remote_ip") or ""))
+    process_totals = []
+    for (owner_pid, owner_name), counts in socket_fd_references.items():
+        aggregate = totals.setdefault(
+            (owner_pid, owner_name),
+            {"pid": owner_pid, "process": owner_name, "inbound_connections": 0,
+             "outbound_connections": 0, "unknown_connections": 0, "remote_ips": set()},
+        )
+        aggregate["tcp_socket_fd_references"] = counts["tcp"]
+        aggregate["udp_socket_fd_references"] = counts["udp"]
+    for aggregate in totals.values():
+        remote_ips = aggregate.pop("remote_ips", set())
+        aggregate["unique_remote_ips"] = len(remote_ips) if isinstance(remote_ips, set) else 0
+        process_totals.append(aggregate)
+    process_totals.sort(
+        key=lambda item: int(item.get("inbound_connections") or 0) + int(item.get("outbound_connections") or 0),
+        reverse=True,
+    )
+    owner_count = owner_count_fn({"communication_sockets": sockets})
+    return {
+        "communication_detail_available": True,
+        "communication_source": "host_proc",
+        "communication_snapshot_count": snapshot_count,
+        "communication_snapshot_truncated": snapshot_count >= snapshot_cap,
+        "communication_processes": process_totals[:50],
+        "communication_sockets": sockets,
+        "service_listeners": service_listeners,
+        "listener_inventory_complete": listener_inventory_complete,
+        "socket_fd_attribution_complete": fd_inventory_complete,
+        "communication_owner_attributed_count": owner_count,
+        "process_attribution_available": owner_count > 0,
+    }
+
+
+def _collect_host_proc_socket_details_native(
+    init_pid: int,
+    host_processes: List[Dict[str, object]],
+    listening_ports: List[int],
+    socket_limit: int,
+    fd_budget: int,
+    process_scope_complete: bool,
+    is_trackable_fn: Any,
+    classify_origin_fn: Any,
+    owner_count_fn: Any,
+) -> Dict[str, object] | None:
+    host_pid_to_proc: Dict[int, Tuple[int, str]] = {}
+    pids: List[int] = []
+    all_valid_pids = True
+    for process in host_processes:
+        host_pid = int(process.get("host_pid") or 0)
+        if host_pid <= 1:
+            all_valid_pids = False
+            continue
+        if host_pid not in host_pid_to_proc:
+            host_pid_to_proc[host_pid] = (
+                int(process.get("pid") or 0),
+                str(process.get("process") or "unknown")[:120],
+            )
+            pids.append(host_pid)
+    if not pids:
+        return None
+    payload = native_probe.proc_sockets(init_pid, pids, max_fds=fd_budget)
+    if (
+        not isinstance(payload, dict)
+        or not payload.get("available")
+        or not isinstance(payload.get("sockets"), list)
+    ):
+        return None
+
+    tcp_listening = {int(port) for port in listening_ports if int(port) > 0}
+    udp_listening: set[int] = set()
+    grouped_sockets: Dict[Tuple[int, str, str, str, int, str, int], set[Tuple[int, str]]] = {}
+    for entry in payload["sockets"]:
+        if not isinstance(entry, dict):
+            continue
+        proto = str(entry.get("proto") or "").lower()
+        if proto == "tcp6":
+            proto = "tcp"
+        elif proto == "udp6":
+            proto = "udp"
+        if proto not in ("tcp", "udp"):
+            continue
+        state = str(entry.get("state_hex") or "").upper()
+        local_ip = str(entry.get("local_ip") or "")
+        remote_ip = str(entry.get("remote_ip") or "")
+        try:
+            inode = int(entry.get("inode") or 0)
+            local_port = int(entry.get("local_port") or 0)
+            remote_port = int(entry.get("remote_port") or 0)
+            host_pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if proto == "tcp" and state == "0A" and local_port > 0:
+            tcp_listening.add(local_port)
+        elif proto == "udp" and remote_port == 0 and local_port > 0:
+            udp_listening.add(local_port)
+        key = (inode, proto, state, local_ip, local_port, remote_ip, remote_port)
+        owners = grouped_sockets.setdefault(key, set())
+        if host_pid > 0:
+            owners.add(host_pid_to_proc.get(host_pid, (0, "unknown")))
+
+    truncated = bool(payload.get("truncated", False))
+    fd_inventory_complete = bool(process_scope_complete) and not truncated and all_valid_pids
+    listener_inventory_complete = fd_inventory_complete
+    sockets: List[Dict[str, object]] = []
+    service_listeners: List[Dict[str, object]] = []
+    listener_keys = set()
+    socket_fd_references: Dict[Tuple[int, str], Dict[str, int]] = {}
+    snapshot_count = len(grouped_sockets)
+    snapshot_cap = max(500, min(2000, socket_limit * 2))
+
+    for (_inode, proto, state, local_ip, local_port, remote_ip, remote_port), owners in grouped_sockets.items():
+        for owner_pid, owner_name in owners:
+            counts = socket_fd_references.setdefault((owner_pid, owner_name), {"tcp": 0, "udp": 0})
+            counts[proto] += 1
+        is_listener = (proto == "tcp" and state == "0A") or (proto == "udp" and remote_port == 0)
+        if is_listener and local_port > 0:
+            listener_owners = owners if owners else {(0, "")}
+            local_endpoint = f"[{local_ip}]:{local_port}" if ":" in local_ip else f"{local_ip}:{local_port}"
+            for owner_pid, owner_name in sorted(listener_owners):
+                listener_key = (proto, local_ip, local_port, owner_pid, owner_name)
+                if listener_key in listener_keys:
+                    continue
+                if len(service_listeners) >= 100:
+                    listener_inventory_complete = False
+                    continue
+                listener_keys.add(listener_key)
+                service_listeners.append({
+                    "process": owner_name,
+                    "pid": owner_pid,
+                    "proto": proto,
+                    "local": local_endpoint,
+                    "port": local_port,
+                    "source": "host_proc_fd_inode" if owner_pid > 0 else "host_proc_unattributed",
+                })
+        if proto == "tcp" and state not in ("01", "02", "03"):
+            continue
+        if proto == "udp" and remote_port <= 0:
+            continue
+        if not is_trackable_fn(remote_ip):
+            continue
+        owner_pid, owner_name = sorted(owners)[0] if owners else (0, "unknown")
+        state_name = _SOCKET_STATE_NAMES.get(state, state.lower())
+        direction, origin, direction_evidence = classify_origin_fn(
+            proto, state_name, local_port, tcp_listening if proto == "tcp" else udp_listening
+        )
+        local_text = f"[{local_ip}]:{local_port}" if ":" in local_ip else f"{local_ip}:{local_port}"
+        remote_text = f"[{remote_ip}]:{remote_port}" if ":" in remote_ip else f"{remote_ip}:{remote_port}"
+        if len(sockets) < socket_limit:
+            sockets.append({
+                "proto": proto,
+                "state": state_name,
+                "direction": direction,
+                "local": local_text,
+                "remote": remote_text,
+                "remote_ip": remote_ip,
+                "process": owner_name,
+                "pid": owner_pid,
+                "origin": origin,
+                "origin_confidence": "confirmed" if direction_evidence.startswith("confirmed_") else "probable" if direction != "unknown" else "unknown",
+                "direction_evidence": direction_evidence,
+                "process_role": "acceptor" if direction == "inbound" else "initiator" if direction == "outbound" else "unknown",
+                "process_attribution": "attributed" if owner_pid > 0 else "unavailable",
+            })
+
+    return _finalize_host_proc_socket_details(
+        sockets,
+        service_listeners,
+        socket_fd_references,
+        snapshot_count,
+        snapshot_cap,
+        listener_inventory_complete,
+        fd_inventory_complete,
+        owner_count_fn,
+    )
+
+
 def _collect_host_proc_socket_details(
     init_pid: int,
     host_processes: List[Dict[str, object]],
@@ -524,8 +752,23 @@ def _collect_host_proc_socket_details(
     classify_origin_fn = _agent_attr("_classify_socket_origin", None)
     owner_count_fn = _agent_attr("_communication_socket_owner_count", None)
 
-    inode_owners: Dict[str, set[Tuple[int, str]]] = {}
     fd_budget = max(1000, min(20000, int(env_float_fn("DEEP_HOST_PROC_FD_MAX", 10000))))
+    if not _has_mocked_socket_primitives(read_proc_fn) and native_probe.is_available():
+        native_result = _collect_host_proc_socket_details_native(
+            init_pid,
+            host_processes,
+            listening_ports,
+            socket_limit,
+            fd_budget,
+            process_scope_complete,
+            is_trackable_fn,
+            classify_origin_fn,
+            owner_count_fn,
+        )
+        if native_result is not None:
+            return native_result
+
+    inode_owners: Dict[str, set[Tuple[int, str]]] = {}
     visited_fds = 0
     fd_inventory_complete = bool(process_scope_complete)
     for process in host_processes:
@@ -669,49 +912,16 @@ def _collect_host_proc_socket_details(
                         "process_attribution": "attributed" if owner_pid > 0 else "unavailable",
                     }
                 )
-    totals: Dict[Tuple[int, str], Dict[str, object]] = {}
-    for item in sockets:
-        key = (int(item.get("pid") or 0), str(item.get("process") or "unknown"))
-        aggregate = totals.setdefault(
-            key,
-            {"pid": key[0], "process": key[1], "inbound_connections": 0, "outbound_connections": 0, "unknown_connections": 0, "remote_ips": set()},
-        )
-        direction = item.get("direction") if item.get("direction") in ("inbound", "outbound") else "unknown"
-        aggregate[f"{direction}_connections"] = int(aggregate[f"{direction}_connections"]) + 1
-        remote_ips = aggregate.get("remote_ips")
-        if isinstance(remote_ips, set):
-            remote_ips.add(str(item.get("remote_ip") or ""))
-    process_totals = []
-    for (owner_pid, owner_name), counts in socket_fd_references.items():
-        aggregate = totals.setdefault(
-            (owner_pid, owner_name),
-            {"pid": owner_pid, "process": owner_name, "inbound_connections": 0,
-             "outbound_connections": 0, "unknown_connections": 0, "remote_ips": set()},
-        )
-        aggregate["tcp_socket_fd_references"] = counts["tcp"]
-        aggregate["udp_socket_fd_references"] = counts["udp"]
-    for aggregate in totals.values():
-        remote_ips = aggregate.pop("remote_ips", set())
-        aggregate["unique_remote_ips"] = len(remote_ips) if isinstance(remote_ips, set) else 0
-        process_totals.append(aggregate)
-    process_totals.sort(
-        key=lambda item: int(item.get("inbound_connections") or 0) + int(item.get("outbound_connections") or 0),
-        reverse=True,
+    return _finalize_host_proc_socket_details(
+        sockets,
+        service_listeners,
+        socket_fd_references,
+        snapshot_count,
+        snapshot_cap,
+        listener_inventory_complete,
+        fd_inventory_complete and socket_tables_complete and socket_tables_parse_complete,
+        owner_count_fn,
     )
-    owner_count = owner_count_fn({"communication_sockets": sockets})
-    return {
-        "communication_detail_available": True,
-        "communication_source": "host_proc",
-        "communication_snapshot_count": snapshot_count,
-        "communication_snapshot_truncated": snapshot_count >= snapshot_cap,
-        "communication_processes": process_totals[:50],
-        "communication_sockets": sockets,
-        "service_listeners": service_listeners,
-        "listener_inventory_complete": listener_inventory_complete,
-        "socket_fd_attribution_complete": fd_inventory_complete and socket_tables_complete and socket_tables_parse_complete,
-        "communication_owner_attributed_count": owner_count,
-        "process_attribution_available": owner_count > 0,
-    }
 
 
 def _collect_vmess_host_proc_listener_inventory(

@@ -26,6 +26,14 @@ enum Command {
     CgroupMetrics {
         cgroup_dir: String,
     },
+    ProcSockets {
+        init_pid: u32,
+        pids: Vec<u32>,
+        max_fds: usize,
+    },
+    HostMetrics {
+        proc_root: String,
+    },
 }
 
 fn next_arg<'a>(args: &'a [String], idx: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -156,6 +164,65 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
                 cgroup_dir.ok_or_else(|| "missing required --cgroup-dir".to_string())?;
             Ok(Command::CgroupMetrics { cgroup_dir })
         }
+        "proc-sockets" => {
+            let mut init_pid: Option<u32> = None;
+            let mut pids: Vec<u32> = Vec::new();
+            let mut max_fds: usize = 4096;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--init-pid" => {
+                        let val = next_arg(args, &mut i, "--init-pid")?;
+                        init_pid = Some(
+                            val.parse::<u32>()
+                                .map_err(|_| format!("invalid --init-pid: {val}"))?,
+                        );
+                    }
+                    "--pids" => {
+                        let val = next_arg(args, &mut i, "--pids")?;
+                        pids.clear();
+                        for part in val.split(',') {
+                            let trimmed = part.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            let pid = trimmed
+                                .parse::<u32>()
+                                .map_err(|_| format!("invalid pid in --pids: {trimmed}"))?;
+                            pids.push(pid);
+                        }
+                    }
+                    "--max-fds" => {
+                        let val = next_arg(args, &mut i, "--max-fds")?;
+                        max_fds = val
+                            .parse::<usize>()
+                            .map_err(|_| format!("invalid --max-fds: {val}"))?;
+                    }
+                    other => return Err(format!("unknown flag for proc-sockets: {other}")),
+                }
+                i += 1;
+            }
+            let init_pid = init_pid.ok_or_else(|| "missing required --init-pid".to_string())?;
+            Ok(Command::ProcSockets {
+                init_pid,
+                pids,
+                max_fds,
+            })
+        }
+        "host-metrics" => {
+            let mut proc_root = "/proc".to_string();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--proc-root" => {
+                        proc_root = next_arg(args, &mut i, "--proc-root")?.to_string();
+                    }
+                    other => return Err(format!("unknown flag for host-metrics: {other}")),
+                }
+                i += 1;
+            }
+            Ok(Command::HostMetrics { proc_root })
+        }
         other => Err(format!("unknown subcommand: {other}")),
     }
 }
@@ -196,6 +263,22 @@ fn main() {
             println!(
                 "{}",
                 cgroup_probe::collect_cgroup_metrics(std::path::Path::new(&cgroup_dir))
+            );
+        }
+        Ok(Command::ProcSockets {
+            init_pid,
+            pids,
+            max_fds,
+        }) => {
+            println!(
+                "{}",
+                proc_probe::collect_proc_sockets(init_pid, &pids, max_fds)
+            );
+        }
+        Ok(Command::HostMetrics { proc_root }) => {
+            println!(
+                "{}",
+                host_metrics::collect_host_metrics(std::path::Path::new(&proc_root))
             );
         }
         Err(err) => {
@@ -302,5 +385,61 @@ mod tests {
         ]))
         .expect("cgroup-metrics");
         assert!(matches!(cg, Command::CgroupMetrics { .. }));
+    }
+
+    #[test]
+    fn test_parse_proc_sockets_and_host_metrics() {
+        let ps = parse_args(&s(&[
+            "narwhal-probe",
+            "proc-sockets",
+            "--init-pid",
+            "42",
+            "--pids",
+            "42,100,200",
+            "--max-fds",
+            "2048",
+        ]))
+        .expect("proc-sockets");
+        match ps {
+            Command::ProcSockets {
+                init_pid,
+                pids,
+                max_fds,
+            } => {
+                assert_eq!(init_pid, 42);
+                assert_eq!(pids, vec![42, 100, 200]);
+                assert_eq!(max_fds, 2048);
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        assert!(parse_args(&s(&["narwhal-probe", "proc-sockets"])).is_err());
+        assert!(parse_args(&s(&[
+            "narwhal-probe",
+            "proc-sockets",
+            "--init-pid",
+            "42",
+            "--pids",
+            "12,abc",
+        ]))
+        .is_err());
+
+        let hm_default = parse_args(&s(&["narwhal-probe", "host-metrics"])).expect("host-metrics");
+        match hm_default {
+            Command::HostMetrics { proc_root } => assert_eq!(proc_root, "/proc"),
+            _ => panic!("unexpected command"),
+        }
+
+        let hm_custom = parse_args(&s(&[
+            "narwhal-probe",
+            "host-metrics",
+            "--proc-root",
+            "/tmp/mock_proc",
+        ]))
+        .expect("host-metrics custom");
+        match hm_custom {
+            Command::HostMetrics { proc_root } => assert_eq!(proc_root, "/tmp/mock_proc"),
+            _ => panic!("unexpected command"),
+        }
     }
 }
