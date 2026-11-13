@@ -3840,14 +3840,13 @@ async def report(
     notifications: List[Dict[str, Any]] = []
     firewall_event_cursor = ""
     automatic_stops_queued = 0
-    automatic_resource_restarts_queued = 0
     automatic_deep_samples_queued = 0
     try:
         client_ip = reach_monitor.extract_client_ip(request)
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config, client_ip)
         _maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, int(time.time()))
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers, incus_runtime_health)
-        automatic_resource_restarts_queued = resource_overload_policy.observe(
+        resource_overload_policy.observe(
             conn, host_id, node_id, ts, containers,
             now=int(time.time()),
             enabled=RESOURCE_AUTO_RESTART_ENABLED,
@@ -4030,7 +4029,6 @@ async def report(
         "firewall_event_cursor": firewall_event_cursor,
         "automatic_deep_samples_queued": automatic_deep_samples_queued,
         "automatic_stops_queued": automatic_stops_queued,
-        "automatic_resource_restarts_queued": automatic_resource_restarts_queued,
         "narwhal_buyer_push": {"owner": "server", "enabled": False},
         "motd_states": motd_states,
     }
