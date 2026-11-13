@@ -11,9 +11,13 @@ from collections import deque
 from typing import Any, Dict, List, Tuple
 
 try:
-    from client import vmess_guard
+    from client import native_probe, vmess_guard
 except ImportError:
+    import native_probe
     import vmess_guard
+
+_ORIG_OS_LISTDIR = os.listdir
+_ORIG_OS_STAT = os.stat
 
 _AGENT_NAMESPACES: List[Dict[str, Any]] = []
 
@@ -237,6 +241,145 @@ def _fallback_env_float(name: str, default: float) -> float:
         return default
 
 
+def _has_mocked_proc_primitives(scan_tree_fn: Any, read_proc_fn: Any) -> bool:
+    if scan_tree_fn is not _scan_host_proc_tree or read_proc_fn is not _read_host_proc_text:
+        return True
+    if os.listdir is not _ORIG_OS_LISTDIR or os.stat is not _ORIG_OS_STAT:
+        return True
+    for ns in _AGENT_NAMESPACES:
+        ns_os = ns.get("os")
+        if ns_os is not None and (
+            ns_os is not os
+            or getattr(ns_os, "listdir", None) is not _ORIG_OS_LISTDIR
+            or getattr(ns_os, "stat", None) is not _ORIG_OS_STAT
+        ):
+            return True
+    return False
+
+
+def _compute_proc_cpu_percent(
+    proc_cpu_counters: Dict[Tuple[int, str], Tuple[float, float, float]],
+    host_pid: int,
+    start_ticks: str,
+    cpu_seconds: float,
+    uptime: float,
+    lifetime_cpu_percent: float,
+) -> float:
+    if uptime <= 0 or not start_ticks:
+        return max(0.0, lifetime_cpu_percent)
+    delta_cpu_percent = 0.0
+    proc_key = (int(host_pid), str(start_ticks))
+    prev_proc = proc_cpu_counters.get(proc_key)
+    if prev_proc is not None:
+        prev_cpu_sec, prev_uptime, prev_pct = prev_proc
+        dt = uptime - prev_uptime
+        dcpu = cpu_seconds - prev_cpu_sec
+        if dt >= 0.5 and dcpu >= 0:
+            delta_cpu_percent = max(0.0, (dcpu / dt) * 100.0)
+            proc_cpu_counters[proc_key] = (cpu_seconds, uptime, delta_cpu_percent)
+        elif 0 <= dt < 0.5 and dcpu >= 0:
+            delta_cpu_percent = max(0.0, prev_pct)
+        else:
+            proc_cpu_counters[proc_key] = (cpu_seconds, uptime, 0.0)
+    else:
+        if len(proc_cpu_counters) > 10000:
+            proc_cpu_counters.clear()
+        proc_cpu_counters[proc_key] = (cpu_seconds, uptime, 0.0)
+    return max(max(0.0, lifetime_cpu_percent), delta_cpu_percent)
+
+
+def _finalize_host_proc_snapshot(
+    host_processes: List[Dict[str, object]],
+    proc_scan_complete: bool,
+    status_scan_complete: bool,
+    capture_limit: int,
+    init_pid: int,
+    tick_cache: Dict[str, Any] | None,
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    namespace_by_host = {
+        int(item.get("host_pid") or 0): int(item.get("pid") or 0) for item in host_processes
+    }
+    for item in host_processes:
+        item["ppid"] = namespace_by_host.get(int(item.get("ppid") or 0), 0)
+    host_processes.sort(key=lambda item: float(item.get("cpu_percent") or 0), reverse=True)
+    public_items = [
+        {key: value for key, value in item.items() if key not in {"host_pid", "start_ticks"}}
+        for item in host_processes
+    ]
+    meta = {
+        "available": bool(host_processes),
+        "source": "host_proc",
+        "scope_complete": proc_scan_complete and status_scan_complete,
+    }
+    if tick_cache is not None:
+        tick_cache["proc_snapshots"][init_pid] = (meta, public_items, host_processes)
+    return (
+        {
+            **meta,
+            "captured": min(len(public_items), capture_limit),
+            "truncated": len(public_items) > capture_limit,
+            "items": public_items[:capture_limit],
+        },
+        host_processes,
+    )
+
+
+def _collect_host_proc_snapshot_native(
+    init_pid: int,
+    scan_limit: int,
+    redact_fn: Any,
+    proc_cpu_counters: Dict[Tuple[int, str], Tuple[float, float, float]],
+) -> Tuple[List[Dict[str, object]], bool, bool] | None:
+    try:
+        clock_ticks = float(os.sysconf("SC_CLK_TCK"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        clock_ticks = 100.0
+    payload = native_probe.proc_snapshot(init_pid, scan_limit=scan_limit, clock_ticks=clock_ticks)
+    if not isinstance(payload, dict) or not payload.get("available"):
+        return None
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        return None
+    uptime = float(payload.get("uptime") or 0.0)
+    proc_scan_complete = bool(payload.get("proc_scan_complete"))
+    status_scan_complete = bool(payload.get("status_scan_complete"))
+    host_processes: List[Dict[str, object]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        host_pid = int(item.get("host_pid") or 0)
+        if host_pid <= 0:
+            continue
+        comm = str(item.get("process") or "unknown")[:120] or "unknown"
+        command = str(item.get("command") or comm)
+        start_ticks = str(item.get("start_ticks") or "")
+        cpu_seconds = float(item.get("cpu_seconds") or 0.0)
+        lifetime_cpu_percent = max(0.0, float(item.get("lifetime_cpu_percent") or 0.0))
+        cpu_percent = _compute_proc_cpu_percent(
+            proc_cpu_counters,
+            host_pid,
+            start_ticks,
+            cpu_seconds,
+            uptime,
+            lifetime_cpu_percent,
+        )
+        host_processes.append(
+            {
+                "host_pid": host_pid,
+                "pid": int(item.get("pid") or 0),
+                "ppid": int(item.get("ppid") or 0),
+                "user": str(item.get("user") or "-"),
+                "state": str(item.get("state") or "-"),
+                "cpu_percent": cpu_percent,
+                "rss_bytes": int(item.get("rss_bytes") or 0),
+                "process": comm,
+                "command": redact_fn(command or comm),
+                "start_ticks": start_ticks,
+            }
+        )
+    return host_processes, proc_scan_complete, status_scan_complete
+
+
 def _collect_host_proc_process_snapshot(
     init_pid: int, process_limit: int
 ) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
@@ -266,6 +409,21 @@ def _collect_host_proc_process_snapshot(
     proc_cpu_counters = _agent_attr("_proc_cpu_counters", _proc_cpu_counters)
 
     scan_limit = max(1000, min(50000, int(env_float_fn("DEEP_HOST_PROC_SCAN_MAX", 20000))))
+    if native_probe.is_available() and not _has_mocked_proc_primitives(scan_tree_fn, read_proc_fn):
+        native_result = _collect_host_proc_snapshot_native(
+            init_pid, scan_limit, redact_fn, proc_cpu_counters
+        )
+        if native_result is not None:
+            host_processes, proc_scan_complete, status_scan_complete = native_result
+            return _finalize_host_proc_snapshot(
+                host_processes,
+                proc_scan_complete,
+                status_scan_complete,
+                capture_limit,
+                init_pid,
+                tick_cache,
+            )
+
     tree = scan_tree_fn(scan_limit)
     parent_map: Dict[int, int] = tree["parent_map"]
     children_map: Dict[int, List[int]] = tree["children_map"]
@@ -312,25 +470,14 @@ def _collect_host_proc_process_snapshot(
                 cpu_seconds = (float(stat_fields[11]) + float(stat_fields[12])) / clock_ticks
                 lifetime = max(0.001, uptime - (float(stat_fields[19]) / clock_ticks))
                 lifetime_cpu_percent = max(0.0, (cpu_seconds / lifetime) * 100.0)
-                delta_cpu_percent = 0.0
-                proc_key = (int(host_pid), str(start_ticks or stat_fields[19]))
-                prev_proc = proc_cpu_counters.get(proc_key)
-                if prev_proc is not None:
-                    prev_cpu_sec, prev_uptime, prev_pct = prev_proc
-                    dt = uptime - prev_uptime
-                    dcpu = cpu_seconds - prev_cpu_sec
-                    if dt >= 0.5 and dcpu >= 0:
-                        delta_cpu_percent = max(0.0, (dcpu / dt) * 100.0)
-                        proc_cpu_counters[proc_key] = (cpu_seconds, uptime, delta_cpu_percent)
-                    elif 0 <= dt < 0.5 and dcpu >= 0:
-                        delta_cpu_percent = max(0.0, prev_pct)
-                    else:
-                        proc_cpu_counters[proc_key] = (cpu_seconds, uptime, 0.0)
-                else:
-                    if len(proc_cpu_counters) > 10000:
-                        proc_cpu_counters.clear()
-                    proc_cpu_counters[proc_key] = (cpu_seconds, uptime, 0.0)
-                cpu_percent = max(lifetime_cpu_percent, delta_cpu_percent)
+                cpu_percent = _compute_proc_cpu_percent(
+                    proc_cpu_counters,
+                    host_pid,
+                    str(start_ticks or stat_fields[19]),
+                    cpu_seconds,
+                    uptime,
+                    lifetime_cpu_percent,
+                )
             except (TypeError, ValueError):
                 pass
         host_processes.append(
@@ -347,28 +494,13 @@ def _collect_host_proc_process_snapshot(
                 "start_ticks": start_ticks,
             }
         )
-    namespace_by_host = {
-        int(item.get("host_pid") or 0): int(item.get("pid") or 0) for item in host_processes
-    }
-    for item in host_processes:
-        item["ppid"] = namespace_by_host.get(int(item.get("ppid") or 0), 0)
-    host_processes.sort(key=lambda item: float(item.get("cpu_percent") or 0), reverse=True)
-    public_items = [{key: value for key, value in item.items() if key not in {"host_pid", "start_ticks"}} for item in host_processes]
-    meta = {
-        "available": bool(host_processes),
-        "source": "host_proc",
-        "scope_complete": proc_scan_complete and status_scan_complete,
-    }
-    if tick_cache is not None:
-        tick_cache["proc_snapshots"][init_pid] = (meta, public_items, host_processes)
-    return (
-        {
-            **meta,
-            "captured": min(len(public_items), capture_limit),
-            "truncated": len(public_items) > capture_limit,
-            "items": public_items[:capture_limit],
-        },
+    return _finalize_host_proc_snapshot(
         host_processes,
+        proc_scan_complete,
+        status_scan_complete,
+        capture_limit,
+        init_pid,
+        tick_cache,
     )
 
 

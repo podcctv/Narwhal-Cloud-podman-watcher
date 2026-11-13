@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import ipaddress
 import json
 import os
@@ -9,6 +10,13 @@ import re
 import shlex
 import time
 from typing import Any, Dict, List, Tuple
+
+try:
+    from client import native_probe
+except ImportError:
+    import native_probe
+
+_ORIG_OPEN = builtins.open
 
 _AGENT_NAMESPACES: List[Dict[str, Any]] = []
 
@@ -622,6 +630,41 @@ def _parse_port(hex_port: str) -> int:
         return 0
 
 
+def _native_read_proc_net_tables(pid: int) -> Tuple[List[Dict[str, object]], int, bool] | None:
+    """Read `/proc/<pid>/net/{tcp,tcp6,udp,udp6}` via `narwhal-probe` when unmocked."""
+    if builtins.open is not _ORIG_OPEN:
+        return None
+    if _agent_attr("_decode_proc_addr", _decode_proc_addr) is not _decode_proc_addr:
+        return None
+    if _agent_attr("_parse_port", _parse_port) is not _parse_port:
+        return None
+    if not native_probe.is_available():
+        return None
+    payload = native_probe.socket_sec(pid)
+    if not isinstance(payload, dict) or not payload.get("available"):
+        return None
+    tcp_raw = payload.get("tcp_entries")
+    udp_raw = payload.get("udp_entries")
+    if not isinstance(tcp_raw, list) or not isinstance(udp_raw, list):
+        return None
+    entries: List[Dict[str, object]] = []
+    for raw_list, default_proto in ((tcp_raw, "tcp"), (udp_raw, "udp")):
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            entries.append(
+                {
+                    "proto": str(item.get("proto") or default_proto).lower(),
+                    "state": str(item.get("state_hex") or "").upper(),
+                    "local_ip": str(item.get("local_ip") or ""),
+                    "local_port": int(item.get("local_port") or 0),
+                    "remote_port": int(item.get("remote_port") or 0),
+                    "remote_ip": str(item.get("remote_ip") or ""),
+                }
+            )
+    return entries, int(payload.get("read_files") or 0), bool(payload.get("malformed"))
+
+
 def _collect_socket_security(pid: int) -> Dict[str, object]:
     result: Dict[str, object] = {
         'connection_metrics': {'schema': 1, 'valid': False},
@@ -654,35 +697,39 @@ def _collect_socket_security(pid: int) -> Dict[str, object]:
     if pid <= 0:
         return result
 
-    entries: List[Dict[str, object]] = []
     metric_epoch = _call_agent("_connection_metric_epoch", _connection_metric_epoch, pid)
-    read_files = 0
-    malformed = False
-    for filename, is_v6 in (("tcp", False), ("tcp6", True), ("udp", False), ("udp6", True)):
-        try:
-            with open(f"/proc/{pid}/net/{filename}", "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.read().splitlines()[1:]
-                read_files += 1
-        except Exception:
-            continue
-        proto = "udp" if filename.startswith("udp") else "tcp"
-        for line in lines:
-            parts = line.split()
-            if len(parts) < 4 or ":" not in parts[1] or ":" not in parts[2]:
-                malformed = True
+    native_tables = _native_read_proc_net_tables(pid)
+    if native_tables is not None:
+        entries, read_files, malformed = native_tables
+    else:
+        entries = []
+        read_files = 0
+        malformed = False
+        for filename, is_v6 in (("tcp", False), ("tcp6", True), ("udp", False), ("udp6", True)):
+            try:
+                with open(f"/proc/{pid}/net/{filename}", "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.read().splitlines()[1:]
+                    read_files += 1
+            except Exception:
                 continue
-            local_ip_hex, local_port_hex = parts[1].rsplit(":", 1)
-            remote_ip_hex, remote_port_hex = parts[2].rsplit(":", 1)
-            entries.append(
-                {
-                    "proto": proto,
-                    "state": parts[3].upper(),
-                    "local_ip": _decode_proc_addr(local_ip_hex, is_v6=is_v6),
-                    "local_port": _parse_port(local_port_hex),
-                    "remote_port": _parse_port(remote_port_hex),
-                    "remote_ip": _decode_proc_addr(remote_ip_hex, is_v6=is_v6),
-                }
-            )
+            proto = "udp" if filename.startswith("udp") else "tcp"
+            for line in lines:
+                parts = line.split()
+                if len(parts) < 4 or ":" not in parts[1] or ":" not in parts[2]:
+                    malformed = True
+                    continue
+                local_ip_hex, local_port_hex = parts[1].rsplit(":", 1)
+                remote_ip_hex, remote_port_hex = parts[2].rsplit(":", 1)
+                entries.append(
+                    {
+                        "proto": proto,
+                        "state": parts[3].upper(),
+                        "local_ip": _decode_proc_addr(local_ip_hex, is_v6=is_v6),
+                        "local_port": _parse_port(local_port_hex),
+                        "remote_port": _parse_port(remote_port_hex),
+                        "remote_ip": _decode_proc_addr(remote_ip_hex, is_v6=is_v6),
+                    }
+                )
 
     tcp_entries = [x for x in entries if x['proto'] == 'tcp']
     result['connection_metrics'] = {
@@ -1144,35 +1191,93 @@ def _parse_conntrack_line(line: str) -> Dict[str, object] | None:
     }
 
 
+def _native_read_conntrack(limit: int) -> Tuple[List[Dict[str, object]], int, bool] | None:
+    """Read host conntrack entries via `narwhal-probe` when unmocked."""
+    if builtins.open is not _ORIG_OPEN:
+        return None
+    if _agent_attr("_parse_conntrack_line", _parse_conntrack_line) is not _parse_conntrack_line:
+        return None
+    if not native_probe.is_available():
+        return None
+    payload = native_probe.conntrack(limit)
+    if not isinstance(payload, dict) or not payload.get("available"):
+        return None
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        return None
+    entries: List[Dict[str, object]] = []
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            continue
+        proto = str(item.get("proto") or "").lower()
+        original_src = str(item.get("src") or "")
+        original_dst = str(item.get("dst") or "")
+        reply_src = str(item.get("reply_src") or "")
+        reply_dst = str(item.get("reply_dst") or "")
+        if not proto or not original_src or not original_dst or not reply_src or not reply_dst:
+            continue
+        if not _is_trackable_ip(original_src):
+            continue
+        entries.append(
+            {
+                "proto": proto,
+                "evidence_source": "host_conntrack",
+                "tcp_state": str(item.get("state") or "").upper(),
+                "unreplied": bool(item.get("unreplied")),
+                "original_packets": int(item.get("original_packets") or 0),
+                "reply_packets": int(item.get("reply_packets") or 0),
+                "original_src": original_src,
+                "original_dst": original_dst,
+                "original_sport": int(item.get("sport") or 0),
+                "original_dport": int(item.get("dport") or 0),
+                "reply_src": reply_src,
+                "reply_dst": reply_dst,
+                "reply_sport": int(item.get("reply_sport") or 0),
+                "reply_dport": int(item.get("reply_dport") or 0),
+            }
+        )
+    raw_count = len(raw_entries)
+    return entries, raw_count, raw_count >= limit
+
+
 def _collect_host_conntrack_snapshot() -> Dict[str, object]:
     """Read one bounded host conntrack snapshot for NAT-aware source attribution."""
     limit = max(100, min(50000, int(_call_agent("_env_float", None, "SECURITY_CONNTRACK_SNAPSHOT_MAX", 5000))))
     lines: List[str] = []
     available = False
-    for path in ("/proc/net/nf_conntrack", "/proc/net/ip_conntrack"):
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+    native_entries: List[Dict[str, object]] | None = None
+    snapshot_count = 0
+    snapshot_truncated = False
+
+    native_conntrack = _native_read_conntrack(limit)
+    if native_conntrack is not None:
+        native_entries, snapshot_count, snapshot_truncated = native_conntrack
+        available = True
+    else:
+        for path in ("/proc/net/nf_conntrack", "/proc/net/ip_conntrack"):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                    available = True
+                    for index, line in enumerate(handle):
+                        if index >= limit:
+                            break
+                        if line.strip():
+                            lines.append(line.strip())
+                break
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+        if not available:
+            output = _call_agent("run", None, 
+                [
+                    "sh",
+                    "-lc",
+                    "if command -v conntrack >/dev/null 2>&1; then "
+                    f"conntrack -L -o extended 2>/dev/null | sed -n '1,{limit}p'; fi",
+                ]
+            )
+            if output.strip():
                 available = True
-                for index, line in enumerate(handle):
-                    if index >= limit:
-                        break
-                    if line.strip():
-                        lines.append(line.strip())
-            break
-        except (FileNotFoundError, PermissionError, OSError):
-            continue
-    if not available:
-        output = _call_agent("run", None, 
-            [
-                "sh",
-                "-lc",
-                "if command -v conntrack >/dev/null 2>&1; then "
-                f"conntrack -L -o extended 2>/dev/null | sed -n '1,{limit}p'; fi",
-            ]
-        )
-        if output.strip():
-            available = True
-            lines = [line.strip() for line in output.splitlines()[:limit] if line.strip()]
+                lines = [line.strip() for line in output.splitlines()[:limit] if line.strip()]
     host_addresses = set()
     address_output = _call_agent("run", None, ["ip", "-j", "address", "show"])
     if address_output.strip():
@@ -1264,15 +1369,20 @@ def _collect_host_conntrack_snapshot() -> Dict[str, object]:
         if key not in existing_nat_keys:
             nat_mappings.append(candidate)
             existing_nat_keys.add(key)
-    entries = []
-    for line in lines:
-        parsed = _parse_conntrack_line(line)
-        if parsed:
-            entries.append(parsed)
+    if native_entries is not None:
+        entries = native_entries
+    else:
+        entries = []
+        for line in lines:
+            parsed = _parse_conntrack_line(line)
+            if parsed:
+                entries.append(parsed)
+        snapshot_count = len(lines)
+        snapshot_truncated = len(lines) >= limit
     return {
         "available": available,
-        "snapshot_count": len(lines),
-        "snapshot_truncated": len(lines) >= limit,
+        "snapshot_count": snapshot_count,
+        "snapshot_truncated": snapshot_truncated,
         "host_addresses": sorted(host_addresses),
         "nat_mappings": nat_mappings[:2000],
         "entries": entries,
