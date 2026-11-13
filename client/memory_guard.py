@@ -18,9 +18,13 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from client import native_probe
     from client.resource_cgroup import resolve_container_cgroup
 except ImportError:
+    import native_probe
     from resource_cgroup import resolve_container_cgroup
+
+_ORIG_PATH_READ_TEXT = Path.read_text
 
 
 STATE_PATH = os.getenv("NARWHAL_MEMORY_GUARD_STATE", "/var/lib/narwhal-agent/memory-guard.json")
@@ -38,6 +42,21 @@ def _number(value: Any, default: float = 0.0) -> float:
 
 
 def _read_pressure(path: Path) -> dict[str, Any]:
+    if Path.read_text is _ORIG_PATH_READ_TEXT and native_probe.is_available():
+        if path == Path("/proc/pressure/memory"):
+            payload = native_probe.psi_snapshot()
+            mem_entry = ((payload or {}).get("host_psi") or {}).get("memory") if isinstance(payload, dict) and payload.get("available") else None
+            if isinstance(mem_entry, dict) and mem_entry.get("status"):
+                if mem_entry.get("status") == "unsupported" and "reason" not in mem_entry:
+                    return {"status": "unsupported", "reason": "memory PSI 文件不可用或格式不受支持"}
+                return mem_entry
+        elif path.name == "memory.pressure":
+            payload = native_probe.psi_snapshot(cgroup_dir=path.parent)
+            mem_entry = ((payload or {}).get("cgroup_psi") or {}).get("memory") if isinstance(payload, dict) and payload.get("available") else None
+            if isinstance(mem_entry, dict) and mem_entry.get("status"):
+                if mem_entry.get("status") == "unsupported" and "reason" not in mem_entry:
+                    return {"status": "unsupported", "reason": "memory PSI 文件不可用或格式不受支持"}
+                return mem_entry
     result: dict[str, Any] = {}
     try:
         lines = path.read_text(encoding="ascii", errors="ignore").splitlines()

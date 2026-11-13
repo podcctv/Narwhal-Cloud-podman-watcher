@@ -34,6 +34,9 @@ enum Command {
     HostMetrics {
         proc_root: String,
     },
+    Diskstats {
+        proc_root: String,
+    },
 }
 
 fn next_arg<'a>(args: &'a [String], idx: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -223,6 +226,20 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::HostMetrics { proc_root })
         }
+        "diskstats" => {
+            let mut proc_root = "/proc".to_string();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--proc-root" => {
+                        proc_root = next_arg(args, &mut i, "--proc-root")?.to_string();
+                    }
+                    other => return Err(format!("unknown flag for diskstats: {other}")),
+                }
+                i += 1;
+            }
+            Ok(Command::Diskstats { proc_root })
+        }
         other => Err(format!("unknown subcommand: {other}")),
     }
 }
@@ -279,6 +296,12 @@ fn main() {
             println!(
                 "{}",
                 host_metrics::collect_host_metrics(std::path::Path::new(&proc_root))
+            );
+        }
+        Ok(Command::Diskstats { proc_root }) => {
+            println!(
+                "{}",
+                host_metrics::collect_diskstats(std::path::Path::new(&proc_root))
             );
         }
         Err(err) => {

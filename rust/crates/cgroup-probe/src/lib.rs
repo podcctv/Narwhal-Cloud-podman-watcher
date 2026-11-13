@@ -352,25 +352,82 @@ pub fn collect_cgroup_metrics(cgroup_dir: &Path) -> String {
     let mut io_rios: u64 = 0;
     let mut io_wios: u64 = 0;
     let mut io_available = false;
+    let mut io_devices_json = String::from("[");
+    let mut io_first_dev = true;
     if let Ok(raw) = fs::read_to_string(cgroup_dir.join("io.stat")) {
         io_available = true;
         for line in raw.lines() {
-            for field in line.split_whitespace().skip(1) {
+            let mut parts = line.split_whitespace();
+            let Some(dev) = parts.next() else { continue };
+            let mut dev_rbytes: Option<u64> = None;
+            let mut dev_wbytes: Option<u64> = None;
+            let mut dev_rios: Option<u64> = None;
+            let mut dev_wios: Option<u64> = None;
+            let mut dev_dbytes: Option<u64> = None;
+            let mut dev_dios: Option<u64> = None;
+            for field in parts {
                 let Some((k, v)) = field.split_once('=') else {
                     continue;
                 };
                 if let Ok(n) = v.parse::<u64>() {
                     match k {
-                        "rbytes" => io_rbytes = io_rbytes.saturating_add(n),
-                        "wbytes" => io_wbytes = io_wbytes.saturating_add(n),
-                        "rios" => io_rios = io_rios.saturating_add(n),
-                        "wios" => io_wios = io_wios.saturating_add(n),
+                        "rbytes" => {
+                            io_rbytes = io_rbytes.saturating_add(n);
+                            dev_rbytes = Some(n);
+                        }
+                        "wbytes" => {
+                            io_wbytes = io_wbytes.saturating_add(n);
+                            dev_wbytes = Some(n);
+                        }
+                        "rios" => {
+                            io_rios = io_rios.saturating_add(n);
+                            dev_rios = Some(n);
+                        }
+                        "wios" => {
+                            io_wios = io_wios.saturating_add(n);
+                            dev_wios = Some(n);
+                        }
+                        "dbytes" => dev_dbytes = Some(n),
+                        "dios" => dev_dios = Some(n),
                         _ => {}
                     }
                 }
             }
+            if dev_rbytes.is_some()
+                || dev_wbytes.is_some()
+                || dev_rios.is_some()
+                || dev_wios.is_some()
+                || dev_dbytes.is_some()
+                || dev_dios.is_some()
+            {
+                if !io_first_dev {
+                    io_devices_json.push(',');
+                }
+                io_first_dev = false;
+                let _ = write!(io_devices_json, "{{\"dev\":{}", json_escape(dev));
+                if let Some(v) = dev_rbytes {
+                    let _ = write!(io_devices_json, ",\"rbytes\":{v}");
+                }
+                if let Some(v) = dev_wbytes {
+                    let _ = write!(io_devices_json, ",\"wbytes\":{v}");
+                }
+                if let Some(v) = dev_rios {
+                    let _ = write!(io_devices_json, ",\"rios\":{v}");
+                }
+                if let Some(v) = dev_wios {
+                    let _ = write!(io_devices_json, ",\"wios\":{v}");
+                }
+                if let Some(v) = dev_dbytes {
+                    let _ = write!(io_devices_json, ",\"dbytes\":{v}");
+                }
+                if let Some(v) = dev_dios {
+                    let _ = write!(io_devices_json, ",\"dios\":{v}");
+                }
+                io_devices_json.push('}');
+            }
         }
     }
+    io_devices_json.push(']');
 
     let opt_u64 = |v: Option<u64>| -> String {
         v.map(|n| n.to_string())
@@ -383,7 +440,7 @@ pub fn collect_cgroup_metrics(cgroup_dir: &Path) -> String {
     };
 
     format!(
-        "{{\"available\":true,\"cpu_stat\":{{\"usage_usec\":{},\"user_usec\":{},\"system_usec\":{},\"nr_periods\":{},\"nr_throttled\":{},\"throttled_usec\":{}}},\"cpu_max\":{{\"raw\":{},\"quota_usec\":{},\"period_usec\":{}}},\"memory\":{{\"current_bytes\":{},\"max_bytes\":{},\"anon_bytes\":{},\"file_bytes\":{},\"inactive_file_bytes\":{}}},\"io\":{{\"available\":{},\"rbytes\":{},\"wbytes\":{},\"rios\":{},\"wios\":{}}}}}",
+        "{{\"available\":true,\"cpu_stat\":{{\"usage_usec\":{},\"user_usec\":{},\"system_usec\":{},\"nr_periods\":{},\"nr_throttled\":{},\"throttled_usec\":{}}},\"cpu_max\":{{\"raw\":{},\"quota_usec\":{},\"period_usec\":{}}},\"memory\":{{\"current_bytes\":{},\"max_bytes\":{},\"anon_bytes\":{},\"file_bytes\":{},\"inactive_file_bytes\":{}}},\"io\":{{\"available\":{},\"rbytes\":{},\"wbytes\":{},\"rios\":{},\"wios\":{},\"devices\":{}}}}}",
         opt_u64(usage_usec),
         opt_u64(user_usec),
         opt_u64(system_usec),
@@ -403,6 +460,7 @@ pub fn collect_cgroup_metrics(cgroup_dir: &Path) -> String {
         io_wbytes,
         io_rios,
         io_wios,
+        io_devices_json,
     )
 }
 

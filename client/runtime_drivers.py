@@ -19,15 +19,18 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
 try:
-    from client import cpu_guard, incus_health, network_quarantine, resource_cgroup, security_banner
+    from client import cpu_guard, incus_health, native_probe, network_quarantine, resource_cgroup, security_banner
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics
 except ImportError:
     import cpu_guard
     import incus_health
+    import native_probe
     import network_quarantine
     import resource_cgroup
     import security_banner
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics
+
+_ORIG_PATH_READ_TEXT = Path.read_text
 
 for _guard_name in ("container_freeze", "udp_guard", "anti_spoof_guard", "file_guard", "microburst_guard"):
     try:
@@ -1014,47 +1017,73 @@ def _sample_cgroup_cpu_metrics(
     if target is None:
         return result
 
-    def _read_quota_cpus(cg_path: Path) -> float:
-        try:
-            cpu_max_raw = (cg_path / "cpu.max").read_text(encoding="ascii", errors="ignore").strip()
-            max_match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", cpu_max_raw)
-            if max_match:
-                quota_str, period_str = max_match.groups()
-                period_val = int(period_str)
-                if quota_str != "max" and period_val >= 1000:
-                    return max(0.0, int(quota_str) / float(period_val))
-        except (OSError, ValueError):
-            pass
-        return 0.0
-
-    quota_cpus = _read_quota_cpus(target)
-    if quota_cpus <= 0 and runtime == "runman" and target.name == "ct":
-        quota_cpus = _read_quota_cpus(target.parent)
-    if quota_cpus > 0:
-        result["quota_cpus"] = quota_cpus
-
-    try:
-        stat_lines = (target / "cpu.stat").read_text(encoding="ascii", errors="ignore").splitlines()
-    except OSError:
-        return result
-
     usage_usec: int | None = None
-    user_usec: int | None = None
-    system_usec: int | None = None
-    for raw_line in stat_lines[:32]:
-        parts = raw_line.strip().split()
-        if len(parts) != 2 or not parts[1].isdigit():
-            continue
-        key, val = parts[0], int(parts[1])
-        if key == "usage_usec":
-            usage_usec = val
-            break
-        if key == "user_usec":
-            user_usec = val
-        elif key == "system_usec":
-            system_usec = val
-    if usage_usec is None and (user_usec is not None or system_usec is not None):
-        usage_usec = int(user_usec or 0) + int(system_usec or 0)
+    quota_cpus = 0.0
+    if Path.read_text is _ORIG_PATH_READ_TEXT and native_probe.is_available():
+        native_cg = native_probe.cgroup_metrics(target)
+        if isinstance(native_cg, dict) and native_cg.get("available"):
+            cpu_max = native_cg.get("cpu_max") if isinstance(native_cg.get("cpu_max"), dict) else {}
+            q_val = cpu_max.get("quota_usec")
+            p_val = cpu_max.get("period_usec")
+            if isinstance(q_val, int) and isinstance(p_val, int) and p_val >= 1000 and q_val > 0:
+                quota_cpus = max(0.0, q_val / float(p_val))
+            cpu_stat = native_cg.get("cpu_stat") if isinstance(native_cg.get("cpu_stat"), dict) else {}
+            u_val = cpu_stat.get("usage_usec")
+            if isinstance(u_val, int) and u_val >= 0:
+                usage_usec = u_val
+            elif cpu_stat.get("user_usec") is not None or cpu_stat.get("system_usec") is not None:
+                usage_usec = int(cpu_stat.get("user_usec") or 0) + int(cpu_stat.get("system_usec") or 0)
+            if quota_cpus <= 0 and runtime == "runman" and target.name == "ct":
+                parent_cg = native_probe.cgroup_metrics(target.parent)
+                if isinstance(parent_cg, dict) and parent_cg.get("available"):
+                    p_max = parent_cg.get("cpu_max") if isinstance(parent_cg.get("cpu_max"), dict) else {}
+                    pq, pp = p_max.get("quota_usec"), p_max.get("period_usec")
+                    if isinstance(pq, int) and isinstance(pp, int) and pp >= 1000 and pq > 0:
+                        quota_cpus = max(0.0, pq / float(pp))
+            if quota_cpus > 0:
+                result["quota_cpus"] = quota_cpus
+
+    if usage_usec is None:
+        def _read_quota_cpus(cg_path: Path) -> float:
+            try:
+                cpu_max_raw = (cg_path / "cpu.max").read_text(encoding="ascii", errors="ignore").strip()
+                max_match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", cpu_max_raw)
+                if max_match:
+                    quota_str, period_str = max_match.groups()
+                    period_val = int(period_str)
+                    if quota_str != "max" and period_val >= 1000:
+                        return max(0.0, int(quota_str) / float(period_val))
+            except (OSError, ValueError):
+                pass
+            return 0.0
+
+        quota_cpus = _read_quota_cpus(target)
+        if quota_cpus <= 0 and runtime == "runman" and target.name == "ct":
+            quota_cpus = _read_quota_cpus(target.parent)
+        if quota_cpus > 0:
+            result["quota_cpus"] = quota_cpus
+
+        try:
+            stat_lines = (target / "cpu.stat").read_text(encoding="ascii", errors="ignore").splitlines()
+        except OSError:
+            return result
+
+        user_usec: int | None = None
+        system_usec: int | None = None
+        for raw_line in stat_lines[:32]:
+            parts = raw_line.strip().split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                continue
+            key, val = parts[0], int(parts[1])
+            if key == "usage_usec":
+                usage_usec = val
+                break
+            if key == "user_usec":
+                user_usec = val
+            elif key == "system_usec":
+                system_usec = val
+        if usage_usec is None and (user_usec is not None or system_usec is not None):
+            usage_usec = int(user_usec or 0) + int(system_usec or 0)
     if usage_usec is None or usage_usec < 0:
         return result
 

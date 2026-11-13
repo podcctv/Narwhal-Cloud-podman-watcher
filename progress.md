@@ -2,6 +2,16 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## Phase 3 完整闭环：Runtime / Memory / IO Guard 原生探针全链路接入（v1.8.34）
+
+- **Rust `narwhal-probe` 扩展 (`rust/crates/host-metrics/src/lib.rs`, `rust/crates/cgroup-probe/src/lib.rs`, `rust/crates/narwhal-probe/src/main.rs`)**：
+  - `host-metrics` 新增 `diskstats` 子命令解析 `/proc/diskstats` 块设备读写与 `busy_ms` 计数。
+  - `cgroup-probe` 的 `cgroup-metrics` 输出 `io.stat` 逐设备明细 `devices`，供 `io_guard` 直接消费。
+- **Python 守卫与驱动层桥接 (`client/native_probe.py`, `client/runtime_drivers.py`, `client/memory_guard.py`, `client/io_guard.py`, `tests/test_native_probe.py`)**：
+  - `runtime_drivers._sample_cgroup_cpu_metrics` 接入 `native_probe.cgroup_metrics`（含 Runman `/ct` 父级 `cpu.max` 兜底）。
+  - `memory_guard._read_pressure` 接入 `native_probe.psi_snapshot` 加速宿主机与容器内存 PSI 读取。
+  - `io_guard._parse_diskstats` 与 `_parse_io_stat` 接入 `native_probe.diskstats` 与 `native_probe.cgroup_metrics`，所有路径均保留 mock 感知与 100% Python 回退。
+
 ## Phase 3 扩展：`proc-sockets` 与 `host-metrics` Rust 原生探针及 Python 桥接（v1.8.33）
 
 - **进程级 Socket FD 归属探针 (`rust/crates/proc-probe/src/lib.rs`, `rust/crates/narwhal-probe/src/main.rs`)**：在 `proc-probe` 新增 `std`-only、`#![forbid(unsafe_code)]` 的 `collect_proc_sockets` / `collect_proc_sockets_from`，单次读取 `/proc/<init_pid>/net/{tcp,tcp6,udp,udp6}` 并按 `max_fds` 有界扫描 `/proc/<pid>/fd/*` 归属 socket inode，接入 `narwhal-probe proc-sockets` 子命令与 Rust 单测。

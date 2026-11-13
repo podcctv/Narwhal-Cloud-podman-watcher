@@ -563,5 +563,85 @@ class ProcSocketsAndHostMetricsNativeBridgeTests(unittest.TestCase):
         self.assertEqual(fallback["communication_sockets"], [])
 
 
+class RuntimeCgroupMemoryIoNativeBridgeTests(unittest.TestCase):
+    def test_diskstats_cli_args(self):
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "run_probe", return_value={"available": True, "devices": {}}
+        ) as run_mock:
+            res = native_probe.diskstats("/proc")
+        self.assertEqual(res, {"available": True, "devices": {}})
+        run_mock.assert_called_once_with(["diskstats", "--proc-root", "/proc"])
+
+    def test_runtime_drivers_cgroup_cpu_sample_uses_native_probe(self):
+        from pathlib import Path
+        from client import cpu_guard, runtime_drivers
+
+        native_cg = {
+            "available": True,
+            "cpu_stat": {"usage_usec": 2500000},
+            "cpu_max": {"raw": "200000 100000", "quota_usec": 200000, "period_usec": 100000},
+        }
+        with mock.patch.object(
+            cpu_guard, "resolve_container_cgroup", return_value=(Path("/sys/fs/cgroup/test"), "")
+        ), mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "cgroup_metrics", return_value=native_cg
+        ), mock.patch.object(agent, "_derive_cpu_percent", return_value=42.5):
+            sample = runtime_drivers._sample_cgroup_cpu_metrics(123, "podman", "abc123", "c1")
+        self.assertTrue(sample["available"])
+        self.assertEqual(sample["usage_usec"], 2500000)
+        self.assertEqual(sample["quota_cpus"], 2.0)
+        self.assertEqual(sample["cpu_percent"], 42.5)
+
+    def test_memory_guard_read_pressure_uses_native_probe(self):
+        from pathlib import Path
+        from client import memory_guard
+
+        host_payload = {
+            "available": True,
+            "host_psi": {"memory": {"status": "ready", "some": {"avg10": 7.5}}},
+        }
+        cg_payload = {
+            "available": True,
+            "cgroup_psi": {"memory": {"status": "ready", "some": {"avg10": 12.0}}},
+        }
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "psi_snapshot", side_effect=[host_payload, cg_payload]
+        ):
+            host_res = memory_guard._read_pressure(Path("/proc/pressure/memory"))
+            cg_res = memory_guard._read_pressure(Path("/sys/fs/cgroup/c1/memory.pressure"))
+        self.assertEqual(host_res["status"], "ready")
+        self.assertEqual(host_res["some"]["avg10"], 7.5)
+        self.assertEqual(cg_res["status"], "ready")
+        self.assertEqual(cg_res["some"]["avg10"], 12.0)
+
+    def test_io_guard_diskstats_and_io_stat_use_native_probe(self):
+        from pathlib import Path
+        from client import io_guard
+
+        disk_payload = {
+            "available": True,
+            "devices": {
+                "8:0": {"rios": 10, "rsectors": 80, "wios": 20, "wsectors": 160, "busy_ms": 50}
+            },
+        }
+        cg_payload = {
+            "available": True,
+            "io": {
+                "available": True,
+                "devices": [
+                    {"dev": "8:0", "rbytes": 4096, "wbytes": 8192, "rios": 4, "wios": 8}
+                ],
+            },
+        }
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "diskstats", return_value=disk_payload
+        ), mock.patch.object(native_probe, "cgroup_metrics", return_value=cg_payload):
+            disks = io_guard._parse_diskstats()
+            cg_io = io_guard._parse_io_stat(Path("/sys/fs/cgroup/c1"))
+        self.assertEqual(disks["8:0"]["busy_ms"], 50)
+        self.assertEqual(cg_io["8:0"]["rbytes"], 4096)
+        self.assertEqual(cg_io["8:0"]["wios"], 8)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ limit. Original per-device limits are persisted before any write.
 
 from __future__ import annotations
 
+import builtins
 import json
 import math
 import os
@@ -19,9 +20,14 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from client import native_probe
     from client.resource_cgroup import resolve_container_cgroup
 except ImportError:
+    import native_probe
     from resource_cgroup import resolve_container_cgroup
+
+_ORIG_OPEN = builtins.open
+_ORIG_PATH_OPEN = Path.open
 
 
 STATE_PATH = os.getenv("NARWHAL_IO_GUARD_STATE", "/var/lib/narwhal-agent/io-guard.json")
@@ -101,7 +107,25 @@ def _write_state(path: str, value: dict[str, Any]) -> None:
 
 
 def _parse_diskstats() -> dict[str, dict[str, int]]:
-    devices: dict[str, dict[str, int]] = {}
+    if builtins.open is _ORIG_OPEN and native_probe.is_available():
+        payload = native_probe.diskstats()
+        if isinstance(payload, dict) and payload.get("available") and isinstance(payload.get("devices"), dict):
+            devices: dict[str, dict[str, int]] = {}
+            for key, item in payload["devices"].items():
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    devices[str(key)] = {
+                        "rios": int(item["rios"]),
+                        "rsectors": int(item["rsectors"]),
+                        "wios": int(item["wios"]),
+                        "wsectors": int(item["wsectors"]),
+                        "busy_ms": int(item["busy_ms"]),
+                    }
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return devices
+    devices = {}
     with open("/proc/diskstats", "r", encoding="ascii", errors="ignore") as stream:
         for line in stream:
             fields = line.split()
@@ -124,7 +148,28 @@ def _parse_diskstats() -> dict[str, dict[str, int]]:
 
 
 def _parse_io_stat(path: Path) -> dict[str, dict[str, int]]:
-    output: dict[str, dict[str, int]] = {}
+    if Path.open is _ORIG_PATH_OPEN and native_probe.is_available():
+        payload = native_probe.cgroup_metrics(path)
+        io_section = payload.get("io") if isinstance(payload, dict) and payload.get("available") else None
+        if isinstance(io_section, dict) and io_section.get("available") and isinstance(io_section.get("devices"), list):
+            output: dict[str, dict[str, int]] = {}
+            for item in io_section["devices"]:
+                if not isinstance(item, dict):
+                    continue
+                dev = str(item.get("dev") or "")
+                if not re.fullmatch(r"\d+:\d+", dev):
+                    continue
+                counters: dict[str, int] = {}
+                for key in _COUNTER_KEYS:
+                    if key in item and item[key] is not None:
+                        try:
+                            counters[key] = int(item[key])
+                        except (TypeError, ValueError):
+                            pass
+                if counters:
+                    output[dev] = counters
+            return output
+    output = {}
     with (path / "io.stat").open("r", encoding="ascii", errors="ignore") as stream:
         for line in stream:
             fields = line.split()

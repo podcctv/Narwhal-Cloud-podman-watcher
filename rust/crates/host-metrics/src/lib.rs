@@ -323,6 +323,52 @@ pub fn collect_host_metrics(proc_root: &Path) -> String {
     out
 }
 
+pub fn collect_diskstats(proc_root: &Path) -> String {
+    let Ok(raw) = fs::read_to_string(proc_root.join("diskstats")) else {
+        return "{\"available\":false,\"devices\":{}}".to_string();
+    };
+    let mut out = String::with_capacity(512);
+    out.push_str("{\"available\":true,\"devices\":{");
+    let mut first = true;
+    for line in raw.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 14 {
+            continue;
+        }
+        let Ok(major) = fields[0].parse::<u64>() else {
+            continue;
+        };
+        let Ok(minor) = fields[1].parse::<u64>() else {
+            continue;
+        };
+        let Ok(rios) = fields[3].parse::<u64>() else {
+            continue;
+        };
+        let Ok(rsectors) = fields[5].parse::<u64>() else {
+            continue;
+        };
+        let Ok(wios) = fields[7].parse::<u64>() else {
+            continue;
+        };
+        let Ok(wsectors) = fields[9].parse::<u64>() else {
+            continue;
+        };
+        let Ok(busy_ms) = fields[12].parse::<u64>() else {
+            continue;
+        };
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        let _ = write!(
+            out,
+            "\"{major}:{minor}\":{{\"rios\":{rios},\"rsectors\":{rsectors},\"wios\":{wios},\"wsectors\":{wsectors},\"busy_ms\":{busy_ms}}}"
+        );
+    }
+    out.push_str("}}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +499,19 @@ Inter-|   Receive                                                |  Transmit
         assert_eq!(parse_uptime("inf 10.0"), None);
         assert_eq!(parse_uptime("-1.0 10.0"), None);
         assert_eq!(parse_uptime(""), None);
+    }
+
+    #[test]
+    fn collect_diskstats_parses_devices() {
+        let dir = temp_proc_dir("diskstats");
+        fs::write(
+            dir.join("diskstats"),
+            "   8       0 sda 100 0 800 50 200 0 1600 80 0 120 130 0 0 0 0\n",
+        )
+        .unwrap();
+        let json = collect_diskstats(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(json.contains("\"available\":true"));
+        assert!(json.contains("\"8:0\":{\"rios\":100,\"rsectors\":800,\"wios\":200,\"wsectors\":1600,\"busy_ms\":120}"));
     }
 }

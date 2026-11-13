@@ -138,3 +138,10 @@ def host_metrics(proc_root: str | os.PathLike[str] = "/proc") -> Dict[str, Any] 
     if not proc_root or not is_available():
         return None
     return run_probe(["host-metrics", "--proc-root", str(proc_root)])
+
+
+def diskstats(proc_root: str | os.PathLike[str] = "/proc") -> Dict[str, Any] | None:
+    """Collect host `/proc/diskstats` per-device counters via `narwhal-probe diskstats`."""
+    if not proc_root or not is_available():
+        return None
+    return run_probe(["diskstats", "--proc-root", str(proc_root)])
