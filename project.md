@@ -1,6 +1,6 @@
 # 项目概览
 
-更新基线：基于 fork `origin/main` v1.8.27，新增 Runman 连续 CPU/内存过载自动重启（v1.8.28）。提交历史与版本演进规范见 [README.md](README.md)。
+更新基线：基于 fork `origin/main` v1.8.27，新增 Runman 连续 CPU/内存过载自动重启（Watcher v1.8.29，Agent 最低版本 v1.8.28）。提交历史与版本演进规范见 [README.md](README.md)。
 
 ## 项目目标
 

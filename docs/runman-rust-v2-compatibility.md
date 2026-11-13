@@ -1,6 +1,6 @@
 # Runman Rust v2 compatibility
 
-Updated for Watcher v1.8.28 and Runman Rust v2.0.4 inventory schema 1. This is a source-level compatibility matrix; it does not claim that a live Runman host was exercised.
+Updated for Watcher v1.8.29 and Runman Rust v2.0.4 inventory schema 1. This is a source-level compatibility matrix; it does not claim that a live Runman host was exercised.
 
 ## Supported
 

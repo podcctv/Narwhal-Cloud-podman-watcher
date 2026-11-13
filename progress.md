@@ -2,11 +2,12 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
-## Runman 连续资源过载自动重启（v1.8.28）
+## Runman 连续资源过载自动重启（Watcher v1.8.29，Agent 最低版本 v1.8.28）
 
 - 在 v1.8.27 模块化客户端结构上新增资源过载保护：CPU 或内存达到 90%、持续满 3600 秒、至少 5 次有效样本且最大间隔 900 秒后才触发。
 - Server 绑定节点 node ID、Runman UUID 与实例代次；Agent 重读 inventory 和当前指标、串行锁定重启、复核精确 systemd unit 与 MainPID，并恢复读回原 `ct/io.max`。
-- 动作记录为 `ops_resource_guard` 非滥用保护信号。Python 语法、前端 TypeScript 检查和 Vite 生产构建通过；未运行测试，也未部署生产节点。
+- 动作记录为 `ops_resource_guard` 非滥用保护信号；服务端镜像显式包含策略模块，Agent 报告响应字段保持原样。
+- 本地 Python 语法、前端 TypeScript 检查和 Vite 生产构建通过；GitHub Actions 的 Python 3.11/3.12 兼容检查、完整测试集、amd64/arm64 镜像烟测均通过。未部署生产节点。
 
 ## 运维中心「节点升级」交互重设计：版本下拉选择与一键全选（v1.8.27）
 
