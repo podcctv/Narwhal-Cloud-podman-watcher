@@ -1,6 +1,20 @@
 # 当前进展与待办
 
-更新时间：2026-11-11（Asia/Shanghai）
+更新时间：2026-11-12（Asia/Shanghai）
+
+## Agent 单核 CPU 尖峰消除与 Incus/Runman 多容器争抢及 `/ct` 子 cgroup CPU 保护优化（v1.8.24）
+
+- **需求背景**：
+  1. 单核（1 vCPU）主机上 `narwhal-monitor-client` 存在周期性 ~56.8% CPU 尖峰，导致主机卡顿。
+  2. 多容器（`incus` / `runman`）并发运行时各自占用落在 `/ct` 子 cgroup 且均配置为 `CPUQuotaPerSecUSec=1s`（单容器上限 100%），单容器未达 85% 持续 300s 阈值但合计打满单核主机引发卡死。
+- **全链路落地与修复实现**：
+  1. **Agent 采集性能与调度优化 (`client/agent.py`, `tests/test_agent_perf.py`)**：
+     - 引入 `_collection_tick_scope()` 与 `_scan_host_proc_tree()`（`O(descendants)` BFS 与轻量 `_extract_proc_ppid`，每 256 个 PID 让出调度），单轮采集中 `/proc` 仅扫描一次并按 `init_pid` 缓存快照，复用至 `collect_top_cpu_process`、`collect_suspicious_processes` 与 `collect_panel_pairing_indicators`。
+     - 跳过 `runman` 已有 `container_fs_available` 时的冗余 `df`、重复 `_sample_cgroup_cpu_metrics` 与重复 `_enrich_socket_ips_geoip`；新增 `_apply_low_priority_scheduling()`（`AGENT_NICE=10`）与容器循环 `AGENT_COLLECT_YIELD_SECONDS=0.02`。
+     - 修复 `incus` 在 `_incus_stats` 报告 `cpu_percent > 0` 时跳过 cgroup `cpu.stat`/`cpu.max` 采样的问题，修复 `runman` `pid_start_ticks` 传递，支持 `/ct/cpu.max` 为 `max` 时回退读取父单元 `.service/cpu.max` 并受主机容量上限约束。
+  2. **Incus/Runman 多容器争抢保护与快速限额 (`client/cpu_guard.py`, `tests/test_resource_protection.py`)**：
+     - 新增 `_runman_effective_cpus_from_cgroup`，在 `/ct/cpu.max` 为 `max` 时回退读取父 unit `cpu.max`；支持 Incus 百分比配额（如 `50%`）解析。
+     - 新增多容器主机争抢检测与按比例公平限额（`_target_limit`、`CPU_AUTO_LIMIT_MAX_SIMULTANEOUS`），将默认失控/争抢确认窗口缩短至 `180s`（`interval` 下限 `30.0s`），保留读回验证（`readback_confirmed`）、`reason_is_user_abuse: False` 与压力回落后自动恢复。
 
 ## 四维连接证据紧凑折叠卡片重构与单核节点 Runman 持续高 CPU 采样及自动限额修复（v1.8.23）
 
