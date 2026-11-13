@@ -2,6 +2,11 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## 修复 `narwhal-probe` POSIX 单测兼容与回退确定性（v1.8.31）
+
+- **`client/proc_scanner.py` & `client/native_probe.py`**：调整 `_collect_host_proc_process_snapshot` 检查顺序，优先判断 `_has_mocked_proc_primitives`，避免在 `os.stat` 被单测 mock 时触发 `native_probe.is_available()`；同时 `probe_binary_path()` 改用 `os.path.abspath(__file__)` 避免 `Path.resolve()` 触发 `os.stat(..., follow_symlinks=...)`。
+- **`tests/test_native_probe.py`**：在 `test_socket_security_consumes_native_probe_and_falls_back` 的回退分支显式 mock `builtins.open` 抛出 `FileNotFoundError`，消除 Linux 宿主机真实 `/proc/321/net` 存在时导致的非确定性。
+
 ## Rust 原生热路径探针 `narwhal-probe` 与渐进式混合架构落地（v1.8.30）
 
 - **Rust `std`-only 工作区 (`rust/`)**：新增零外部依赖、`#![forbid(unsafe_code)]` 的 `narwhal-probe` Cargo workspace（`proc-probe`、`socket-sec`、`narwhal-probe`），提供 `proc-snapshot`（`/proc` 进程树 BFS 扫描与 stat/status 解析）、`socket-sec`（`/proc/<pid>/net/{tcp,tcp6,udp,udp6}` hex 解码与状态统计）及 `conntrack`（`/proc/net/nf_conntrack` 解析）子命令与单测。

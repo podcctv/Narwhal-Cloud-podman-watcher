@@ -409,7 +409,7 @@ def _collect_host_proc_process_snapshot(
     proc_cpu_counters = _agent_attr("_proc_cpu_counters", _proc_cpu_counters)
 
     scan_limit = max(1000, min(50000, int(env_float_fn("DEEP_HOST_PROC_SCAN_MAX", 20000))))
-    if native_probe.is_available() and not _has_mocked_proc_primitives(scan_tree_fn, read_proc_fn):
+    if not _has_mocked_proc_primitives(scan_tree_fn, read_proc_fn) and native_probe.is_available():
         native_result = _collect_host_proc_snapshot_native(
             init_pid, scan_limit, redact_fn, proc_cpu_counters
         )

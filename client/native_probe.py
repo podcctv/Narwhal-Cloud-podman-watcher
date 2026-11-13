@@ -16,7 +16,7 @@ def probe_binary_path() -> Path:
     override = os.getenv("NARWHAL_NATIVE_PROBE_PATH", "").strip()
     if override:
         return Path(override)
-    return Path(__file__).resolve().parent / "bin" / "narwhal-probe"
+    return Path(os.path.abspath(__file__)).parent / "bin" / "narwhal-probe"
 
 
 def is_available() -> bool:
@@ -27,8 +27,8 @@ def is_available() -> bool:
         return False
     path = probe_binary_path()
     try:
-        return path.is_file() and os.access(path, os.X_OK)
-    except OSError:
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+    except (OSError, TypeError):
         return False
 
 

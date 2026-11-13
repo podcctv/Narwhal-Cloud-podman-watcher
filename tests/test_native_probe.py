@@ -288,10 +288,12 @@ class SocketCollectorNativeBridgeTests(unittest.TestCase):
         self.assertEqual(sec["inbound_unique_ips"], 1)
         self.assertEqual(sec["outbound_unique_ips"], 1)
 
-        # Fallback to Python when probe returns None
+        # Fallback to Python when probe returns None (deterministic even if PID exists on Linux)
         with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
             native_probe, "socket_sec", return_value=None
-        ), mock.patch.object(agent, "_connection_metric_epoch", return_value="epoch-1"):
+        ), mock.patch.object(agent, "_connection_metric_epoch", return_value="epoch-1"), mock.patch(
+            "builtins.open", side_effect=FileNotFoundError("/proc/321/net/tcp")
+        ):
             sec_fallback = agent._collect_socket_security(321)
         self.assertFalse(sec_fallback["connection_metrics"]["valid"])
 
