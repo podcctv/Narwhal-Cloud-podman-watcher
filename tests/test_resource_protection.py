@@ -305,6 +305,185 @@ class ResourceProtectionPressureTests(unittest.TestCase):
                 self.assertEqual(c3["security"]["cpu_guard"]["state"], "watching")
                 self.assertEqual(c3["security"]["cpu_guard"]["high_samples"], 2)
 
+    def test_multi_container_runman_contention_capped_proportionally_and_restored(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cgroups = {}
+            for idx, vm_id in enumerate(
+                [
+                    "11111111-1111-4111-8111-111111111111",
+                    "22222222-2222-4222-8222-222222222222",
+                    "33333333-3333-4333-8333-333333333333",
+                ]
+            ):
+                unit_dir = root / "system.slice" / f"runman-{vm_id}.service"
+                ct_dir = unit_dir / "ct"
+                ct_dir.mkdir(parents=True, exist_ok=True)
+                (unit_dir / "cpu.max").write_text("100000 100000\n", encoding="ascii")
+                (ct_dir / "cpu.max").write_text("max 100000\n", encoding="ascii")
+                cgroups[vm_id] = ct_dir
+
+            state_path = str(root / "cpu-guard.json")
+            host_busy = {
+                "available": True,
+                "status": "ready",
+                "busy_percent": 94.0,
+                "iowait_percent": 0.0,
+                "logical_cpus": 1,
+                "load_1m": 2.1,
+                "sample_seconds": 90.0,
+                "psi": {"cpu": {"status": "ready", "some": {"avg10": 1.2}}},
+            }
+            host_idle = {
+                "available": True,
+                "status": "ready",
+                "busy_percent": 15.0,
+                "iowait_percent": 0.0,
+                "logical_cpus": 1,
+                "load_1m": 0.2,
+                "sample_seconds": 90.0,
+                "psi": {"cpu": {"status": "ready", "some": {"avg10": 0.1}}},
+            }
+
+            def make_containers(usages: list[float]) -> list[dict]:
+                items = []
+                for idx, (vm_id, cpu_pct) in enumerate(zip(cgroups.keys(), usages), start=1):
+                    items.append(
+                        {
+                            "id": vm_id,
+                            "stable_id": vm_id,
+                            "name": vm_id,
+                            "runtime": "runman",
+                            "runtime_bin": "runman",
+                            "project": "default",
+                            "instance_id": f"aaaaaaaa-0000-4000-8000-00000000000{idx}",
+                            "pid": str(1000 + idx),
+                            "pid_start_ticks": str(5000 + idx),
+                            "cpu_percent": cpu_pct,
+                            "cpu_pressure_percent": cpu_pct,
+                            "cpu_pressure_sample_available": True,
+                            "cpu_effective_cpus": 0.0,
+                            "security": {},
+                        }
+                    )
+                return items
+
+            def fake_resolve(pid, runtime, stable_id, name="", **_kwargs):
+                return cgroups[stable_id], ""
+
+            env_clean = {k: v for k, v in os.environ.items() if k != "CPU_AUTO_LIMIT_REQUIRED_SECONDS"}
+            with mock.patch.dict(os.environ, env_clean, clear=True), mock.patch.object(
+                cpu_guard, "resolve_container_cgroup", side_effect=fake_resolve
+            ):
+                # 3 Runman instances each using 11.0%, 10.7%, 8.5% on a 1-vCPU host
+                for ts in (1000, 1090, 1180):
+                    batch = make_containers([11.0, 10.7, 8.5])
+                    summary = cpu_guard.observe(batch, host_busy, 90.0, {"runman": "runman"}, now=ts, state_path=state_path)
+
+                self.assertTrue(summary["limit_policy"]["multi_container_contention"])
+                self.assertEqual(summary["limited_containers"], 3)
+                for item in batch:
+                    guard = item["security"]["cpu_guard"]
+                    self.assertEqual(guard["state"], "limited")
+                    self.assertTrue(guard["readback_confirmed"])
+                    self.assertFalse(guard["reason_is_user_abuse"])
+                    self.assertEqual(guard["effective_cpus"], 1.0)
+                    # Fair share for 3 contenders on 1 vCPU: 0.85 / 3 = 0.2833 -> 28333 100000
+                    self.assertEqual(guard["active_limit"], "28333 100000")
+
+                # Verify /ct/cpu.max was written and parent cpu.max was untouched
+                for vm_id, ct_dir in cgroups.items():
+                    self.assertEqual((ct_dir / "cpu.max").read_text(encoding="ascii").strip(), "28333 100000")
+                    self.assertEqual((ct_dir.parent / "cpu.max").read_text(encoding="ascii").strip(), "100000 100000")
+
+                # Recovery after pressure subsides (600s+ window)
+                for ts in (1300, 1500, 1700, 1950):
+                    idle_batch = make_containers([2.0, 2.0, 2.0])
+                    summary_idle = cpu_guard.observe(idle_batch, host_idle, 200.0, {"runman": "runman"}, now=ts, state_path=state_path)
+
+                self.assertEqual(summary_idle["limited_containers"], 0)
+                for item in idle_batch:
+                    self.assertEqual(item["security"]["cpu_guard"]["state"], "restored")
+                for ct_dir in cgroups.values():
+                    self.assertEqual((ct_dir / "cpu.max").read_text(encoding="ascii").strip(), "max 100000")
+
+    def test_multi_container_incus_contention_and_percentage_allowance(self):
+        self.assertEqual(cpu_guard._limit_cpus("incus", "50%", 2.0), 1.0)
+        target, cpus = cpu_guard._half_limit("incus", "50%", 2.0)
+        self.assertEqual(target, "50ms/100ms")
+        self.assertEqual(cpus, 0.5)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = str(Path(tmpdir) / "cpu-guard.json")
+            allowances = {"c1": "", "c2": ""}
+
+            def fake_run(binary, args, timeout=20.0):
+                if "get" in args:
+                    name = args[-2]
+                    return 0, allowances[name]
+                if "set" in args:
+                    name = args[-3]
+                    allowances[name] = args[-1]
+                    return 0, ""
+                if "unset" in args:
+                    name = args[-2]
+                    allowances[name] = ""
+                    return 0, ""
+                return 1, "unsupported"
+
+            host_busy = {
+                "available": True,
+                "status": "ready",
+                "busy_percent": 96.0,
+                "logical_cpus": 1,
+                "load_1m": 2.4,
+                "psi": {"cpu": {"status": "ready", "some": {"avg10": 12.0}}},
+            }
+
+            def make_incus() -> list[dict]:
+                return [
+                    {
+                        "id": f"incus-{name}",
+                        "stable_id": f"incus-{name}",
+                        "name": name,
+                        "runtime": "incus",
+                        "runtime_bin": "incus",
+                        "project": "default",
+                        "cpu_percent": 45.0,
+                        "cpu_pressure_percent": 45.0,
+                        "cpu_pressure_sample_available": True,
+                        "cpu_effective_cpus": 1.0,
+                        "security": {},
+                    }
+                    for name in ("c1", "c2")
+                ]
+
+            env_clean = {k: v for k, v in os.environ.items() if k != "CPU_AUTO_LIMIT_REQUIRED_SECONDS"}
+            with mock.patch.dict(os.environ, env_clean, clear=True), mock.patch.object(
+                cpu_guard, "_run", side_effect=fake_run
+            ), mock.patch.object(
+                cpu_guard, "resolve_container_cgroup", return_value=(None, "no_psi")
+            ):
+                for ts in (1000, 1090, 1180):
+                    batch = make_incus()
+                    summary = cpu_guard.observe(batch, host_busy, 90.0, {"incus": "incus"}, now=ts, state_path=state_path)
+
+                self.assertEqual(summary["limited_containers"], 2)
+                for item in batch:
+                    self.assertEqual(item["security"]["cpu_guard"]["state"], "limited")
+                    self.assertTrue(item["security"]["cpu_guard"]["readback_confirmed"])
+                    self.assertEqual(item["security"]["cpu_guard"]["active_limit"], "42ms/100ms")
+                self.assertEqual(allowances, {"c1": "42ms/100ms", "c2": "42ms/100ms"})
+
+    def test_runman_effective_cpus_falls_back_to_parent_unit_quota(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            unit_dir = Path(tmpdir) / "system.slice" / "runman-test.service"
+            ct_dir = unit_dir / "ct"
+            ct_dir.mkdir(parents=True, exist_ok=True)
+            (unit_dir / "cpu.max").write_text("100000 100000\n", encoding="ascii")
+            (ct_dir / "cpu.max").write_text("max 100000\n", encoding="ascii")
+            self.assertEqual(cpu_guard._runman_effective_cpus_from_cgroup(ct_dir, 4.0), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

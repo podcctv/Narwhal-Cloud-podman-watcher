@@ -1,10 +1,10 @@
-"""Conservative, reversible CPU protection for Incus and Podman containers.
+"""Conservative, reversible CPU protection for Incus, Podman, and Runman containers.
 
-The guard only limits one container at a time, after sustained container CPU
-saturation coincides with host CPU PSI contention. It never stops a process or
-container, and it restores the exact saved runtime CPU setting after sustained
-recovery. State is persisted before runtime changes so an agent restart can
-resume verification and restoration safely.
+The guard limits runaway or contending containers after sustained container/host
+CPU saturation is confirmed. It supports multi-container contention capping on
+low-core hosts, never stops a process or container, and restores the exact saved
+runtime CPU setting after sustained recovery. State is persisted before runtime
+changes so an agent restart can resume verification and restoration safely.
 """
 
 from __future__ import annotations
@@ -344,6 +344,24 @@ def _runman_cpu_cgroup(container: dict[str, Any] | None) -> tuple[Any, str]:
     return target, ""
 
 
+def _runman_effective_cpus_from_cgroup(target: Any, host_logical: float) -> float:
+    """Resolve effective Runman CPUs from /ct/cpu.max, falling back to parent unit cpu.max."""
+    for candidate_dir in (target, getattr(target, "parent", None)):
+        if candidate_dir is None:
+            continue
+        try:
+            raw = (candidate_dir / "cpu.max").read_text(encoding="ascii").strip()
+        except OSError:
+            continue
+        match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", raw)
+        if not match:
+            continue
+        quota, period = match.groups()
+        if quota != "max":
+            return min(host_logical, int(quota) / int(period))
+    return host_logical
+
+
 def _valid_runman_cpu_max(value: str) -> bool:
     match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", str(value or "").strip())
     if not match:
@@ -394,6 +412,9 @@ def _limit_cpus(runtime: str, limit: dict[str, Any] | str, effective_cpus: float
         if hard:
             quota, period = float(hard.group(1)), float(hard.group(2))
             return quota / period if period > 0 else 0.0
+        pct = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*%\s*", value)
+        if pct and effective_cpus > 0:
+            return max(0.0, effective_cpus * (float(pct.group(1)) / 100.0))
         return max(0.0, effective_cpus)
     if runtime == "runman":
         match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", str(limit or "").strip())
@@ -406,23 +427,35 @@ def _limit_cpus(runtime: str, limit: dict[str, Any] | str, effective_cpus: float
     return quota / period if quota > 0 and period > 0 else max(0.0, effective_cpus)
 
 
-def _half_limit(
-    runtime: str, limit: dict[str, Any] | str, effective_cpus: float
+def _target_limit(
+    runtime: str,
+    limit: dict[str, Any] | str,
+    effective_cpus: float,
+    target_cpus: float | None = None,
 ) -> tuple[dict[str, Any] | str | None, float]:
     ratio = min(0.75, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_TARGET_RATIO", "0.5"), 0.5)))
     available_cpus = max(0.0, _finite_number(effective_cpus, 0.0))
     if runtime == "incus":
         value = str(limit or "").strip().lower()
         hard = re.fullmatch(r"\s*(\d+(?:\.\d+)?)ms\s*/\s*(\d+(?:\.\d+)?)ms\s*", value)
-        configured_cpus = float(hard.group(1)) / float(hard.group(2)) if hard and float(hard.group(2)) > 0 else available_cpus
+        pct = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*%\s*", value)
+        if hard and float(hard.group(2)) > 0:
+            configured_cpus = float(hard.group(1)) / float(hard.group(2))
+        elif pct and available_cpus > 0:
+            configured_cpus = available_cpus * (float(pct.group(1)) / 100.0)
+        else:
+            configured_cpus = available_cpus
         baseline = min(configured_cpus, available_cpus) if available_cpus > 0 else configured_cpus
         if baseline <= 0:
             return None, 0.0
+        desired_cpus = baseline * ratio
+        if target_cpus is not None and target_cpus > 0:
+            desired_cpus = min(desired_cpus, max(0.1, float(target_cpus)))
         if hard:
             period = max(1, int(float(hard.group(2))))
-            quota = max(1, int(baseline * ratio * period))
+            quota = max(1, int(desired_cpus * period))
             return f"{quota}ms/{period}ms", quota / period
-        quota = max(1, int(baseline * ratio * 100))
+        quota = max(1, int(desired_cpus * 100))
         return f"{quota}ms/100ms", quota / 100.0
     if runtime == "runman":
         match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", str(limit or "").strip())
@@ -434,7 +467,10 @@ def _half_limit(
         baseline = min(configured, available_cpus) if available_cpus > 0 else configured
         if baseline <= 0:
             return None, 0.0
-        applied_quota = max(1000, int(baseline * ratio * period_value))
+        desired_cpus = baseline * ratio
+        if target_cpus is not None and target_cpus > 0:
+            desired_cpus = min(desired_cpus, max(0.1, float(target_cpus)))
+        applied_quota = max(1000, int(desired_cpus * period_value))
         if quota != "max" and applied_quota >= int(quota):
             return None, 0.0
         return f"{applied_quota} {period_value}", applied_quota / period_value
@@ -448,7 +484,10 @@ def _half_limit(
     baseline = min(configured_cpus, available_cpus) if available_cpus > 0 else configured_cpus
     if baseline <= 0:
         return None, 0.0
-    applied_quota = max(1000, int(baseline * ratio * period))
+    desired_cpus = baseline * ratio
+    if target_cpus is not None and target_cpus > 0:
+        desired_cpus = min(desired_cpus, max(0.1, float(target_cpus)))
+    applied_quota = max(1000, int(desired_cpus * period))
     if applied_quota >= baseline * period:
         return None, 0.0
     return {
@@ -457,6 +496,12 @@ def _half_limit(
         "nano_cpus": int(limit.get("nano_cpus") or 0),
         "cpuset_cpus": str(limit.get("cpuset_cpus") or ""),
     }, applied_quota / period
+
+
+def _half_limit(
+    runtime: str, limit: dict[str, Any] | str, effective_cpus: float
+) -> tuple[dict[str, Any] | str | None, float]:
+    return _target_limit(runtime, limit, effective_cpus, target_cpus=None)
 
 
 def _scale_limit(runtime: str, value: dict[str, Any] | str, ratio: float) -> tuple[dict[str, Any] | str | None, float]:
@@ -667,7 +712,7 @@ def observe(
     cpu_auto_enabled = os.getenv("SECURITY_CPU_AUTO_LIMIT_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
     allow_new_limits = allow_new_limits and cpu_auto_enabled
     timestamp = int(time.time()) if now is None else int(now)
-    interval = max(60.0, _finite_number(interval_seconds, 300.0))
+    interval = max(30.0, _finite_number(interval_seconds, 300.0))
     high_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_SATURATION_PERCENT", "65"), 65.0)))
     host_threshold = min(99.0, max(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_HOST_BUSY_PERCENT", "80"), 80.0)))
     recovery_ratio = min(0.8, max(0.1, _finite_number(os.getenv("CPU_AUTO_LIMIT_RECOVERY_RATIO", "0.5"), 0.5)))
@@ -693,8 +738,42 @@ def observe(
     alerts: list[dict[str, Any]] = []
     active_keys: set[str] = set()
     host_busy = _finite_number(host_cpu.get("busy_percent"), -1.0) if host_cpu.get("status") == "ready" else -1.0
+    logical_cpus = max(1, int(_finite_number(host_cpu.get("logical_cpus"), float(os.cpu_count() or 1))))
+    load_1m = _finite_number(host_cpu.get("load_1m"), -1.0)
     host_pressure_confirmed, host_cpu_psi, host_pressure_basis = _host_cpu_pressure(
         host_cpu, host_threshold, host_psi_threshold
+    )
+    host_contention_confirmed = bool(
+        host_cpu.get("status") == "ready"
+        and host_busy >= host_threshold
+        and (
+            host_pressure_confirmed
+            or (host_busy >= max(host_threshold, 85.0) and load_1m >= float(logical_cpus))
+            or host_busy >= 95.0
+        )
+    )
+    default_contention_min = "8.0" if logical_cpus <= 1 else ("10.0" if logical_cpus <= 2 else "15.0")
+    contention_min_cpu = max(5.0, min(50.0, _finite_number(os.getenv("CPU_AUTO_LIMIT_CONTENTION_MIN_CPU_PERCENT", default_contention_min), float(default_contention_min))))
+    contending_cpus: list[float] = []
+    for item in containers:
+        if not isinstance(item, dict) or not _identity(item):
+            continue
+        item_avail = item.get("cpu_pressure_sample_available") is True
+        item_cpu = _finite_number(item.get("cpu_pressure_percent"), -1.0) if item_avail else -1.0
+        if item_cpu < 0:
+            item_fallback = _finite_number(item.get("cpu_percent"), -1.0)
+            if item_fallback > 0:
+                item_cpu = item_fallback
+        if item_cpu >= contention_min_cpu:
+            contending_cpus.append(item_cpu)
+    multi_container_contention = bool(
+        host_contention_confirmed
+        and len(contending_cpus) >= 2
+        and sum(contending_cpus) >= max(25.0, float(logical_cpus) * 25.0)
+    )
+    max_simultaneous_limits = max(
+        1,
+        int(_finite_number(os.getenv("CPU_AUTO_LIMIT_MAX_SIMULTANEOUS", str(max(2, logical_cpus * 4))), float(max(2, logical_cpus * 4)))),
     )
 
     for container in containers:
@@ -715,11 +794,11 @@ def observe(
                 sample_available = True
         effective_cpus = _finite_number(container.get("cpu_effective_cpus"), 0.0)
         if effective_cpus <= 0:
-            host_logical = max(1.0, _finite_number(host_cpu.get("logical_cpus"), float(os.cpu_count() or 1)))
+            host_logical = float(logical_cpus)
             if runtime == "runman":
-                current_limit_raw, limit_err = _read_limit(runtime, binary, project, name, container)
-                if not limit_err and isinstance(current_limit_raw, str):
-                    effective_cpus = _limit_cpus(runtime, current_limit_raw, host_logical)
+                target, limit_err = _runman_cpu_cgroup(container)
+                if not limit_err and target is not None:
+                    effective_cpus = _runman_effective_cpus_from_cgroup(target, host_logical)
             if effective_cpus <= 0:
                 effective_cpus = host_logical
             container["cpu_effective_cpus"] = effective_cpus
@@ -1058,12 +1137,17 @@ def observe(
             host_pressure_confirmed,
             host_pressure_basis,
         )
+        is_contention = bool(multi_container_contention and metrics_cpu >= contention_min_cpu)
         qualifies = (
-            (saturation * 100.0 >= high_threshold or per_core_pressure)
-            and pressure_confirmed
+            (
+                ((saturation * 100.0 >= high_threshold or per_core_pressure) and pressure_confirmed)
+                or is_contention
+            )
             and effective_cpus > 0
             and host_cpu.get("status") == "ready"
         )
+        if is_contention and not (saturation * 100.0 >= high_threshold or per_core_pressure):
+            container_pressure_basis = host_pressure_basis if host_pressure_confirmed else "multi_container_host_cpu_contention"
         if qualifies:
             previous_high = int(candidate.get("last_high") or 0)
             if previous_high <= 0 or timestamp <= previous_high or timestamp - previous_high > max_gap:
@@ -1073,11 +1157,12 @@ def observe(
                 candidate["high_samples"] = int(candidate.get("high_samples") or 0) + 1
             candidate["last_high"] = timestamp
             candidate["runaway"] = bool(is_runaway)
+            candidate["contention"] = bool(is_contention)
             candidate["pressure_basis"] = container_pressure_basis
-            if is_runaway and "CPU_AUTO_LIMIT_REQUIRED_SECONDS" not in os.environ:
+            if (is_runaway or is_contention) and "CPU_AUTO_LIMIT_REQUIRED_SECONDS" not in os.environ:
                 runaway_duration = max(
-                    180,
-                    int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RUNAWAY_REQUIRED_SECONDS", "300"), 300)),
+                    120,
+                    int(_finite_number(os.getenv("CPU_AUTO_LIMIT_RUNAWAY_REQUIRED_SECONDS", "180"), 180)),
                 )
                 candidate_required_duration = min(required_duration, runaway_duration)
                 candidate_min_samples = max(2, int(math.ceil(candidate_required_duration / interval)) + 1)
@@ -1163,162 +1248,170 @@ def observe(
             elif timestamp - int(record.get("last_seen") or record.get("applied_at") or timestamp) > 30 * 86400:
                 instances.pop(key, None)
 
-    already_limited = bool(active_keys)
     ready_candidates = [item for item in candidates if
         int(item[2].get("high_samples") or 0) >= int(item[2].get("required_samples") or min_samples)
         and timestamp - int(item[2].get("high_since") or timestamp) >= int(item[2].get("required_duration") or required_duration)
     ]
-    limited_candidate_instance_id = ""
-    if not already_limited and ready_candidates:
+    limited_candidate_instance_ids: set[str] = set()
+    remaining_slots = max(0, max_simultaneous_limits - len(active_keys))
+    if remaining_slots > 0 and ready_candidates:
         ready_candidates.sort(key=lambda item: item[0], reverse=True)
-        _, container, candidate, identity = ready_candidates[0]
-        runtime, project, name = identity["runtime"], identity["project"], identity["name"]
-        binary = identity["binary"]
-        instance_id = identity["instance_id"]
-        last_attempt = int(candidate.get("last_attempt") or 0)
-        result_action: dict[str, Any]
-        process: dict[str, Any] = {}
-        if process_sampler is not None and timestamp - int(candidate.get("last_process_sample") or 0) >= 900:
-            try:
-                sampled = process_sampler(container)
-                if isinstance(sampled, dict):
-                    process = sampled
-                    candidate["top_process"] = sampled
-                    candidate["last_process_sample"] = timestamp
-            except Exception as exc:
-                process = {"available": False, "reason": str(exc)[:200]}
-        else:
-            process = candidate.get("top_process") if isinstance(candidate.get("top_process"), dict) else {}
-
-        if timestamp - last_attempt < retry_seconds:
-            current, error = _read_limit(runtime, binary, project, name, container)
-            result_action = {"attempted": True, "succeeded": False,
-                "message": "CPU 限额操作处于安全重试间隔；本次未重复修改配置。"}
-            current_limit = current
-            action_error = error
-        else:
-            original, read_error = _read_limit(runtime, binary, project, name, container)
-            applied, applied_cpus = _half_limit(
-                runtime, original, identity["effective_cpus"]
-            ) if original is not None else (None, 0.0)
-            if read_error or original is None or applied is None or applied_cpus <= 0:
-                candidate["last_attempt"] = timestamp
-                candidate["last_error"] = (read_error or "没有安全的 CPU 配额基线")[:400]
-                action_error = candidate["last_error"]
-                result_action = {"attempted": True, "succeeded": False,
-                    "message": "无法读取或计算可恢复的原 CPU 配置；为避免破坏现有设置，未修改容器。"}
-                current_limit = original
-            else:
-                record = {
-                    "stage": "applying", "runtime": runtime, "project": project,
-                    "name": name, "instance_id": instance_id,
-                    "original": original, "applied": applied,
-                    "effective_cpus_before": identity["effective_cpus"],
-                    "applied_cpus": applied_cpus,
-                    "trigger_basis": identity.get("trigger_basis"),
-                    "trigger_threshold_percent": high_threshold if identity.get("trigger_basis") == "one_cpu" else identity["effective_cpus"] * high_threshold,
-                    "high_samples": int(candidate.get("high_samples") or 0),
-                    "high_since": int(candidate.get("high_since") or timestamp),
-                    "last_high": timestamp, "last_seen": timestamp,
-                    "last_attempt": timestamp, "last_step_at": timestamp,
-                    "tier": 1, "low_samples": 0, "low_since": 0,
-                    "escalation_high_samples": 0, "escalation_high_since": 0,
-                    "top_process": process, "applied_at": timestamp,
-                }
-                instances[identity["runtime"] + "|" + identity["project"] + "|" + instance_id] = record
+        to_limit = ready_candidates[:remaining_slots]
+        total_contending_limited = len(active_keys) + len(to_limit)
+        fair_share_cpus = (
+            max(0.15, (0.85 * float(logical_cpus)) / float(total_contending_limited))
+            if total_contending_limited >= 2
+            else None
+        )
+        for _, container, candidate, identity in to_limit:
+            runtime, project, name = identity["runtime"], identity["project"], identity["name"]
+            binary = identity["binary"]
+            instance_id = identity["instance_id"]
+            last_attempt = int(candidate.get("last_attempt") or 0)
+            result_action: dict[str, Any]
+            process: dict[str, Any] = {}
+            if process_sampler is not None and timestamp - int(candidate.get("last_process_sample") or 0) >= 900:
                 try:
-                    _write_state(path, state)
-                except OSError as exc:
-                    instances.pop(identity["runtime"] + "|" + identity["project"] + "|" + instance_id, None)
+                    sampled = process_sampler(container)
+                    if isinstance(sampled, dict):
+                        process = sampled
+                        candidate["top_process"] = sampled
+                        candidate["last_process_sample"] = timestamp
+                except Exception as exc:
+                    process = {"available": False, "reason": str(exc)[:200]}
+            else:
+                process = candidate.get("top_process") if isinstance(candidate.get("top_process"), dict) else {}
+
+            if timestamp - last_attempt < retry_seconds:
+                current, error = _read_limit(runtime, binary, project, name, container)
+                result_action = {"attempted": True, "succeeded": False,
+                    "message": "CPU 限额操作处于安全重试间隔；本次未重复修改配置。"}
+                current_limit = current
+                action_error = error
+            else:
+                original, read_error = _read_limit(runtime, binary, project, name, container)
+                applied, applied_cpus = _target_limit(
+                    runtime, original, identity["effective_cpus"], target_cpus=fair_share_cpus
+                ) if original is not None else (None, 0.0)
+                if read_error or original is None or applied is None or applied_cpus <= 0:
                     candidate["last_attempt"] = timestamp
-                    action_error = f"无法保存自动恢复状态：{exc}"[:400]
+                    candidate["last_error"] = (read_error or "没有安全的 CPU 配额基线")[:400]
+                    action_error = candidate["last_error"]
                     result_action = {"attempted": True, "succeeded": False,
-                        "message": "无法可靠保存自动恢复状态；为避免留下无法还原的配额，未修改容器。"}
+                        "message": "无法读取或计算可恢复的原 CPU 配置；为避免破坏现有设置，未修改容器。"}
                     current_limit = original
                 else:
-                    before_apply, before_error = _read_limit(runtime, binary, project, name, container)
-                    if before_error or not _matches(runtime, before_apply, original):
-                        record["stage"] = "apply_unverified" if before_error else "manual_override"
-                        record["last_error"] = (before_error or "检测到管理员在保护执行前更改 CPU 配额；保留人工设置")[:400]
-                        result_action = {"attempted": True, "succeeded": False,
-                            "message": "执行前 CPU 配额与已保存的原设置不一致；系统没有覆盖该设置。"}
-                        action_error = record["last_error"]
-                    else:
-                        applied_ok, apply_output = _set_limit(runtime, binary, project, name, applied, container)
-                        current_limit, read_error = _read_limit(runtime, binary, project, name, container)
-                        if applied_ok and not read_error and _matches(runtime, current_limit, applied):
-                            record["stage"] = "active"
-                            record["applied_at"] = timestamp
-                            record["last_error"] = ""
-                            active_keys.add(identity["runtime"] + "|" + identity["project"] + "|" + instance_id)
-                            result_action = {"attempted": True, "succeeded": True,
-                                "action_type": "set_cpu_quota",
-                                "message": "已读回确认第一阶 CPU 保护限额生效（约为原有效 CPU 容量的 50%）；没有停止进程或容器。",
-                                "original_limit": _format_limit(runtime, original),
-                                "active_limit": _format_limit(runtime, applied)}
-                            action_error = ""
-                        else:
-                            record["stage"] = "apply_unverified"
-                            record["last_error"] = (apply_output or read_error or "应用后的 CPU 配额读回不一致")[:400]
-                            result_action = {"attempted": True, "succeeded": False,
-                                "message": "CPU 配额应用结果未通过读回确认；系统保留原配置记录并继续核验。"}
-                            action_error = record["last_error"]
+                    record = {
+                        "stage": "applying", "runtime": runtime, "project": project,
+                        "name": name, "instance_id": instance_id,
+                        "original": original, "applied": applied,
+                        "effective_cpus_before": identity["effective_cpus"],
+                        "applied_cpus": applied_cpus,
+                        "trigger_basis": identity.get("trigger_basis"),
+                        "trigger_threshold_percent": high_threshold if identity.get("trigger_basis") == "one_cpu" else identity["effective_cpus"] * high_threshold,
+                        "high_samples": int(candidate.get("high_samples") or 0),
+                        "high_since": int(candidate.get("high_since") or timestamp),
+                        "last_high": timestamp, "last_seen": timestamp,
+                        "last_attempt": timestamp, "last_step_at": timestamp,
+                        "tier": 1, "low_samples": 0, "low_since": 0,
+                        "escalation_high_samples": 0, "escalation_high_since": 0,
+                        "top_process": process, "applied_at": timestamp,
+                    }
+                    instances[identity["runtime"] + "|" + identity["project"] + "|" + instance_id] = record
                     try:
                         _write_state(path, state)
                     except OSError as exc:
-                        record["last_error"] = f"无法更新自动恢复状态：{exc}"[:400]
-                        action_error = record["last_error"]
-        alert_type = "cpu_pressure_protection"
-        cpu_now = identity["cpu_percent"]
-        effective_now = identity["effective_cpus"]
-        limited_candidate_instance_id = instance_id
-        result_action["pressure_basis"] = identity.get("pressure_basis") or host_pressure_basis
-        req_samples_now = int(candidate.get("required_samples") or min_samples)
-        container_security = container.get("security") if isinstance(container.get("security"), dict) else {}
-        succeeded_now = result_action.get("succeeded") is True
-        container_security["cpu_guard"] = {
-            "state": "limited" if succeeded_now else "limit_failed",
-            "original_limit": result_action.get("original_limit"),
-            "active_limit": result_action.get("active_limit"),
-            "expected_limit": result_action.get("active_limit"),
-            "actual_limit": _format_limit(runtime, current_limit) if current_limit is not None else None,
-            "readback_confirmed": succeeded_now,
-            "readback_confirmed_at": timestamp if succeeded_now else 0,
-            "applied_at": timestamp if succeeded_now else 0,
-            "high_samples": int(candidate.get("high_samples") or 0),
-            "required_samples": req_samples_now,
-            "confirmed_duration_seconds": max(0, timestamp - int(candidate.get("high_since") or timestamp)),
-            "container_cpu_percent": round(cpu_now, 2),
-            "effective_cpus": round(effective_now, 3),
-            "host_busy_percent": host_cpu.get("busy_percent"),
-            "host_iowait_percent": host_cpu.get("iowait_percent"),
-            "host_busy_threshold_percent": host_threshold,
-            "host_cpu_psi_some_avg10": host_cpu_psi,
-            "host_cpu_psi_threshold_percent": host_psi_threshold,
-            "host_pressure_basis": identity.get("pressure_basis") or host_pressure_basis,
-            "threshold_percent_of_one_cpu": high_threshold,
-            "tier": 1,
-            "tier_percent_of_original": 50,
-            "trigger_basis": identity.get("trigger_basis"),
-            "top_process": process,
-            "reason_is_user_abuse": False,
-            "action": result_action,
-        }
-        alerts.append(_alert(alert_type=alert_type, container=container, host_cpu=host_cpu,
-            cpu_percent=cpu_now, effective_cpus=effective_now,
-            threshold_percent=(high_threshold if cpu_now >= high_threshold else effective_now * high_threshold),
-            high_samples=int(candidate.get("high_samples") or 0),
-            required_samples=req_samples_now,
-            duration=max(0, timestamp - int(candidate.get("high_since") or timestamp)),
-            process=process, action=result_action, instance_id=instance_id,
-            error=action_error, tier=1))
-        # The local runtime action and restore state are durable before any network notification.
+                        instances.pop(identity["runtime"] + "|" + identity["project"] + "|" + instance_id, None)
+                        candidate["last_attempt"] = timestamp
+                        action_error = f"无法保存自动恢复状态：{exc}"[:400]
+                        result_action = {"attempted": True, "succeeded": False,
+                            "message": "无法可靠保存自动恢复状态；为避免留下无法还原的配额，未修改容器。"}
+                        current_limit = original
+                    else:
+                        before_apply, before_error = _read_limit(runtime, binary, project, name, container)
+                        if before_error or not _matches(runtime, before_apply, original):
+                            record["stage"] = "apply_unverified" if before_error else "manual_override"
+                            record["last_error"] = (before_error or "检测到管理员在保护执行前更改 CPU 配额；保留人工设置")[:400]
+                            result_action = {"attempted": True, "succeeded": False,
+                                "message": "执行前 CPU 配额与已保存的原设置不一致；系统没有覆盖该设置。"}
+                            action_error = record["last_error"]
+                        else:
+                            applied_ok, apply_output = _set_limit(runtime, binary, project, name, applied, container)
+                            current_limit, read_error = _read_limit(runtime, binary, project, name, container)
+                            if applied_ok and not read_error and _matches(runtime, current_limit, applied):
+                                record["stage"] = "active"
+                                record["applied_at"] = timestamp
+                                record["last_error"] = ""
+                                active_keys.add(identity["runtime"] + "|" + identity["project"] + "|" + instance_id)
+                                share_pct = round(max(1.0, (applied_cpus / max(0.01, identity["effective_cpus"])) * 100.0), 1)
+                                result_action = {"attempted": True, "succeeded": True,
+                                    "action_type": "set_cpu_quota",
+                                    "message": f"已读回确认第一阶 CPU 保护限额生效（约为原有效 CPU 容量的 {share_pct:g}%）；没有停止进程或容器。",
+                                    "original_limit": _format_limit(runtime, original),
+                                    "active_limit": _format_limit(runtime, applied)}
+                                action_error = ""
+                            else:
+                                record["stage"] = "apply_unverified"
+                                record["last_error"] = (apply_output or read_error or "应用后的 CPU 配额读回不一致")[:400]
+                                result_action = {"attempted": True, "succeeded": False,
+                                    "message": "CPU 配额应用结果未通过读回确认；系统保留原配置记录并继续核验。"}
+                                action_error = record["last_error"]
+                        try:
+                            _write_state(path, state)
+                        except OSError as exc:
+                            record["last_error"] = f"无法更新自动恢复状态：{exc}"[:400]
+                            action_error = record["last_error"]
+            alert_type = "cpu_pressure_protection"
+            cpu_now = identity["cpu_percent"]
+            effective_now = identity["effective_cpus"]
+            limited_candidate_instance_ids.add(instance_id)
+            result_action["pressure_basis"] = identity.get("pressure_basis") or host_pressure_basis
+            req_samples_now = int(candidate.get("required_samples") or min_samples)
+            container_security = container.get("security") if isinstance(container.get("security"), dict) else {}
+            succeeded_now = result_action.get("succeeded") is True
+            container_security["cpu_guard"] = {
+                "state": "limited" if succeeded_now else "limit_failed",
+                "original_limit": result_action.get("original_limit"),
+                "active_limit": result_action.get("active_limit"),
+                "expected_limit": result_action.get("active_limit"),
+                "actual_limit": _format_limit(runtime, current_limit) if current_limit is not None else None,
+                "readback_confirmed": succeeded_now,
+                "readback_confirmed_at": timestamp if succeeded_now else 0,
+                "applied_at": timestamp if succeeded_now else 0,
+                "high_samples": int(candidate.get("high_samples") or 0),
+                "required_samples": req_samples_now,
+                "confirmed_duration_seconds": max(0, timestamp - int(candidate.get("high_since") or timestamp)),
+                "container_cpu_percent": round(cpu_now, 2),
+                "effective_cpus": round(effective_now, 3),
+                "host_busy_percent": host_cpu.get("busy_percent"),
+                "host_iowait_percent": host_cpu.get("iowait_percent"),
+                "host_busy_threshold_percent": host_threshold,
+                "host_cpu_psi_some_avg10": host_cpu_psi,
+                "host_cpu_psi_threshold_percent": host_psi_threshold,
+                "host_pressure_basis": identity.get("pressure_basis") or host_pressure_basis,
+                "threshold_percent_of_one_cpu": high_threshold,
+                "tier": 1,
+                "tier_percent_of_original": 50,
+                "trigger_basis": identity.get("trigger_basis"),
+                "top_process": process,
+                "reason_is_user_abuse": False,
+                "action": result_action,
+            }
+            alerts.append(_alert(alert_type=alert_type, container=container, host_cpu=host_cpu,
+                cpu_percent=cpu_now, effective_cpus=effective_now,
+                threshold_percent=(high_threshold if cpu_now >= high_threshold else effective_now * high_threshold),
+                high_samples=int(candidate.get("high_samples") or 0),
+                required_samples=req_samples_now,
+                duration=max(0, timestamp - int(candidate.get("high_since") or timestamp)),
+                process=process, action=result_action, instance_id=instance_id,
+                error=action_error, tier=1))
+            # The local runtime action and restore state are durable before any network notification.
 
     for cpu_val, container, candidate, identity in candidates:
         cand_instance_id = identity["instance_id"]
-        if cand_instance_id == limited_candidate_instance_id:
+        if cand_instance_id in limited_candidate_instance_ids:
             continue
-        if candidate.get("runaway") is True and int(candidate.get("high_samples") or 0) >= 2:
+        if (candidate.get("runaway") is True or candidate.get("contention") is True) and int(candidate.get("high_samples") or 0) >= 2:
             req_samples_cand = int(candidate.get("required_samples") or min_samples)
             req_duration_cand = int(candidate.get("required_duration") or required_duration)
             elapsed_cand = max(0, timestamp - int(candidate.get("high_since") or timestamp))
@@ -1375,7 +1468,9 @@ def observe(
             "recovery_host_busy_percent": recovery_host_threshold,
             "recovery_host_cpu_psi_some_avg10_percent": recovery_host_psi_threshold,
             "recovery_samples": recovery_samples,
-            "max_simultaneous_container_limits": 1,
+            "max_simultaneous_container_limits": max_simultaneous_limits,
+            "multi_container_contention": multi_container_contention,
+            "contention_min_cpu_percent": contention_min_cpu,
             "cooldown_seconds": cooldown_seconds,
         },
         "host_cpu": host_cpu,
