@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -888,7 +889,32 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
                 item["verified_by_observation"] = verification.get("method") == "healthy_version_observation"
                 item["verification_source"] = str(verification.get("method") or "")
                 item.pop("campaign_status", None)
-            return {"automatic":fleet_updates.settings(conn),"nodes":nodes,"campaigns":unpack(rows(conn,"SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 50")),"progress":progress,"server_version":version()}
+            current_version = version()
+            current_revision = os.getenv("NARWHAL_REVISION", "").strip().lower()
+            campaigns = unpack(rows(conn, "SELECT * FROM ops_upgrades ORDER BY id DESC LIMIT 50"))
+            available_releases = []
+            seen_releases = set()
+            if re.fullmatch(r"\d+\.\d+\.\d+", current_version or "") and re.fullmatch(r"[0-9a-f]{40}", current_revision):
+                seen_releases.add((current_version, current_revision))
+                available_releases.append({
+                    "version": current_version,
+                    "revision": current_revision,
+                    "label": f"v{current_version}（当前主控 · {current_revision[:7]}）",
+                    "current": True,
+                })
+            for camp in campaigns:
+                c_ver = str(camp.get("version") or "").strip()
+                c_rev = str(camp.get("revision") or "").strip().lower()
+                if re.fullmatch(r"\d+\.\d+\.\d+", c_ver) and re.fullmatch(r"[0-9a-f]{40}", c_rev) and (c_ver, c_rev) not in seen_releases:
+                    seen_releases.add((c_ver, c_rev))
+                    is_curr = c_ver == current_version
+                    available_releases.append({
+                        "version": c_ver,
+                        "revision": c_rev,
+                        "label": f"v{c_ver}（{'当前主控 · ' if is_curr else '历史发布 · '}{c_rev[:7]}）",
+                        "current": is_curr,
+                    })
+            return {"automatic":fleet_updates.settings(conn),"nodes":nodes,"campaigns":campaigns,"progress":progress,"server_version":current_version,"server_revision":current_revision,"available_releases":available_releases}
         finally:
             conn.close()
 
@@ -913,8 +939,12 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
     async def create_upgrade(request:Request):
         require_admin(request)
         p=await request.json()
-        revision=str(p.get("revision",""))
-        target_version=str(p.get("version",""))
+        target_version=str(p.get("version","") or version()).strip()
+        revision=str(p.get("revision","") or "").strip().lower()
+        if not revision and target_version==version():
+            env_rev=os.getenv("NARWHAL_REVISION","").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{40}",env_rev):
+                revision=env_rev
         hosts=p.get("hosts",[])
         if not re.fullmatch(r"[0-9a-f]{40}",revision) or not re.fullmatch(r"\d+\.\d+\.\d+",target_version) or not isinstance(hosts,list) or not 1<=len(hosts)<=100 or len(set(hosts))!=len(hosts):
             raise HTTPException(400,"需要固定 SHA、版本和不重复的 1-100 个节点")

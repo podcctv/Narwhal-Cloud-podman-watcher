@@ -2,6 +2,11 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## 运维中心「节点升级」交互重设计：版本下拉选择与一键全选（v1.8.27）
+
+- **后端 (`server/operations_api.py`)**：`/api/v1/ops/upgrades` 返回 `server_revision` 与 `available_releases`（自动关联当前主控 `VERSION` + `NARWHAL_REVISION` 及历史发布记录）；`POST /api/v1/ops/upgrades` 在未显式传入 `revision` 且目标等于当前主控版本时自动填充 `NARWHAL_REVISION`。
+- **前端 (`frontend/src/components/operations/OperationsView.tsx`)**：移除反直觉的「已发布的 main 提交 SHA」与版本号手工输入框，改为目标版本下拉菜单自动绑定对应 `main` SHA，并在节点列表上方新增「全选待升级」「全选全部」「清空选择」与实时已选计数。
+
 ## 修复 `runtime_drivers.py` Linux Runman `security_banner` 导入与代次字典同步（v1.8.26）
 
 - 补充 `client/runtime_drivers.py` 中缺失的 `security_banner` 导入，修复 Linux `/proc` 校验路径下的 `NameError`。
