@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import glob
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
@@ -131,6 +133,42 @@ _pending_deep_samples: Dict[int, Dict[str, object]] = {}
 _abuse_targets: List[Dict[str, object]] = []
 _socks_probe_cache = {}
 _socks_probe_lock = threading.Lock()
+_collection_tick_cache: Dict[str, Any] | None = None
+_collection_tick_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def _collection_tick_scope():
+    """Share expensive host-wide scans (such as /proc trees) within one collection round."""
+    global _collection_tick_cache
+    with _collection_tick_lock:
+        if _collection_tick_cache is not None:
+            yield _collection_tick_cache
+            return
+        cache: Dict[str, Any] = {
+            "proc_tree": {},
+            "proc_snapshots": {},
+            "ps_by_container": {},
+        }
+        _collection_tick_cache = cache
+        try:
+            yield cache
+        finally:
+            _collection_tick_cache = None
+
+
+def _apply_low_priority_scheduling() -> None:
+    """Lower agent CPU priority so 1-vCPU hosts favor container workloads over telemetry."""
+    try:
+        nice_val = max(0, min(19, int(os.getenv("AGENT_NICE", "10"))))
+    except ValueError:
+        nice_val = 10
+    if nice_val <= 0 or not hasattr(os, "nice"):
+        return
+    try:
+        os.nice(nice_val)
+    except OSError:
+        pass
 
 _SOCKS_DIRECT_NAMES = {"microsocks", "sockd", "danted", "srelay", "hev-socks5-server"}
 _SOCKS_CONFIGURABLE_NAMES = {"3proxy", "gost", "xray", "v2ray", "sing-box"}
@@ -784,16 +822,24 @@ def _sample_cgroup_cpu_metrics(
     if target is None:
         return result
 
-    try:
-        cpu_max_raw = (target / "cpu.max").read_text(encoding="ascii", errors="ignore").strip()
-        max_match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", cpu_max_raw)
-        if max_match:
-            quota_str, period_str = max_match.groups()
-            period_val = int(period_str)
-            if quota_str != "max" and period_val >= 1000:
-                result["quota_cpus"] = max(0.0, int(quota_str) / float(period_val))
-    except (OSError, ValueError):
-        pass
+    def _read_quota_cpus(cg_path: Path) -> float:
+        try:
+            cpu_max_raw = (cg_path / "cpu.max").read_text(encoding="ascii", errors="ignore").strip()
+            max_match = re.fullmatch(r"(max|[1-9][0-9]*) ([1-9][0-9]*)", cpu_max_raw)
+            if max_match:
+                quota_str, period_str = max_match.groups()
+                period_val = int(period_str)
+                if quota_str != "max" and period_val >= 1000:
+                    return max(0.0, int(quota_str) / float(period_val))
+        except (OSError, ValueError):
+            pass
+        return 0.0
+
+    quota_cpus = _read_quota_cpus(target)
+    if quota_cpus <= 0 and runtime == "runman" and target.name == "ct":
+        quota_cpus = _read_quota_cpus(target.parent)
+    if quota_cpus > 0:
+        result["quota_cpus"] = quota_cpus
 
     try:
         stat_lines = (target / "cpu.stat").read_text(encoding="ascii", errors="ignore").splitlines()
@@ -6841,10 +6887,38 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
     return summary
 
 
+def _tick_ps_from_host_proc(init_pid: int, limit: int = 200) -> str:
+    """Format a cached host /proc snapshot into ps-compatible lines without spawning exec."""
+    if _collection_tick_cache is None or init_pid <= 1 or not os.path.isdir(f"/proc/{init_pid}"):
+        return ""
+    _, host_processes = _collect_host_proc_process_snapshot(init_pid, limit)
+    if not host_processes:
+        return ""
+    return "\n".join(
+        f"{p.get('pid', 0)} {p.get('state', '-')} {p.get('process', '')} {p.get('command', '')}".strip()
+        for p in host_processes
+        if p.get("pid")
+    )
+
+
 def collect_top_cpu_process(name: str, runtime: str = "", project: str = "", pid: int = 0) -> Dict[str, object]:
     runtime = runtime or get_container_bin()
     if not runtime:
         return {"pid": 0, "cpu_percent": 0.0, "command": ""}
+
+    if _collection_tick_cache is not None and int(pid or 0) > 1 and os.path.isdir(f"/proc/{int(pid)}"):
+        _, host_processes = _collect_host_proc_process_snapshot(int(pid), 50)
+        best = {"pid": 0, "cpu_percent": 0.0, "command": ""}
+        for proc in host_processes:
+            proc_cpu = round(max(0.0, float(proc.get("cpu_percent") or 0.0)), 2)
+            proc_pid = int(proc.get("pid") or 0)
+            if proc_pid > 0 and proc_cpu > float(best["cpu_percent"]):
+                best = {
+                    "pid": proc_pid,
+                    "cpu_percent": proc_cpu,
+                    "command": _redact_process_command(str(proc.get("command") or proc.get("process") or "")),
+                }
+        return best
 
     kind = _runtime_kind(runtime)
     top_cmd = [runtime, "top", name, "pcpu,pid,comm,args"]
@@ -6883,7 +6957,7 @@ def collect_top_cpu_process(name: str, runtime: str = "", project: str = "", pid
     return best
 
 
-def collect_suspicious_processes(name: str, runtime: str = "", project: str = "") -> List[Dict[str, object]]:
+def collect_suspicious_processes(name: str, runtime: str = "", project: str = "", init_pid: int = 0) -> List[Dict[str, object]]:
     runtime = runtime or get_container_bin()
     if not runtime:
         return []
@@ -6901,7 +6975,23 @@ def collect_suspicious_processes(name: str, runtime: str = "", project: str = ""
     # a miner name. Searching the full ps row caused repeat false positives for
     # `sh` launchers whose command line merely contained the string "xmrig".
     exact_miner_names = {"xmrig", "kinsing", "kdevtmpfsi", "watchbog", "cryptonight", "minerd", "pwnrig"}
-    output = run(_runtime_exec_cmd(runtime, name, "ps -eo pid,pcpu,comm,args 2>/dev/null", project))
+    output = ""
+    if _collection_tick_cache is not None and init_pid > 1 and os.path.isdir(f"/proc/{init_pid}"):
+        _, host_processes = _collect_host_proc_process_snapshot(init_pid, 200)
+        if host_processes:
+            output = "\n".join(
+                f"{p.get('pid', 0)} {float(p.get('cpu_percent') or 0.0):.2f} {p.get('process', '')} {p.get('command', '')}".strip()
+                for p in host_processes
+                if p.get("pid")
+            )
+    if not output:
+        ps_key = (runtime, project, name, "suspicious")
+        if _collection_tick_cache is not None and ps_key in _collection_tick_cache["ps_by_container"]:
+            output = _collection_tick_cache["ps_by_container"][ps_key]
+        else:
+            output = run(_runtime_exec_cmd(runtime, name, "ps -eo pid,pcpu,comm,args 2>/dev/null", project))
+            if _collection_tick_cache is not None:
+                _collection_tick_cache["ps_by_container"][ps_key] = output
     matches: List[Dict[str, object]] = []
     for line in output.splitlines():
         text = line.strip()
@@ -8459,10 +8549,18 @@ def collect_panel_pairing_indicators(
         ).split(",")
         if pattern.strip()
     ]
-    ps_cmd = "ps -eo pid=,stat=,comm=,args= 2>/dev/null || ps -o pid=,stat=,comm=,args= 2>/dev/null || ps -o pid=,comm=,args= 2>/dev/null || ps 2>/dev/null"
-    process_output = run(
-        _runtime_exec_cmd(runtime, name, ps_cmd, project)
-    )
+    process_output = _tick_ps_from_host_proc(init_pid, 100)
+    if not process_output:
+        ps_cmd = "ps -eo pid=,stat=,comm=,args= 2>/dev/null || ps -o pid=,stat=,comm=,args= 2>/dev/null || ps -o pid=,comm=,args= 2>/dev/null || ps 2>/dev/null"
+        ps_key = (runtime, project, name, "panel")
+        if _collection_tick_cache is not None and ps_key in _collection_tick_cache["ps_by_container"]:
+            process_output = _collection_tick_cache["ps_by_container"][ps_key]
+        else:
+            process_output = run(
+                _runtime_exec_cmd(runtime, name, ps_cmd, project)
+            )
+            if _collection_tick_cache is not None:
+                _collection_tick_cache["ps_by_container"][ps_key] = process_output
     if not process_output.strip() and init_pid > 1:
         _, host_processes = _collect_host_proc_process_snapshot(init_pid, 100)
         if host_processes:
@@ -9751,7 +9849,8 @@ def collect_runman_report(
         'sensitive_file_events': file_guard.scan_container_sensitive_drops(int(container.get('pid') or 0), runtime='runman', name=str(container.get('name') or '')) if file_guard is not None else [],
         'microburst': microburst_guard.detect_microburst('runman', str(container.get('name') or ''), 0, 0, traffic_rx, traffic_tx) if microburst_guard is not None else {},
     })
-    _enrich_socket_ips_geoip(security, allow_network=True)
+    if base_report is None:
+        _enrich_socket_ips_geoip(security, allow_network=True)
     security['socket_abuse'] = _evaluate_socket_abuse(
         {
             'conn_count': total_connections if metrics.get('valid') is True else int(report.get('conn_count') or 0),
@@ -9809,6 +9908,7 @@ def collect_runman_report(
     base_effective_cpus = float(report.get('cpu_effective_cpus') or 0.0) if type(report.get('cpu_effective_cpus')) in (int, float) else 0.0
     if not math.isfinite(base_effective_cpus) or base_effective_cpus < 0:
         base_effective_cpus = 0.0
+    host_cpus = _host_cpu_capacity()
     if configured_cpus > 0 and cgroup_quota_cpus > 0:
         effective_cpus = min(configured_cpus, float(cgroup_quota_cpus))
     elif configured_cpus > 0:
@@ -9818,7 +9918,9 @@ def collect_runman_report(
     elif base_effective_cpus > 0:
         effective_cpus = base_effective_cpus
     else:
-        effective_cpus = _host_cpu_capacity()
+        effective_cpus = host_cpus
+    if host_cpus > 0 and effective_cpus > host_cpus:
+        effective_cpus = host_cpus
     cpu_pressure_sample_available = bool(
         is_running
         and (
@@ -10025,6 +10127,44 @@ def collect_container(
     host_conntrack: Dict[str, object] | None = None,
     precomputed_runman_resources: Dict[str, object] | None = None,
     instance_id: str = "",
+    expected_start_ticks: str = "",
+) -> Dict:
+    with _collection_tick_scope():
+        return _collect_container_impl(
+            name=name,
+            container_id=container_id,
+            runtime=runtime,
+            runtime_name=runtime_name,
+            project=project,
+            pid_hint=pid_hint,
+            precomputed_security_risks=precomputed_security_risks,
+            precomputed_network_exposure=precomputed_network_exposure,
+            image=image,
+            precomputed_incus_metrics=precomputed_incus_metrics,
+            precomputed_network_addresses=precomputed_network_addresses,
+            host_conntrack=host_conntrack,
+            precomputed_runman_resources=precomputed_runman_resources,
+            instance_id=instance_id,
+            expected_start_ticks=expected_start_ticks,
+        )
+
+
+def _collect_container_impl(
+    name: str,
+    container_id: str = "",
+    runtime: str = "",
+    runtime_name: str = "",
+    project: str = "",
+    pid_hint: int = 0,
+    precomputed_security_risks: List[Dict[str, str]] | None = None,
+    precomputed_network_exposure: List[Dict[str, str]] | None = None,
+    image: str = "",
+    precomputed_incus_metrics: Dict[Tuple[str, str], Dict[str, float]] | None = None,
+    precomputed_network_addresses: List[str] | None = None,
+    host_conntrack: Dict[str, object] | None = None,
+    precomputed_runman_resources: Dict[str, object] | None = None,
+    instance_id: str = "",
+    expected_start_ticks: str = "",
 ) -> Dict:
     runtime = "runman" if runtime_name == "runman" else runtime or get_container_bin()
     runtime_name = runtime_name or _runtime_kind(runtime)
@@ -10276,15 +10416,34 @@ def collect_container(
         mem_limit = int((float(mem) * 100.0) / float(mem_percent))
 
     disk = collect_disk_alert()
-    container_disk = collect_container_disk_usage(name, runtime, project)
-    if pid > 1 and (cpu_percent <= 0 or runtime_name == "runman"):
+    runman_has_proc_fs = (
+        runtime_name == "runman"
+        and isinstance(precomputed_runman_resources, dict)
+        and precomputed_runman_resources.get("container_fs_available") is True
+    )
+    container_disk = (
+        {"rw_bytes": 0, "rootfs_bytes": 0, "fs": {"root": {"total_bytes": 0, "avail_bytes": 0}, "data": {"total_bytes": 0, "avail_bytes": 0}}}
+        if runman_has_proc_fs
+        else collect_container_disk_usage(name, runtime, project)
+    )
+    runman_cgroup_already_sampled = (
+        runtime_name == "runman"
+        and isinstance(precomputed_runman_resources, dict)
+        and "cgroup_cpu_available" in precomputed_runman_resources
+    )
+    if pid > 1 and not runman_cgroup_already_sampled and (cpu_percent <= 0 or runtime_name in {"incus", "runman"}):
+        resolved_start_ticks = expected_start_ticks or (
+            str((precomputed_runman_resources or {}).get("pid_start_ticks") or "")
+            if isinstance(precomputed_runman_resources, dict)
+            else ""
+        )
         cgroup_sample = _sample_cgroup_cpu_metrics(
             pid,
             runtime_name,
             container_id or name,
             name,
             instance_id=instance_id,
-            expected_start_ticks=str((precomputed_runman_resources or {}).get("pid_start_ticks") or "") if isinstance(precomputed_runman_resources, dict) else "",
+            expected_start_ticks=resolved_start_ticks,
         )
         if cgroup_sample.get("available") is True:
             cpu_pressure_sample_available = True
@@ -10294,8 +10453,11 @@ def collect_container(
             cgroup_quota = float(cgroup_sample.get("quota_cpus") or 0.0)
             if cgroup_quota > 0 and (cpu_effective_cpus <= 0 or cgroup_quota < cpu_effective_cpus):
                 cpu_effective_cpus = cgroup_quota
+    host_cpus = _host_cpu_capacity()
+    if host_cpus > 0 and cpu_effective_cpus > host_cpus:
+        cpu_effective_cpus = host_cpus
     top_cpu_process = collect_top_cpu_process(name, runtime, project, pid=pid)
-    suspicious_processes = collect_suspicious_processes(name, runtime, project)
+    suspicious_processes = collect_suspicious_processes(name, runtime, project, init_pid=pid)
     panel_pairing = collect_panel_pairing_indicators(name, runtime, project, image, init_pid=pid)
     socks_proxy = panel_pairing.pop("socks_proxy", {})
     socket_security = _collect_socket_security(pid)
@@ -10857,14 +11019,26 @@ def _read_host_proc_text(path: str, limit: int = 8192) -> str:
         return ""
 
 
-def _collect_host_proc_process_snapshot(
-    init_pid: int, process_limit: int
-) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
-    """Read a target container process tree from host /proc when the image has no ps."""
-    if init_pid <= 1 or not os.path.isdir(f"/proc/{init_pid}"):
-        return {"available": False, "captured": 0, "truncated": False, "items": []}, []
-    scan_limit = max(1000, min(50000, int(_env_float("DEEP_HOST_PROC_SCAN_MAX", 20000))))
+def _extract_proc_ppid(status: str) -> int | None:
+    """Extract numeric PPid from /proc/<pid>/status without per-PID regex overhead."""
+    for line in status.splitlines():
+        if line.startswith("PPid:"):
+            raw = line[5:].strip()
+            if raw.isdigit():
+                return int(raw)
+            return None
+    return None
+
+
+def _scan_host_proc_tree(scan_limit: int) -> Dict[str, Any]:
+    """Scan host /proc once per tick to build parent/child maps and status texts."""
+    if _collection_tick_cache is not None:
+        cached_tree = _collection_tick_cache["proc_tree"].get(scan_limit)
+        if isinstance(cached_tree, dict):
+            return cached_tree
+
     parent_map: Dict[int, int] = {}
+    children_map: Dict[int, List[int]] = {}
     status_map: Dict[int, str] = {}
     proc_scan_complete = True
     try:
@@ -10876,10 +11050,12 @@ def _collect_host_proc_process_snapshot(
         proc_scan_complete = False
     proc_ids = all_proc_ids[:scan_limit]
     status_scan_complete = True
-    for host_pid in proc_ids:
+    for idx, host_pid in enumerate(proc_ids):
+        if idx > 0 and idx % 256 == 0:
+            time.sleep(0)
         status = _read_host_proc_text(f"/proc/{host_pid}/status")
-        parent_match = re.search(r"(?m)^PPid:\s+(\d+)", status)
-        if not parent_match:
+        ppid = _extract_proc_ppid(status)
+        if ppid is None:
             # Processes commonly exit between listing /proc and reading status.
             # A vanished PID cannot still own a live socket; treating this normal
             # race as a host-wide inventory failure made unrelated short-lived
@@ -10895,25 +11071,73 @@ def _collect_host_proc_process_snapshot(
                 continue
             status_scan_complete = False
             continue
-        parent_map[host_pid] = int(parent_match.group(1))
+        parent_map[host_pid] = ppid
+        children_map.setdefault(ppid, []).append(host_pid)
         status_map[host_pid] = status
 
-    descendants = {init_pid}
-    changed = True
-    while changed and len(descendants) <= scan_limit:
-        changed = False
-        for host_pid, parent_pid in parent_map.items():
-            if host_pid not in descendants and parent_pid in descendants:
-                descendants.add(host_pid)
-                changed = True
-    if len(descendants) > scan_limit:
-        proc_scan_complete = False
-    capture_limit = max(20, min(200, int(process_limit)))
     try:
         uptime = float(_read_host_proc_text("/proc/uptime", 128).split()[0])
         clock_ticks = float(os.sysconf("SC_CLK_TCK"))
     except (IndexError, OSError, TypeError, ValueError):
         uptime, clock_ticks = 0.0, 100.0
+
+    tree = {
+        "parent_map": parent_map,
+        "children_map": children_map,
+        "status_map": status_map,
+        "proc_scan_complete": proc_scan_complete,
+        "status_scan_complete": status_scan_complete,
+        "uptime": uptime,
+        "clock_ticks": clock_ticks,
+    }
+    if _collection_tick_cache is not None:
+        _collection_tick_cache["proc_tree"][scan_limit] = tree
+    return tree
+
+
+def _collect_host_proc_process_snapshot(
+    init_pid: int, process_limit: int
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    """Read a target container process tree from host /proc when the image has no ps."""
+    if init_pid <= 1 or not os.path.isdir(f"/proc/{init_pid}"):
+        return {"available": False, "captured": 0, "truncated": False, "items": []}, []
+    capture_limit = max(20, min(200, int(process_limit)))
+    if _collection_tick_cache is not None:
+        cached_snap = _collection_tick_cache["proc_snapshots"].get(init_pid)
+        if isinstance(cached_snap, tuple) and len(cached_snap) == 3:
+            meta, public_items, host_processes = cached_snap
+            return (
+                {
+                    **meta,
+                    "captured": min(len(public_items), capture_limit),
+                    "truncated": len(public_items) > capture_limit,
+                    "items": list(public_items[:capture_limit]),
+                },
+                list(host_processes),
+            )
+
+    scan_limit = max(1000, min(50000, int(_env_float("DEEP_HOST_PROC_SCAN_MAX", 20000))))
+    tree = _scan_host_proc_tree(scan_limit)
+    parent_map: Dict[int, int] = tree["parent_map"]
+    children_map: Dict[int, List[int]] = tree["children_map"]
+    status_map: Dict[int, str] = tree["status_map"]
+    proc_scan_complete: bool = bool(tree["proc_scan_complete"])
+    status_scan_complete: bool = bool(tree["status_scan_complete"])
+    uptime: float = float(tree["uptime"])
+    clock_ticks: float = float(tree["clock_ticks"])
+
+    descendants = {init_pid}
+    queue = deque([init_pid])
+    while queue and len(descendants) <= scan_limit:
+        current_pid = queue.popleft()
+        for child_pid in children_map.get(current_pid, ()):
+            if child_pid not in descendants:
+                descendants.add(child_pid)
+                queue.append(child_pid)
+                if len(descendants) > scan_limit:
+                    break
+    if len(descendants) > scan_limit:
+        proc_scan_complete = False
     host_processes: List[Dict[str, object]] = []
     for host_pid in sorted(descendants):
         status = status_map.get(host_pid) or _read_host_proc_text(f"/proc/{host_pid}/status")
@@ -10981,13 +11205,18 @@ def _collect_host_proc_process_snapshot(
         item["ppid"] = namespace_by_host.get(int(item.get("ppid") or 0), 0)
     host_processes.sort(key=lambda item: float(item.get("cpu_percent") or 0), reverse=True)
     public_items = [{key: value for key, value in item.items() if key not in {"host_pid", "start_ticks"}} for item in host_processes]
+    meta = {
+        "available": bool(host_processes),
+        "source": "host_proc",
+        "scope_complete": proc_scan_complete and status_scan_complete,
+    }
+    if _collection_tick_cache is not None:
+        _collection_tick_cache["proc_snapshots"][init_pid] = (meta, public_items, host_processes)
     return (
         {
-            "available": bool(host_processes),
-            "source": "host_proc",
+            **meta,
             "captured": min(len(public_items), capture_limit),
             "truncated": len(public_items) > capture_limit,
-            "scope_complete": proc_scan_complete and status_scan_complete,
             "items": public_items[:capture_limit],
         },
         host_processes,
@@ -14132,6 +14361,7 @@ def main() -> None:
     parser.add_argument("--host-id", default=os.getenv("HOST_ID", socket.gethostname()))
     parser.add_argument("--node-id", default=os.getenv("NODE_ID", ""))
     args = parser.parse_args()
+    _apply_low_priority_scheduling()
     node_operations.load_config()
     _start_admission_guard(args.server,args.secret,args.host_id,args.node_id)
     try:
@@ -14203,98 +14433,103 @@ def main() -> None:
             _augment_conntrack_with_host_proxy_sockets(host_conntrack, containers)
         collected = []
         included_deep_sample_ids: List[int] = []
-        for c in containers:
-            now_mono = time.monotonic()
-            if now_mono - last_action_poll >= action_poll_interval:
-                last_action_poll = now_mono
-                try:
-                    process_security_actions(
-                        args.server, args.secret, args.host_id, args.node_id,
-                        bridge_inventory=[],
-                    )
-                except Exception as action_error:
-                    print(f"security action poll failed: {action_error}")
-            try:
-                if c.get("runtime") == "runman" and c.get("status") != "running":
-                    container_report = collect_runman_report(c)
-                    container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
-                    collected.append(container_report)
-                    continue
-                if c.get("runtime") == "docker" and docker_mode == "notice":
-                    collected.append(collect_docker_notice(c))
-                    continue
-                try:
-                    pid_hint = int(c.get("pid", "") or 0)
-                except ValueError:
-                    pid_hint = 0
-                container_report = collect_container(
-                    c["name"],
-                    c.get("id", ""),
-                    c.get("runtime_bin", ""),
-                    c.get("runtime", ""),
-                    c.get("project", ""),
-                    pid_hint,
-                    c.get("security_risks") if isinstance(c.get("security_risks"), list) else None,
-                    c.get("network_exposure") if isinstance(c.get("network_exposure"), list) else None,
-                    c.get("image", ""),
-                    incus_metrics_by_runtime.get(str(c.get("runtime_bin") or "incus"))
-                    if c.get("runtime") == "incus"
-                    else None,
-                    c.get("network_addresses") if isinstance(c.get("network_addresses"), list) else None,
-                    host_conntrack,
-                    c.get("runman_resources") if c.get("runtime") == "runman" and isinstance(c.get("runman_resources"), dict) else None,
-                    instance_id=str(c.get("instance_id") or c.get("stable_id") or c.get("id") or ""),
-                )
-                if c.get("runtime") == "runman":
-                    container_report = collect_runman_report(c, container_report)
-                container_security = container_report.get("security")
-                container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
-                if security_enabled and isinstance(container_security, dict):
-                    container_security["access_log"] = _collect_container_access_log_stats(c, security_interval)
-                pending_deep_sample = _pending_deep_sample_for(c)
-                if c.get("runtime") == "runman" and c.get("status") != "running":
-                    pending_deep_sample = None
-                if pending_deep_sample is not None:
+        yield_seconds = max(0.0, min(0.5, _env_float("AGENT_COLLECT_YIELD_SECONDS", 0.02)))
+        with _collection_tick_scope():
+            for idx, c in enumerate(containers):
+                if idx > 0 and yield_seconds > 0:
+                    time.sleep(yield_seconds)
+                now_mono = time.monotonic()
+                if now_mono - last_action_poll >= action_poll_interval:
+                    last_action_poll = now_mono
                     try:
-                        container_report["deep_sample"] = collect_container_deep_sample(
-                            c["name"],
-                            str(c.get("runtime_bin") or ""),
-                            str(c.get("runtime") or ""),
-                            str(c.get("project") or ""),
-                            pid_hint,
-                            pending_deep_sample,
-                            container_report,
-                            host_conntrack,
+                        process_security_actions(
+                            args.server, args.secret, args.host_id, args.node_id,
+                            bridge_inventory=[],
                         )
-                        included_deep_sample_ids.append(int(pending_deep_sample.get("id") or 0))
-                    except Exception as deep_error:
-                        print(f"deep sample failed for {c.get('name')}: {deep_error}")
-                collected.append(container_report)
-            except Exception as container_err:
-                print(f"collect_container error for {c.get('name')}: {container_err}")
-                collected.append({
-                    "id": c.get("id", ""),
-                    "name": c.get("name", "unknown"),
-                    "runtime": c.get("runtime", ""),
-                    "project": c.get("project", ""),
-                    "status": c.get("status", "running"),
-                    "stable_id": c.get("stable_id") or c.get("id") or "",
-                    "instance_id": str(c.get("instance_id") or c.get("stable_id") or c.get("id") or ""),
-                    "cpu_percent": 0.0,
-                    "mem_bytes": 0,
-                    "mem_limit_bytes": 0,
-                    "mem_percent": 0.0,
-                    "net_rx_bps": 0.0,
-                    "net_tx_bps": 0.0,
-                    "conn_count": 0,
-                    "tcp_country_stats": [],
-                    "udp_country_stats": [],
-                    "disk": collect_disk_alert(),
-                    "container_disk": {"rw_bytes": 0, "rootfs_bytes": 0},
-                    "collection_error": str(container_err),
-                })
-        incus_runtime_health = _collect_incus_runtime_health()
-        security = collect_security_summary(collected, security_interval, incus_runtime_health)
+                    except Exception as action_error:
+                        print(f"security action poll failed: {action_error}")
+                try:
+                    if c.get("runtime") == "runman" and c.get("status") != "running":
+                        container_report = collect_runman_report(c)
+                        container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
+                        collected.append(container_report)
+                        continue
+                    if c.get("runtime") == "docker" and docker_mode == "notice":
+                        collected.append(collect_docker_notice(c))
+                        continue
+                    try:
+                        pid_hint = int(c.get("pid", "") or 0)
+                    except ValueError:
+                        pid_hint = 0
+                    container_report = collect_container(
+                        c["name"],
+                        c.get("id", ""),
+                        c.get("runtime_bin", ""),
+                        c.get("runtime", ""),
+                        c.get("project", ""),
+                        pid_hint,
+                        c.get("security_risks") if isinstance(c.get("security_risks"), list) else None,
+                        c.get("network_exposure") if isinstance(c.get("network_exposure"), list) else None,
+                        c.get("image", ""),
+                        incus_metrics_by_runtime.get(str(c.get("runtime_bin") or "incus"))
+                        if c.get("runtime") == "incus"
+                        else None,
+                        c.get("network_addresses") if isinstance(c.get("network_addresses"), list) else None,
+                        host_conntrack,
+                        c.get("runman_resources") if c.get("runtime") == "runman" and isinstance(c.get("runman_resources"), dict) else None,
+                        instance_id=str(c.get("instance_id") or c.get("stable_id") or c.get("id") or ""),
+                        expected_start_ticks=str(c.get("pid_start_ticks") or ""),
+                    )
+                    if c.get("runtime") == "runman":
+                        container_report = collect_runman_report(c, container_report)
+                    container_security = container_report.get("security")
+                    container_report['stable_id'] = c.get('stable_id') or c.get('id') or ''
+                    if security_enabled and isinstance(container_security, dict):
+                        container_security["access_log"] = _collect_container_access_log_stats(c, security_interval)
+                    pending_deep_sample = _pending_deep_sample_for(c)
+                    if c.get("runtime") == "runman" and c.get("status") != "running":
+                        pending_deep_sample = None
+                    if pending_deep_sample is not None:
+                        try:
+                            container_report["deep_sample"] = collect_container_deep_sample(
+                                c["name"],
+                                str(c.get("runtime_bin") or ""),
+                                str(c.get("runtime") or ""),
+                                str(c.get("project") or ""),
+                                pid_hint,
+                                pending_deep_sample,
+                                container_report,
+                                host_conntrack,
+                            )
+                            included_deep_sample_ids.append(int(pending_deep_sample.get("id") or 0))
+                        except Exception as deep_error:
+                            print(f"deep sample failed for {c.get('name')}: {deep_error}")
+                    collected.append(container_report)
+                except Exception as container_err:
+                    print(f"collect_container error for {c.get('name')}: {container_err}")
+                    collected.append({
+                        "id": c.get("id", ""),
+                        "name": c.get("name", "unknown"),
+                        "runtime": c.get("runtime", ""),
+                        "project": c.get("project", ""),
+                        "status": c.get("status", "running"),
+                        "stable_id": c.get("stable_id") or c.get("id") or "",
+                        "instance_id": str(c.get("instance_id") or c.get("stable_id") or c.get("id") or ""),
+                        "cpu_percent": 0.0,
+                        "mem_bytes": 0,
+                        "mem_limit_bytes": 0,
+                        "mem_percent": 0.0,
+                        "net_rx_bps": 0.0,
+                        "net_tx_bps": 0.0,
+                        "conn_count": 0,
+                        "tcp_country_stats": [],
+                        "udp_country_stats": [],
+                        "disk": collect_disk_alert(),
+                        "container_disk": {"rw_bytes": 0, "rootfs_bytes": 0},
+                        "collection_error": str(container_err),
+                    })
+            incus_runtime_health = _collect_incus_runtime_health()
+            security = collect_security_summary(collected, security_interval, incus_runtime_health)
         # The init PID and its kernel start tick are local procfs write guards;
         # they are not part of the telemetry contract.
         for container_report in collected:
