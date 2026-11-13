@@ -14,6 +14,7 @@ COPY reach_monitor.py .
 COPY ip_reputation.py .
 COPY disk_cleanup.py .
 COPY connection_policy.py .
+COPY resource_overload_policy.py .
 COPY inbound_assessment.py .
 COPY database_telemetry.py .
 COPY control_reconciliation.py .
