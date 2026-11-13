@@ -159,9 +159,49 @@ jobs:
           docker run --rm --platform "$TARGET_PLATFORM" --entrypoint python narwhal-monitor-server-compat:ci \
             -c "import app, inbound_assessment; print('server imports OK')"
 
+  rust-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - name: Install musl and cross-compile toolchains
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+
+      - name: Run Rust probe tests
+        run: cargo test --manifest-path rust/Cargo.toml
+
+      - name: Build static narwhal-probe binaries
+        run: |
+          cargo build --manifest-path rust/Cargo.toml --release --target x86_64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc \
+            cargo build --manifest-path rust/Cargo.toml --release --target aarch64-unknown-linux-musl
+
+      - name: Stage narwhal-probe binaries and SHA256SUMS
+        run: |
+          mkdir -p dist/client_bins
+          cp rust/target/x86_64-unknown-linux-musl/release/narwhal-probe dist/client_bins/narwhal-probe-amd64
+          cp rust/target/aarch64-unknown-linux-musl/release/narwhal-probe dist/client_bins/narwhal-probe-arm64
+          chmod 0755 dist/client_bins/narwhal-probe-amd64 dist/client_bins/narwhal-probe-arm64
+          (cd dist/client_bins && sha256sum narwhal-probe-amd64 narwhal-probe-arm64 > SHA256SUMS)
+
+      - name: Upload narwhal-probe binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: narwhal-probe-binaries
+          path: dist/client_bins
+          retention-days: 7
+
   build-and-push:
     if: github.event_name != 'pull_request'
-    needs: [test, compatibility-tests, image-architecture-smoke]
+    needs: [test, rust-probe, compatibility-tests, image-architecture-smoke]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -194,12 +234,18 @@ jobs:
         shell: bash
         run: |
           if git diff --quiet HEAD^ HEAD -- VERSION && \
-             ! git diff --quiet HEAD^ HEAD -- client server scripts; then
+             ! git diff --quiet HEAD^ HEAD -- client server scripts rust; then
             echo "Runtime or deployment files changed without updating VERSION." >&2
             exit 1
           fi
           version="$(tr -d '[:space:]' < VERSION)"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+
+      - name: Download narwhal-probe binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: narwhal-probe-binaries
+          path: server/client_bins
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

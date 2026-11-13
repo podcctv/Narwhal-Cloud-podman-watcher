@@ -38,6 +38,158 @@ normalize_arch() {
   esac
 }
 
+fetch_narwhal_probe() {
+  local arch="${1:-}"
+  local dest_path="${2:-}"
+  local server_url="${3:-}"
+  local secret="${4:-}"
+  local ca_file="${5:-}"
+  if [[ -z "$arch" || -z "$dest_path" || -z "$server_url" || -z "$secret" ]]; then
+    return 0
+  fi
+  if [[ "$arch" != "amd64" && "$arch" != "arm64" ]]; then
+    echo "[WARN] Skipping narwhal-probe download for unsupported arch: $arch"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[INFO] python3 unavailable; skipping narwhal-probe download."
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest_path")"
+  python3 - "$arch" "$dest_path" "$server_url" "$secret" "$ca_file" <<'PY' || true
+import hashlib
+import hmac
+import os
+import re
+import ssl
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from urllib.parse import urlparse
+
+
+def normalize_url(value: str) -> str:
+    cleaned = value.strip().rstrip("/")
+    if cleaned and not urlparse(cleaned).scheme:
+        cleaned = f"https://{cleaned}"
+    return cleaned
+
+
+def signed_headers(secret: str) -> tuple[str, dict[str, str]]:
+    ts = str(int(time.time()))
+    sig = hmac.new(secret.encode(), ts.encode(), hashlib.sha256).hexdigest()
+    return ts, {
+        "User-Agent": "Narwhal-Client-Updater/1.0",
+        "X-Timestamp": ts,
+        "X-Signature": sig,
+    }
+
+
+def main() -> int:
+    arch, dest_path, raw_url, secret, ca_file = sys.argv[1:6]
+    server_url = normalize_url(raw_url)
+    if not server_url:
+        return 0
+    context = ssl.create_default_context(cafile=ca_file or None)
+
+    ts, headers = signed_headers(secret)
+    sha_req = urllib.request.Request(
+        f"{server_url}/api/v1/update/probe/sha256",
+        headers=headers,
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(sha_req, context=context, timeout=12.0) as resp:
+            sha_body = resp.read(65537)
+            resp_sig = resp.headers.get("X-Narwhal-Response-Signature", "")
+    except urllib.error.HTTPError as exc:
+        print(f"[INFO] narwhal-probe checksums unavailable (HTTP {exc.code}); using Python fallback.")
+        return 0
+    except (OSError, urllib.error.URLError) as exc:
+        print(f"[INFO] Cannot reach Server for narwhal-probe ({exc}); using Python fallback.")
+        return 0
+
+    if len(sha_body) > 65536:
+        print("[WARN] narwhal-probe SHA256SUMS response too large; using Python fallback.")
+        return 0
+    expected_sig = hmac.new(secret.encode(), sha_body + ts.encode(), hashlib.sha256).hexdigest()
+    if not resp_sig or not hmac.compare_digest(expected_sig, resp_sig):
+        print("[WARN] narwhal-probe SHA256SUMS signature verification failed; using Python fallback.")
+        return 0
+
+    target_name = f"narwhal-probe-{arch}"
+    expected_sha256 = ""
+    for line in sha_body.decode("utf-8", errors="replace").splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[1].lstrip("*") == target_name:
+            candidate = parts[0].lower()
+            if re.fullmatch(r"[0-9a-f]{64}", candidate):
+                expected_sha256 = candidate
+                break
+    if not expected_sha256:
+        print(f"[INFO] {target_name} not listed in SHA256SUMS; using Python fallback.")
+        return 0
+
+    if os.path.isfile(dest_path):
+        h = hashlib.sha256()
+        with open(dest_path, "rb") as existing:
+            for chunk in iter(lambda: existing.read(65536), b""):
+                h.update(chunk)
+        if h.hexdigest().lower() == expected_sha256:
+            os.chmod(dest_path, 0o755)
+            print(f"[OK] narwhal-probe ({arch}) already matches SHA256 ({expected_sha256[:12]}...).")
+            return 0
+
+    _, bin_headers = signed_headers(secret)
+    bin_req = urllib.request.Request(
+        f"{server_url}/api/v1/update/probe/{arch}",
+        headers=bin_headers,
+        method="GET",
+    )
+    dest_dir = os.path.dirname(dest_path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".narwhal-probe-", dir=dest_dir)
+    try:
+        hasher = hashlib.sha256()
+        total = 0
+        max_bytes = 64 * 1024 * 1024
+        with os.fdopen(fd, "wb") as tmp_file:
+            with urllib.request.urlopen(bin_req, context=context, timeout=30.0) as resp:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError("binary exceeds 64 MiB limit")
+                    hasher.update(chunk)
+                    tmp_file.write(chunk)
+        actual_sha256 = hasher.hexdigest().lower()
+        if not hmac.compare_digest(actual_sha256, expected_sha256):
+            print("[WARN] narwhal-probe SHA256 mismatch; keeping Python fallback.")
+            os.unlink(tmp_path)
+            return 0
+        os.chmod(tmp_path, 0o755)
+        os.replace(tmp_path, dest_path)
+        print(f"[OK] Installed verified narwhal-probe ({arch}, sha256={actual_sha256[:12]}...) to {dest_path}")
+        return 0
+    except urllib.error.HTTPError as exc:
+        print(f"[INFO] narwhal-probe binary unavailable (HTTP {exc.code}); using Python fallback.")
+    except Exception as exc:
+        print(f"[WARN] narwhal-probe download failed ({exc}); using Python fallback.")
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+}
+
 generate_secret() {
   tr -d '-' </proc/sys/kernel/random/uuid | cut -c 1-25
 }
@@ -543,6 +695,9 @@ if [[ -d "$ROOT_DIR/client/bin" ]]; then
   for b in "$ROOT_DIR"/client/bin/*; do
     [[ -f "$b" ]] && install -m 0755 "$b" "$CLIENT_APP_DIR/bin/$(basename "$b")"
   done
+fi
+if [[ "$MODE" == "update" ]]; then
+  fetch_narwhal_probe "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-probe" "${NARWHAL_SERVER_URL:-$server_url}" "${NARWHAL_SHARED_SECRET:-$secret}" "${NARWHAL_TLS_CA_FILE:-$tls_ca_file}" || true
 fi
 install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
 if [[ -f "$ROOT_DIR/scripts/update_archive.py" ]]; then

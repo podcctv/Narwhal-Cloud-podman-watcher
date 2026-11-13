@@ -22,6 +22,7 @@ COPY gfw_monitor.py .
 COPY operations.py operations_api.py upgrade_health.py buyer_notifications.py buyer_mapping.py buyer_content.py investigation.py dashboard_auth.py commerce.py tcping.py ./
 COPY fleet_updates.py ./
 COPY maintain_db.py .
+COPY client_bins/ client_bins/
 COPY static/ static/
 EXPOSE 8080
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,12 +1,17 @@
 """Tests for Phase 2 upgrade/rollback hardening and architecture detection."""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import http.server
 import os
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -224,6 +229,209 @@ esac
             self.assertIn("# old updater", (base / "managed-client-update.sh").read_text(encoding="utf-8"))
             self.assertIn("# old archive", (base / "update_archive.py").read_text(encoding="utf-8"))
             self.assertIn("daemon-reload", systemctl_log.read_text(encoding="utf-8"))
+
+
+class ProbeDistributionAndChecksumTests(unittest.TestCase):
+    def _extract_probe_python(self) -> str:
+        installer = (ROOT / "scripts" / "install-client.sh").read_text(encoding="utf-8")
+        marker = "python3 - \"$arch\" \"$dest_path\" \"$server_url\" \"$secret\" \"$ca_file\" <<'PY' || true\n"
+        start = installer.index(marker) + len(marker)
+        end = installer.index("\nPY\n", start)
+        return installer[start:end] + "\n"
+
+    def test_ci_workflow_and_dockerfile_probe_contracts(self):
+        workflow = (ROOT / ".github" / "workflows" / "build-and-push-ghcr.yml").read_text(encoding="utf-8")
+        self.assertIn("rust-probe:", workflow)
+        self.assertIn("x86_64-unknown-linux-musl", workflow)
+        self.assertIn("aarch64-unknown-linux-musl", workflow)
+        self.assertIn("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc", workflow)
+        self.assertIn("narwhal-probe-binaries", workflow)
+        self.assertIn("needs: [test, rust-probe, compatibility-tests, image-architecture-smoke]", workflow)
+        self.assertIn("path: server/client_bins", workflow)
+        self.assertIn("git diff --quiet HEAD^ HEAD -- client server scripts rust", workflow)
+
+        dockerfile = (ROOT / "server" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("COPY client_bins/ client_bins/", dockerfile)
+        self.assertTrue((ROOT / "server" / "client_bins" / ".gitkeep").is_file())
+
+        installer = (ROOT / "scripts" / "install-client.sh").read_text(encoding="utf-8")
+        self.assertIn("fetch_narwhal_probe()", installer)
+
+    def test_server_probe_endpoints_auth_404_and_download(self):
+        from fastapi.testclient import TestClient
+        from server import app as server_app
+
+        with tempfile.TemporaryDirectory(prefix="narwhal-probe-srv-") as temp:
+            bins_dir = Path(temp)
+            secret = "test-probe-secret"
+            with (
+                patch.object(server_app, "SHARED_SECRET", secret),
+                patch.dict(os.environ, {"NARWHAL_CLIENT_BINS_DIR": str(bins_dir)}),
+            ):
+                client = TestClient(server_app.app)
+
+                # Unauthenticated requests are rejected.
+                self.assertEqual(client.get("/api/v1/update/probe/sha256").status_code, 401)
+                self.assertEqual(client.get("/api/v1/update/probe/amd64").status_code, 401)
+
+                def auth_headers() -> tuple[str, dict[str, str]]:
+                    ts = str(int(time.time()))
+                    sig = hmac.new(secret.encode(), ts.encode(), hashlib.sha256).hexdigest()
+                    return ts, {"X-Timestamp": ts, "X-Signature": sig}
+
+                # Empty client_bins returns 404 cleanly.
+                _, hdrs = auth_headers()
+                self.assertEqual(client.get("/api/v1/update/probe/sha256", headers=hdrs).status_code, 404)
+                self.assertEqual(client.get("/api/v1/update/probe/amd64", headers=hdrs).status_code, 404)
+
+                # Bundled amd64 binary + SHA256SUMS returns 200 with signed checksums.
+                payload = b"\x7fELF-mock-narwhal-probe-amd64"
+                digest = hashlib.sha256(payload).hexdigest()
+                sums = f"{digest}  narwhal-probe-amd64\n".encode("utf-8")
+                (bins_dir / "narwhal-probe-amd64").write_bytes(payload)
+                (bins_dir / "SHA256SUMS").write_bytes(sums)
+
+                ts, hdrs = auth_headers()
+                sha_resp = client.get("/api/v1/update/probe/sha256", headers=hdrs)
+                self.assertEqual(sha_resp.status_code, 200)
+                self.assertEqual(sha_resp.content, sums)
+                expected_resp_sig = hmac.new(
+                    secret.encode(), sums + ts.encode(), hashlib.sha256
+                ).hexdigest()
+                self.assertEqual(sha_resp.headers.get("X-Narwhal-Response-Signature"), expected_resp_sig)
+
+                _, hdrs = auth_headers()
+                bin_resp = client.get("/api/v1/update/probe/amd64", headers=hdrs)
+                self.assertEqual(bin_resp.status_code, 200)
+                self.assertEqual(bin_resp.content, payload)
+
+                # Missing arm64 still returns 404.
+                self.assertEqual(client.get("/api/v1/update/probe/arm64", headers=hdrs).status_code, 404)
+
+    def test_client_probe_fetch_verifies_checksum_and_falls_back_gracefully(self):
+        script_code = self._extract_probe_python()
+        secret = "client-fetch-secret"
+        valid_binary = b"#!/bin/sh\necho probe-v1\n"
+        valid_sha = hashlib.sha256(valid_binary).hexdigest()
+        sums_body = f"{valid_sha}  narwhal-probe-amd64\n".encode("utf-8")
+
+        state = {
+            "sha_status": 200,
+            "sha_body": sums_body,
+            "bad_sig": False,
+            "bin_status": 200,
+            "bin_body": valid_binary,
+            "bin_requests": 0,
+        }
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                return
+
+            def do_GET(self):
+                ts = self.headers.get("X-Timestamp", "")
+                sig = self.headers.get("X-Signature", "")
+                expected = hmac.new(secret.encode(), ts.encode(), hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(expected, sig):
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                if self.path == "/api/v1/update/probe/sha256":
+                    self.send_response(state["sha_status"])
+                    body = state["sha_body"]
+                    resp_sig = (
+                        "0" * 64
+                        if state["bad_sig"]
+                        else hmac.new(secret.encode(), body + ts.encode(), hashlib.sha256).hexdigest()
+                    )
+                    self.send_header("X-Narwhal-Response-Signature", resp_sig)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path == "/api/v1/update/probe/amd64":
+                    state["bin_requests"] += 1
+                    self.send_response(state["bin_status"])
+                    body = state["bin_body"]
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}"
+            with tempfile.TemporaryDirectory(prefix="narwhal-probe-cli-") as temp:
+                helper = Path(temp) / "fetch.py"
+                helper.write_text(script_code, encoding="utf-8")
+                dest = Path(temp) / "bin" / "narwhal-probe"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+
+                # 1. Valid download and verification succeeds.
+                res = subprocess.run(
+                    [sys.executable, str(helper), "amd64", str(dest), url, secret, ""],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(dest.read_bytes(), valid_binary)
+                self.assertEqual(state["bin_requests"], 1)
+
+                # 2. Re-running with matching SHA256 skips re-download.
+                res2 = subprocess.run(
+                    [sys.executable, str(helper), "amd64", str(dest), url, secret, ""],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
+                self.assertEqual(state["bin_requests"], 1)
+
+                # 3. Checksum mismatch is non-fatal and does not overwrite/create dest.
+                dest.unlink()
+                state["bin_body"] = b"corrupted-binary"
+                res3 = subprocess.run(
+                    [sys.executable, str(helper), "amd64", str(dest), url, secret, ""],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(res3.returncode, 0, res3.stdout + res3.stderr)
+                self.assertFalse(dest.exists())
+                self.assertIn("SHA256 mismatch", res3.stdout)
+
+                # 4. Bad response signature on SHA256SUMS is non-fatal and skips binary fetch.
+                prev_reqs = state["bin_requests"]
+                state["bad_sig"] = True
+                res4 = subprocess.run(
+                    [sys.executable, str(helper), "amd64", str(dest), url, secret, ""],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(res4.returncode, 0, res4.stdout + res4.stderr)
+                self.assertEqual(state["bin_requests"], prev_reqs)
+                self.assertFalse(dest.exists())
+
+                # 5. Server 404 is non-fatal.
+                state["bad_sig"] = False
+                state["sha_status"] = 404
+                res5 = subprocess.run(
+                    [sys.executable, str(helper), "amd64", str(dest), url, secret, ""],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(res5.returncode, 0, res5.stdout + res5.stderr)
+                self.assertFalse(dest.exists())
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

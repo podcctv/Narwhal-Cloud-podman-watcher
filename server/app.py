@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 ASSETS_DIR = STATIC_DIR / "assets"
+CLIENT_BINS_DIR = Path(__file__).resolve().parent / "client_bins"
 
 DB_PATH = os.getenv("DB_PATH", "/data/monitor.db")
 SHARED_SECRET = os.getenv("SHARED_SECRET", "change-me")
@@ -176,6 +177,9 @@ _AGENT_ONLY_PATHS = {
     "/api/v1/gfw-probe/report",
     "/api/v1/gfw-probe/failure",
     "/api/v1/update/version",
+    "/api/v1/update/probe/sha256",
+    "/api/v1/update/probe/amd64",
+    "/api/v1/update/probe/arm64",
 }
 
 # Telegram sends updates without the dashboard's Basic credentials.  The opaque
@@ -5255,6 +5259,58 @@ async def agent_update_version(
             "ready": not expected_version or APP_VERSION == expected_version,
         },
         x_timestamp,
+    )
+
+
+def _resolve_client_bins_dir() -> Path:
+    override = os.getenv("NARWHAL_CLIENT_BINS_DIR", "").strip()
+    return Path(override) if override else CLIENT_BINS_DIR
+
+
+@app.get("/api/v1/update/probe/sha256")
+def agent_update_probe_sha256(
+    x_timestamp: str = Header(default=""),
+    x_signature: str = Header(default=""),
+) -> Response:
+    """Return bundled narwhal-probe SHA256SUMS to an authenticated Client updater."""
+    verify_signature(b"", x_timestamp, x_signature)
+    checksums_path = _resolve_client_bins_dir() / "SHA256SUMS"
+    if not checksums_path.is_file():
+        raise HTTPException(status_code=404, detail="probe checksums not bundled")
+    content = checksums_path.read_bytes()
+    if len(content) > 65536:
+        raise HTTPException(status_code=500, detail="probe checksums file too large")
+    response_signature = hmac.new(
+        SHARED_SECRET.encode(), content + x_timestamp.encode(), hashlib.sha256
+    ).hexdigest()
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "X-Narwhal-Response-Signature": response_signature,
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/api/v1/update/probe/{arch}")
+def agent_update_probe_binary(
+    arch: str,
+    x_timestamp: str = Header(default=""),
+    x_signature: str = Header(default=""),
+) -> FileResponse:
+    """Return the bundled static narwhal-probe binary for an authenticated Client updater."""
+    verify_signature(b"", x_timestamp, x_signature)
+    if arch not in {"amd64", "arm64"}:
+        raise HTTPException(status_code=404, detail="unsupported probe architecture")
+    bin_path = _resolve_client_bins_dir() / f"narwhal-probe-{arch}"
+    if not bin_path.is_file():
+        raise HTTPException(status_code=404, detail="probe binary not bundled")
+    return FileResponse(
+        path=bin_path,
+        media_type="application/octet-stream",
+        filename=f"narwhal-probe-{arch}",
+        headers={"Cache-Control": "no-store"},
     )
 
 
