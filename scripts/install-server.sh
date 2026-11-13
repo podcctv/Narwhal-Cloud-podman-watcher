@@ -1381,6 +1381,15 @@ main() {
   local retention_seconds raw_retention report_max_rows host_security_max_rows
   local connection_auto_stop_enabled
   connection_auto_stop_enabled="$(load_non_empty_or_default "$SERVER_ENV_FILE" CONNECTION_AUTO_STOP_ENABLED "true")"
+  local resource_auto_restart_enabled resource_restart_cpu_threshold_percent resource_restart_memory_threshold_percent
+  local resource_restart_duration_seconds resource_restart_max_gap_seconds resource_restart_cooldown_seconds resource_restart_min_samples
+  resource_auto_restart_enabled="$(load_non_empty_or_default "$SERVER_ENV_FILE" RESOURCE_AUTO_RESTART_ENABLED "true")"
+  resource_restart_cpu_threshold_percent="$(load_non_empty_or_default "$SERVER_ENV_FILE" RESOURCE_RESTART_CPU_THRESHOLD_PERCENT "90")"
+  resource_restart_memory_threshold_percent="$(load_non_empty_or_default "$SERVER_ENV_FILE" RESOURCE_RESTART_MEMORY_THRESHOLD_PERCENT "90")"
+  resource_restart_duration_seconds="$(load_non_empty_or_default "$SERVER_ENV_FILE" RESOURCE_RESTART_DURATION_SECONDS "3600")"
+  resource_restart_max_gap_seconds="$(load_non_empty_or_default "$SERVER_ENV_FILE" RESOURCE_RESTART_MAX_GAP_SECONDS "900")"
+  resource_restart_cooldown_seconds="$(load_non_empty_or_default "$SERVER_ENV_FILE" RESOURCE_RESTART_COOLDOWN_SECONDS "3600")"
+  resource_restart_min_samples="$(load_non_empty_or_default "$SERVER_ENV_FILE" RESOURCE_RESTART_MIN_SAMPLES "5")"
   retention_seconds="$(load_non_empty_or_default "$SERVER_ENV_FILE" PURGE_SECONDS "2592000")"
   raw_retention="$(load_non_empty_or_default "$SERVER_ENV_FILE" RAW_RETENTION_SECONDS "604800")"
   report_max_rows="$(load_non_empty_or_default "$SERVER_ENV_FILE" REPORT_MAX_ROWS "50000")"
@@ -1404,6 +1413,13 @@ CONNECTION_STOP_THRESHOLD=$default_connection_stop_threshold
 CONNECTION_AUTO_STOP_ENABLED=$connection_auto_stop_enabled
 CONNECTION_STOP_DURATION_SECONDS=$default_connection_stop_duration_seconds
 CONNECTION_STOP_MAX_GAP_SECONDS=$default_connection_stop_max_gap_seconds
+RESOURCE_AUTO_RESTART_ENABLED=$resource_auto_restart_enabled
+RESOURCE_RESTART_CPU_THRESHOLD_PERCENT=$resource_restart_cpu_threshold_percent
+RESOURCE_RESTART_MEMORY_THRESHOLD_PERCENT=$resource_restart_memory_threshold_percent
+RESOURCE_RESTART_DURATION_SECONDS=$resource_restart_duration_seconds
+RESOURCE_RESTART_MAX_GAP_SECONDS=$resource_restart_max_gap_seconds
+RESOURCE_RESTART_COOLDOWN_SECONDS=$resource_restart_cooldown_seconds
+RESOURCE_RESTART_MIN_SAMPLES=$resource_restart_min_samples
 OFFLINE_HOST_PURGE_SECONDS=$default_offline_host_purge_seconds
 ALERT_WEBHOOK_URL=$alert_webhook_url
 ALERT_WEBHOOK_MIN_SEVERITY=$alert_webhook_min_severity

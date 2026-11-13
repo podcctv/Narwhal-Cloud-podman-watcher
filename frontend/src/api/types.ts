@@ -1345,7 +1345,7 @@ export interface InvestigationEvidence {
   service_listeners?: { process: string; local: string; pid: string }[];
   automatic_remediation?: { attempted: boolean; succeeded: boolean; items: InvestigationReceipt[] };
 }
-export interface InvestigationAction { id?: number; action_type?: string; status?: string; updated_at?: number; items?: InvestigationReceipt[]; }
+export interface InvestigationAction { id?: number; action_type?: string; status?: string; updated_at?: number; result_message?: string; items?: InvestigationReceipt[]; }
 export interface InvestigationIncident {
   id: number; identity_key: string; host_id: string; runtime: string; project: string; container_name: string;
   user_id: string; title: string; alert_type: string; category: string; severity: string; status: string; state: string;

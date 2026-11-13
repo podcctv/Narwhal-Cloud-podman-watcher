@@ -19,12 +19,13 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
 try:
-    from client import cpu_guard, incus_health, network_quarantine, security_banner
+    from client import cpu_guard, incus_health, network_quarantine, resource_cgroup, security_banner
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics
 except ImportError:
     import cpu_guard
     import incus_health
     import network_quarantine
+    import resource_cgroup
     import security_banner
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics
 
@@ -357,6 +358,265 @@ def _runman_stop_overload_request(
         return False, 'Runman overload stop socket unavailable or timed out; stop was not confirmed'
     finally:
         connection.close()
+
+
+def _runman_current_resource_percent(container: Dict[str, object], metric: str, now: int):
+    if not isinstance(container, dict) or container.get('runtime') != 'runman' or container.get('status') != 'running':
+        return None
+    resources = container.get('runman_resources') if isinstance(container.get('runman_resources'), dict) else {}
+    if metric == 'cpu_percent':
+        monitor = resources.get('monitor_metrics') if isinstance(resources.get('monitor_metrics'), dict) else {}
+        sampled_at = monitor.get('sampled_at')
+        value = monitor.get('cpu_percent')
+        if (
+            monitor.get('available') is not True or type(sampled_at) is not int
+            or sampled_at <= 0 or sampled_at > now + 30 or now - sampled_at > 180
+            or type(value) not in (int, float) or not math.isfinite(float(value))
+            or float(value) < 0 or float(value) > 1000
+        ):
+            return None
+        return float(value)
+    if metric == 'memory_percent':
+        used = resources.get('mem_bytes')
+        limit = resources.get('mem_limit_bytes')
+        if type(used) is not int or used < 0 or type(limit) is not int or limit <= 0:
+            return None
+        value = 100.0 * used / limit
+        return value if math.isfinite(value) and value <= 10000 else None
+    return None
+
+
+def _runman_systemd_unit_state(unit: str, container_name: str):
+    if not shutil.which('systemctl') or not os.path.isdir('/run/systemd/system'):
+        return None, 'systemd is unavailable on the Runman host'
+    try:
+        result = subprocess.run(
+            ['systemctl', 'show', unit, '--property=LoadState', '--property=ActiveState',
+             '--property=MainPID', '--property=ControlGroup', '--no-pager'],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, 'unable to read the exact Runman systemd unit'
+    if result.returncode != 0:
+        return None, 'the exact Runman systemd unit could not be read'
+    properties = {}
+    for line in result.stdout.splitlines():
+        name, sep, value = line.partition('=')
+        if sep:
+            properties[name.strip()] = value.strip()
+    expected_cgroup = f'/system.slice/runman-{container_name}.service'
+    try:
+        pid = int(properties.get('MainPID') or 0)
+    except ValueError:
+        pid = 0
+    if (
+        properties.get('LoadState') != 'loaded'
+        or properties.get('ActiveState') != 'active'
+        or properties.get('ControlGroup') != expected_cgroup
+        or pid <= 1
+    ):
+        return None, 'the exact Runman unit is not loaded, active, and identity-matched'
+    return {'pid': pid, 'cgroup': expected_cgroup}, ''
+
+
+def _runman_read_io_max(container: Dict[str, object]):
+    target, error = resource_cgroup.resolve_container_cgroup(
+        container.get('pid'), 'runman', container.get('stable_id') or container.get('id'),
+        container.get('name'), expected_start_ticks=str(container.get('pid_start_ticks') or ''),
+    )
+    if target is None:
+        return None, error or 'Runman cgroup identity is unavailable'
+    path = os.path.join(str(target), 'io.max')
+    if not os.path.isfile(path):
+        return [], ''
+    try:
+        with open(path, 'r', encoding='ascii', errors='strict') as handle:
+            raw = handle.read(65537)
+    except (OSError, UnicodeError):
+        return None, 'current Runman io.max could not be read'
+    if len(raw) > 65536:
+        return None, 'current Runman io.max exceeded the safe read limit'
+    limits = []
+    for line in raw.splitlines():
+        fields = line.split()
+        if not fields or not re.fullmatch(r'\d+:\d+', fields[0]):
+            return None, 'current Runman io.max format is invalid'
+        values = {'rbps': 'max', 'wbps': 'max', 'riops': 'max', 'wiops': 'max'}
+        for field in fields[1:]:
+            key, sep, value = field.partition('=')
+            if not sep or key not in values or (value != 'max' and not value.isdigit()):
+                return None, 'current Runman io.max format is invalid'
+            values[key] = value
+        limits.append((fields[0], values))
+    return limits, ''
+
+
+def _runman_restore_io_max(container: Dict[str, object], limits):
+    if not limits:
+        return True, ''
+    target, error = resource_cgroup.resolve_container_cgroup(
+        container.get('pid'), 'runman', container.get('stable_id') or container.get('id'),
+        container.get('name'), expected_start_ticks=str(container.get('pid_start_ticks') or ''),
+    )
+    if target is None:
+        return False, error or 'new Runman cgroup identity is unavailable'
+    path = os.path.join(str(target), 'io.max')
+    if not os.path.isfile(path):
+        return False, 'new Runman cgroup does not expose io.max'
+    try:
+        for device, values in limits:
+            line = device + ' ' + ' '.join(f'{key}={values[key]}' for key in ('rbps', 'wbps', 'riops', 'wiops'))
+            with open(path, 'w', encoding='ascii') as handle:
+                handle.write(line)
+        current, read_error = _runman_read_io_max(container)
+        if current is None:
+            return False, read_error
+        observed = {device: values for device, values in current}
+        if any(observed.get(device) != values for device, values in limits):
+            return False, 'restored Runman io.max did not match the saved values'
+        return True, ''
+    except OSError:
+        return False, 'saved Runman io.max could not be restored'
+
+
+def _runman_restart_overload_request(action: Dict[str, object], node_id: str) -> Tuple[bool, str]:
+    """Restart only the still-overloaded Runman UUID service after fresh checks."""
+    runtime = str(action.get('runtime') or '').lower()
+    project = str(action.get('project') or '')
+    container_name = str(action.get('container_name') or '').lower()
+    params = action.get('params') if isinstance(action.get('params'), dict) else {}
+    metric = str(params.get('metric') or '')
+    try:
+        threshold = float(params.get('threshold_percent'))
+        observed = float(params.get('observed_percent'))
+        duration = int(params.get('duration_seconds'))
+        required = int(params.get('required_duration_seconds'))
+        samples = int(params.get('sample_count'))
+        max_gap = int(params.get('max_gap_seconds'))
+        observed_at = int(params.get('observed_at'))
+        expires_at = int(params.get('expires_at'))
+    except (TypeError, ValueError, OverflowError):
+        return False, 'resource restart evidence is incomplete'
+    instance_id = str(params.get('instance_id') or '').lower()
+    current_time = int(time.time())
+    if (
+        os.name != 'posix' or not hasattr(socket, 'AF_UNIX')
+        or runtime != 'runman' or project != 'default'
+        or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', container_name)
+        or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', instance_id)
+        or params.get('reason') != 'sustained_resource_overload'
+        or params.get('metric_schema') != 1 or metric not in {'cpu_percent', 'memory_percent'}
+        or not math.isfinite(threshold) or not 1 <= threshold <= 100
+        or not math.isfinite(observed) or observed < threshold
+        or duration < required or required < 3600 or required > 86400
+        or samples < 5 or samples > 100000
+        or not 60 <= max_gap <= 1800
+        or params.get('duration_verified') is not True
+        or params.get('expected_node_id') != node_id or not node_id
+        or observed_at <= 0 or observed_at > current_time + 30
+        or current_time - observed_at > max_gap
+        or expires_at < current_time or expires_at - current_time > max_gap + 30
+        or _runman_instance_generations.get(container_name) != instance_id
+    ):
+        return False, 'Runman resource restart evidence is invalid, stale, or bound to another generation'
+
+    try:
+        import fcntl
+    except ImportError:
+        return False, 'exclusive restart locking is unavailable; no restart attempted'
+    lock_path = '/run/narwhal-agent/resource-overload-restart.lock'
+    lock_fd = None
+    try:
+        if not os.path.isdir(os.path.dirname(lock_path)):
+            return False, 'Runman agent runtime directory is unavailable; no restart attempted'
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        lock_fd = os.open(lock_path, flags, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False, 'another resource restart is being handled; no duplicate restart attempted'
+
+        # Re-read the authoritative inventory after taking the local lock.
+        inventory = _agent_attr('_runman_inventory_containers', _runman_inventory_containers)
+        containers = inventory()
+        target = next((item for item in containers if item.get('name') == container_name), None)
+        generations = _agent_attr('_runman_instance_generations', _runman_instance_generations)
+        if (
+            target is None or target.get('project') != 'default'
+            or target.get('status') != 'running'
+            or str(target.get('instance_id') or '').lower() != instance_id
+            or generations.get(container_name) != instance_id
+        ):
+            return False, 'Runman instance changed or stopped before restart; action cancelled'
+        current_value = _runman_current_resource_percent(target, metric, int(time.time()))
+        if current_value is None or current_value < threshold:
+            return False, 'Runman resource pressure recovered or current metric is unavailable; action cancelled'
+        saved_io_limits, io_error = _runman_read_io_max(target)
+        if saved_io_limits is None:
+            return False, f'current Runman I/O limits could not be preserved: {io_error}; no restart attempted'
+
+        unit = f'runman-{container_name}.service'
+        try:
+            jobs = subprocess.run(
+                ['systemctl', 'list-jobs', '--no-legend', '--no-pager'],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False, 'unable to check active systemd lifecycle jobs; no restart attempted'
+        if jobs.returncode != 0:
+            return False, 'unable to verify systemd lifecycle jobs; no restart attempted'
+        if any(len(fields := line.split()) >= 4 and fields[1] == unit for line in jobs.stdout.splitlines()):
+            return False, 'the Runman instance already has a systemd lifecycle job; restart cancelled'
+
+        before, reason = _runman_systemd_unit_state(unit, container_name)
+        if before is None:
+            return False, reason
+        try:
+            restarted = subprocess.run(
+                ['systemctl', 'restart', unit], capture_output=True, text=True,
+                timeout=180, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            restarted = None
+        except OSError:
+            return False, 'systemd restart could not be requested'
+
+        deadline = time.monotonic() + 120
+        after = None
+        while time.monotonic() < deadline:
+            after, _ = _runman_systemd_unit_state(unit, container_name)
+            if after is not None and after['pid'] != before['pid']:
+                break
+            time.sleep(2)
+        if after is None or after['pid'] == before['pid']:
+            if restarted is None or restarted.returncode == 0:
+                return False, 'systemd restart did not verify an active unit with a new MainPID'
+            return False, 'systemd did not verify a restart of the exact Runman unit'
+        io_message = ''
+        if saved_io_limits:
+            restarted_containers = inventory()
+            target_after = next((item for item in restarted_containers if item.get('name') == container_name), None)
+            if target_after is None or target_after.get('status') != 'running':
+                io_message = '; warning: restart verified but previous io.max could not be restored because Runman inventory is unavailable'
+            else:
+                restored, restore_error = _runman_restore_io_max(target_after, saved_io_limits)
+                if restored:
+                    io_message = '; previous io.max limits restored and read back'
+                else:
+                    io_message = f'; warning: restart verified but previous io.max restore failed: {restore_error}'
+        return True, (
+            f'restarted exact Runman unit; active MainPID changed {before["pid"]}->{after["pid"]}; '
+            f'pre-restart {metric} was {current_value:.1f}% (threshold {threshold:.1f}%){io_message}'
+        )
+    except OSError:
+        return False, 'resource restart lock or systemd access failed; no success was confirmed'
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except (NameError, OSError):
+                pass
+            os.close(lock_fd)
 
 
 def run(cmd: List[str], timeout: float | None = None) -> str:

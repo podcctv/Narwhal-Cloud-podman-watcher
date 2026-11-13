@@ -47,6 +47,13 @@ CONNECTION_STOP_THRESHOLD = int(os.getenv("CONNECTION_STOP_THRESHOLD", "2000"))
 CONNECTION_AUTO_STOP_ENABLED = os.getenv('CONNECTION_AUTO_STOP_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
 CONNECTION_STOP_DURATION_SECONDS = max(60, int(os.getenv("CONNECTION_STOP_DURATION_SECONDS", "300")))
 CONNECTION_STOP_MAX_GAP_SECONDS = max(1, min(600, int(os.getenv("CONNECTION_STOP_MAX_GAP_SECONDS", "360"))))
+RESOURCE_AUTO_RESTART_ENABLED = os.getenv('RESOURCE_AUTO_RESTART_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
+RESOURCE_RESTART_CPU_THRESHOLD_PERCENT = max(1.0, min(100.0, float(os.getenv('RESOURCE_RESTART_CPU_THRESHOLD_PERCENT', '90'))))
+RESOURCE_RESTART_MEMORY_THRESHOLD_PERCENT = max(1.0, min(100.0, float(os.getenv('RESOURCE_RESTART_MEMORY_THRESHOLD_PERCENT', '90'))))
+RESOURCE_RESTART_DURATION_SECONDS = max(3600, min(86400, int(os.getenv('RESOURCE_RESTART_DURATION_SECONDS', '3600'))))
+RESOURCE_RESTART_MAX_GAP_SECONDS = max(60, min(1800, int(os.getenv('RESOURCE_RESTART_MAX_GAP_SECONDS', '900'))))
+RESOURCE_RESTART_COOLDOWN_SECONDS = max(3600, min(86400, int(os.getenv('RESOURCE_RESTART_COOLDOWN_SECONDS', '3600'))))
+RESOURCE_RESTART_MIN_SAMPLES = max(5, min(100, int(os.getenv('RESOURCE_RESTART_MIN_SAMPLES', '5'))))
 STALE_SECONDS = int(os.getenv("STALE_SECONDS", "900"))
 RFW_APPLICATION_PROTOCOLS = ("http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto")
 RFW_CN_ALERT_PROTOCOLS = {"socks", "fet", "wireguard", "mtproto", "openvpn"}
@@ -132,10 +139,11 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, ip_reputation, inbound_assessment, database_telemetry, control_reconciliation
+    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, resource_overload_policy, ip_reputation, inbound_assessment, database_telemetry, control_reconciliation
 except ImportError:
     import operations
     import connection_policy
+    import resource_overload_policy
     import operations_api
     import disk_cleanup
     import investigation
@@ -487,6 +495,7 @@ def init_db() -> None:
     )
     operations.initialize(conn)
     connection_policy.initialize(conn)
+    resource_overload_policy.initialize(conn)
     buyer_notifications.initialize(conn)
     investigation.initialize(conn)
     commerce.initialize(conn)
@@ -2242,7 +2251,7 @@ def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
     conn.execute("DELETE FROM security_alert_decisions WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_evidence WHERE alert_id IN (SELECT id FROM security_alerts WHERE host_id=?)", (host_id,))
     conn.execute("DELETE FROM security_alert_policies WHERE fingerprint IN (SELECT fingerprint FROM security_alerts WHERE host_id=?)", (host_id,))
-    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "buyer_user_notices", "host_firewall_policies", "host_firewall_policy_history", "host_firewall_readbacks"):
+    for table in ("reports", "security_alerts", "host_security", "security_actions", "connection_overloads", "resource_overload_windows", "buyer_user_notices", "host_firewall_policies", "host_firewall_policy_history", "host_firewall_readbacks"):
         conn.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
     conn.execute("DELETE FROM hosts WHERE host_id=?", (host_id,))
 
@@ -3831,12 +3840,25 @@ async def report(
     notifications: List[Dict[str, Any]] = []
     firewall_event_cursor = ""
     automatic_stops_queued = 0
+    automatic_resource_restarts_queued = 0
     automatic_deep_samples_queued = 0
     try:
         client_ip = reach_monitor.extract_client_ip(request)
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config, client_ip)
         _maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, int(time.time()))
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers, incus_runtime_health)
+        automatic_resource_restarts_queued = resource_overload_policy.observe(
+            conn, host_id, node_id, ts, containers,
+            now=int(time.time()),
+            enabled=RESOURCE_AUTO_RESTART_ENABLED,
+            cpu_threshold=RESOURCE_RESTART_CPU_THRESHOLD_PERCENT,
+            memory_threshold=RESOURCE_RESTART_MEMORY_THRESHOLD_PERCENT,
+            required_duration=RESOURCE_RESTART_DURATION_SECONDS,
+            max_gap=RESOURCE_RESTART_MAX_GAP_SECONDS,
+            cooldown=RESOURCE_RESTART_COOLDOWN_SECONDS,
+            min_samples=RESOURCE_RESTART_MIN_SAMPLES,
+            stale_seconds=STALE_SECONDS,
+        )
         for c in containers:
             stored_payload = dict(c)
             stored_payload["_agent_version"] = agent_version
@@ -4008,6 +4030,7 @@ async def report(
         "firewall_event_cursor": firewall_event_cursor,
         "automatic_deep_samples_queued": automatic_deep_samples_queued,
         "automatic_stops_queued": automatic_stops_queued,
+        "automatic_resource_restarts_queued": automatic_resource_restarts_queued,
         "narwhal_buyer_push": {"owner": "server", "enabled": False},
         "motd_states": motd_states,
     }
@@ -6577,6 +6600,8 @@ async def poll_security_actions(
             stored = json.loads(row["params_json"] or "{}")
             if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'confirm_replaced_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
                 continue
+            if row["action_type"] == "restart_container" and stored.get("expected_node_id") != node_id:
+                continue
             params = _refresh_remediation_process_pids(conn, row)
             conn.execute(
                 "UPDATE security_actions SET status='dispatched', attempts=attempts+1, updated_at=?, params_json=? WHERE id=?",
@@ -6672,7 +6697,7 @@ async def security_action_result(
         if row is None or row["host_id"] != host_id:
             raise HTTPException(status_code=404, detail="action not found for host")
         params = json.loads(row["params_json"] or "{}")
-        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback", "release_network_quarantine", "confirm_replaced_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} and params.get("expected_node_id") != node_id:
+        if row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback", "release_network_quarantine", "confirm_replaced_network_quarantine",'disk_cleanup_scan','disk_cleanup_execute', 'apply_container_connlimit', 'release_container_connlimit', 'apply_host_firewall_policy', 'delete_host_firewall_rule', "restart_container"} and params.get("expected_node_id") != node_id:
             raise HTTPException(status_code=403, detail="action belongs to another node")
         if row["action_type"] in ("remediate_panel_pairing", "remediate_malicious_process") and status in {"succeeded", "failed"}:
             if _remediation_changed(message):
@@ -6707,6 +6732,12 @@ async def security_action_result(
             if status in {'succeeded','failed'} and row['action_type'] == 'stop_container':
                 operations.record_connection_guard(conn,action_id,now)
                 buyer_notifications.reconcile(conn,host_id,now)
+            if status in {'succeeded','failed'} and row['action_type'] == 'restart_container':
+                resource_overload_policy.record_action(conn, action_id, now)
+                buyer_notifications.reconcile(conn, host_id, now)
+                alert_row = conn.execute("SELECT alert_id FROM security_actions WHERE id=?", (action_id,)).fetchone()
+                if alert_row and int(alert_row[0] or 0) > 0:
+                    investigation.sync_states(conn, host_id, now, alert_id=int(alert_row[0]))
             if status == "succeeded" and row["action_type"] == "self_uninstall":
                 _purge_host(conn, host_id)
                 invalidate_security_status_cache()

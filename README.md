@@ -1,10 +1,19 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.8.0**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.8.28**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
+
+Runman 持续 CPU/内存过载重启策略：[docs/resource-overload-restart.md](docs/resource-overload-restart.md)。
+
+### v1.8.28：Runman 连续资源过载后自动重启
+
+- CPU 或内存达到 90% 并连续 1 小时后，按新鲜采样、至少 5 次采样、Runman UUID 代次和节点身份核验后才排队重启。
+- 仅 Client Agent v1.8.28 或更新版本执行；执行前复核当前负载、实例与 systemd unit，检查并发生命周期任务，成功后核验 MainPID 变化并恢复已有 `ct/io.max`。
+- 自动重启作为资源保护事件记录，不作为用户滥用结论；当前 Runman API 没有生命周期锁定重启端点，剩余并发竞态见策略文档。
+- 本次更新尚未部署到生产节点。
 
 Incus 卡住实例巡检与安全护栏：[docs/incus-runtime-health.md](docs/incus-runtime-health.md)。
 
@@ -1625,6 +1634,13 @@ ALERT_CONN_CRITICAL_THRESHOLD=1000
 CONNECTION_STOP_THRESHOLD=1500
 CONNECTION_STOP_DURATION_SECONDS=3600
 CONNECTION_STOP_MAX_GAP_SECONDS=600
+RESOURCE_AUTO_RESTART_ENABLED=true
+RESOURCE_RESTART_CPU_THRESHOLD_PERCENT=90
+RESOURCE_RESTART_MEMORY_THRESHOLD_PERCENT=90
+RESOURCE_RESTART_DURATION_SECONDS=3600
+RESOURCE_RESTART_MAX_GAP_SECONDS=900
+RESOURCE_RESTART_COOLDOWN_SECONDS=3600
+RESOURCE_RESTART_MIN_SAMPLES=5
 OFFLINE_HOST_PURGE_SECONDS=604800
 DASHBOARD_USERNAME=安装时随机生成
 DASHBOARD_PASSWORD=安装时随机生成

@@ -115,9 +115,9 @@ def _evidence(alert):
 
 
 def _action(conn, alert):
-    row = conn.execute("SELECT id,action_type,status,updated_at FROM security_actions WHERE alert_id=? "
+    row = conn.execute("SELECT id,action_type,status,updated_at,result_message FROM security_actions WHERE alert_id=? "
                        "AND created_at>=? AND action_type IN ('enforce_socks_auth','stop_reviewed_socks','remediate_panel_pairing',"
-                       "'remediate_malicious_process','stop_container','apply_udp_throttle','release_udp_throttle',"
+                       "'remediate_malicious_process','stop_container','restart_container','apply_udp_throttle','release_udp_throttle',"
                        "'release_socks_auth','allow_panel_domains','disallow_panel_domains') ORDER BY id DESC LIMIT 1",
                        (alert["id"], alert["first_seen"])).fetchone()
     if not row:

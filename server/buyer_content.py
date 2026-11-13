@@ -446,6 +446,10 @@ def execution_text(details, action=None):
         parts.append(f"另外 {len(entries)-6} 项处理记录已保存，需要详情请发工单")
     if success and result.get("action_type") == "stop_container":
         parts.append("系统已停止该实例，未删除实例")
+    if success and result.get("action_type") == "restart_container":
+        parts.append("系统已重启该 Runman 实例，未删除实例")
+        if "warning:" in raw:
+            parts.append(clean(raw[raw.index("warning:"):], 240))
     if success and result.get("action_type") == "apply_udp_throttle":
         parts.append(f"相关代理已限速至 {fmt(params.get('rate_mbps'))} Mbps，计划 {fmt(num(params.get('duration'))/60)} 分钟")
     text = "系统已执行处理操作" if success else "系统尝试处理，但未能全部完成"

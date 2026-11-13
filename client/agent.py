@@ -129,6 +129,7 @@ try:
         _runtime_command_timeout,
         _runman_exec_request,
         _runman_stop_overload_request,
+        _runman_restart_overload_request,
         run,
         run_first_success,
         _runtime_base,
@@ -296,6 +297,7 @@ except ImportError:
         _runtime_command_timeout,
         _runman_exec_request,
         _runman_stop_overload_request,
+        _runman_restart_overload_request,
         run,
         run_first_success,
         _runtime_base,
@@ -8662,6 +8664,11 @@ def execute_security_action(action: Dict) -> Tuple[bool, str]:
         return anti_spoof_guard.release_anti_spoof(veth_name, runtime=runtime_kind, name=container_name)
     if action_type == "remediate_malicious_process":
         return remediate_malicious_process(action)
+    if action_type == "restart_container":
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        if params.get("expected_node_id") != node_id or not node_id:
+            return False, "resource restart belongs to another watcher node; no local restart attempted"
+        return _runman_restart_overload_request(action, node_id)
     if action_type == "stop_container":
         runtime_kind = str(action.get("runtime") or "").strip().lower()
         container_name = str(action.get("container_name") or "").strip()
