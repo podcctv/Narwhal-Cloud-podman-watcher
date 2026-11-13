@@ -19,12 +19,13 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
 try:
-    from client import cpu_guard, incus_health, network_quarantine
+    from client import cpu_guard, incus_health, network_quarantine, security_banner
     from client.incus_metrics import parse_incus_metrics as _parse_incus_metrics
 except ImportError:
     import cpu_guard
     import incus_health
     import network_quarantine
+    import security_banner
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics
 
 for _guard_name in ("container_freeze", "udp_guard", "anti_spoof_guard", "file_guard", "microburst_guard"):
@@ -1552,8 +1553,7 @@ def _runman_proc_snapshot(pid: int) -> Dict[str, object]:
 
 def _runman_inventory_containers() -> List[Dict[str, str]]:
     """Read Runman's bounded, root-only inventory and generation-bound metrics."""
-    global _runman_instance_generations
-    _runman_instance_generations = {}
+    _runman_instance_generations.clear()
     if os.name != 'posix' or not hasattr(socket, 'AF_UNIX'):
         return []
     configured = os.getenv('CONTAINER_RUNTIMES', 'auto').strip().lower().replace(' ', '')
@@ -1769,7 +1769,7 @@ def _runman_inventory_containers() -> List[Dict[str, str]]:
                 'net_metrics_available': raw_item.get('net_metrics_available') is True,
             },
         })
-    _runman_instance_generations = generations
+    _runman_instance_generations.update(generations)
     return items
 
 

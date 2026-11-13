@@ -2,6 +2,11 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## 修复 `runtime_drivers.py` Linux Runman `security_banner` 导入与代次字典同步（v1.8.26）
+
+- 补充 `client/runtime_drivers.py` 中缺失的 `security_banner` 导入，修复 Linux `/proc` 校验路径下的 `NameError`。
+- 将 `_runman_inventory_containers()` 中的 `_runman_instance_generations` 重置与更新改为原地 `.clear()` / `.update()`，确保与 `agent._runman_instance_generations` 共享同一字典引用。
+
 ## 客户端核心采集模块拆分与覆盖升级/回滚跨架构基建加固（v1.8.25）
 
 - **需求背景**：
