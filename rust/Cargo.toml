@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proc-probe",
+    "crates/socket-sec",
+    "crates/narwhal-probe",
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

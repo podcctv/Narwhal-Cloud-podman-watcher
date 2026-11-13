@@ -1,0 +1,8 @@
+[package]
+name = "narwhal-probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+proc-probe = { path = "../proc-probe" }
+socket-sec = { path = "../socket-sec" }
