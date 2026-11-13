@@ -374,10 +374,10 @@ class LiveEvidenceTests(unittest.TestCase):
         self.assertIn('client/vmess_guard.py',installer)
         self.assertIn('client/speedtest_guard.py',installer)
         self.assertIn('client/manual_bandwidth.py',installer)
-        self.assertEqual(updater.count('vmess_guard speedtest_guard manual_bandwidth; do'),2)
-        self.assertIn('"$stage/client/speedtest_guard.py"',updater)
-        self.assertIn('"$stage/client/manual_bandwidth.py"',updater)
-        self.assertIn('"$snapshot/manual_bandwidth.py"',updater)
+        self.assertIn('for f in "$ROOT_DIR"/client/*.py; do',installer)
+        self.assertIn('stage_py_files=("$stage/client"/*.py)',updater)
+        self.assertIn('for app_py in "$app_dir"/*.py; do',updater)
+        self.assertIn('for snap_py in "$snapshot_client_dir"/*.py; do',updater)
 
 
 if __name__=='__main__': unittest.main()

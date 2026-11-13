@@ -7,6 +7,7 @@ action_id=${4:-${2:-0}}
 [[ "$action_id" =~ ^[0-9]+$ ]] || exit 2
 snapshot="$base/client-previous"
 app_dir="$base/client-agent"
+systemd_unit="${NARWHAL_SYSTEMD_SERVICE_FILE:-/etc/systemd/system/narwhal-monitor-client.service}"
 exec 9>"$base/managed-client-update.lock"
 flock -n 9 || { echo 'another managed upgrade is running'; exit 1; }
 exec 8>/run/narwhal-monitor-client-auto-update.lock
@@ -57,37 +58,67 @@ wait_for_client_stable() {
   return 1
 }
 restore() {
-  [[ -f "$snapshot/agent.py" && -f "$snapshot/client.env" ]] || return 1
+  local snapshot_client_dir="$snapshot/client"
+  if [[ ! -d "$snapshot_client_dir" ]]; then
+    snapshot_client_dir="$snapshot"
+  fi
+  [[ -f "$snapshot_client_dir/agent.py" && -f "$snapshot/client.env" ]] || return 1
   systemctl stop narwhal-monitor-client.service || return 1
   if [[ -f "$app_dir/admission_guard.py" ]]; then
     "$app_dir/.venv/bin/python" "$app_dir/admission_guard.py" --release-all || return 1
   fi
-  for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard incus_health incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard speedtest_guard container_freeze udp_guard anti_spoof_guard file_guard microburst_guard; do
-    if [[ -f "$snapshot/$module.py" ]]; then
-      install -m 0644 "$snapshot/$module.py" "$app_dir/$module.py" || return 1
+  shopt -s nullglob
+  local cur_py cur_name snap_py cur_bin bin_name snap_bin
+  for cur_py in "$app_dir"/*.py; do
+    cur_name=$(basename "$cur_py")
+    if [[ ! -f "$snapshot_client_dir/$cur_name" ]]; then
+      rm -f "$cur_py" || return 1
     fi
   done
-  if [[ -f "$snapshot/manual_bandwidth.py" ]]; then
-    install -m 0644 "$snapshot/manual_bandwidth.py" "$app_dir/manual_bandwidth.py" || return 1
-  else
-    rm -f "$app_dir/manual_bandwidth.py" || return 1
+  if [[ -f "$snapshot/staged-files.manifest" ]]; then
+    while IFS= read -r staged_rel; do
+      [[ -n "$staged_rel" ]] || continue
+      if [[ ! -f "$snapshot_client_dir/$staged_rel" ]]; then
+        rm -f "$app_dir/$staged_rel" || return 1
+      fi
+    done <"$snapshot/staged-files.manifest"
   fi
-  install -m 0644 "$snapshot/agent.py" "$app_dir/agent.py" || return 1
-  if [[ -f "$snapshot/operations.py" ]]; then
-    install -m 0644 "$snapshot/operations.py" "$app_dir/operations.py" || return 1
+  if [[ -d "$app_dir/bin" ]]; then
+    for cur_bin in "$app_dir/bin"/*; do
+      [[ -f "$cur_bin" ]] || continue
+      bin_name=$(basename "$cur_bin")
+      if [[ ! -f "$snapshot_client_dir/bin/$bin_name" ]]; then
+        rm -f "$cur_bin" || return 1
+      fi
+    done
+    if [[ ! -d "$snapshot_client_dir/bin" ]]; then
+      rmdir "$app_dir/bin" 2>/dev/null || true
+    fi
   fi
-  if [[ -f "$snapshot/security_banner.py" ]]; then
-    install -m 0644 "$snapshot/security_banner.py" "$app_dir/security_banner.py" || return 1
+  for snap_py in "$snapshot_client_dir"/*.py; do
+    install -m 0644 "$snap_py" "$app_dir/$(basename "$snap_py")" || return 1
+  done
+  if [[ -d "$snapshot_client_dir/bin" ]]; then
+    mkdir -p "$app_dir/bin" || return 1
+    for snap_bin in "$snapshot_client_dir/bin"/*; do
+      [[ -f "$snap_bin" ]] || continue
+      install -m 0755 "$snap_bin" "$app_dir/bin/$(basename "$snap_bin")" || return 1
+    done
   fi
-  if [[ -f "$snapshot/tcp_probe.py" ]]; then
-    install -m 0644 "$snapshot/tcp_probe.py" "$app_dir/tcp_probe.py" || return 1
-  fi
-  if [[ -f "$snapshot/gfw_probe.py" ]]; then
-    install -m 0644 "$snapshot/gfw_probe.py" "$app_dir/gfw_probe.py" || return 1
-  fi
+  shopt -u nullglob
   install -m 0600 "$snapshot/client.env" "$base/client.env" || return 1
   install -m 0644 "$snapshot/requirements.txt" "$app_dir/requirements.txt" || return 1
   "$app_dir/.venv/bin/pip" install -r "$app_dir/requirements.txt" || return 1
+  if [[ -f "$snapshot/managed-client-update.sh" ]]; then
+    install -m 0755 "$snapshot/managed-client-update.sh" "$base/managed-client-update.sh" || return 1
+  fi
+  if [[ -f "$snapshot/update_archive.py" ]]; then
+    install -m 0755 "$snapshot/update_archive.py" "$base/update_archive.py" || return 1
+  fi
+  if [[ -f "$snapshot/narwhal-monitor-client.service" ]]; then
+    install -m 0644 "$snapshot/narwhal-monitor-client.service" "$systemd_unit" || return 1
+    systemctl daemon-reload || return 1
+  fi
   systemctl restart narwhal-monitor-client.service || return 1
   wait_for_client_stable
 }
@@ -163,30 +194,53 @@ elif [[ "$update_mode" == archive ]]; then
 else
   fail_preflight 'invalid automatic update mode'
 fi
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard incus_health incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard speedtest_guard manual_bandwidth; do
-  "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
+shopt -s nullglob
+stage_py_files=("$stage/client"/*.py)
+shopt -u nullglob
+[[ ${#stage_py_files[@]} -gt 0 && -f "$stage/client/agent.py" ]] || fail_preflight 'staged client bundle is missing Python modules'
+"$app_dir/.venv/bin/python" -m py_compile "${stage_py_files[@]}"
+rm -rf "$snapshot"
+mkdir -p "$snapshot/client"
+chmod 0700 "$snapshot" "$snapshot/client"
+: >"$snapshot/installed-files.manifest"
+: >"$snapshot/staged-files.manifest"
+shopt -s nullglob
+for stage_py in "$stage/client"/*.py; do
+  printf '%s\n' "$(basename "$stage_py")" >>"$snapshot/staged-files.manifest"
 done
-for module in container_freeze udp_guard anti_spoof_guard file_guard microburst_guard; do
-  "$app_dir/.venv/bin/python" -m py_compile "$stage/client/$module.py"
+if [[ -d "$stage/client/bin" ]]; then
+  for stage_bin in "$stage/client/bin"/*; do
+    [[ -f "$stage_bin" ]] || continue
+    printf 'bin/%s\n' "$(basename "$stage_bin")" >>"$snapshot/staged-files.manifest"
+  done
+fi
+for app_py in "$app_dir"/*.py; do
+  app_py_name=$(basename "$app_py")
+  install -m 0644 "$app_py" "$snapshot/client/$app_py_name"
+  printf '%s\n' "$app_py_name" >>"$snapshot/installed-files.manifest"
 done
-"$app_dir/.venv/bin/python" -m py_compile "$stage/client/gfw_probe.py"
-"$app_dir/.venv/bin/python" -m py_compile "$stage/client/agent.py" "$stage/client/operations.py" "$stage/client/incus_health.py" "$stage/client/security_banner.py" "$stage/client/tcp_probe.py" "$stage/client/gfw_probe.py" "$stage/client/incus_metrics.py" "$stage/client/disk_cleanup.py" "$stage/client/disk_cleanup_worker.py" "$stage/client/host_security_audit.py" "$stage/client/vmess_guard.py" "$stage/client/speedtest_guard.py" "$stage/client/manual_bandwidth.py" "$stage/client/cpu_guard.py" "$stage/client/io_guard.py" "$stage/client/memory_guard.py"
-mkdir -p "$snapshot"
-chmod 0700 "$snapshot"
-install -m 0644 "$app_dir/agent.py" "$snapshot/agent.py"
-for module in abuse_detection abuse_collection abuse_guard network_quarantine admission_policy admission_linux admission_guard admission_observe pasarguard_guard cpu_guard io_guard memory_guard incus_health incus_metrics disk_cleanup disk_cleanup_worker socks_detector host_security_audit vmess_guard speedtest_guard manual_bandwidth; do
-  [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
-done
-for module in container_freeze udp_guard anti_spoof_guard file_guard microburst_guard; do
-  [[ ! -f "$app_dir/$module.py" ]] || install -m 0644 "$app_dir/$module.py" "$snapshot/$module.py"
-done
-[[ ! -f "$app_dir/gfw_probe.py" ]] || install -m 0644 "$app_dir/gfw_probe.py" "$snapshot/gfw_probe.py"
-[[ ! -f "$app_dir/operations.py" ]] || install -m 0644 "$app_dir/operations.py" "$snapshot/operations.py"
-[[ ! -f "$app_dir/security_banner.py" ]] || install -m 0644 "$app_dir/security_banner.py" "$snapshot/security_banner.py"
-[[ ! -f "$app_dir/tcp_probe.py" ]] || install -m 0644 "$app_dir/tcp_probe.py" "$snapshot/tcp_probe.py"
-[[ ! -f "$app_dir/gfw_probe.py" ]] || install -m 0644 "$app_dir/gfw_probe.py" "$snapshot/gfw_probe.py"
+if [[ -d "$app_dir/bin" ]]; then
+  mkdir -p "$snapshot/client/bin"
+  chmod 0755 "$snapshot/client/bin"
+  for app_bin in "$app_dir/bin"/*; do
+    [[ -f "$app_bin" ]] || continue
+    app_bin_name=$(basename "$app_bin")
+    install -m 0755 "$app_bin" "$snapshot/client/bin/$app_bin_name"
+    printf 'bin/%s\n' "$app_bin_name" >>"$snapshot/installed-files.manifest"
+  done
+fi
+shopt -u nullglob
 install -m 0644 "$app_dir/requirements.txt" "$snapshot/requirements.txt"
 install -m 0600 "$base/client.env" "$snapshot/client.env"
+if [[ -f "$systemd_unit" ]]; then
+  install -m 0644 "$systemd_unit" "$snapshot/narwhal-monitor-client.service"
+fi
+if [[ -f "$base/managed-client-update.sh" ]]; then
+  install -m 0755 "$base/managed-client-update.sh" "$snapshot/managed-client-update.sh"
+fi
+if [[ -f "$base/update_archive.py" ]]; then
+  install -m 0755 "$base/update_archive.py" "$snapshot/update_archive.py"
+fi
 if [[ "$update_mode" == git ]]; then
   git -C "$repo" rev-parse HEAD >"$snapshot/revision"
 else

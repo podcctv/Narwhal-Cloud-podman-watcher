@@ -22,6 +22,22 @@ if [[ "$MODE" != "install" && "$MODE" != "update" ]]; then
   exit 1
 fi
 
+normalize_arch() {
+  local raw_arch="${1:-$(uname -m)}"
+  case "$raw_arch" in
+    x86_64|amd64)
+      printf 'amd64\n'
+      ;;
+    aarch64|arm64)
+      printf 'arm64\n'
+      ;;
+    *)
+      echo "[ERROR] Unsupported CPU architecture: ${raw_arch:-unknown} (supported: x86_64/amd64, aarch64/arm64)" >&2
+      return 1
+      ;;
+  esac
+}
+
 generate_secret() {
   tr -d '-' </proc/sys/kernel/random/uuid | cut -c 1-25
 }
@@ -161,6 +177,8 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Please run as root: sudo bash scripts/install-client.sh ${MODE}"
   exit 1
 fi
+
+TARGET_ARCH="$(normalize_arch)"
 
 has_podman=0
 has_docker=0
@@ -520,7 +538,16 @@ cp "$ROOT_DIR/client/manual_bandwidth.py" "$CLIENT_APP_DIR/manual_bandwidth.py"
 for f in "$ROOT_DIR"/client/*.py; do
   [[ -f "$f" ]] && cp "$f" "$CLIENT_APP_DIR/"
 done
+if [[ -d "$ROOT_DIR/client/bin" ]]; then
+  mkdir -p "$CLIENT_APP_DIR/bin"
+  for b in "$ROOT_DIR"/client/bin/*; do
+    [[ -f "$b" ]] && install -m 0755 "$b" "$CLIENT_APP_DIR/bin/$(basename "$b")"
+  done
+fi
 install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
+if [[ -f "$ROOT_DIR/scripts/update_archive.py" ]]; then
+  install -m 0755 "$ROOT_DIR/scripts/update_archive.py" /opt/narwhal-monitor/update_archive.py
+fi
 cp "$ROOT_DIR/client/requirements.txt" "$CLIENT_APP_DIR/requirements.txt"
 cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"
 chmod 0700 "$SELF_UNINSTALL_SCRIPT"
@@ -585,6 +612,7 @@ cat <<EOF_SUM
 ===== Client Install Summary =====
 Mode: $MODE
 Version: $PROJECT_VERSION
+Arch: $TARGET_ARCH
 Runtime: host agent (systemd)
 Service Name: narwhal-monitor-client.service
 Server URL: $server_url

@@ -18,7 +18,9 @@ class ClientPackagingTests(unittest.TestCase):
 
     def test_managed_upgrade_validates_and_snapshots_incus_metrics(self):
         updater=(ROOT/"scripts"/"managed-client-update.sh").read_text(encoding="utf-8")
-        self.assertGreaterEqual(updater.count("incus_metrics"),4)
+        self.assertIn('stage_py_files=("$stage/client"/*.py)',updater)
+        self.assertIn('for app_py in "$app_dir"/*.py; do',updater)
+        self.assertIn('for snap_py in "$snapshot_client_dir"/*.py; do',updater)
         self.assertIn("wait_for_client_stable",updater)
         self.assertIn("systemctl show --no-pager --property=ActiveState,SubState,MainPID,NRestarts",updater)
         self.assertIn("&& wait_for_client_stable; then",updater)

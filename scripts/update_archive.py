@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import os
+import platform
 import re
 import shutil
 import sys
@@ -38,6 +39,12 @@ MAX_CLIENT_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_CLIENT_FILES = 2000
 MAX_CLIENT_FILE_BYTES = 16 * 1024 * 1024
 ARCHIVE_DOWNLOAD_ATTEMPTS = 3
+SUPPORTED_ARCHES = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+}
 CLIENT_REQUIRED_FILES = (
     "VERSION",
     "client/agent.py",
@@ -52,6 +59,19 @@ CLIENT_REQUIRED_FILES = (
     "scripts/managed-client-update.sh",
     "scripts/update_archive.py",
 )
+
+
+def normalize_arch(machine: str | None = None) -> str:
+    """Normalize host machine architecture (uname -m) to amd64 or arm64."""
+    if machine is None:
+        raw = os.uname().machine if hasattr(os, "uname") else platform.machine()
+    else:
+        raw = machine
+    key = str(raw).strip().lower()
+    normalized = SUPPORTED_ARCHES.get(key)
+    if not normalized:
+        raise RuntimeError(f"unsupported CPU architecture: {key or 'unknown'}")
+    return normalized
 
 
 def _read_url(url: str, *, timeout: int = 15, limit: int = 2 * 1024 * 1024) -> bytes:
@@ -365,7 +385,7 @@ def _extract_safe(archive_path: Path, destination: Path, expected_revision: str)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("resolve", "version", "download", "download-client"))
+    parser.add_argument("command", choices=("resolve", "version", "arch", "download", "download-client"))
     parser.add_argument("reference", nargs="?")
     parser.add_argument("destination", nargs="?")
     args = parser.parse_args()
@@ -374,6 +394,8 @@ def main() -> int:
             print(resolve_main_revision())
         elif args.command == "version":
             print(resolve_main_version())
+        elif args.command == "arch":
+            print(normalize_arch(args.reference))
         elif args.command == "download-client":
             if args.reference is None or args.destination is None:
                 parser.error("download-client requires a reference and destination")
