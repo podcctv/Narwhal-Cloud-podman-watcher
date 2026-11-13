@@ -89,3 +89,23 @@ def conntrack(limit: int = 50000) -> Dict[str, Any] | None:
     if limit <= 0 or not is_available():
         return None
     return run_probe(["conntrack", "--limit", str(int(limit))])
+
+
+def psi_snapshot(
+    cgroup_dir: str | os.PathLike[str] | None = None,
+    proc_root: str | os.PathLike[str] = "/proc",
+) -> Dict[str, Any] | None:
+    """Collect host PSI, `/proc/stat` CPU counters, and optional cgroup PSI via `narwhal-probe`."""
+    if not is_available():
+        return None
+    args = ["psi-snapshot", "--proc-root", str(proc_root)]
+    if cgroup_dir is not None:
+        args.extend(["--cgroup-dir", str(cgroup_dir)])
+    return run_probe(args)
+
+
+def cgroup_metrics(cgroup_dir: str | os.PathLike[str]) -> Dict[str, Any] | None:
+    """Collect cgroup v2 cpu/memory/io counters via `narwhal-probe cgroup-metrics`."""
+    if not cgroup_dir or not is_available():
+        return None
+    return run_probe(["cgroup-metrics", "--cgroup-dir", str(cgroup_dir)])

@@ -19,6 +19,13 @@ enum Command {
         path: String,
         limit: usize,
     },
+    PsiSnapshot {
+        proc_root: String,
+        cgroup_dir: Option<String>,
+    },
+    CgroupMetrics {
+        cgroup_dir: String,
+    },
 }
 
 fn next_arg<'a>(args: &'a [String], idx: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -112,6 +119,43 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Conntrack { path, limit })
         }
+        "psi-snapshot" => {
+            let mut proc_root = "/proc".to_string();
+            let mut cgroup_dir: Option<String> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--proc-root" => {
+                        proc_root = next_arg(args, &mut i, "--proc-root")?.to_string();
+                    }
+                    "--cgroup-dir" => {
+                        cgroup_dir = Some(next_arg(args, &mut i, "--cgroup-dir")?.to_string());
+                    }
+                    other => return Err(format!("unknown flag for psi-snapshot: {other}")),
+                }
+                i += 1;
+            }
+            Ok(Command::PsiSnapshot {
+                proc_root,
+                cgroup_dir,
+            })
+        }
+        "cgroup-metrics" => {
+            let mut cgroup_dir: Option<String> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--cgroup-dir" => {
+                        cgroup_dir = Some(next_arg(args, &mut i, "--cgroup-dir")?.to_string());
+                    }
+                    other => return Err(format!("unknown flag for cgroup-metrics: {other}")),
+                }
+                i += 1;
+            }
+            let cgroup_dir =
+                cgroup_dir.ok_or_else(|| "missing required --cgroup-dir".to_string())?;
+            Ok(Command::CgroupMetrics { cgroup_dir })
+        }
         other => Err(format!("unknown subcommand: {other}")),
     }
 }
@@ -137,6 +181,22 @@ fn main() {
         }
         Ok(Command::Conntrack { path, limit }) => {
             println!("{}", socket_sec::collect_conntrack(&path, limit));
+        }
+        Ok(Command::PsiSnapshot {
+            proc_root,
+            cgroup_dir,
+        }) => {
+            let cg_path = cgroup_dir.as_deref().map(std::path::Path::new);
+            println!(
+                "{}",
+                cgroup_probe::collect_psi_snapshot(std::path::Path::new(&proc_root), cg_path)
+            );
+        }
+        Ok(Command::CgroupMetrics { cgroup_dir }) => {
+            println!(
+                "{}",
+                cgroup_probe::collect_cgroup_metrics(std::path::Path::new(&cgroup_dir))
+            );
         }
         Err(err) => {
             eprintln!("narwhal-probe: {err}");
@@ -210,6 +270,37 @@ mod tests {
         assert!(parse_args(&s(&["narwhal-probe"])).is_err());
         assert!(parse_args(&s(&["narwhal-probe", "proc-snapshot"])).is_err());
         assert!(parse_args(&s(&["narwhal-probe", "socket-sec"])).is_err());
+        assert!(parse_args(&s(&["narwhal-probe", "cgroup-metrics"])).is_err());
         assert!(parse_args(&s(&["narwhal-probe", "unknown"])).is_err());
+    }
+
+    #[test]
+    fn test_parse_psi_and_cgroup_metrics() {
+        let psi = parse_args(&s(&[
+            "narwhal-probe",
+            "psi-snapshot",
+            "--cgroup-dir",
+            "/sys/fs/cgroup/test",
+        ]))
+        .expect("psi-snapshot");
+        match psi {
+            Command::PsiSnapshot {
+                proc_root,
+                cgroup_dir,
+            } => {
+                assert_eq!(proc_root, "/proc");
+                assert_eq!(cgroup_dir.as_deref(), Some("/sys/fs/cgroup/test"));
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let cg = parse_args(&s(&[
+            "narwhal-probe",
+            "cgroup-metrics",
+            "--cgroup-dir",
+            "/sys/fs/cgroup/test",
+        ]))
+        .expect("cgroup-metrics");
+        assert!(matches!(cg, Command::CgroupMetrics { .. }));
     }
 }

@@ -342,5 +342,89 @@ class SocketCollectorNativeBridgeTests(unittest.TestCase):
         self.assertIsInstance(snap_fallback["entries"], list)
 
 
+class CpuGuardNativeBridgeTests(unittest.TestCase):
+    def test_psi_snapshot_and_cgroup_metrics_cli_args(self):
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "run_probe", return_value={"available": True}
+        ) as run_mock:
+            res1 = native_probe.psi_snapshot(cgroup_dir="/sys/fs/cgroup/c1", proc_root="/proc")
+            res2 = native_probe.cgroup_metrics("/sys/fs/cgroup/c1")
+        self.assertEqual(res1, {"available": True})
+        self.assertEqual(res2, {"available": True})
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["psi-snapshot", "--proc-root", "/proc", "--cgroup-dir", "/sys/fs/cgroup/c1"],
+        )
+        self.assertEqual(
+            run_mock.call_args_list[1].args[0],
+            ["cgroup-metrics", "--cgroup-dir", "/sys/fs/cgroup/c1"],
+        )
+
+    def test_sample_host_cpu_uses_native_probe_and_falls_back(self):
+        from client import cpu_guard
+
+        tick1 = {
+            "available": True,
+            "host_psi": {
+                "cpu": {"status": "ready", "some": {"avg10": 6.5}},
+                "memory": {"status": "unavailable", "reason": "FileNotFoundError"},
+                "io": {"status": "unsupported"},
+            },
+            "host_cpu": {"available": True, "total": 1000, "busy": 200, "iowait": 50},
+        }
+        tick2 = {
+            "available": True,
+            "host_psi": tick1["host_psi"],
+            "host_cpu": {"available": True, "total": 2000, "busy": 700, "iowait": 150},
+        }
+        orig_prev = cpu_guard._host_cpu_previous
+        cpu_guard._host_cpu_previous = None
+        try:
+            with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+                native_probe, "psi_snapshot", side_effect=[tick1, tick2]
+            ), mock.patch.object(cpu_guard.time, "monotonic", side_effect=[100.0, 105.0]):
+                first = cpu_guard.sample_host_cpu()
+                second = cpu_guard.sample_host_cpu()
+            self.assertEqual(first["status"], "warming")
+            self.assertEqual(second["status"], "ready")
+            self.assertTrue(second["available"])
+            self.assertEqual(second["busy_percent"], 50.0)
+            self.assertEqual(second["iowait_percent"], 10.0)
+            self.assertEqual(second["psi"]["cpu"]["some"]["avg10"], 6.5)
+            self.assertIn("reason", second["psi"]["io"])
+
+            # Fallback when probe returns None
+            cpu_guard._host_cpu_previous = None
+            with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+                native_probe, "psi_snapshot", return_value=None
+            ), mock.patch("builtins.open", side_effect=FileNotFoundError("/proc/stat")):
+                fallback = cpu_guard.sample_host_cpu()
+            self.assertFalse(fallback["available"])
+            self.assertEqual(fallback["status"], "unavailable")
+        finally:
+            cpu_guard._host_cpu_previous = orig_prev
+
+    def test_container_psi_uses_native_probe(self):
+        from pathlib import Path
+        from client import cpu_guard
+
+        payload = {
+            "available": True,
+            "cgroup_psi": {
+                "cpu": {"status": "ready", "some": {"avg10": 11.0}},
+                "memory": {"status": "ready", "some": {"avg10": 1.0}},
+                "io": {"status": "unavailable", "reason": "FileNotFoundError"},
+            },
+        }
+        with mock.patch.object(
+            cpu_guard, "resolve_container_cgroup", return_value=(Path("/sys/fs/cgroup/test"), "")
+        ), mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "psi_snapshot", return_value=payload
+        ):
+            res = cpu_guard._container_psi({"pid": 123, "runtime": "incus", "id": "c1"})
+        self.assertEqual(res["status"], "partial")
+        self.assertEqual(res["cpu"]["some"]["avg10"], 11.0)
+
+
 if __name__ == "__main__":
     unittest.main()

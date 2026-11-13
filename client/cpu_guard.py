@@ -9,6 +9,7 @@ changes so an agent restart can resume verification and restoration safely.
 
 from __future__ import annotations
 
+import builtins
 import json
 import math
 import os
@@ -19,9 +20,13 @@ import uuid
 from typing import Any, Callable
 
 try:
+    from client import native_probe
     from client.resource_cgroup import resolve_container_cgroup
 except ImportError:
+    import native_probe
     from resource_cgroup import resolve_container_cgroup
+
+_ORIG_OPEN = builtins.open
 
 
 STATE_PATH = os.getenv("NARWHAL_CPU_GUARD_STATE", "/var/lib/narwhal-agent/cpu-guard.json")
@@ -151,7 +156,33 @@ def _read_psi(path: str) -> dict[str, Any]:
     return {"status": "ready", **result}
 
 
+def _normalize_native_psi_entry(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {"status": "unavailable", "reason": "OSError"}
+    status = entry.get("status")
+    if status == "ready":
+        return entry
+    if status == "unsupported":
+        return {"status": "unsupported", "reason": str(entry.get("reason") or "PSI 数据不可用或格式不受支持")}
+    return {"status": "unavailable", "reason": str(entry.get("reason") or "OSError")}
+
+
+def _normalize_native_psi_map(raw_map: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_map, dict):
+        return None
+    return {
+        resource: _normalize_native_psi_entry(raw_map.get(resource))
+        for resource in ("cpu", "memory", "io")
+    }
+
+
 def _host_psi() -> dict[str, Any]:
+    if builtins.open is _ORIG_OPEN and native_probe.is_available():
+        payload = native_probe.psi_snapshot()
+        if isinstance(payload, dict) and payload.get("available"):
+            parsed = _normalize_native_psi_map(payload.get("host_psi"))
+            if parsed is not None:
+                return parsed
     return {resource: _read_psi(f"/proc/pressure/{resource}")
             for resource in ("cpu", "memory", "io")}
 
@@ -166,8 +197,14 @@ def _container_psi(container: dict[str, Any]) -> dict[str, Any]:
     )
     if target is None:
         return {"status": "unavailable", "reason": error}
-    resources = {resource: _read_psi(str(target / f"{resource}.pressure"))
-                 for resource in ("cpu", "memory", "io")}
+    resources: dict[str, Any] | None = None
+    if builtins.open is _ORIG_OPEN and native_probe.is_available():
+        payload = native_probe.psi_snapshot(cgroup_dir=target)
+        if isinstance(payload, dict) and payload.get("available"):
+            resources = _normalize_native_psi_map(payload.get("cgroup_psi"))
+    if resources is None:
+        resources = {resource: _read_psi(str(target / f"{resource}.pressure"))
+                     for resource in ("cpu", "memory", "io")}
     available = [value for value in resources.values() if value.get("status") == "ready"]
     if not available:
         return {"status": "unsupported", "reason": "当前内核或 cgroup 未提供 PSI 文件", **resources}
@@ -205,6 +242,16 @@ def sample_host_cpu() -> dict[str, Any]:
     """Return host-wide CPU busy percent over the interval between agent reports."""
     global _host_cpu_previous
     now = time.monotonic()
+    native_payload = (
+        native_probe.psi_snapshot()
+        if builtins.open is _ORIG_OPEN and native_probe.is_available()
+        else None
+    )
+    native_host_psi = (
+        _normalize_native_psi_map(native_payload.get("host_psi"))
+        if isinstance(native_payload, dict) and native_payload.get("available")
+        else None
+    )
     result: dict[str, Any] = {
         "available": False,
         "status": "unavailable",
@@ -213,20 +260,35 @@ def sample_host_cpu() -> dict[str, Any]:
         "logical_cpus": max(1, int(os.cpu_count() or 1)),
         "load_1m": None,
         "sample_seconds": 0.0,
-        "psi": _host_psi(),
+        "psi": native_host_psi if native_host_psi is not None else _host_psi(),
     }
-    try:
-        with open("/proc/stat", "r", encoding="ascii", errors="ignore") as stream:
-            first = stream.readline().split()
-        values = [int(value) for value in first[1:9]]
-        if len(values) < 5:
+    native_cpu = (
+        native_payload.get("host_cpu")
+        if isinstance(native_payload, dict) and native_payload.get("available")
+        else None
+    )
+    if isinstance(native_cpu, dict) and native_cpu.get("available"):
+        try:
+            total = int(native_cpu["total"])
+            busy = int(native_cpu["busy"])
+            iowait = int(native_cpu["iowait"])
+        except (KeyError, TypeError, ValueError):
+            native_cpu = None
+    else:
+        native_cpu = None
+    if native_cpu is None:
+        try:
+            with open("/proc/stat", "r", encoding="ascii", errors="ignore") as stream:
+                first = stream.readline().split()
+            values = [int(value) for value in first[1:9]]
+            if len(values) < 5:
+                return result
+            total = sum(values)
+            idle = values[3] + values[4]
+            iowait = values[4]
+            busy = max(0, total - idle)
+        except (OSError, ValueError, IndexError):
             return result
-        total = sum(values)
-        idle = values[3] + values[4]
-        iowait = values[4]
-        busy = max(0, total - idle)
-    except (OSError, ValueError, IndexError):
-        return result
     try:
         load = os.getloadavg()[0]
         result["load_1m"] = round(max(0.0, float(load)), 3)

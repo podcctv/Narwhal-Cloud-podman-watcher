@@ -2,6 +2,11 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## Phase 3 扩展：`cgroup-probe` Rust Crate 与 `cpu_guard` 原生 PSI/stat 采样桥接（v1.8.32）
+
+- **新增 Rust `std`-only Crate (`rust/crates/cgroup-probe/`)**：实现 `#![forbid(unsafe_code)]`、零外部依赖的 `psi-snapshot`（单次调用读取宿主机 `/proc/pressure/{cpu,memory,io}`、`/proc/stat` 与容器 `<cgroup>/{cpu,memory,io}.pressure`）与 `cgroup-metrics`（读取 `cpu.stat`、`cpu.max`、`memory.{current,max,stat}`、`io.stat`），并接入 `narwhal-probe` CLI 与 Rust 单测。
+- **`cpu_guard` 无缝桥接 (`client/native_probe.py`, `client/cpu_guard.py`, `tests/test_native_probe.py`)**：`sample_host_cpu()`、`_host_psi()` 与 `_container_psi()` 在 `narwhal-probe` 可用且 `builtins.open` 未被 mock 时自动走原生探针，异常或不可用时透明回退纯 Python 路径，并新增单测覆盖。
+
 ## 修复 `narwhal-probe` POSIX 单测兼容与回退确定性（v1.8.31）
 
 - **`client/proc_scanner.py` & `client/native_probe.py`**：调整 `_collect_host_proc_process_snapshot` 检查顺序，优先判断 `_has_mocked_proc_primitives`，避免在 `os.stat` 被单测 mock 时触发 `native_probe.is_available()`；同时 `probe_binary_path()` 改用 `os.path.abspath(__file__)` 避免 `Path.resolve()` 触发 `os.stat(..., follow_symlinks=...)`。

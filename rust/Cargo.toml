@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/proc-probe",
     "crates/socket-sec",
+    "crates/cgroup-probe",
     "crates/narwhal-probe",
 ]
 

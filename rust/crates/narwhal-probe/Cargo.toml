@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 proc-probe = { path = "../proc-probe" }
 socket-sec = { path = "../socket-sec" }
+cgroup-probe = { path = "../cgroup-probe" }
