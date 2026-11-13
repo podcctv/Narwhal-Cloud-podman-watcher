@@ -2,6 +2,12 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## Rust 原生热路径探针 `narwhal-probe` 与渐进式混合架构落地（v1.8.30）
+
+- **Rust `std`-only 工作区 (`rust/`)**：新增零外部依赖、`#![forbid(unsafe_code)]` 的 `narwhal-probe` Cargo workspace（`proc-probe`、`socket-sec`、`narwhal-probe`），提供 `proc-snapshot`（`/proc` 进程树 BFS 扫描与 stat/status 解析）、`socket-sec`（`/proc/<pid>/net/{tcp,tcp6,udp,udp6}` hex 解码与状态统计）及 `conntrack`（`/proc/net/nf_conntrack` 解析）子命令与单测。
+- **Python 无缝桥接与回退 (`client/native_probe.py`, `client/proc_scanner.py`, `client/socket_collector.py`, `tests/test_native_probe.py`)**：在 POSIX 且可执行 `$APP_DIR/bin/narwhal-probe` 就绪时自动走原生探针（保留 Python 侧增量 CPU 计算、命令脱敏与 `tick_cache`），不可用或被单测 mock 时无缝回退至纯 Python 路径。
+- **多架构静态编译、Server 分发与节点校验升级 (`.github/workflows/build-and-push-ghcr.yml`, `server/Dockerfile`, `server/app.py`, `scripts/install-client.sh`, `tests/test_managed_update_scripts.py`)**：CI 新增 `rust-probe` 任务交叉编译 `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` 静态二进制并生成 `SHA256SUMS`，打包进 Server 镜像 `/app/client_bins/`；Server 新增 HMAC 签名 `/api/v1/update/probe/sha256` 与 `/api/v1/update/probe/{arch}`；`install-client.sh update` 按 `TARGET_ARCH` 下载并校验 `SHA256SUMS`，失败时非致命回退纯 Python。
+
 ## Runman 连续资源过载自动重启（Watcher v1.8.29，Agent 最低版本 v1.8.28）
 
 - 在 v1.8.27 模块化客户端结构上新增资源过载保护：CPU 或内存达到 90%、持续满 3600 秒、至少 5 次有效样本且最大间隔 900 秒后才触发。
