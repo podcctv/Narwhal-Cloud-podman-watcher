@@ -516,7 +516,7 @@ mod tests {
     fn test_parse_serve_and_dispatch_nested_serve() {
         let cmd = parse_args(&s(&["narwhal-probe", "serve"])).expect("serve");
         assert!(matches!(cmd, Command::Serve));
-        assert!(dispatch(Command::Serve).is_err());
+        assert!(dispatch(Command::Serve).contains("cannot nest serve"));
 
         let tab_args = parse_serve_line("cgroup-metrics\t--path\t/sys/fs/cgroup/my dir");
         assert_eq!(
