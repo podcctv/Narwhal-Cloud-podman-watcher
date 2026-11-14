@@ -130,8 +130,8 @@ impl MmdbDb {
             }
             IpAddr::V6(v6) => {
                 if self.ip_version == 4 {
-                    if let Some(v4) = v6.to_ipv4_mapped() {
-                        return self.lookup_bits(0, &v4.octets());
+                    if let [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] = v6.octets() {
+                        return self.lookup_bits(0, &[a, b, c, d]);
                     }
                     return None;
                 }
