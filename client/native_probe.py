@@ -261,3 +261,13 @@ def diskstats(proc_root: str | os.PathLike[str] = "/proc") -> Dict[str, Any] | N
     if not proc_root or not is_available():
         return None
     return run_probe(["diskstats", "--proc-root", str(proc_root)])
+
+
+def geoip_country_batch(
+    db_path: str | os.PathLike[str], ips: List[str]
+) -> Dict[str, Any] | None:
+    """Resolve country ISO codes from a local MMDB file via `narwhal-probe geoip-lookup`."""
+    clean_ips = [str(ip).strip() for ip in ips if str(ip).strip()]
+    if not db_path or not clean_ips or not is_available():
+        return None
+    return run_probe(["geoip-lookup", "--db", str(db_path), "--ips", ",".join(clean_ips)])

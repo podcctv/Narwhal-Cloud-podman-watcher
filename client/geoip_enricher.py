@@ -18,6 +18,13 @@ try:
 except ImportError:  # Optional at import time for source-only/test environments.
     maxminddb = None
 
+try:
+    from client import native_probe
+except ImportError:  # pragma: no cover - direct script execution in /opt/narwhal-monitor/app
+    import native_probe  # type: ignore
+
+_ORIG_MAXMINDDB = maxminddb
+
 
 _geoip_country_cache: Dict[str, Tuple[str, float]] = {}
 _geoip_detail_cache: Dict[str, Tuple[Dict[str, str], float]] = {}
@@ -182,13 +189,25 @@ def _geoip_cache_put(ip: str, country: str, now: float) -> None:
 def _geoip_local_country_batch(ips: List[str]) -> Dict[str, str]:
     """Resolve country codes from a local MaxMind MMDB file if available."""
     global _geoip_reader, _geoip_reader_path
-    mmdb = _agent_attr("maxminddb", maxminddb)
-    if not ips or mmdb is None:
+    mmdb = maxminddb if maxminddb is not _ORIG_MAXMINDDB else _agent_attr("maxminddb", maxminddb)
+    if not ips:
         return {}
     configured_path = os.getenv(
         "GEOIP_MMDB_PATH", "/usr/share/GeoIP/GeoLite2-Country.mmdb"
     ).strip()
     if not configured_path or not os.path.isfile(configured_path):
+        return {}
+    if mmdb is _ORIG_MAXMINDDB and maxminddb is _ORIG_MAXMINDDB and native_probe.is_available():
+        payload = native_probe.geoip_country_batch(configured_path, ips)
+        if isinstance(payload, dict) and payload.get("available"):
+            raw_countries = payload.get("countries")
+            if isinstance(raw_countries, dict):
+                return {
+                    str(k): str(v).upper()
+                    for k, v in raw_countries.items()
+                    if re.fullmatch(r"[A-Za-z]{2}", str(v or ""))
+                }
+    if mmdb is None:
         return {}
     if _geoip_reader is None or _geoip_reader_path != configured_path:
         if _geoip_reader is not None:

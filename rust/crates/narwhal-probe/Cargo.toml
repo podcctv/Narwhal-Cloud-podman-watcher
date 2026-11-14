@@ -8,3 +8,4 @@ proc-probe = { path = "../proc-probe" }
 socket-sec = { path = "../socket-sec" }
 cgroup-probe = { path = "../cgroup-probe" }
 host-metrics = { path = "../host-metrics" }
+geoip-probe = { path = "../geoip-probe" }

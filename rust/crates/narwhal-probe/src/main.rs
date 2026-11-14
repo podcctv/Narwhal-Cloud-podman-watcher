@@ -39,6 +39,10 @@ enum Command {
     Diskstats {
         proc_root: String,
     },
+    GeoipLookup {
+        db: String,
+        ips: Vec<String>,
+    },
     Serve,
 }
 
@@ -243,6 +247,30 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Diskstats { proc_root })
         }
+        "geoip-lookup" => {
+            let mut db: Option<String> = None;
+            let mut ips: Vec<String> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--db" => {
+                        db = Some(next_arg(args, &mut i, "--db")?.to_string());
+                    }
+                    "--ips" => {
+                        let val = next_arg(args, &mut i, "--ips")?;
+                        ips = val
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                    other => return Err(format!("unknown flag for geoip-lookup: {other}")),
+                }
+                i += 1;
+            }
+            let db = db.ok_or_else(|| "missing required --db".to_string())?;
+            Ok(Command::GeoipLookup { db, ips })
+        }
         "serve" => Ok(Command::Serve),
         other => Err(format!("unknown subcommand: {other}")),
     }
@@ -315,6 +343,9 @@ fn dispatch(cmd: Command) -> String {
         }
         Command::Diskstats { proc_root } => {
             host_metrics::collect_diskstats(std::path::Path::new(&proc_root))
+        }
+        Command::GeoipLookup { db, ips } => {
+            geoip_probe::lookup_countries(std::path::Path::new(&db), &ips)
         }
         Command::Serve => "{\"available\":false,\"error\":\"cannot nest serve\"}".to_string(),
     }
@@ -542,5 +573,23 @@ mod tests {
             ]
         );
         assert!(parse_args(&ws_args).is_ok());
+
+        let geo_cmd = parse_args(&s(&[
+            "narwhal-probe",
+            "geoip-lookup",
+            "--db",
+            "/usr/share/GeoIP/GeoLite2-Country.mmdb",
+            "--ips",
+            "1.1.1.1,8.8.8.8",
+        ]))
+        .expect("geoip-lookup");
+        match geo_cmd {
+            Command::GeoipLookup { db, ips } => {
+                assert_eq!(db, "/usr/share/GeoIP/GeoLite2-Country.mmdb");
+                assert_eq!(ips, vec!["1.1.1.1", "8.8.8.8"]);
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(parse_args(&s(&["narwhal-probe", "geoip-lookup"])).is_err());
     }
 }

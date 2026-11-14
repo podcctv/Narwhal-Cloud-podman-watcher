@@ -5,6 +5,7 @@ members = [
     "crates/socket-sec",
     "crates/cgroup-probe",
     "crates/host-metrics",
+    "crates/geoip-probe",
     "crates/narwhal-probe",
 ]
 

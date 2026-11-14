@@ -2,6 +2,14 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## Phase 4 扩展：`geoip-probe` Rust MMDB 原生查询与 `geoip_enricher` 桥接（v1.8.37）
+
+- 新增零外部依赖、`#![forbid(unsafe_code)]` 的 `rust/crates/geoip-probe`：
+  - 纯 `std` 解析 MaxMind `.mmdb` 元数据、24/28/32 位搜索树（支持 IPv4/IPv6 与 `ipv4_start_node` 加速）及指针压缩记录，提取 `country.iso_code`。
+  - 通过进程内 `DB_CACHE` 在 `narwhal-probe serve` 模式下复用已解析数据库，避免重复读盘。
+  - 在 `rust/crates/narwhal-probe/src/main.rs` 新增 `geoip-lookup --db <path> --ips <csv>` 子命令及单测。
+- `client/native_probe.py` 与 `client/geoip_enricher.py` 接入 `geoip_country_batch`，在无 `maxminddb` 或原生探针可用时自动走 Rust 本地查询，并保留 `maxminddb` mock 感知与回退。
+
 ## Phase 4 性能优化：Rust `narwhal-probe serve` 常驻管道模式（v1.8.36）
 
 - 已完成 `rust/crates/narwhal-probe/src/main.rs` 常驻管道模式（`narwhal-probe serve`）：

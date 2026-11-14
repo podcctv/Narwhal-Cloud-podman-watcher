@@ -734,5 +734,57 @@ class PersistentServePipeTests(unittest.TestCase):
         run_mock.assert_called_once()
 
 
+class GeoipProbeBridgeTests(unittest.TestCase):
+    def test_geoip_country_batch_cli_args(self):
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "run_probe", return_value={"available": True, "countries": {"1.1.1.1": "AU"}}
+        ) as run_mock:
+            res = native_probe.geoip_country_batch("/tmp/db.mmdb", ["1.1.1.1", " ", "8.8.8.8"])
+        self.assertEqual(res["countries"]["1.1.1.1"], "AU")
+        run_mock.assert_called_once_with(
+            ["geoip-lookup", "--db", "/tmp/db.mmdb", "--ips", "1.1.1.1,8.8.8.8"]
+        )
+
+    def test_geoip_enricher_uses_native_probe_and_falls_back(self):
+        from client import geoip_enricher
+
+        with mock.patch.dict(
+            geoip_enricher.os.environ, {"GEOIP_MMDB_PATH": "/tmp/GeoLite2-Country.mmdb"}, clear=False
+        ), mock.patch.object(geoip_enricher.os.path, "isfile", return_value=True), mock.patch.object(
+            native_probe, "is_available", return_value=True
+        ), mock.patch.object(
+            native_probe,
+            "geoip_country_batch",
+            return_value={"available": True, "countries": {"1.1.1.1": "au", "8.8.8.8": "US"}},
+        ):
+            res = geoip_enricher._geoip_local_country_batch(["1.1.1.1", "8.8.8.8"])
+        self.assertEqual(res, {"1.1.1.1": "AU", "8.8.8.8": "US"})
+
+        fake_reader = mock.MagicMock()
+        fake_reader.get.return_value = {"country": {"iso_code": "jp"}}
+        fake_mmdb = mock.MagicMock()
+        fake_mmdb.open_database.return_value = fake_reader
+        old_reader = geoip_enricher._geoip_reader
+        old_path = geoip_enricher._geoip_reader_path
+        try:
+            with mock.patch.dict(
+                geoip_enricher.os.environ, {"GEOIP_MMDB_PATH": "/tmp/GeoLite2-Country.mmdb"}, clear=False
+            ), mock.patch.object(
+                geoip_enricher.os.path, "isfile", return_value=True
+            ), mock.patch.object(
+                geoip_enricher, "maxminddb", fake_mmdb
+            ), mock.patch.object(
+                native_probe, "is_available", return_value=True
+            ), mock.patch.object(
+                native_probe, "geoip_country_batch"
+            ) as probe_mock:
+                fb = geoip_enricher._geoip_local_country_batch(["1.2.3.4"])
+            probe_mock.assert_not_called()
+            self.assertEqual(fb, {"1.2.3.4": "JP"})
+        finally:
+            geoip_enricher._geoip_reader = old_reader
+            geoip_enricher._geoip_reader_path = old_path
+
+
 if __name__ == "__main__":
     unittest.main()
