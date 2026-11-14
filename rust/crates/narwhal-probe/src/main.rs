@@ -518,13 +518,13 @@ mod tests {
         assert!(matches!(cmd, Command::Serve));
         assert!(dispatch(Command::Serve).contains("cannot nest serve"));
 
-        let tab_args = parse_serve_line("cgroup-metrics\t--path\t/sys/fs/cgroup/my dir");
+        let tab_args = parse_serve_line("cgroup-metrics\t--cgroup-dir\t/sys/fs/cgroup/my dir");
         assert_eq!(
             tab_args,
             vec![
                 "narwhal-probe",
                 "cgroup-metrics",
-                "--path",
+                "--cgroup-dir",
                 "/sys/fs/cgroup/my dir"
             ]
         );
