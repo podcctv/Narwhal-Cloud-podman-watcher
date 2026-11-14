@@ -43,6 +43,9 @@ enum Command {
         db: String,
         ips: Vec<String>,
     },
+    PidMetrics {
+        pid: u32,
+    },
     Serve,
 }
 
@@ -271,6 +274,25 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             let db = db.ok_or_else(|| "missing required --db".to_string())?;
             Ok(Command::GeoipLookup { db, ips })
         }
+        "pid-metrics" => {
+            let mut pid: Option<u32> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--pid" => {
+                        let val = next_arg(args, &mut i, "--pid")?;
+                        pid = Some(
+                            val.parse::<u32>()
+                                .map_err(|_| format!("invalid --pid: {val}"))?,
+                        );
+                    }
+                    other => return Err(format!("unknown flag for pid-metrics: {other}")),
+                }
+                i += 1;
+            }
+            let pid = pid.ok_or_else(|| "missing required --pid".to_string())?;
+            Ok(Command::PidMetrics { pid })
+        }
         "serve" => Ok(Command::Serve),
         other => Err(format!("unknown subcommand: {other}")),
     }
@@ -347,6 +369,7 @@ fn dispatch(cmd: Command) -> String {
         Command::GeoipLookup { db, ips } => {
             geoip_probe::lookup_countries(std::path::Path::new(&db), &ips)
         }
+        Command::PidMetrics { pid } => proc_probe::collect_pid_metrics(pid),
         Command::Serve => "{\"available\":false,\"error\":\"cannot nest serve\"}".to_string(),
     }
 }
@@ -591,5 +614,13 @@ mod tests {
             _ => panic!("unexpected command"),
         }
         assert!(parse_args(&s(&["narwhal-probe", "geoip-lookup"])).is_err());
+
+        let pm_cmd = parse_args(&s(&["narwhal-probe", "pid-metrics", "--pid", "4321"]))
+            .expect("pid-metrics");
+        match pm_cmd {
+            Command::PidMetrics { pid } => assert_eq!(pid, 4321),
+            _ => panic!("unexpected command"),
+        }
+        assert!(parse_args(&s(&["narwhal-probe", "pid-metrics"])).is_err());
     }
 }

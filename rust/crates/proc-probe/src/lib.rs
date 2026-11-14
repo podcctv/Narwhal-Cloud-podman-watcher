@@ -588,6 +588,173 @@ pub fn collect_proc_sockets_from(
     out
 }
 
+pub fn collect_pid_metrics(pid: u32) -> String {
+    collect_pid_metrics_from(Path::new("/proc"), pid)
+}
+
+fn read_u64_file(path: &Path) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()
+}
+
+fn parse_pair_table(
+    content: &str,
+    wanted: &[(&str, &[&str])],
+    out: &mut Vec<(String, u64)>,
+) {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut idx = 0usize;
+    while idx + 1 < lines.len() {
+        let header: Vec<&str> = lines[idx].split_whitespace().collect();
+        let values: Vec<&str> = lines[idx + 1].split_whitespace().collect();
+        idx += 2;
+        if header.is_empty() || values.is_empty() || header[0] != values[0] {
+            continue;
+        }
+        let proto = header[0].trim_end_matches(':');
+        let Some((_, fields)) = wanted.iter().find(|(p, _)| *p == proto) else {
+            continue;
+        };
+        for &field in *fields {
+            if let Some(pos) = header[1..].iter().position(|h| *h == field) {
+                let val = values
+                    .get(pos + 1)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                out.push((format!("{proto}_{field}"), val));
+            }
+        }
+    }
+}
+
+pub fn collect_pid_metrics_from(proc_root: &Path, pid: u32) -> String {
+    if pid == 0 {
+        return "{\"available\":false,\"error\":\"invalid pid\"}".to_string();
+    }
+    let pid_dir = proc_root.join(pid.to_string());
+    if !pid_dir.is_dir() {
+        return "{\"available\":false,\"error\":\"pid directory not found\"}".to_string();
+    }
+
+    let cgroup_base = pid_dir.join("root/sys/fs/cgroup");
+    let mut mem_bytes: u64 = 0;
+    let mut mem_percent: f64 = 0.0;
+    for (usage_rel, limit_rel) in [
+        ("memory.current", "memory.max"),
+        ("memory/memory.usage_in_bytes", "memory/memory.limit_in_bytes"),
+    ] {
+        if let Some(usage) = read_u64_file(&cgroup_base.join(usage_rel)) {
+            if usage > 0 {
+                mem_bytes = usage;
+                if let Some(limit) = read_u64_file(&cgroup_base.join(limit_rel)) {
+                    if limit > 0 && limit < (1u64 << 60) {
+                        mem_percent = (usage as f64 / limit as f64) * 100.0;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    let mut process_count: u64 = 0;
+    for rel in ["pids.current", "pids/pids.current"] {
+        if let Some(val) = read_u64_file(&cgroup_base.join(rel)) {
+            process_count = val;
+            break;
+        }
+    }
+
+    let mut rx_bytes: u64 = 0;
+    let mut tx_bytes: u64 = 0;
+    let mut rx_packets: u64 = 0;
+    let mut tx_packets: u64 = 0;
+    if let Ok(net_dev) = fs::read_to_string(pid_dir.join("net/dev")) {
+        for line in net_dev.lines().skip(2) {
+            let Some((iface, rest)) = line.split_once(':') else {
+                continue;
+            };
+            if iface.trim() == "lo" {
+                continue;
+            }
+            let cols: Vec<&str> = rest.split_whitespace().collect();
+            if cols.len() < 16 {
+                continue;
+            }
+            if let (Ok(rb), Ok(rp), Ok(tb), Ok(tp)) = (
+                cols[0].parse::<u64>(),
+                cols[1].parse::<u64>(),
+                cols[8].parse::<u64>(),
+                cols[9].parse::<u64>(),
+            ) {
+                rx_bytes = rx_bytes.saturating_add(rb);
+                rx_packets = rx_packets.saturating_add(rp);
+                tx_bytes = tx_bytes.saturating_add(tb);
+                tx_packets = tx_packets.saturating_add(tp);
+            }
+        }
+    }
+
+    let mut protocols: Vec<(String, u64)> = Vec::new();
+    if let Ok(snmp) = fs::read_to_string(pid_dir.join("net/snmp")) {
+        parse_pair_table(
+            &snmp,
+            &[
+                (
+                    "Tcp",
+                    &[
+                        "ActiveOpens",
+                        "AttemptFails",
+                        "EstabResets",
+                        "OutRsts",
+                        "InSegs",
+                        "OutSegs",
+                        "RetransSegs",
+                    ],
+                ),
+                (
+                    "Udp",
+                    &[
+                        "InDatagrams",
+                        "OutDatagrams",
+                        "NoPorts",
+                        "InErrors",
+                        "RcvbufErrors",
+                        "SndbufErrors",
+                    ],
+                ),
+            ],
+            &mut protocols,
+        );
+    }
+    if let Ok(netstat) = fs::read_to_string(pid_dir.join("net/netstat")) {
+        parse_pair_table(
+            &netstat,
+            &[(
+                "TcpExt",
+                &[
+                    "TCPInDataOctets",
+                    "TCPOutDataOctets",
+                    "SyncookiesSent",
+                    "ListenOverflows",
+                    "ListenDrops",
+                ],
+            )],
+            &mut protocols,
+        );
+    }
+
+    let mut out = format!(
+        "{{\"available\":true,\"mem_bytes\":{mem_bytes},\"mem_percent\":{mem_percent:.4},\"process_count\":{process_count},\"net\":{{\"rx_bytes\":{rx_bytes},\"tx_bytes\":{tx_bytes},\"rx_packets\":{rx_packets},\"tx_packets\":{tx_packets}}},\"protocols\":{{"
+    );
+    for (idx, (k, v)) in protocols.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "\"{}\":{}", json_escape(k), v);
+    }
+    out.push_str("}}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,6 +985,55 @@ mod tests {
         let json_trunc = collect_proc_sockets_from(&root, 100, &[100, 101], 2);
         assert!(json_trunc.contains("\"fd_scanned\":2"));
         assert!(json_trunc.contains("\"truncated\":true"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_pid_metrics_from() {
+        let root = make_temp_proc("pid_metrics");
+        let cg = root.join("555/root/sys/fs/cgroup");
+        let net = root.join("555/net");
+        fs::create_dir_all(&cg).unwrap();
+        fs::create_dir_all(&net).unwrap();
+        fs::write(cg.join("memory.current"), "1048576\n").unwrap();
+        fs::write(cg.join("memory.max"), "4194304\n").unwrap();
+        fs::write(cg.join("pids.current"), "17\n").unwrap();
+        fs::write(
+            net.join("dev"),
+            "Inter-|   Receive                                                |  Transmit\n\
+             face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+                lo: 999 9 0 0 0 0 0 0 999 9 0 0 0 0 0 0\n\
+              eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        fs::write(
+            net.join("snmp"),
+            "Tcp: RtoAlgorithm RtoMin ActiveOpens InSegs OutSegs\n\
+             Tcp: 1 200 42 100 200\n\
+             Udp: InDatagrams OutDatagrams NoPorts\n\
+             Udp: 11 22 3\n",
+        )
+        .unwrap();
+        fs::write(
+            net.join("netstat"),
+            "TcpExt: SyncookiesSent ListenDrops\n\
+             TcpExt: 5 2\n",
+        )
+        .unwrap();
+
+        let json = collect_pid_metrics_from(&root, 555);
+        assert!(json.contains("\"available\":true"));
+        assert!(json.contains("\"mem_bytes\":1048576"));
+        assert!(json.contains("\"mem_percent\":25.0000"));
+        assert!(json.contains("\"process_count\":17"));
+        assert!(json.contains("\"rx_bytes\":1000"));
+        assert!(json.contains("\"tx_bytes\":2000"));
+        assert!(json.contains("\"rx_packets\":10"));
+        assert!(json.contains("\"tx_packets\":20"));
+        assert!(json.contains("\"Tcp_ActiveOpens\":42"));
+        assert!(json.contains("\"Udp_InDatagrams\":11"));
+        assert!(json.contains("\"TcpExt_SyncookiesSent\":5"));
 
         let _ = fs::remove_dir_all(&root);
     }

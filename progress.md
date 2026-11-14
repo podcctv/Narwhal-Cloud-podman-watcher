@@ -1,6 +1,13 @@
 # 当前进展与待办
 
-更新时间：2026-11-13（Asia/Shanghai）
+更新时间：2026-11-14（Asia/Shanghai）
+
+## Phase 4 扩展：`pid-metrics` 容器 PID cgroup/网络/协议计数器统一探针（v1.8.40）
+
+- 在 `rust/crates/proc-probe/src/lib.rs` 新增 `collect_pid_metrics` / `collect_pid_metrics_from`（`#![forbid(unsafe_code)]`、纯 `std`）：
+  - 单次采集容器 `init_pid` 的 cgroup v2/v1 内存占用与占比（`memory.current`/`memory.max`）、进程数（`pids.current`）、`/proc/<pid>/net/dev` 收发字节与包数，以及 `/proc/<pid>/net/{snmp,netstat}` TCP/UDP/TcpExt 协议计数器，并补充 Rust 单元测试。
+  - 在 `rust/crates/narwhal-probe/src/main.rs` 接入 `pid-metrics --pid <pid>` 子命令（支持 `serve` 常驻管道）。
+- 在 `client/native_probe.py` 与 `client/runtime_drivers.py` 桥接 `_read_mem_usage_from_pid`、`_read_process_count_from_pid`、`_read_net_stats_from_pid` 与 `_read_protocol_counters`，保留 `builtins.open` mock 感知与 100% Python 回退；补充 `tests/test_native_probe.py` 单测。
 
 ## Phase 4 扩展：`geoip-probe` Rust MMDB 原生查询与 `geoip_enricher` 桥接（v1.8.39）
 

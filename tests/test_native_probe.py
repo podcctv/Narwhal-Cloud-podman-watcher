@@ -786,5 +786,41 @@ class GeoipProbeBridgeTests(unittest.TestCase):
             geoip_enricher._geoip_reader_path = old_path
 
 
+class PidMetricsBridgeTests(unittest.TestCase):
+    def test_pid_metrics_cli_args_and_runtime_drivers_consumption(self):
+        from client import runtime_drivers
+
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "run_probe", return_value={"available": True}
+        ) as run_mock:
+            native_probe.pid_metrics(555)
+        run_mock.assert_called_once_with(["pid-metrics", "--pid", "555"])
+
+        payload = {
+            "available": True,
+            "mem_bytes": 1048576,
+            "mem_percent": 25.0,
+            "process_count": 17,
+            "net": {"rx_bytes": 1000, "tx_bytes": 2000, "rx_packets": 10, "tx_packets": 20},
+            "protocols": {"Tcp_ActiveOpens": 42, "Udp_InDatagrams": 11},
+        }
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "pid_metrics", return_value=payload
+        ):
+            self.assertEqual(runtime_drivers._read_mem_usage_from_pid(555), (1048576, 25.0))
+            self.assertEqual(runtime_drivers._read_process_count_from_pid(555), 17)
+            self.assertEqual(runtime_drivers._read_net_stats_from_pid(555), (1000, 2000, 10, 20))
+            self.assertEqual(
+                runtime_drivers._read_protocol_counters(555),
+                {"Tcp_ActiveOpens": 42, "Udp_InDatagrams": 11},
+            )
+
+        with mock.patch("builtins.open", side_effect=FileNotFoundError), mock.patch.object(
+            native_probe, "is_available", return_value=True
+        ), mock.patch.object(native_probe, "pid_metrics") as pm_mock:
+            self.assertEqual(runtime_drivers._read_process_count_from_pid(555), 0)
+        pm_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

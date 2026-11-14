@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import http.client
 import ipaddress
 import json
@@ -31,6 +32,16 @@ except ImportError:
     from incus_metrics import parse_incus_metrics as _parse_incus_metrics
 
 _ORIG_PATH_READ_TEXT = Path.read_text
+_ORIG_OPEN = builtins.open
+
+
+def _sample_pid_metrics(pid: int) -> Dict[str, Any] | None:
+    if pid <= 0 or builtins.open is not _ORIG_OPEN or not native_probe.is_available():
+        return None
+    payload = native_probe.pid_metrics(pid)
+    if isinstance(payload, dict) and payload.get("available"):
+        return payload
+    return None
 
 for _guard_name in ("container_freeze", "udp_guard", "anti_spoof_guard", "file_guard", "microburst_guard"):
     try:
@@ -1131,6 +1142,11 @@ def _read_protocol_counters(pid: int) -> Dict[str, int]:
     result: Dict[str, int] = {}
     if pid <= 0:
         return result
+    native_pm = _sample_pid_metrics(pid)
+    if native_pm is not None:
+        raw_protos = native_pm.get("protocols")
+        if isinstance(raw_protos, dict):
+            return {str(k): int(v) for k, v in raw_protos.items()}
     try:
         with open(f"/proc/{pid}/net/snmp", "r", encoding="utf-8", errors="ignore") as handle:
             lines = handle.read().splitlines()
@@ -1289,6 +1305,12 @@ def _get_incus_metrics(runtime: str = "incus") -> Dict[Tuple[str, str], Dict[str
 def _read_mem_usage_from_pid(pid: int) -> Tuple[int, float]:
     if pid <= 0:
         return 0, 0.0
+    native_pm = _sample_pid_metrics(pid)
+    if native_pm is not None:
+        try:
+            return int(native_pm.get("mem_bytes") or 0), float(native_pm.get("mem_percent") or 0.0)
+        except (TypeError, ValueError):
+            pass
     base = f"/proc/{pid}/root/sys/fs/cgroup"
     candidates = (
         (f"{base}/memory.current", f"{base}/memory.max"),  # cgroup v2
@@ -1318,6 +1340,12 @@ def _read_mem_usage_from_pid(pid: int) -> Tuple[int, float]:
 def _read_process_count_from_pid(pid: int) -> int:
     if pid <= 0:
         return 0
+    native_pm = _sample_pid_metrics(pid)
+    if native_pm is not None:
+        try:
+            return int(native_pm.get("process_count") or 0)
+        except (TypeError, ValueError):
+            pass
     for path in (
         f"/proc/{pid}/root/sys/fs/cgroup/pids.current",
         f"/proc/{pid}/root/sys/fs/cgroup/pids/pids.current",
@@ -1335,6 +1363,19 @@ def _read_process_count_from_pid(pid: int) -> int:
 def _read_net_stats_from_pid(pid: int) -> Tuple[int, int, int, int]:
     if pid <= 0:
         return 0, 0, 0, 0
+    native_pm = _sample_pid_metrics(pid)
+    if native_pm is not None:
+        net = native_pm.get("net")
+        if isinstance(net, dict):
+            try:
+                return (
+                    int(net.get("rx_bytes") or 0),
+                    int(net.get("tx_bytes") or 0),
+                    int(net.get("rx_packets") or 0),
+                    int(net.get("tx_packets") or 0),
+                )
+            except (TypeError, ValueError):
+                pass
     path = f"/proc/{pid}/net/dev"
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:

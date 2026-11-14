@@ -271,3 +271,10 @@ def geoip_country_batch(
     if not db_path or not clean_ips or not is_available():
         return None
     return run_probe(["geoip-lookup", "--db", str(db_path), "--ips", ",".join(clean_ips)])
+
+
+def pid_metrics(pid: int) -> Dict[str, Any] | None:
+    """Collect per-PID cgroup memory/pids and net/dev/snmp/netstat via `narwhal-probe pid-metrics`."""
+    if pid <= 0 or not is_available():
+        return None
+    return run_probe(["pid-metrics", "--pid", str(int(pid))])
