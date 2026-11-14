@@ -2,7 +2,7 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
-## Phase 4 扩展：`geoip-probe` Rust MMDB 原生查询与 `geoip_enricher` 桥接（v1.8.38）
+## Phase 4 扩展：`geoip-probe` Rust MMDB 原生查询与 `geoip_enricher` 桥接（v1.8.39）
 
 - 新增零外部依赖、`#![forbid(unsafe_code)]` 的 `rust/crates/geoip-probe`：
   - 纯 `std` 解析 MaxMind `.mmdb` 元数据、24/28/32 位搜索树（支持 IPv4/IPv6 与 `ipv4_start_node` 加速）及指针压缩记录，提取 `country.iso_code`。

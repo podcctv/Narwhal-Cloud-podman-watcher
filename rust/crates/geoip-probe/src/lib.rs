@@ -281,7 +281,12 @@ fn read_utf8<'a>(
         .get(val_pos..val_pos + size)
         .ok_or_else(|| "EOF in utf8_string".to_string())?;
     let s = std::str::from_utf8(slice).map_err(|_| "invalid utf8".to_string())?;
-    Ok((s, next_pos))
+    let after = if next_pos == val_pos {
+        val_pos + size
+    } else {
+        next_pos
+    };
+    Ok((s, after))
 }
 
 fn skip_value(
