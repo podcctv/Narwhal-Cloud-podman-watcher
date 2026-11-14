@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 use std::env;
+use std::fmt::Write as _;
+use std::io::{self, BufRead, Write};
 use std::process;
 
 const VERSION_JSON: &str = "{\"probe\":\"narwhal-probe\",\"version\":\"0.1.0\"}";
@@ -37,6 +39,7 @@ enum Command {
     Diskstats {
         proc_root: String,
     },
+    Serve,
 }
 
 fn next_arg<'a>(args: &'a [String], idx: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -240,70 +243,113 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Diskstats { proc_root })
         }
+        "serve" => Ok(Command::Serve),
         other => Err(format!("unknown subcommand: {other}")),
+    }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn parse_serve_line(line: &str) -> Vec<String> {
+    let trimmed = line.trim_end_matches(['\r', '\n']);
+    let mut argv = vec!["narwhal-probe".to_string()];
+    if trimmed.contains('\t') {
+        for part in trimmed.split('\t') {
+            if !part.is_empty() {
+                argv.push(part.to_string());
+            }
+        }
+    } else {
+        for part in trimmed.split_whitespace() {
+            argv.push(part.to_string());
+        }
+    }
+    argv
+}
+
+fn dispatch(cmd: Command) -> String {
+    match cmd {
+        Command::Version => VERSION_JSON.to_string(),
+        Command::ProcSnapshot {
+            init_pid,
+            scan_limit,
+            clock_ticks,
+        } => proc_probe::collect_proc_snapshot(init_pid, scan_limit, clock_ticks),
+        Command::SocketSec { pid } => socket_sec::collect_socket_tables(pid),
+        Command::Conntrack { path, limit } => socket_sec::collect_conntrack(&path, limit),
+        Command::PsiSnapshot {
+            proc_root,
+            cgroup_dir,
+        } => {
+            let cg_path = cgroup_dir.as_deref().map(std::path::Path::new);
+            cgroup_probe::collect_psi_snapshot(std::path::Path::new(&proc_root), cg_path)
+        }
+        Command::CgroupMetrics { cgroup_dir } => {
+            cgroup_probe::collect_cgroup_metrics(std::path::Path::new(&cgroup_dir))
+        }
+        Command::ProcSockets {
+            init_pid,
+            pids,
+            max_fds,
+        } => proc_probe::collect_proc_sockets(init_pid, &pids, max_fds),
+        Command::HostMetrics { proc_root } => {
+            host_metrics::collect_host_metrics(std::path::Path::new(&proc_root))
+        }
+        Command::Diskstats { proc_root } => {
+            host_metrics::collect_diskstats(std::path::Path::new(&proc_root))
+        }
+        Command::Serve => "{\"available\":false,\"error\":\"cannot nest serve\"}".to_string(),
+    }
+}
+
+fn run_serve() {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    for line_res in stdin.lock().lines() {
+        let Ok(line) = line_res else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let argv = parse_serve_line(&line);
+        let reply = match parse_args(&argv) {
+            Ok(Command::Serve) => {
+                "{\"available\":false,\"error\":\"cannot nest serve\"}".to_string()
+            }
+            Ok(cmd) => dispatch(cmd),
+            Err(err) => format!("{{\"available\":false,\"error\":{}}}", json_escape(&err)),
+        };
+        if writeln!(out, "{reply}").is_err() || out.flush().is_err() {
+            break;
+        }
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     match parse_args(&args) {
-        Ok(Command::Version) => {
-            println!("{VERSION_JSON}");
-        }
-        Ok(Command::ProcSnapshot {
-            init_pid,
-            scan_limit,
-            clock_ticks,
-        }) => {
-            println!(
-                "{}",
-                proc_probe::collect_proc_snapshot(init_pid, scan_limit, clock_ticks)
-            );
-        }
-        Ok(Command::SocketSec { pid }) => {
-            println!("{}", socket_sec::collect_socket_tables(pid));
-        }
-        Ok(Command::Conntrack { path, limit }) => {
-            println!("{}", socket_sec::collect_conntrack(&path, limit));
-        }
-        Ok(Command::PsiSnapshot {
-            proc_root,
-            cgroup_dir,
-        }) => {
-            let cg_path = cgroup_dir.as_deref().map(std::path::Path::new);
-            println!(
-                "{}",
-                cgroup_probe::collect_psi_snapshot(std::path::Path::new(&proc_root), cg_path)
-            );
-        }
-        Ok(Command::CgroupMetrics { cgroup_dir }) => {
-            println!(
-                "{}",
-                cgroup_probe::collect_cgroup_metrics(std::path::Path::new(&cgroup_dir))
-            );
-        }
-        Ok(Command::ProcSockets {
-            init_pid,
-            pids,
-            max_fds,
-        }) => {
-            println!(
-                "{}",
-                proc_probe::collect_proc_sockets(init_pid, &pids, max_fds)
-            );
-        }
-        Ok(Command::HostMetrics { proc_root }) => {
-            println!(
-                "{}",
-                host_metrics::collect_host_metrics(std::path::Path::new(&proc_root))
-            );
-        }
-        Ok(Command::Diskstats { proc_root }) => {
-            println!(
-                "{}",
-                host_metrics::collect_diskstats(std::path::Path::new(&proc_root))
-            );
-        }
+        Ok(Command::Serve) => run_serve(),
+        Ok(cmd) => println!("{}", dispatch(cmd)),
         Err(err) => {
             eprintln!("narwhal-probe: {err}");
             process::exit(2);
@@ -464,5 +510,37 @@ mod tests {
             Command::HostMetrics { proc_root } => assert_eq!(proc_root, "/tmp/mock_proc"),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_parse_serve_and_dispatch_nested_serve() {
+        let cmd = parse_args(&s(&["narwhal-probe", "serve"])).expect("serve");
+        assert!(matches!(cmd, Command::Serve));
+        assert!(dispatch(Command::Serve).is_err());
+
+        let tab_args = parse_serve_line("cgroup-metrics\t--path\t/sys/fs/cgroup/my dir");
+        assert_eq!(
+            tab_args,
+            vec![
+                "narwhal-probe",
+                "cgroup-metrics",
+                "--path",
+                "/sys/fs/cgroup/my dir"
+            ]
+        );
+        let tab_cmd = parse_args(&tab_args).expect("tab cgroup-metrics");
+        assert!(matches!(tab_cmd, Command::CgroupMetrics { .. }));
+
+        let ws_args = parse_serve_line("host-metrics --proc-root /tmp/mock_proc");
+        assert_eq!(
+            ws_args,
+            vec![
+                "narwhal-probe",
+                "host-metrics",
+                "--proc-root",
+                "/tmp/mock_proc"
+            ]
+        );
+        assert!(parse_args(&ws_args).is_ok());
     }
 }

@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import select
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
 MAX_STDOUT_BYTES = 8 * 1024 * 1024
+_ORIG_SUBPROCESS_RUN = subprocess.run
+_SERVE_LOCK = threading.Lock()
+_serve_proc: subprocess.Popen[bytes] | None = None
+_serve_binary: str = ""
 
 
 def probe_binary_path() -> Path:
@@ -32,9 +40,117 @@ def is_available() -> bool:
         return False
 
 
+def close_serve_process() -> None:
+    """Terminate the persistent `narwhal-probe serve` child process if running."""
+    global _serve_proc, _serve_binary
+    proc = _serve_proc
+    _serve_proc = None
+    _serve_binary = ""
+    if proc is None:
+        return
+    for stream in (proc.stdin, proc.stdout):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+atexit.register(close_serve_process)
+
+
+def _readline_bounded(stdout: Any, timeout: float) -> bytes | None:
+    """Read a single newline-terminated line within `timeout` seconds and `MAX_STDOUT_BYTES`."""
+    deadline = time.monotonic() + max(0.05, float(timeout))
+    buf = bytearray()
+    fd = stdout.fileno()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            return None
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return None
+        buf.extend(chunk)
+        if len(buf) > MAX_STDOUT_BYTES:
+            return None
+        nl = buf.find(b"\n")
+        if nl != -1:
+            return bytes(buf[:nl])
+
+
+def _run_via_serve(binary: Path, args: List[str], timeout: float) -> Dict[str, Any] | None:
+    """Send a single tab-delimited command over the persistent `serve` pipe."""
+    global _serve_proc, _serve_binary
+    if any(("\t" in a or "\n" in a or "\r" in a) for a in args):
+        return None
+    bin_str = str(binary)
+    line = ("\t".join(args) + "\n").encode("utf-8")
+    with _SERVE_LOCK:
+        if _serve_proc is None or _serve_proc.poll() is not None or _serve_binary != bin_str:
+            close_serve_process()
+            try:
+                _serve_proc = subprocess.Popen(
+                    [bin_str, "serve"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                _serve_binary = bin_str
+            except (OSError, subprocess.SubprocessError, ValueError):
+                close_serve_process()
+                return None
+
+        proc = _serve_proc
+        if proc is None or proc.stdin is None or proc.stdout is None:
+            close_serve_process()
+            return None
+        try:
+            proc.stdin.write(line)
+            proc.stdin.flush()
+            raw = _readline_bounded(proc.stdout, timeout)
+        except (OSError, ValueError):
+            close_serve_process()
+            return None
+        if raw is None:
+            close_serve_process()
+            return None
+
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, TypeError):
+        with _SERVE_LOCK:
+            close_serve_process()
+        return None
+    if not isinstance(payload, dict) or payload.get("ok") is False:
+        return None
+    return payload
+
+
 def run_probe(args: List[str], timeout: float = 5.0) -> Dict[str, Any] | None:
     """Execute `narwhal-probe` with bounded output and return parsed JSON dict or None."""
     binary = probe_binary_path()
+    if (
+        os.name == "posix"
+        and os.getenv("NARWHAL_NATIVE_PROBE_SERVE", "1").strip() != "0"
+        and subprocess.run is _ORIG_SUBPROCESS_RUN
+    ):
+        served = _run_via_serve(binary, args, timeout)
+        if served is not None:
+            return served
+
     try:
         proc = subprocess.run(
             [str(binary), *args],

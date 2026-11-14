@@ -643,5 +643,96 @@ class RuntimeCgroupMemoryIoNativeBridgeTests(unittest.TestCase):
         self.assertEqual(cg_io["8:0"]["wios"], 8)
 
 
+class PersistentServePipeTests(unittest.TestCase):
+    def tearDown(self):
+        native_probe.close_serve_process()
+
+    def test_run_probe_reuses_persistent_serve_pipe(self):
+        import io
+
+        class _FakeStdout:
+            def fileno(self):
+                return 99
+
+            def close(self):
+                pass
+
+        fake_proc = mock.MagicMock()
+        fake_proc.poll.return_value = None
+        fake_proc.stdin = io.BytesIO()
+        fake_proc.stdout = _FakeStdout()
+
+        with mock.patch.object(native_probe.os, "name", "posix"), mock.patch.object(
+            native_probe, "probe_binary_path", return_value="/tmp/narwhal-probe"
+        ), mock.patch.dict(
+            native_probe.os.environ, {"NARWHAL_NATIVE_PROBE_SERVE": "1"}, clear=False
+        ), mock.patch.object(
+            native_probe.subprocess, "Popen", return_value=fake_proc
+        ) as popen_mock, mock.patch.object(
+            native_probe.select, "select", return_value=([99], [], [])
+        ), mock.patch.object(
+            native_probe.os,
+            "read",
+            side_effect=[b'{"ok":true,"n":1}\n', b'{"ok":true,"n":2}\n'],
+        ):
+            r1 = native_probe.run_probe(["version"])
+            r2 = native_probe.run_probe(["host-metrics", "--proc-root", "/proc"])
+
+        self.assertEqual(popen_mock.call_count, 1)
+        self.assertEqual(r1, {"ok": True, "n": 1})
+        self.assertEqual(r2, {"ok": True, "n": 2})
+        self.assertEqual(
+            fake_proc.stdin.getvalue(),
+            b"version\nhost-metrics\t--proc-root\t/proc\n",
+        )
+
+    def test_serve_bypassed_when_disabled_or_subprocess_run_mocked(self):
+        fake_completed = mock.Mock(returncode=0, stdout=b'{"ok":true,"mode":"oneshot"}')
+        with mock.patch.object(native_probe.os, "name", "posix"), mock.patch.object(
+            native_probe, "probe_binary_path", return_value="/tmp/narwhal-probe"
+        ), mock.patch.dict(
+            native_probe.os.environ, {"NARWHAL_NATIVE_PROBE_SERVE": "0"}, clear=False
+        ), mock.patch.object(native_probe, "_run_via_serve") as serve_mock, mock.patch.object(
+            native_probe.subprocess, "run", return_value=fake_completed
+        ) as run_mock:
+            res = native_probe.run_probe(["version"])
+        serve_mock.assert_not_called()
+        run_mock.assert_called_once()
+        self.assertEqual(res, {"ok": True, "mode": "oneshot"})
+
+    def test_serve_falls_back_to_oneshot_on_broken_pipe_or_bad_json(self):
+        class _FakeStdout:
+            def fileno(self):
+                return 99
+
+            def close(self):
+                pass
+
+        bad_proc = mock.MagicMock()
+        bad_proc.poll.return_value = None
+        bad_proc.stdin = mock.MagicMock()
+        bad_proc.stdout = _FakeStdout()
+        fake_completed = mock.Mock(returncode=0, stdout=b'{"ok":true,"fallback":true}')
+
+        with mock.patch.object(native_probe.os, "name", "posix"), mock.patch.object(
+            native_probe, "probe_binary_path", return_value="/tmp/narwhal-probe"
+        ), mock.patch.object(
+            native_probe.subprocess, "Popen", return_value=bad_proc
+        ), mock.patch.object(
+            native_probe.select, "select", return_value=([99], [], [])
+        ), mock.patch.object(
+            native_probe.os, "read", return_value=b"not-json\n"
+        ), mock.patch.object(
+            native_probe.subprocess, "run", return_value=fake_completed
+        ) as run_mock, mock.patch.object(
+            native_probe, "_ORIG_SUBPROCESS_RUN", run_mock
+        ):
+            res = native_probe.run_probe(["version"])
+
+        self.assertEqual(res, {"ok": True, "fallback": True})
+        self.assertIsNone(native_probe._serve_proc)
+        run_mock.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

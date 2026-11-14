@@ -2,6 +2,15 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
+## Phase 4 性能优化：Rust `narwhal-probe serve` 常驻管道模式（v1.8.35）
+
+- 已完成 `rust/crates/narwhal-probe/src/main.rs` 常驻管道模式（`narwhal-probe serve`）：
+  - 支持从 `stdin` 逐行读取命令（`\t` 分隔参数或空白分隔），单行 JSON 输出到 `stdout` 并立即 flush，消除高频采集时的 `fork`/`exec` 子进程创建开销。
+  - 新增 `parse_serve_line` 与嵌套 `serve` 防护的 Rust 单元测试。
+- 已完成 `client/native_probe.py` 线程安全常驻管道客户端（`_run_via_serve` + `close_serve_process` + `atexit` 清理）：
+  - 复用单个 `narwhal-probe serve` 子进程（支持 `NARWHAL_NATIVE_PROBE_SERVE=0` 开关、超时与 `MAX_STDOUT_BYTES` 保护、异常/断管自动清理并无感回退至单次 `subprocess.run` 与纯 Python 实现）。
+- 已补充 `tests/test_native_probe.py` 常驻管道复用、开关旁路与断管回退单元测试。
+
 ## Phase 3 完整闭环：Runtime / Memory / IO Guard 原生探针全链路接入（v1.8.34）
 
 - **Rust `narwhal-probe` 扩展 (`rust/crates/host-metrics/src/lib.rs`, `rust/crates/cgroup-probe/src/lib.rs`, `rust/crates/narwhal-probe/src/main.rs`)**：
