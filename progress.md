@@ -2,7 +2,7 @@
 
 更新时间：2026-11-13（Asia/Shanghai）
 
-## Phase 4 性能优化：Rust `narwhal-probe serve` 常驻管道模式（v1.8.35）
+## Phase 4 性能优化：Rust `narwhal-probe serve` 常驻管道模式（v1.8.36）
 
 - 已完成 `rust/crates/narwhal-probe/src/main.rs` 常驻管道模式（`narwhal-probe serve`）：
   - 支持从 `stdin` 逐行读取命令（`\t` 分隔参数或空白分隔），单行 JSON 输出到 `stdout` 并立即 flush，消除高频采集时的 `fork`/`exec` 子进程创建开销。
