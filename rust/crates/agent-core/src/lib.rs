@@ -2,10 +2,11 @@
 
 pub mod actions;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::io::Write;
+use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +17,7 @@ use cgroup_probe::{collect_psi_snapshot, read_psi, PsiStatus};
 use geoip_probe::lookup_countries;
 use guard_core::security::{
     detect_suspicious_processes, evaluate_socket_abuse, ProcInfo, SocketAbuseInput,
+    SocketAbuseVerdict, SuspiciousProcFinding,
 };
 use guard_core::{
     CpuContainerSample, CpuGuardConfig, CpuGuardTracker, HostCpuSample, HostDeviceSample,
@@ -538,15 +540,20 @@ impl AgentState {
         };
         let suspicious_json = serialize_suspicious_findings_json(&suspicious_findings);
         let socket_abuse_input = aggregate_socket_abuse_from_containers(containers, timestamp);
-        let socket_abuse_json = evaluate_socket_abuse(&socket_abuse_input).to_json();
+        let socket_verdict = evaluate_socket_abuse(&socket_abuse_input);
+        let socket_abuse_json = socket_verdict.to_json();
+        let security_alerts_json = build_security_alerts_json(&socket_verdict, &suspicious_findings);
         let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
+        let ipv4_ok = host_ip_family_available(false);
+        let ipv6_ok = host_ip_family_available(true);
+        let runtime_inventory_json = detect_runtime_inventory_json(containers);
 
         let agent_ver = resolved_agent_version();
         let host_fw_json = detect_host_firewall_json();
         let mut out = String::with_capacity(4096);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":{},\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -558,6 +565,10 @@ impl AgentState {
             config.security_monitor_enabled,
             json_escape(&agent_ver),
             timestamp,
+            ipv4_ok,
+            ipv6_ok,
+            ipv4_ok,
+            ipv6_ok,
             containers_json,
             config.security_monitor_enabled,
             interval_secs.max(1.0),
@@ -566,6 +577,7 @@ impl AgentState {
             total_rx_pps,
             total_tx_pps,
             socket_abuse_input.tcp_syn_recv,
+            security_alerts_json,
             suspicious_json,
             socket_abuse_json,
             rfw_service_health_json,
@@ -582,6 +594,7 @@ impl AgentState {
             host_metrics_json,
             psi_snapshot_json,
             proc_snapshot_json,
+            runtime_inventory_json,
             cpu_out.actions.len(),
             mem_actions.len(),
             io_actions.len(),
@@ -1090,6 +1103,137 @@ fn serialize_suspicious_findings_json(
     }
     out.push(']');
     out
+}
+
+/// Checks whether IPv4 or IPv6 kernel routing is available without sending packets.
+pub fn host_ip_family_available(ipv6: bool) -> bool {
+    let (bind_addr, target_addr) = if ipv6 {
+        ("[::]:0", "[2606:4700:4700::1111]:53")
+    } else {
+        ("0.0.0.0:0", "1.1.1.1:53")
+    };
+    let Ok(sock) = UdpSocket::bind(bind_addr) else {
+        return false;
+    };
+    if sock.connect(target_addr).is_err() {
+        return false;
+    }
+    match sock.local_addr() {
+        Ok(addr) => !addr.ip().is_unspecified(),
+        Err(_) => false,
+    }
+}
+
+fn binary_exists_in_path(bin: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| {
+        let candidate = dir.join(bin);
+        candidate.is_file()
+    })
+}
+
+/// Builds the `operations.runtime_inventory` snapshot matching the Python agent contract.
+pub fn detect_runtime_inventory_json(containers: &[ContainerSample]) -> String {
+    let mut runtimes = BTreeSet::new();
+    if Path::new("/run/narwhal-agent/connlimit.sock").exists() || binary_exists_in_path("runman") {
+        runtimes.insert("runman".to_string());
+    }
+    for name in ["podman", "docker", "incus"] {
+        if binary_exists_in_path(name) {
+            runtimes.insert(name.to_string());
+        }
+    }
+    for container in containers {
+        let rt = container.runtime.trim().to_ascii_lowercase();
+        if !rt.is_empty() {
+            runtimes.insert(rt);
+        }
+    }
+    let state = if runtimes.is_empty() {
+        "empty"
+    } else {
+        "available"
+    };
+    let mut runtimes_json = String::from("[");
+    for (idx, rt) in runtimes.iter().take(8).enumerate() {
+        if idx > 0 {
+            runtimes_json.push(',');
+        }
+        let _ = write!(runtimes_json, "\"{}\"", json_escape(rt));
+    }
+    runtimes_json.push(']');
+    format!(
+        "{{\"state\":\"{}\",\"runtimes\":{},\"container_count\":{}}}",
+        state,
+        runtimes_json,
+        containers.len()
+    )
+}
+
+/// Generates `security.alerts` entries from Rust socket abuse and suspicious process verdicts.
+pub fn build_security_alerts_json(
+    socket_verdict: &SocketAbuseVerdict,
+    suspicious_findings: &[SuspiciousProcFinding],
+) -> String {
+    let mut items: Vec<String> = Vec::new();
+    if socket_verdict.suspected {
+        let cat_titles: Vec<&str> = socket_verdict
+            .categories
+            .iter()
+            .map(|c| c.title.as_str())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let cat_summary = if cat_titles.is_empty() {
+            "异常连接特征".to_string()
+        } else {
+            cat_titles.join("、")
+        };
+        let primary = socket_verdict.categories.first();
+        let value = primary.map(|c| c.value).unwrap_or(socket_verdict.total_sockets.max(1));
+        let threshold = primary.map(|c| c.threshold).unwrap_or(1);
+        let reason = primary
+            .map(|c| c.reason.as_str())
+            .unwrap_or(socket_verdict.verdict_label.as_str());
+        let title = format!("疑似 Socket / 代理连接滥用（待人工复核：{}）", cat_summary);
+        let message = format!("{} {}", socket_verdict.verdict_label, reason).trim().to_string();
+        items.push(format!(
+            "{{\"type\":\"socket_abuse_suspected\",\"severity\":\"{}\",\"title\":\"{}\",\"message\":\"{}\",\"value\":{},\"threshold\":{},\"protection_only\":true,\"auto_stop_eligible\":false}}",
+            json_escape(if socket_verdict.severity.is_empty() { "warning" } else { &socket_verdict.severity }),
+            json_escape(&title),
+            json_escape(&message),
+            value,
+            threshold,
+        ));
+    }
+    if let Some(first) = suspicious_findings.first() {
+        let sev = if first.severity.is_empty() {
+            "critical"
+        } else {
+            first.severity.as_str()
+        };
+        let title = format!(
+            "发现疑似恶意/代理进程：{} (PID {})",
+            first.process, first.pid
+        );
+        let message = format!(
+            "类别={} 匹配={} 命令={}",
+            first.category, first.pattern, first.redacted_command
+        );
+        items.push(format!(
+            "{{\"type\":\"suspicious_process\",\"severity\":\"{}\",\"title\":\"{}\",\"message\":\"{}\",\"value\":{},\"threshold\":1,\"pid\":{},\"process\":\"{}\",\"category\":\"{}\",\"pattern\":\"{}\"}}",
+            json_escape(sev),
+            json_escape(&title),
+            json_escape(&message),
+            suspicious_findings.len(),
+            first.pid,
+            json_escape(&first.process),
+            json_escape(&first.category),
+            json_escape(&first.pattern),
+        ));
+    }
+    format!("[{}]", items.join(","))
 }
 
 pub fn extract_proc_infos_from_snapshot(proc_snapshot_json: &str) -> Vec<ProcInfo> {
@@ -1768,8 +1912,9 @@ SECURITY_MONITOR_ENABLED=false
             "\"client_config\":{",
             "\"agent_version\":",
             "\"timestamp\":1700000000",
-            "\"container_network\":{\"ipv4_ok\":true,\"ipv6_ok\":false}",
-            "\"podman_network\":{\"ipv4_ok\":true,\"ipv6_ok\":false}",
+            "\"container_network\":{\"ipv4_ok\":",
+            "\"podman_network\":{\"ipv4_ok\":",
+            "\"runtime_inventory\":{\"state\":",
             "\"containers\":[]",
             "\"security\":{",
             "\"operations\":{",
@@ -2169,5 +2314,57 @@ SECURITY_MONITOR_ENABLED=false
         assert_eq!(state.last_sample_ts, Some(1_700_000_000));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_runtime_inventory_and_security_alerts_generation() {
+        let inv_empty = detect_runtime_inventory_json(&[]);
+        assert!(inv_empty.contains("\"container_count\":0"));
+
+        let containers = vec![ContainerSample {
+            id: "id1".to_string(),
+            stable_id: "runman:id1".to_string(),
+            name: "c1".to_string(),
+            image: "alpine".to_string(),
+            runtime: "runman".to_string(),
+            runtime_bin: "runman".to_string(),
+            project: String::new(),
+            pid: Some(42),
+            status: "running".to_string(),
+            instance_id: String::new(),
+            network_addresses: Vec::new(),
+            pid_metrics_json: None,
+            socket_tables_json: None,
+            cgroup_metrics_json: None,
+        }];
+        let inv = detect_runtime_inventory_json(&containers);
+        assert!(inv.contains("\"state\":\"available\""));
+        assert!(inv.contains("\"runman\""));
+        assert!(inv.contains("\"container_count\":1"));
+
+        let mut abuse_input = SocketAbuseInput::default();
+        abuse_input.evaluated_at = 1_700_000_000;
+        abuse_input.conn_count = 300;
+        abuse_input.cm_total = 300;
+        abuse_input.cm_valid = true;
+        abuse_input.has_tcp_states = true;
+        abuse_input.socks_detected = true;
+        abuse_input.socks_auth_mode = "none".to_string();
+        let verdict = evaluate_socket_abuse(&abuse_input);
+        let findings = vec![SuspiciousProcFinding {
+            pid: 999,
+            cpu_percent: 98.0,
+            process: "xmrig".to_string(),
+            category: "crypto_miner".to_string(),
+            pattern: "xmrig".to_string(),
+            severity: "critical".to_string(),
+            redacted_command: "xmrig -o stratum+tcp://pool".to_string(),
+        }];
+        let alerts = build_security_alerts_json(&verdict, &findings);
+        assert!(alerts.contains("\"type\":\"suspicious_process\""));
+        assert!(alerts.contains("\"pid\":999"));
+        if verdict.suspected {
+            assert!(alerts.contains("\"type\":\"socket_abuse_suspected\""));
+        }
     }
 }

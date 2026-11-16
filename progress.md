@@ -2,6 +2,13 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 7 完善：`narwhal-agent` 宿主机网络可达性、运行时清单与安全告警原生生成（v1.9.7）
+
+- **`rust/crates/agent-core/src/lib.rs`**：
+  - 新增纯 `std` 零发包内核路由探测 `host_ip_family_available`（`UdpSocket::bind` + `connect`），替换 `build_report_json` 中硬编码的 `container_network` / `podman_network`（`ipv4_ok`/`ipv6_ok`）。
+  - 新增 `detect_runtime_inventory_json`，探测宿主机 Runman Unix socket 与 `podman`/`docker`/`incus` 运行时，生成符合服务端契约的 `operations.runtime_inventory` 对象（`state`/`runtimes`/`container_count`）。
+  - 新增 `build_security_alerts_json`，将 `evaluate_socket_abuse`（`socket_abuse_suspected`）与 `detect_suspicious_processes`（`suspicious_process`）结果实时转化为 `security.alerts` 上报项，并补充单元测试。
+
 ## 发布修复：前端 `getSecurityStatus` 透传 RFW 与 Agent 元数据字段（v1.9.6）
 
 - **`frontend/src/api/client.ts`**：`getSecurityStatus()` 在映射 `/api/v1/security/status` 返回项时先展开 `...item`，修复之前手动重建对象时丢弃 `rfw_service_health`、`agent_version`、`last_seen`、`last_seen_utc8` 与 `collection_health` 导致界面始终显示 `Agent 未知 · 最近上报 —` 和 `主机 RFW | Agent 未上报 | 需升级 Agent 获取检查结果` 的问题，并重新构建 `server/static/` 静态资源。
