@@ -485,7 +485,7 @@ fi
 
 TARGET_ARCH="$(normalize_arch)"
 agent_mode="${NARWHAL_AGENT_MODE:-$(load_kv_from_file "$CLIENT_ENV_FILE" NARWHAL_AGENT_MODE || true)}"
-agent_mode="${agent_mode:-python}"
+agent_mode="${agent_mode:-rust}"
 if [[ "$agent_mode" != "rust" && "$agent_mode" != "python" ]]; then
   echo "[WARN] Unsupported NARWHAL_AGENT_MODE=$agent_mode; falling back to python." >&2
   agent_mode="python"
@@ -856,9 +856,7 @@ if [[ -d "$ROOT_DIR/client/bin" ]]; then
     [[ -f "$b" ]] && install -m 0755 "$b" "$CLIENT_APP_DIR/bin/$(basename "$b")"
   done
 fi
-if [[ "$MODE" == "update" ]]; then
-  fetch_narwhal_probe "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-probe" "${NARWHAL_SERVER_URL:-$server_url}" "${NARWHAL_SHARED_SECRET:-$secret}" "${NARWHAL_TLS_CA_FILE:-$tls_ca_file}" || true
-fi
+fetch_narwhal_probe "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-probe" "${NARWHAL_SERVER_URL:-$server_url}" "${NARWHAL_SHARED_SECRET:-$secret}" "${NARWHAL_TLS_CA_FILE:-$tls_ca_file}" || true
 fetch_narwhal_agent "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-agent" "${NARWHAL_SERVER_URL:-$server_url}" "${NARWHAL_SHARED_SECRET:-$secret}" "${NARWHAL_TLS_CA_FILE:-$tls_ca_file}" || true
 install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
 if [[ -f "$ROOT_DIR/scripts/update_archive.py" ]]; then
@@ -869,8 +867,11 @@ cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"
 chmod 0700 "$SELF_UNINSTALL_SCRIPT"
 
 use_rust_agent=0
-if [[ "$agent_mode" == "rust" && -x "$CLIENT_APP_DIR/bin/narwhal-agent" ]]; then
+if [[ "$agent_mode" == "rust" && -x "$CLIENT_APP_DIR/bin/narwhal-agent" ]] \
+  && NARWHAL_CLIENT_ENV_FILE="$CLIENT_ENV_FILE" "$CLIENT_APP_DIR/bin/narwhal-agent" --check-config >/dev/null 2>&1; then
   use_rust_agent=1
+elif [[ "$agent_mode" == "rust" ]]; then
+  echo "[WARN] narwhal-agent binary missing or failed self-check; keeping Python fallback runtime." >&2
 fi
 
 if [[ $use_rust_agent -eq 0 ]]; then

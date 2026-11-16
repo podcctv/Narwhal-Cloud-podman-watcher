@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
-use std::path::Path;
-use std::process::Command;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -11,6 +12,8 @@ use net_probe::{is_allowed_host, probe_tcp_target};
 use transport::{SignedResponse, TransportClient, TransportError};
 
 pub const MANAGED_UPDATE_SCRIPT: &str = "/opt/narwhal-monitor/managed-client-update.sh";
+pub const SELF_UNINSTALL_SCRIPT: &str = "/opt/narwhal-monitor/client-self-uninstall.sh";
+pub const RUNMAN_FIREWALL_SOCK_PATH: &str = "/run/narwhal-agent/firewall.sock";
 pub const MAX_TCP_PING_WORKERS: usize = 4;
 pub const MAX_TCP_PING_TARGETS: usize = 400;
 const MAX_JSON_DEPTH: usize = 64;
@@ -106,6 +109,26 @@ impl JsonValue {
 
     pub fn get(&self, key: &str) -> Option<&JsonValue> {
         self.as_object().and_then(|map| map.get(key))
+    }
+
+    pub fn to_json(&self) -> String {
+        match self {
+            Self::Null => "null".to_string(),
+            Self::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Self::Number(n) => n.clone(),
+            Self::String(s) => json_quote(s),
+            Self::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(JsonValue::to_json).collect();
+                format!("[{}]", items.join(","))
+            }
+            Self::Object(map) => {
+                let fields: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("{}:{}", json_quote(k), v.to_json()))
+                    .collect();
+                format!("{{{}}}", fields.join(","))
+            }
+        }
     }
 }
 
@@ -529,6 +552,21 @@ impl ActionReceipt {
         }
     }
 
+    pub fn running(
+        action_id: i64,
+        action_type: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            action_id,
+            action_type: action_type.into(),
+            ok: true,
+            status: "running".to_string(),
+            message: message.into(),
+            data_json: None,
+        }
+    }
+
     pub fn failed(
         action_id: i64,
         action_type: impl Into<String>,
@@ -638,13 +676,52 @@ pub fn is_valid_systemd_unit(unit: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'@' | b'-'))
 }
 
+#[derive(Debug, Clone)]
+pub struct ActionContext {
+    pub node_id: String,
+    pub env_file: PathBuf,
+    pub configured_access_logs: Vec<String>,
+    pub rescan_requested: bool,
+    pub restart_required: bool,
+}
+
+impl Default for ActionContext {
+    fn default() -> Self {
+        Self {
+            node_id: String::new(),
+            env_file: PathBuf::from(crate::DEFAULT_ENV_FILE),
+            configured_access_logs: Vec::new(),
+            rescan_requested: false,
+            restart_required: false,
+        }
+    }
+}
+
 pub fn execute_action(req: &ActionRequest) -> ActionReceipt {
+    let mut ctx = ActionContext::default();
+    execute_action_with_context(req, &mut ctx)
+}
+
+pub fn execute_action_with_context(
+    req: &ActionRequest,
+    ctx: &mut ActionContext,
+) -> ActionReceipt {
     match req.action_type.as_str() {
-        "managed_upgrade" => execute_managed_upgrade(req, Path::new(MANAGED_UPDATE_SCRIPT)),
+        "managed_upgrade" | "managed_rollback" => {
+            execute_managed_upgrade(req, Path::new(MANAGED_UPDATE_SCRIPT), ctx)
+        }
         "tcp_ping" => execute_tcp_ping(req),
         "cpu_limit" | "memory_limit" | "io_limit" => execute_systemd_limit(req),
         "kill_pid" | "stop_socks_process" => execute_kill_pid(req),
         "runman_restart_overload" | "runman_stop_overload" => execute_runman_overload(req),
+        "update_host_config" => execute_update_host_config(req, ctx),
+        "self_uninstall" => execute_self_uninstall(req, Path::new(SELF_UNINSTALL_SCRIPT), ctx),
+        "discover_access_logs" => execute_discover_access_logs(req, ctx),
+        "host_security_rescan" => execute_host_security_rescan(req, ctx),
+        "restart_container" => execute_restart_container(req, ctx),
+        "freeze_container" | "unfreeze_container" => execute_freeze_container(req),
+        "apply_host_firewall_policy" => execute_apply_host_firewall_policy(req, ctx),
+        "delete_host_firewall_rule" => execute_delete_host_firewall_rule(req, ctx),
         other => ActionReceipt::failed(
             req.id,
             other,
@@ -653,7 +730,30 @@ pub fn execute_action(req: &ActionRequest) -> ActionReceipt {
     }
 }
 
-fn execute_managed_upgrade(req: &ActionRequest, script_path: &Path) -> ActionReceipt {
+fn check_expected_node_id(req: &ActionRequest, ctx: &ActionContext) -> Result<(), String> {
+    if ctx.node_id.is_empty() {
+        return Ok(());
+    }
+    let expected = req
+        .params
+        .get("expected_node_id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("");
+    if expected != ctx.node_id {
+        return Err("host action node identity mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn execute_managed_upgrade(
+    req: &ActionRequest,
+    script_path: &Path,
+    ctx: &ActionContext,
+) -> ActionReceipt {
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    let rollback = req.action_type == "managed_rollback";
     let revision = req
         .params
         .get("revision")
@@ -665,14 +765,14 @@ fn execute_managed_upgrade(req: &ActionRequest, script_path: &Path) -> ActionRec
         .and_then(JsonValue::as_str)
         .unwrap_or("");
 
-    if !is_valid_revision(revision) {
+    if !rollback && !is_valid_revision(revision) {
         return ActionReceipt::failed(
             req.id,
             &req.action_type,
             "invalid managed_upgrade revision: expected 40-char lowercase hex",
         );
     }
-    if !is_valid_semver(version) {
+    if !rollback && !is_valid_semver(version) {
         return ActionReceipt::failed(
             req.id,
             &req.action_type,
@@ -686,35 +786,59 @@ fn execute_managed_upgrade(req: &ActionRequest, script_path: &Path) -> ActionRec
             format!("managed update script unavailable: {}", script_path.display()),
         );
     }
+    if req.id <= 0 {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid action id");
+    }
 
-    match Command::new(script_path)
-        .arg("upgrade")
-        .arg(revision)
-        .arg(version)
-        .output()
-    {
-        Ok(output) if output.status.success() => ActionReceipt::succeeded(
+    let unit = format!("narwhal-managed-{}", req.id);
+    let action_id_str = req.id.to_string();
+    let script_str = script_path.to_string_lossy().into_owned();
+    let mut cmd = Command::new("systemd-run");
+    cmd.arg("--no-block")
+        .arg("--unit")
+        .arg(&unit)
+        .arg("--collect")
+        .arg("--property=Type=oneshot")
+        .arg("--property=TimeoutStartSec=15min")
+        .arg("/bin/bash")
+        .arg(&script_str);
+    if rollback {
+        cmd.arg("rollback").arg(&action_id_str);
+    } else {
+        cmd.arg("upgrade")
+            .arg(revision)
+            .arg(version)
+            .arg(&action_id_str);
+    }
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => ActionReceipt::running(
             req.id,
             &req.action_type,
-            format!("managed_upgrade {version} ({revision}) completed"),
+            if rollback {
+                "scheduled managed rollback".to_string()
+            } else {
+                format!("scheduled immutable upgrade {version} ({revision})")
+            },
         ),
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.trim();
             let msg = if detail.is_empty() {
                 format!(
-                    "managed_upgrade exited with status {}",
+                    "{} systemd-run exited with status {}",
+                    req.action_type,
                     output.status.code().unwrap_or(-1)
                 )
             } else {
-                format!("managed_upgrade failed: {detail}")
+                format!("{} failed: {detail}", req.action_type)
             };
             ActionReceipt::failed(req.id, &req.action_type, msg)
         }
         Err(err) => ActionReceipt::failed(
             req.id,
             &req.action_type,
-            format!("failed to invoke managed_upgrade script: {err}"),
+            format!("unable to enqueue managed update; systemd-run failed: {err}"),
         ),
     }
 }
@@ -1346,6 +1470,544 @@ fn execute_runman_overload(req: &ActionRequest) -> ActionReceipt {
     }
 }
 
+fn is_valid_access_log_path(path: &str) -> bool {
+    if !path.starts_with("/var/log/") || path.len() > 200 || path.contains("..") {
+        return false;
+    }
+    let rest = &path["/var/log/".len()..];
+    !rest.is_empty()
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'/' | b'-'))
+}
+
+fn execute_update_host_config(req: &ActionRequest, ctx: &mut ActionContext) -> ActionReceipt {
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    let Some(cfg_obj) = req.params.get("config").and_then(JsonValue::as_object) else {
+        return ActionReceipt::failed(req.id, &req.action_type, "no valid host configuration");
+    };
+    if !ctx.env_file.is_file() {
+        return ActionReceipt::failed(req.id, &req.action_type, "client environment file not found");
+    }
+
+    let mut updates: BTreeMap<&'static str, String> = BTreeMap::new();
+    for (key, val) in cfg_obj {
+        let env_key = match key.as_str() {
+            "host_id" => "HOST_ID",
+            "report_interval" => "REPORT_INTERVAL",
+            "action_poll_interval" => "ACTION_POLL_INTERVAL",
+            "container_runtimes" => "CONTAINER_RUNTIMES",
+            "docker_monitor_mode" => "DOCKER_MONITOR_MODE",
+            "incus_project" => "INCUS_PROJECT",
+            "security_monitor_enabled" => "SECURITY_MONITOR_ENABLED",
+            "security_access_log_paths" => "SECURITY_ACCESS_LOG_PATHS",
+            _ => continue,
+        };
+        if key == "security_access_log_paths" {
+            let Some(arr) = val.as_array() else {
+                return ActionReceipt::failed(req.id, &req.action_type, "unsafe access log paths");
+            };
+            if !(1..=20).contains(&arr.len()) {
+                return ActionReceipt::failed(req.id, &req.action_type, "unsafe access log paths");
+            }
+            let mut joined = Vec::with_capacity(arr.len());
+            for item in arr {
+                let Some(s) = item.as_str() else {
+                    return ActionReceipt::failed(req.id, &req.action_type, "unsafe access log paths");
+                };
+                if !is_valid_access_log_path(s) {
+                    return ActionReceipt::failed(req.id, &req.action_type, "unsafe access log paths");
+                }
+                joined.push(s);
+            }
+            updates.insert(env_key, joined.join(","));
+        } else if key == "security_monitor_enabled" {
+            let b = val.as_bool().unwrap_or(false);
+            updates.insert(env_key, if b { "true" } else { "false" }.to_string());
+        } else {
+            let raw = match val {
+                JsonValue::String(s) => s.trim().to_string(),
+                JsonValue::Number(n) => n.clone(),
+                JsonValue::Bool(b) => b.to_string(),
+                _ => return ActionReceipt::failed(req.id, &req.action_type, format!("invalid config value: {key}")),
+            };
+            if raw.chars().any(|c| matches!(c, '\r' | '\n' | '=' | '\\' | '"' | '\'')) {
+                return ActionReceipt::failed(req.id, &req.action_type, format!("invalid config value: {key}"));
+            }
+            updates.insert(env_key, raw);
+        }
+    }
+
+    if updates.is_empty() {
+        return ActionReceipt::failed(req.id, &req.action_type, "no valid host configuration");
+    }
+
+    let Ok(existing) = fs::read_to_string(&ctx.env_file) else {
+        return ActionReceipt::failed(req.id, &req.action_type, "unable to read client configuration");
+    };
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut output: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        let key = line.split('=').next().unwrap_or("");
+        if let Some(new_val) = updates.get(key) {
+            output.push(format!("{key}={new_val}"));
+            seen.insert(key.to_string());
+        } else {
+            output.push(line.to_string());
+        }
+    }
+    for (k, v) in &updates {
+        if !seen.contains(*k) {
+            output.push(format!("{k}={v}"));
+        }
+    }
+
+    let tmp_path = ctx.env_file.with_extension(format!("env.tmp-{}", std::process::id()));
+    let content = format!("{}\n", output.join("\n"));
+    if let Err(err) = fs::write(&tmp_path, content.as_bytes()) {
+        return ActionReceipt::failed(req.id, &req.action_type, format!("unable to write host config: {err}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+    }
+    if let Err(err) = fs::rename(&tmp_path, &ctx.env_file) {
+        let _ = fs::remove_file(&tmp_path);
+        return ActionReceipt::failed(req.id, &req.action_type, format!("unable to replace host config: {err}"));
+    }
+    ctx.restart_required = true;
+    ActionReceipt::succeeded(req.id, &req.action_type, "configuration saved; agent will restart")
+}
+
+fn execute_self_uninstall(
+    req: &ActionRequest,
+    script_path: &Path,
+    ctx: &ActionContext,
+) -> ActionReceipt {
+    if req.id <= 0 {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid uninstall action id");
+    }
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    let journal_path = Path::new("/var/lib/narwhal-monitor/quarantine-journal.json");
+    if journal_path.exists() {
+        match fs::read_to_string(journal_path) {
+            Ok(raw) => {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() && trimmed != "{}" && trimmed != "[]" {
+                    return ActionReceipt::failed(
+                        req.id,
+                        &req.action_type,
+                        "pending network quarantine review; preserve recovery tooling and release/review first",
+                    );
+                }
+            }
+            Err(_) => {
+                return ActionReceipt::failed(
+                    req.id,
+                    &req.action_type,
+                    "quarantine recovery journal unavailable; refusing unattended uninstall",
+                );
+            }
+        }
+    }
+    if !script_path.is_file() {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            "self-uninstall helper is unavailable; update Client first",
+        );
+    }
+    match Command::new(script_path)
+        .arg(req.id.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => ActionReceipt::running(req.id, &req.action_type, "self-uninstall scheduled"),
+        Err(err) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("unable to schedule self-uninstall: {err}"),
+        ),
+    }
+}
+
+fn execute_discover_access_logs(req: &ActionRequest, ctx: &ActionContext) -> ActionReceipt {
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    let mut patterns: Vec<String> = vec![
+        "/var/log/nginx/*access*.log".to_string(),
+        "/var/log/caddy/*access*.log".to_string(),
+        "/var/log/apache2/*access*.log".to_string(),
+    ];
+    for p in &ctx.configured_access_logs {
+        if !p.contains('*') && !p.contains('?') {
+            patterns.push(p.clone());
+        }
+    }
+    let (mut candidates, _) = crate::expand_access_log_globs(&patterns);
+    candidates.sort();
+    candidates.dedup();
+
+    let mut results = Vec::new();
+    for path_str in candidates.into_iter().take(30) {
+        let status;
+        let mut samples = 0usize;
+        let mut parsed_count = 0usize;
+        let mut parse_errors = 0usize;
+        let mut formats: BTreeSet<&'static str> = BTreeSet::new();
+        let mut methods: BTreeSet<String> = BTreeSet::new();
+        let mut statuses: BTreeSet<u16> = BTreeSet::new();
+        let mut modified_at = 0u64;
+
+        match fs::metadata(&path_str) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => status = "missing",
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => status = "permission_denied",
+            Err(_) => status = "read_error",
+            Ok(meta) => {
+                modified_at = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                match fs::read(&path_str) {
+                    Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => status = "permission_denied",
+                    Err(_) => status = "read_error",
+                    Ok(bytes) => {
+                        let tail = if bytes.len() > 16384 {
+                            &bytes[bytes.len() - 16384..]
+                        } else {
+                            &bytes[..]
+                        };
+                        let text = String::from_utf8_lossy(tail);
+                        let lines: Vec<&str> = text.lines().collect();
+                        let start_idx = lines.len().saturating_sub(20);
+                        for line in &lines[start_idx..] {
+                            samples += 1;
+                            if let Some(ev) = crate::parse_access_log_line(line) {
+                                parsed_count += 1;
+                                if !ev.method.is_empty() {
+                                    methods.insert(ev.method);
+                                }
+                                statuses.insert(ev.status);
+                                formats.insert(if line.trim_start().starts_with('{') { "json" } else { "combined" });
+                            } else {
+                                parse_errors += 1;
+                            }
+                        }
+                        status = if parsed_count > 0 {
+                            "healthy"
+                        } else if samples == 0 {
+                            "idle"
+                        } else {
+                            "parse_error"
+                        };
+                    }
+                }
+            }
+        }
+
+        let fmt_json: Vec<String> = formats.iter().map(|s| json_quote(s)).collect();
+        let method_json: Vec<String> = methods.iter().map(|s| json_quote(s)).collect();
+        let status_json: Vec<String> = statuses.iter().map(|s| s.to_string()).collect();
+        results.push(format!(
+            "{{\"path\":{},\"status\":{},\"samples\":{},\"parsed\":{},\"parse_errors\":{},\"formats\":[{}],\"methods\":[{}],\"statuses\":[{}],\"modified_at\":{}}}",
+            json_quote(&path_str),
+            json_quote(status),
+            samples,
+            parsed_count,
+            parse_errors,
+            fmt_json.join(","),
+            method_json.join(","),
+            status_json.join(","),
+            modified_at,
+        ));
+    }
+
+    ActionReceipt::succeeded(req.id, &req.action_type, format!("[{}]", results.join(",")))
+}
+
+fn execute_host_security_rescan(req: &ActionRequest, ctx: &mut ActionContext) -> ActionReceipt {
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    ctx.rescan_requested = true;
+    ActionReceipt::succeeded(
+        req.id,
+        &req.action_type,
+        "read-only host security rescan scheduled for next report",
+    )
+}
+
+fn is_safe_container_target(name: &str) -> bool {
+    (1..=200).contains(&name.len())
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'@' | b'+' | b'-'))
+}
+
+fn execute_restart_container(req: &ActionRequest, ctx: &ActionContext) -> ActionReceipt {
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    if runtime == "runman" {
+        return execute_runman_overload(req);
+    }
+    if !matches!(runtime.as_str(), "podman" | "docker" | "incus") {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("unsupported runtime for restart_container: {runtime}"),
+        );
+    }
+    let target = req.container_name.trim();
+    if !is_safe_container_target(target) {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid container target");
+    }
+    let mut cmd = Command::new(&runtime);
+    if runtime == "incus" && !req.project.is_empty() && is_safe_container_target(&req.project) {
+        cmd.arg("--project").arg(&req.project);
+    }
+    cmd.arg("restart").arg(target);
+    match cmd.output() {
+        Ok(out) if out.status.success() => ActionReceipt::succeeded(
+            req.id,
+            &req.action_type,
+            format!("{runtime} restarted {target}"),
+        ),
+        Ok(out) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("{runtime} restart failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        ),
+        Err(err) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("unable to invoke {runtime} restart: {err}"),
+        ),
+    }
+}
+
+fn execute_freeze_container(req: &ActionRequest) -> ActionReceipt {
+    let freeze = req.action_type == "freeze_container";
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let target = req.container_name.trim();
+    if !is_safe_container_target(target) {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid container target");
+    }
+
+    // Direct pure-std cgroup v2 freeze when PID is supplied
+    if let Some(pid) = req.params.get("pid").and_then(JsonValue::as_i64).filter(|&p| p > 1) {
+        if let Some(cg_dir) = runtime_drivers::resolve_cgroup_dir_from_proc(
+            Path::new("/proc"),
+            Path::new("/sys/fs/cgroup"),
+            pid as u32,
+        ) {
+            let freeze_path = cg_dir.join("cgroup.freeze");
+            if freeze_path.is_file() {
+                if fs::write(&freeze_path, if freeze { b"1" } else { b"0" }).is_ok() {
+                    return ActionReceipt::succeeded(
+                        req.id,
+                        &req.action_type,
+                        format!(
+                            "cgroup {} succeeded for {target}",
+                            if freeze { "freeze" } else { "unfreeze" }
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    if !matches!(runtime.as_str(), "podman" | "docker") {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("unable to freeze/unfreeze {runtime} container without valid cgroup pid"),
+        );
+    }
+    let subcmd = if freeze { "pause" } else { "unpause" };
+    match Command::new(&runtime).arg(subcmd).arg(target).output() {
+        Ok(out) if out.status.success() => ActionReceipt::succeeded(
+            req.id,
+            &req.action_type,
+            format!("{runtime} {subcmd} succeeded for {target}"),
+        ),
+        Ok(out) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("{runtime} {subcmd} failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        ),
+        Err(err) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("unable to execute {runtime} {subcmd}: {err}"),
+        ),
+    }
+}
+
+fn execute_apply_host_firewall_policy(
+    req: &ActionRequest,
+    ctx: &ActionContext,
+) -> ActionReceipt {
+    if req.runtime != "host" || req.container_name != "__host__" {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy action has an invalid scope");
+    }
+    if check_expected_node_id(req, ctx).is_err() {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy belongs to another Watcher node");
+    }
+    let Some(policy_val) = req.params.get("policy") else {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy data is invalid");
+    };
+    let Some(revision) = policy_val.get("revision").and_then(JsonValue::as_i64).filter(|&r| r >= 1) else {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy revision is missing or invalid");
+    };
+    if policy_val.get("rules").and_then(JsonValue::as_array).is_none()
+        || policy_val.get("abuse").and_then(JsonValue::as_object).is_none()
+    {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy data is invalid");
+    }
+
+    if !Path::new(RUNMAN_FIREWALL_SOCK_PATH).exists() {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            "Runman firewall socket unavailable; no host firewall change was confirmed",
+        );
+    }
+
+    let body = policy_val.to_json();
+    match runtime_drivers::runman_request(
+        RUNMAN_FIREWALL_SOCK_PATH,
+        "POST",
+        "/v1/firewall/policy",
+        Some(body.as_bytes()),
+    ) {
+        Ok((200, resp_body)) => {
+            let text = String::from_utf8_lossy(&resp_body);
+            let msg = parse_json(&text)
+                .ok()
+                .and_then(|v| v.get("message").and_then(JsonValue::as_str).map(|s| s.to_string()))
+                .unwrap_or_else(|| "Runman host firewall policy updated".to_string());
+            // Read back revision to verify persistence.
+            match runtime_drivers::runman_request(RUNMAN_FIREWALL_SOCK_PATH, "GET", "/v1/firewall/policy", None) {
+                Ok((200, rb_body)) => {
+                    let rb_text = String::from_utf8_lossy(&rb_body);
+                    let rb_rev = parse_json(&rb_text)
+                        .ok()
+                        .and_then(|v| v.get("revision").and_then(JsonValue::as_i64));
+                    if rb_rev == Some(revision) {
+                        ActionReceipt::succeeded(
+                            req.id,
+                            &req.action_type,
+                            format!("{msg}; readback verified revision {revision}"),
+                        )
+                    } else {
+                        ActionReceipt::failed(
+                            req.id,
+                            &req.action_type,
+                            format!("host firewall readback mismatch: expected revision {revision}"),
+                        )
+                    }
+                }
+                _ => ActionReceipt::failed(
+                    req.id,
+                    &req.action_type,
+                    "host firewall applied but readback verification failed",
+                ),
+            }
+        }
+        Ok((status, resp_body)) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("Runman rejected host firewall policy (HTTP {status}): {}", String::from_utf8_lossy(&resp_body).trim()),
+        ),
+        Err(err) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("Runman firewall socket error: {err}"),
+        ),
+    }
+}
+
+fn execute_delete_host_firewall_rule(
+    req: &ActionRequest,
+    ctx: &ActionContext,
+) -> ActionReceipt {
+    if req.runtime != "host" || req.container_name != "__host__" {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall rule deletion action has an invalid scope");
+    }
+    if let Err(_) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall rule deletion belongs to another Watcher node");
+    }
+    let Some(rule_val) = req.params.get("rule") else {
+        return ActionReceipt::failed(req.id, &req.action_type, "manual RFW rule identity is missing or invalid");
+    };
+    let Some(rule_id) = rule_val.get("id").and_then(JsonValue::as_i64).filter(|&id| id >= 1) else {
+        return ActionReceipt::failed(req.id, &req.action_type, "manual RFW rule identity is missing or invalid");
+    };
+    if rule_val.get("origin").and_then(JsonValue::as_str) != Some("manual")
+        || rule_val.get("sync_state").and_then(JsonValue::as_str) != Some("manual")
+        || rule_val
+            .get("managed_key")
+            .and_then(JsonValue::as_str)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            "only a confirmed manual RFW rule can be deleted directly",
+        );
+    }
+    if !Path::new(RUNMAN_FIREWALL_SOCK_PATH).exists() {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            "Runman firewall socket unavailable; no RFW rule deletion was confirmed",
+        );
+    }
+    let body = rule_val.to_json();
+    let endpoint = format!("/v1/firewall/rules/{rule_id}");
+    match runtime_drivers::runman_request(
+        RUNMAN_FIREWALL_SOCK_PATH,
+        "DELETE",
+        &endpoint,
+        Some(body.as_bytes()),
+    ) {
+        Ok((200, resp_body)) => {
+            let text = String::from_utf8_lossy(&resp_body);
+            let msg = parse_json(&text)
+                .ok()
+                .and_then(|v| v.get("message").and_then(JsonValue::as_str).map(|s| s.to_string()))
+                .unwrap_or_else(|| "RFW manual rule deleted".to_string());
+            ActionReceipt::succeeded(req.id, &req.action_type, msg)
+        }
+        Ok((status, resp_body)) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("Runman rejected RFW rule deletion (HTTP {status}): {}", String::from_utf8_lossy(&resp_body).trim()),
+        ),
+        Err(err) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("Runman firewall socket error: {err}"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1450,7 +2112,11 @@ mod tests {
             r#"{"id":4,"action_type":"managed_upgrade","params":{"revision":"0123456789abcdef0123456789abcdef01234567","version":"1.8.44"}}"#,
         )
         .unwrap();
-        let r4 = execute_managed_upgrade(&missing_script, Path::new("/nonexistent/managed-client-update.sh"));
+        let r4 = execute_managed_upgrade(
+            &missing_script,
+            Path::new("/nonexistent/managed-client-update.sh"),
+            &ActionContext::default(),
+        );
         assert!(!r4.ok);
     }
 
@@ -1634,5 +2300,89 @@ mod tests {
                 receipt.message
             );
         }
+    }
+
+    #[test]
+    fn test_mainline_host_config_rescan_discover_and_firewall_validation() {
+        let dir = std::env::temp_dir().join("narwhal-actions-mainline-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let env_file = dir.join("client.env");
+        fs::write(&env_file, "HOST_ID=old-host\nREPORT_INTERVAL=300\nSECURITY_MONITOR_ENABLED=true\n").unwrap();
+
+        let log_file = dir.join("access.log");
+        fs::write(&log_file, "203.0.113.1 - - [16/Nov/2026:12:00:00 +0800] \"GET /health HTTP/1.1\" 200 2\n").unwrap();
+
+        let mut ctx = ActionContext {
+            node_id: "node-xyz".to_string(),
+            env_file: env_file.clone(),
+            configured_access_logs: vec![log_file.to_string_lossy().into_owned()],
+            rescan_requested: false,
+            restart_required: false,
+        };
+
+        // Mismatched node_id must be rejected
+        let bad_cfg = ActionRequest::from_json(
+            r#"{"id":60,"action_type":"update_host_config","params":{"expected_node_id":"wrong","config":{"host_id":"new"}}}"#,
+        )
+        .unwrap();
+        let r_bad_cfg = execute_action_with_context(&bad_cfg, &mut ctx);
+        assert!(!r_bad_cfg.ok);
+        assert!(!ctx.restart_required);
+
+        // Unsafe access log path must be rejected
+        let bad_paths = ActionRequest::from_json(
+            r#"{"id":61,"action_type":"update_host_config","params":{"expected_node_id":"node-xyz","config":{"security_access_log_paths":["/etc/passwd"]}}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_paths, &mut ctx).ok);
+
+        // Valid host config update mutates client.env and requests restart
+        let ok_cfg = ActionRequest::from_json(
+            r#"{"id":62,"action_type":"update_host_config","params":{"expected_node_id":"node-xyz","config":{"host_id":"new-host","report_interval":120,"security_monitor_enabled":false,"security_access_log_paths":["/var/log/nginx/access.log"]}}}"#,
+        )
+        .unwrap();
+        let r_ok_cfg = execute_action_with_context(&ok_cfg, &mut ctx);
+        assert!(r_ok_cfg.ok);
+        assert!(ctx.restart_required);
+        let written = fs::read_to_string(&env_file).unwrap();
+        assert!(written.contains("HOST_ID=new-host"));
+        assert!(written.contains("REPORT_INTERVAL=120"));
+        assert!(written.contains("SECURITY_MONITOR_ENABLED=false"));
+        assert!(written.contains("SECURITY_ACCESS_LOG_PATHS=/var/log/nginx/access.log"));
+
+        // host_security_rescan sets rescan flag
+        let rescan_req = ActionRequest::from_json(
+            r#"{"id":63,"action_type":"host_security_rescan","params":{"expected_node_id":"node-xyz"}}"#,
+        )
+        .unwrap();
+        let r_rescan = execute_action_with_context(&rescan_req, &mut ctx);
+        assert!(r_rescan.ok);
+        assert!(ctx.rescan_requested);
+
+        // discover_access_logs finds & parses configured log
+        let disc_req = ActionRequest::from_json(
+            r#"{"id":64,"action_type":"discover_access_logs","params":{"expected_node_id":"node-xyz"}}"#,
+        )
+        .unwrap();
+        let r_disc = execute_action_with_context(&disc_req, &mut ctx);
+        assert!(r_disc.ok);
+        assert!(r_disc.message.contains("access.log"));
+        assert!(r_disc.message.contains("\"status\":\"healthy\""));
+
+        // Host firewall policy rejects wrong scope and non-manual delete
+        let bad_fw = ActionRequest::from_json(
+            r#"{"id":65,"action_type":"apply_host_firewall_policy","runtime":"podman","container_name":"c1","params":{"expected_node_id":"node-xyz","policy":{"revision":1,"rules":[],"abuse":{}}}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_fw, &mut ctx).ok);
+
+        let bad_del = ActionRequest::from_json(
+            r#"{"id":66,"action_type":"delete_host_firewall_rule","runtime":"host","container_name":"__host__","params":{"expected_node_id":"node-xyz","rule":{"id":1,"origin":"auto","sync_state":"manual"}}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_del, &mut ctx).ok);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

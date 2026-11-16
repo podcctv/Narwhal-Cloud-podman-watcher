@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod actions;
+pub mod gfw_probe;
+pub mod host_audit;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
@@ -59,19 +61,6 @@ pub fn resolved_agent_version() -> String {
         }
     }
     AGENT_VERSION.trim().to_string()
-}
-
-fn detect_host_firewall_json() -> &'static str {
-    if Path::new("/usr/sbin/nft").exists() || Path::new("/sbin/nft").exists() {
-        "{\"available\":true,\"backend\":\"nftables\"}"
-    } else if Path::new("/usr/sbin/iptables").exists()
-        || Path::new("/sbin/iptables").exists()
-        || Path::new("/proc/net/ip_tables_names").exists()
-    {
-        "{\"available\":true,\"backend\":\"iptables\"}"
-    } else {
-        "{\"available\":false,\"backend\":\"none\"}"
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,6 +413,7 @@ pub struct AgentState {
     geoip_db_path: Option<PathBuf>,
     rfw_restart_observation: Option<RfwRestartObservation>,
     access_log_states: HashMap<String, AccessLogCursor>,
+    host_audit_state: host_audit::HostAuditState,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -437,6 +427,28 @@ struct RfwRestartObservation {
     boot_id: String,
     restart_count: u64,
     restart_events: Vec<u64>,
+}
+
+fn resolve_default_geoip_db_path() -> Option<PathBuf> {
+    if let Ok(env_path) = std::env::var("GEOIP_MMDB_PATH") {
+        let trimmed = env_path.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    for candidate in [
+        "/opt/narwhal-monitor/GeoLite2-Country.mmdb",
+        "/usr/share/GeoIP/GeoLite2-Country.mmdb",
+    ] {
+        let p = PathBuf::from(candidate);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 impl AgentState {
@@ -474,9 +486,10 @@ impl AgentState {
             last_sample_ts: None,
             proc_root,
             conntrack_path,
-            geoip_db_path: None,
+            geoip_db_path: resolve_default_geoip_db_path(),
             rfw_restart_observation: None,
             access_log_states: HashMap::new(),
+            host_audit_state: host_audit::HostAuditState::default(),
         }
     }
 
@@ -596,11 +609,20 @@ impl AgentState {
         let upgrade_result_json = read_managed_upgrade_result_json(Path::new(MANAGED_UPDATE_RESULT_FILE));
 
         let agent_ver = resolved_agent_version();
-        let host_fw_json = detect_host_firewall_json();
-        let mut out = String::with_capacity(4096);
+        let host_fw_json = host_audit::collect_host_firewall_full_json(timestamp, containers);
+        let host_audit_json = if config.security_monitor_enabled {
+            host_audit::collect_host_audit_json(
+                timestamp,
+                self.geoip_db_path.is_some(),
+                &mut self.host_audit_state,
+            )
+        } else {
+            "{\"enabled\":false}".to_string()
+        };
+        let mut out = String::with_capacity(8192);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":[\"operations-v1\",\"agent-rust-v2\",\"public-tcp-v2\"],\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":[\"operations-v1\",\"agent-rust-v2\",\"public-tcp-v2\"],\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -631,6 +653,7 @@ impl AgentState {
             socket_abuse_json,
             rfw_service_health_json,
             host_fw_json,
+            host_audit_json,
             conntrack_json,
             psi_snapshot_json,
             cpu_out.multi_container_contention,
@@ -2150,24 +2173,53 @@ pub fn poll_actions_once(
     client: &TransportClient,
     config: &Config,
 ) -> Result<usize, TransportError> {
+    let mut state = AgentState::new(config);
+    let (count, _, _) = poll_actions_with_state(client, config, &mut state)?;
+    Ok(count)
+}
+
+pub fn poll_actions_with_state(
+    client: &TransportClient,
+    config: &Config,
+    state: &mut AgentState,
+) -> Result<(usize, bool, bool), TransportError> {
+    let gfw_caps = gfw_probe::route_capabilities_json(&state.proc_root);
     let poll_body = format!(
-        "{{\"host_id\":\"{}\",\"node_id\":\"{}\"}}",
+        "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"gfw_probe_capabilities\":{}}}",
         json_escape(&config.host_id),
-        json_escape(&config.node_id)
+        json_escape(&config.node_id),
+        gfw_caps
     );
     let resp = client.post_json_signed_verified("/api/v1/actions/poll", poll_body.as_bytes())?;
     let body_str = String::from_utf8_lossy(&resp.body);
+    gfw_probe::handle_poll_gfw_probe(&body_str, &config.host_id, &config.node_id, client);
+
     let requests = match actions::parse_poll_actions(&body_str) {
         Ok(reqs) => reqs,
-        Err(_) => return Ok(0),
+        Err(_) => return Ok((0, false, false)),
     };
     let count = requests.len();
+    let env_path = std::env::var("NARWHAL_CLIENT_ENV_FILE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ENV_FILE));
+    let mut ctx = actions::ActionContext {
+        node_id: config.node_id.clone(),
+        env_file: env_path,
+        configured_access_logs: config.security_access_log_paths.clone(),
+        rescan_requested: false,
+        restart_required: false,
+    };
 
     for req in &requests {
-        let receipt = actions::execute_action(req);
+        let receipt = actions::execute_action_with_context(req, &mut ctx);
         let _ = actions::submit_action_receipt(client, &config.host_id, &config.node_id, &receipt)?;
     }
-    Ok(count)
+    if ctx.rescan_requested {
+        state.host_audit_state.rescan_requested_at = current_unix_ts();
+    }
+    Ok((count, ctx.rescan_requested, ctx.restart_required))
 }
 
 pub fn deterministic_jitter_secs(node_id: &str, host_id: &str, max_jitter: u64) -> u64 {
@@ -2284,8 +2336,18 @@ pub fn run_with_config(
         }
 
         if now >= next_action_poll {
-            if let Err(err) = poll_actions_once(&client, config) {
-                let _ = writeln!(out, "action poll failed: {err}");
+            match poll_actions_with_state(&client, config, state) {
+                Ok((_, rescan_requested, restart_required)) => {
+                    if restart_required {
+                        return Ok(0);
+                    }
+                    if rescan_requested {
+                        next_report = Instant::now();
+                    }
+                }
+                Err(err) => {
+                    let _ = writeln!(out, "action poll failed: {err}");
+                }
             }
             next_action_poll = advance_deadline(next_action_poll, poll_delay, now);
         }

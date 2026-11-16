@@ -2,6 +2,17 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 9：Rust `narwhal-agent` 主线功能齐备与默认主线切换（v1.9.9）
+
+- **Rust `gfw_probe` 与 `host_audit`（`rust/crates/agent-core/src/{gfw_probe.rs,host_audit.rs}`）**：
+  - 新增纯 `std`、`#![forbid(unsafe_code)]` 的 `gfw_probe` 模块：采集 `/proc/net/route` 与 `/proc/net/ipv6_route` 默认路由能力（随 `/api/v1/actions/poll` 上报 `gfw_probe_capabilities`），完整校验服务端下发的 GFW 探测任务签名摘要（`targets_hash` 与逐目标 ID SHA-256），并发探测并回传 `/api/v1/gfw-probe/{report,failure}`。
+  - 新增只读 `host_audit` 模块（300 秒缓存并支持 `host_security_rescan` 立即刷新）：采集 `/etc/os-release`、`/etc/passwd`（含非 root UID 0 审计）、SSH 公钥数量与 `sshd_config` 安全配置检查、关键配置 SHA-256 基线变更告警、SSH 认证日志可读性及 dpkg/apk 包统计（严格标注离线跳过 OSV 的 `partial` 覆盖度）；并补齐 `host_firewall.interface_inventory` 与 `/run/narwhal-agent/firewall.sock` 读回采集。
+- **全量主机/容器 Action 闭环与 `systemd-run` 托管升级（`rust/crates/agent-core/src/actions.rs`）**：
+  - 修复 `managed_upgrade` 并新增 `managed_rollback`，统一通过 `systemd-run --no-block --collect` 投递独立瞬态单元（传参 `action_id` 并返回 `running`），避免服务重启中断升级。
+  - 新增 `update_host_config`（白名单键校验与原子写入 `client.env` 后平滑重启）、`self_uninstall`（含隔离日志检查）、`discover_access_logs`、`host_security_rescan`、`restart_container`、`freeze_container`/`unfreeze_container`（纯 Rust `cgroup.freeze` 与运行时回退）及 `apply_host_firewall_policy`/`delete_host_firewall_rule`（Runman firewall socket + 读回校验）。
+- **主线安装脚本默认切换与自检门禁（`scripts/install-client.sh`）**：
+  - 将默认 `NARWHAL_AGENT_MODE` 从 `python` 切换为 `rust`；安装与更新均下载 `narwhal-probe` 与 `narwhal-agent`（保留已有 `client.env` 中的显式模式配置），在执行 `narwhal-agent --check-config` 验证通过后启用纯 Rust 运行（跳过 `.venv` 依赖，二进制缺失或自检失败自动安全回退到 Python），并补充 `tests/test_rust_agent_mainline.py` 端到端契约测试。
+
 ## Phase 8：`narwhal-agent` 原生访问日志增量解析、运维健康基线与升级回执（v1.9.8）
 
 - **`rust/crates/agent-core/src/lib.rs`**：
