@@ -3,7 +3,6 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ureq::tls::{PemItem, RootCerts, TlsConfig};
@@ -502,7 +501,7 @@ fn build_custom_tls_config(ca_path: &Path) -> Result<TlsConfig, TransportError> 
     let mut certs = Vec::new();
     for item in ureq::tls::parse_pem(&pem_bytes) {
         match item {
-            Ok(PemItem::Certificate(cert)) => certs.push(cert.into_owned()),
+            Ok(PemItem::Certificate(cert)) => certs.push(cert),
             Ok(_) => {}
             Err(err) => return Err(TransportError::TlsConfig(err.to_string())),
         }
@@ -514,7 +513,7 @@ fn build_custom_tls_config(ca_path: &Path) -> Result<TlsConfig, TransportError> 
         )));
     }
     Ok(TlsConfig::builder()
-        .root_certs(RootCerts::Specific(Arc::new(certs)))
+        .root_certs(RootCerts::new_with_certs(&certs))
         .build())
 }
 

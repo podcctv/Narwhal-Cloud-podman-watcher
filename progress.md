@@ -2,7 +2,7 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
-## Phase 5：Rust `narwhal-agent` 全功能代理骨架与双二进制分发（v1.8.43）
+## Phase 5：Rust `narwhal-agent` 全功能代理骨架与双二进制分发（v1.8.44）
 
 - 新增纯 `std`、`#![forbid(unsafe_code)]` 的 Rust workspace crates：
   - `rust/crates/transport`：HTTP/1.1 + TLS/HTTPS 客户端、HMAC-SHA256 请求签名与响应验签。
