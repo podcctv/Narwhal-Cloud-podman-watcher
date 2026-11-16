@@ -43,6 +43,29 @@ pub const DEFAULT_DOCKER_MONITOR_MODE: &str = "notice";
 pub const DEFAULT_INCUS_PROJECT: &str = "all";
 pub const AGENT_VERSION: &str = env!("NARWHAL_AGENT_VERSION");
 
+pub fn resolved_agent_version() -> String {
+    if let Ok(v) = std::env::var("NARWHAL_VERSION") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    AGENT_VERSION.trim().to_string()
+}
+
+fn detect_host_firewall_json() -> &'static str {
+    if Path::new("/usr/sbin/nft").exists() || Path::new("/sbin/nft").exists() {
+        "{\"available\":true,\"backend\":\"nftables\"}"
+    } else if Path::new("/usr/sbin/iptables").exists()
+        || Path::new("/sbin/iptables").exists()
+        || Path::new("/proc/net/ip_tables_names").exists()
+    {
+        "{\"available\":true,\"backend\":\"iptables\"}"
+    } else {
+        "{\"available\":false,\"backend\":\"none\"}"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     InvalidFlag(String),
@@ -254,7 +277,7 @@ impl Config {
 
         format!(
             "{{\"agent_version\":\"{}\",\"server_url\":\"{}\",\"shared_secret\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"host_id\":\"{}\",\"node_id\":\"{}\",\"server_tls_ca_file\":\"{}\",\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{},\"once\":{},\"dry_run\":{},\"check_config\":{}}}",
-            json_escape(AGENT_VERSION),
+            json_escape(&resolved_agent_version()),
             json_escape(&self.server_url),
             secret_status,
             self.report_interval,
@@ -506,10 +529,12 @@ impl AgentState {
         let socket_abuse_json = evaluate_socket_abuse(&socket_abuse_input).to_json();
         let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
 
+        let agent_ver = resolved_agent_version();
+        let host_fw_json = detect_host_firewall_json();
         let mut out = String::with_capacity(4096);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -519,7 +544,7 @@ impl AgentState {
             json_escape(&config.docker_monitor_mode),
             json_escape(&config.incus_project),
             config.security_monitor_enabled,
-            json_escape(AGENT_VERSION),
+            json_escape(&agent_ver),
             timestamp,
             containers_json,
             config.security_monitor_enabled,
@@ -532,6 +557,7 @@ impl AgentState {
             suspicious_json,
             socket_abuse_json,
             rfw_service_health_json,
+            host_fw_json,
             conntrack_json,
             psi_snapshot_json,
             cpu_out.multi_container_contention,

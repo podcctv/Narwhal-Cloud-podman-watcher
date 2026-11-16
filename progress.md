@@ -2,6 +2,11 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 7 完善：统一探针版本注入与宿主机防火墙零子进程检测（v1.9.3）
+
+- **`rust/crates/narwhal-probe/src/main.rs`**：通过 `include_str!("../../../../VERSION")` 嵌入仓库根目录版本号，使 `narwhal-probe --version` 与发行版本一致。
+- **`rust/crates/agent-core/src/lib.rs`**：保留 `build.rs` 注入的 `NARWHAL_AGENT_VERSION`（支持 `NARWHAL_VERSION` 环境变量覆盖）与 `rfw_service_health`，并新增零子进程 `detect_host_firewall_json()` 填充 `security.host_firewall`。
+
 ## 发布修复：Rust Agent 使用仓库版本（v1.9.2）
 
 - `rust/crates/agent-core/build.rs` 在构建时读取仓库根目录 `VERSION` 并注入 `AGENT_VERSION`，避免常量求值错误，并让 Agent 上报版本与托管升级目标一致。

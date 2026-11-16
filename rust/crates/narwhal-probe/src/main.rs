@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 use std::process;
 
-const VERSION_JSON: &str = "{\"probe\":\"narwhal-probe\",\"version\":\"0.1.0\"}";
+const EMBEDDED_VERSION: &str = include_str!("../../../../VERSION");
 
 enum Command {
     Version,
@@ -383,7 +383,10 @@ fn parse_serve_line(line: &str) -> Vec<String> {
 
 fn dispatch(cmd: Command) -> String {
     match cmd {
-        Command::Version => VERSION_JSON.to_string(),
+        Command::Version => format!(
+            "{{\"probe\":\"narwhal-probe\",\"version\":{}}}",
+            json_escape(EMBEDDED_VERSION.trim())
+        ),
         Command::ProcSnapshot {
             init_pid,
             scan_limit,
