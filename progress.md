@@ -2,6 +2,15 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 6 大版本性能里程碑：并行容器采样、跨 Tick 增量速率引擎与零告警 Rust Workspace（v1.9.0）
+
+- **`rust/crates/runtime-drivers/src/lib.rs`**：
+  - 实现 `enrich_samples_parallel`（`std::thread::scope` 有界 4 线程并行执行容器 PID/socket/cgroup 采集），消除多容器串行阻塞。
+  - 修复全部 5 处非 Unix/通用编译警告（`cargo check` / `cargo test` 零警告）。
+- **`rust/crates/agent-core/src/lib.rs`**：
+  - 在 `AgentState` 新增跨 Tick 增量追踪（`prev_container_cpu`、`prev_host_disks`、`prev_container_io`、`prev_container_net`），实时计算容器 CPU%、`diskstats` 磁盘繁忙度/吞吐、cgroup `io.stat` 读写速率及网络 rx/tx bps/pps，全面喂入 `CpuGuardTracker`、`MemoryGuardTracker`、`IoGuardTracker` 与 `"security"` 指标，并补充双 Tick 增量单测。
+- **`rust/crates/guard-core/src/security.rs`**：清理冗余辅助函数，实现全 workspace 零编译器警告构建。
+
 ## Phase 5 收口：`narwhal-agent` 全链路真实采集与 Runman/进程处置闭环（v1.8.48）
 
 - **`rust/crates/agent-core/src/lib.rs`**：`AgentState::build_report_json()` 接入真实进程快照解析（`extract_proc_infos_from_snapshot` -> `detect_suspicious_processes`）、容器 cgroup 内存/CPU 样本（`extract_container_guard_samples` -> `memory_guard`/`cpu_guard`）及容器 socket 统计聚合（`aggregate_socket_abuse_from_containers` -> `evaluate_socket_abuse`），并补充单元测试。

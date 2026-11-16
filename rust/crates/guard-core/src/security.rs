@@ -172,11 +172,6 @@ fn is_proxy_binary(name: &str) -> bool {
     PROXY_BINARIES.iter().any(|&p| p == lower)
 }
 
-fn is_exact_miner_binary(name: &str) -> bool {
-    let lower = posix_basename(name);
-    EXACT_MINER_BINARIES.iter().any(|&m| m == lower)
-}
-
 // ============================================================================
 // 1. 4D Socket Abuse Evaluation
 // ============================================================================

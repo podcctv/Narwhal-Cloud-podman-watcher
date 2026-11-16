@@ -17,10 +17,13 @@ use guard_core::security::{
     detect_suspicious_processes, evaluate_socket_abuse, ProcInfo, SocketAbuseInput,
 };
 use guard_core::{
-    CpuContainerSample, CpuGuardConfig, CpuGuardTracker, HostCpuSample, IoGuardConfig,
-    IoGuardTracker, MemoryContainerSample, MemoryGuardConfig, MemoryGuardTracker, PsiSample,
+    CpuContainerSample, CpuGuardConfig, CpuGuardTracker, HostCpuSample, HostDeviceSample,
+    IoContainerSample, IoGuardConfig, IoGuardTracker, IoRates, MemoryContainerSample,
+    MemoryGuardConfig, MemoryGuardTracker, PsiSample,
 };
-use host_metrics::{collect_host_metrics, parse_loadavg, parse_proc_stat_cpu, CpuMetrics};
+use host_metrics::{
+    collect_diskstats, collect_host_metrics, parse_loadavg, parse_proc_stat_cpu, CpuMetrics,
+};
 use net_probe::is_allowed_host;
 use proc_probe::{collect_proc_snapshot_from_root, json_escape};
 use runtime_drivers::{discover_and_sample_containers, ContainerSample};
@@ -353,6 +356,10 @@ pub struct AgentState {
     memory_guard: MemoryGuardTracker,
     io_guard: IoGuardTracker,
     prev_cpu: Option<CpuMetrics>,
+    prev_container_cpu: HashMap<String, (u64, u64)>,
+    prev_host_disks: HashMap<String, (u64, u64, u64, u64, u64)>,
+    prev_container_io: HashMap<String, HashMap<String, (u64, u64, u64, u64)>>,
+    prev_container_net: HashMap<String, (u64, u64, u64, u64)>,
     last_sample_ts: Option<u64>,
     proc_root: PathBuf,
     conntrack_path: PathBuf,
@@ -387,6 +394,10 @@ impl AgentState {
             memory_guard: MemoryGuardTracker::new(mem_cfg),
             io_guard: IoGuardTracker::new(io_cfg),
             prev_cpu: None,
+            prev_container_cpu: HashMap::new(),
+            prev_host_disks: HashMap::new(),
+            prev_container_io: HashMap::new(),
+            prev_container_net: HashMap::new(),
             last_sample_ts: None,
             proc_root,
             conntrack_path,
@@ -412,10 +423,24 @@ impl AgentState {
 
     /// Build the exact `/api/v1/report` JSON payload using in-process Rust probes and guard state machines.
     pub fn build_report_json(&mut self, config: &Config, timestamp: u64) -> String {
-        let interval_secs = match self.last_sample_ts {
-            Some(prev) if timestamp > prev => (timestamp - prev) as f64,
-            _ => config.report_interval as f64,
-        };
+        let containers = discover_and_sample_containers(&config.container_runtimes);
+        self.build_report_json_with_containers(config, timestamp, &containers)
+    }
+
+    fn build_report_json_with_containers(
+        &mut self,
+        config: &Config,
+        timestamp: u64,
+        containers: &[ContainerSample],
+    ) -> String {
+        let dt = self.last_sample_ts.and_then(|prev| {
+            if timestamp > prev {
+                Some((timestamp - prev) as f64)
+            } else {
+                None
+            }
+        });
+        let interval_secs = dt.unwrap_or(config.report_interval as f64);
         self.last_sample_ts = Some(timestamp);
 
         let host_metrics_json = collect_host_metrics(&self.proc_root);
@@ -429,11 +454,18 @@ impl AgentState {
         let host_mem_psi = read_psi_sample(&self.proc_root.join("pressure").join("memory"));
         let host_io_psi = read_psi_sample(&self.proc_root.join("pressure").join("io"))
             .effective_avg();
+        let host_devices = self.sample_host_disks(dt);
 
-        let containers = discover_and_sample_containers(&config.container_runtimes);
-        let containers_json = serialize_containers_json(&containers);
-        let (mem_samples, cpu_samples) =
-            extract_container_guard_samples(&containers, host_cpu_sample.logical_cpus);
+        let containers_json = serialize_containers_json(containers);
+        let (mem_samples, cpu_samples) = extract_container_guard_samples_with_cpu_delta(
+            &mut self.prev_container_cpu,
+            containers,
+            timestamp,
+            host_cpu_sample.logical_cpus,
+        );
+        let io_samples = self.extract_container_io_samples(containers, dt);
+        let (total_rx_bps, total_tx_bps, total_rx_pps, total_tx_pps) =
+            self.compute_container_net_rates(containers, dt);
 
         let allow_new_limits = config.security_monitor_enabled;
         let cpu_out = self
@@ -448,9 +480,9 @@ impl AgentState {
         let (io_decisions, io_actions) = self.io_guard.observe(
             timestamp,
             host_cpu_sample.ready,
-            &[],
+            &host_devices,
             host_io_psi,
-            &[],
+            &io_samples,
             allow_new_limits,
         );
 
@@ -461,13 +493,13 @@ impl AgentState {
             Vec::new()
         };
         let suspicious_json = serialize_suspicious_findings_json(&suspicious_findings);
-        let socket_abuse_input = aggregate_socket_abuse_from_containers(&containers, timestamp);
+        let socket_abuse_input = aggregate_socket_abuse_from_containers(containers, timestamp);
         let socket_abuse_json = evaluate_socket_abuse(&socket_abuse_input).to_json();
 
         let mut out = String::with_capacity(4096);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":0.0,\"total_tx_bps\":0.0,\"total_rx_pps\":0.0,\"total_tx_pps\":0.0,\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -482,6 +514,10 @@ impl AgentState {
             containers_json,
             config.security_monitor_enabled,
             interval_secs.max(1.0),
+            total_rx_bps,
+            total_tx_bps,
+            total_rx_pps,
+            total_tx_pps,
             socket_abuse_input.tcp_syn_recv,
             suspicious_json,
             socket_abuse_json,
@@ -542,6 +578,181 @@ impl AgentState {
             load_1m,
             psi_some_avg10: cpu_psi,
         }
+    }
+
+    fn sample_host_disks(&mut self, dt: Option<f64>) -> Vec<HostDeviceSample> {
+        let raw = collect_diskstats(&self.proc_root);
+        let Ok(root) = actions::parse_json(&raw) else {
+            self.prev_host_disks.clear();
+            return Vec::new();
+        };
+        if root.get("available").and_then(|v| v.as_bool()) != Some(true) {
+            self.prev_host_disks.clear();
+            return Vec::new();
+        }
+        let Some(devices) = root.get("devices").and_then(|v| v.as_object()) else {
+            self.prev_host_disks.clear();
+            return Vec::new();
+        };
+
+        let mut samples = Vec::new();
+        let mut next_disks = HashMap::with_capacity(devices.len());
+        for (dev, val) in devices {
+            let rios = val.get("rios").and_then(|v| v.as_u64()).unwrap_or(0);
+            let rsectors = val.get("rsectors").and_then(|v| v.as_u64()).unwrap_or(0);
+            let wios = val.get("wios").and_then(|v| v.as_u64()).unwrap_or(0);
+            let wsectors = val.get("wsectors").and_then(|v| v.as_u64()).unwrap_or(0);
+            let busy_ms = val.get("busy_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            if let Some(dt_secs) = dt.filter(|d| *d > 0.0) {
+                if let Some(&(p_rios, p_rsec, p_wios, p_wsec, p_busy)) =
+                    self.prev_host_disks.get(dev)
+                {
+                    let d_rios = rios.saturating_sub(p_rios);
+                    let d_rsec = rsectors.saturating_sub(p_rsec);
+                    let d_wios = wios.saturating_sub(p_wios);
+                    let d_wsec = wsectors.saturating_sub(p_wsec);
+                    let d_busy = busy_ms.saturating_sub(p_busy);
+                    let read_bps = (d_rsec as f64 * 512.0) / dt_secs;
+                    let write_bps = (d_wsec as f64 * 512.0) / dt_secs;
+                    let total_iops = d_rios.saturating_add(d_wios) as f64 / dt_secs;
+                    let busy_percent =
+                        ((d_busy as f64 / (dt_secs * 1000.0)) * 100.0).clamp(0.0, 100.0);
+                    samples.push(HostDeviceSample {
+                        device: dev.clone(),
+                        busy_percent,
+                        total_bps: read_bps + write_bps,
+                        total_iops,
+                    });
+                }
+            }
+            next_disks.insert(dev.clone(), (rios, rsectors, wios, wsectors, busy_ms));
+        }
+        self.prev_host_disks = next_disks;
+        samples
+    }
+
+    fn extract_container_io_samples(
+        &mut self,
+        containers: &[ContainerSample],
+        dt: Option<f64>,
+    ) -> Vec<IoContainerSample> {
+        let mut samples = Vec::new();
+        let mut next_io: HashMap<String, HashMap<String, (u64, u64, u64, u64)>> =
+            HashMap::with_capacity(containers.len());
+
+        for c in containers {
+            let key = container_guard_key(c);
+            if key.is_empty() {
+                continue;
+            }
+            let Some(cg_val) = c
+                .cgroup_metrics_json
+                .as_deref()
+                .and_then(|s| actions::parse_json(s).ok())
+            else {
+                continue;
+            };
+            let Some(devices) = cg_val
+                .get("io")
+                .and_then(|io| io.get("devices"))
+                .and_then(|d| d.as_array())
+            else {
+                continue;
+            };
+
+            let prev_devs = self.prev_container_io.get(&key);
+            let mut next_devs = HashMap::with_capacity(devices.len());
+            let mut device_rates = Vec::new();
+
+            for item in devices {
+                let Some(dev) = item
+                    .get("dev")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                let rbytes = item.get("rbytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                let wbytes = item.get("wbytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                let rios = item.get("rios").and_then(|v| v.as_u64()).unwrap_or(0);
+                let wios = item.get("wios").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                if let Some(dt_secs) = dt.filter(|d| *d > 0.0) {
+                    if let Some(&(p_rb, p_wb, p_ri, p_wi)) = prev_devs.and_then(|m| m.get(dev)) {
+                        device_rates.push((
+                            dev.to_string(),
+                            IoRates {
+                                rbps: rbytes.saturating_sub(p_rb) as f64 / dt_secs,
+                                wbps: wbytes.saturating_sub(p_wb) as f64 / dt_secs,
+                                riops: rios.saturating_sub(p_ri) as f64 / dt_secs,
+                                wiops: wios.saturating_sub(p_wi) as f64 / dt_secs,
+                            },
+                        ));
+                    }
+                }
+                next_devs.insert(dev.to_string(), (rbytes, wbytes, rios, wios));
+            }
+
+            if !device_rates.is_empty() {
+                samples.push(IoContainerSample {
+                    key: key.clone(),
+                    device_rates,
+                    original_limits: HashMap::new(),
+                });
+            }
+            next_io.insert(key, next_devs);
+        }
+
+        self.prev_container_io = next_io;
+        samples
+    }
+
+    fn compute_container_net_rates(
+        &mut self,
+        containers: &[ContainerSample],
+        dt: Option<f64>,
+    ) -> (f64, f64, f64, f64) {
+        let mut total_rx_bps = 0.0;
+        let mut total_tx_bps = 0.0;
+        let mut total_rx_pps = 0.0;
+        let mut total_tx_pps = 0.0;
+        let mut next_net: HashMap<String, (u64, u64, u64, u64)> =
+            HashMap::with_capacity(containers.len());
+
+        for c in containers {
+            let key = container_guard_key(c);
+            if key.is_empty() {
+                continue;
+            }
+            let Some(pm_val) = c
+                .pid_metrics_json
+                .as_deref()
+                .and_then(|s| actions::parse_json(s).ok())
+            else {
+                continue;
+            };
+            let Some(net) = pm_val.get("net") else {
+                continue;
+            };
+            let rx_bytes = net.get("rx_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let tx_bytes = net.get("tx_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let rx_packets = net.get("rx_packets").and_then(|v| v.as_u64()).unwrap_or(0);
+            let tx_packets = net.get("tx_packets").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            if let Some(dt_secs) = dt.filter(|d| *d > 0.0) {
+                if let Some(&(p_rb, p_tb, p_rp, p_tp)) = self.prev_container_net.get(&key) {
+                    total_rx_bps += rx_bytes.saturating_sub(p_rb) as f64 / dt_secs;
+                    total_tx_bps += tx_bytes.saturating_sub(p_tb) as f64 / dt_secs;
+                    total_rx_pps += rx_packets.saturating_sub(p_rp) as f64 / dt_secs;
+                    total_tx_pps += tx_packets.saturating_sub(p_tp) as f64 / dt_secs;
+                }
+            }
+            next_net.insert(key, (rx_bytes, tx_bytes, rx_packets, tx_packets));
+        }
+
+        self.prev_container_net = next_net;
+        (total_rx_bps, total_tx_bps, total_rx_pps, total_tx_pps)
     }
 }
 
@@ -673,13 +884,25 @@ fn container_guard_key(container: &ContainerSample) -> String {
     }
 }
 
+#[cfg(test)]
 fn extract_container_guard_samples(
     containers: &[ContainerSample],
+    logical_cpus: u32,
+) -> (Vec<MemoryContainerSample>, Vec<CpuContainerSample>) {
+    let mut empty_prev = HashMap::new();
+    extract_container_guard_samples_with_cpu_delta(&mut empty_prev, containers, 0, logical_cpus)
+}
+
+fn extract_container_guard_samples_with_cpu_delta(
+    prev_container_cpu: &mut HashMap<String, (u64, u64)>,
+    containers: &[ContainerSample],
+    timestamp: u64,
     logical_cpus: u32,
 ) -> (Vec<MemoryContainerSample>, Vec<CpuContainerSample>) {
     let default_cpus = logical_cpus.max(1) as f64;
     let mut mem_samples = Vec::new();
     let mut cpu_samples = Vec::new();
+    let mut next_cpu: HashMap<String, (u64, u64)> = HashMap::with_capacity(containers.len());
 
     for c in containers {
         let key = container_guard_key(c);
@@ -732,10 +955,30 @@ fn extract_container_guard_samples(
             })
             .filter(|q| q.is_finite() && *q > 0.0);
 
-        let cpu_percent = pm_val
+        let usage_usec = cg_val
             .as_ref()
-            .and_then(|v| v.get("cpu_percent"))
-            .and_then(|v| v.as_f64())
+            .and_then(|v| v.get("cpu_stat").or_else(|| v.get("cpu")))
+            .and_then(|s| s.get("usage_usec"))
+            .and_then(|u| u.as_u64());
+
+        let delta_cpu_percent = usage_usec.and_then(|curr_usec| {
+            next_cpu.insert(key.clone(), (timestamp, curr_usec));
+            let &(prev_ts, prev_usec) = prev_container_cpu.get(&key)?;
+            if timestamp > prev_ts && curr_usec >= prev_usec {
+                let dt_usec = (timestamp - prev_ts) as f64 * 1_000_000.0;
+                Some(((curr_usec - prev_usec) as f64 / dt_usec) * 100.0)
+            } else {
+                None
+            }
+        });
+
+        let cpu_percent = delta_cpu_percent
+            .or_else(|| {
+                pm_val
+                    .as_ref()
+                    .and_then(|v| v.get("cpu_percent"))
+                    .and_then(|v| v.as_f64())
+            })
             .or_else(|| {
                 cg_val
                     .as_ref()
@@ -751,6 +994,7 @@ fn extract_container_guard_samples(
         });
     }
 
+    *prev_container_cpu = next_cpu;
     (mem_samples, cpu_samples)
 }
 
@@ -1391,5 +1635,150 @@ SECURITY_MONITOR_ENABLED=false
         assert!((cpu_samples[0].effective_cpus - 1.5).abs() < 1e-6);
         assert_eq!(cpu_samples[1].key, "docker:c2");
         assert!((cpu_samples[1].effective_cpus - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_two_tick_cross_delta_diskstats_and_network_rates() {
+        let dir = std::env::temp_dir().join(format!("agent-core-delta-test-{}", std::process::id()));
+        let proc_root = dir.join("proc");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(proc_root.join("net")).unwrap();
+        fs::create_dir_all(proc_root.join("pressure")).unwrap();
+        fs::write(proc_root.join("loadavg"), "0.20 0.15 0.10 1/100 42\n").unwrap();
+        fs::write(proc_root.join("uptime"), "100.00 200.00\n").unwrap();
+        fs::write(
+            proc_root.join("meminfo"),
+            "MemTotal:        4096000 kB\nMemAvailable:    2048000 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("net").join("dev"),
+            "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n  eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("pressure").join("cpu"),
+            "some avg10=1.00 avg60=0.50 avg300=0.25 total=100\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("pressure").join("memory"),
+            "some avg10=0.10 avg60=0.05 avg300=0.01 total=10\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("pressure").join("io"),
+            "some avg10=0.20 avg60=0.10 avg300=0.05 total=20\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("stat"),
+            "cpu  1000 0 500 8500 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("diskstats"),
+            "   8       0 sda 100 0 2000 10 50 0 1000 5 0 500 15\n",
+        )
+        .unwrap();
+        let conntrack = dir.join("nf_conntrack");
+        fs::write(&conntrack, "").unwrap();
+
+        let cfg = Config {
+            host_id: "delta-host".to_string(),
+            node_id: "node-delta".to_string(),
+            container_runtimes: "none".to_string(),
+            ..Config::default()
+        };
+        let mut state = AgentState::with_paths(&cfg, proc_root.clone(), conntrack);
+
+        // Tick 1 via public build_report_json(): records baseline diskstats & CPU without panics.
+        let report1 = state.build_report_json(&cfg, 1_700_000_000);
+        assert!(report1.contains("\"total_rx_bps\":0.000"));
+        assert!(state.prev_host_disks.contains_key("8:0"));
+
+        // Advance /proc/stat & /proc/diskstats for tick 2 (10s later).
+        fs::write(
+            proc_root.join("stat"),
+            "cpu  1200 0 600 9200 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("diskstats"),
+            "   8       0 sda 200 0 6000 20 150 0 3000 15 0 2500 35\n",
+        )
+        .unwrap();
+        let report2 = state.build_report_json(&cfg, 1_700_000_010);
+        assert!(report2.contains("\"interval_seconds\":10.000"));
+        assert_eq!(state.prev_host_disks.get("8:0"), Some(&(200, 6000, 150, 3000, 2500)));
+
+        // Verify diskstats delta calculation directly on tick 3 (10s later).
+        fs::write(
+            proc_root.join("diskstats"),
+            "   8       0 sda 300 0 10000 30 250 0 5000 25 0 7500 55\n",
+        )
+        .unwrap();
+        let disk_samples = state.sample_host_disks(Some(10.0));
+        assert_eq!(disk_samples.len(), 1);
+        assert_eq!(disk_samples[0].device, "8:0");
+        assert!((disk_samples[0].busy_percent - 50.0).abs() < 1e-6);
+        assert!((disk_samples[0].total_bps - 307_200.0).abs() < 1e-6);
+        assert!((disk_samples[0].total_iops - 20.0).abs() < 1e-6);
+
+        // Verify two-tick container CPU, IO, and network rate deltas via build_report_json_with_containers().
+        let make_container = |usage_usec: u64, rbytes: u64, wbytes: u64, rios: u64, wios: u64, rx_b: u64, tx_b: u64, rx_p: u64, tx_p: u64| {
+            ContainerSample {
+                id: "c1".to_string(),
+                stable_id: "docker:c1".to_string(),
+                name: "app1".to_string(),
+                image: "alpine".to_string(),
+                runtime: "docker".to_string(),
+                runtime_bin: "docker".to_string(),
+                project: String::new(),
+                pid: Some(1000),
+                status: "running".to_string(),
+                instance_id: String::new(),
+                network_addresses: Vec::new(),
+                pid_metrics_json: Some(format!(
+                    r#"{{"available":true,"mem_bytes":52428800,"net":{{"rx_bytes":{rx_b},"tx_bytes":{tx_b},"rx_packets":{rx_p},"tx_packets":{tx_p}}}}}"#
+                )),
+                socket_tables_json: None,
+                cgroup_metrics_json: Some(format!(
+                    r#"{{"available":true,"cpu_stat":{{"usage_usec":{usage_usec}}},"memory":{{"current_bytes":52428800,"max_bytes":134217728}},"io":{{"available":true,"devices":[{{"dev":"8:0","rbytes":{rbytes},"wbytes":{wbytes},"rios":{rios},"wios":{wios}}}]}}}}"#
+                )),
+            }
+        };
+
+        let c_tick1 = vec![make_container(1_000_000, 10_000, 20_000, 100, 200, 1_000, 2_000, 10, 20)];
+        let c_tick2 = vec![make_container(6_000_000, 30_000, 60_000, 150, 300, 11_000, 22_000, 110, 220)];
+
+        let _ = state.build_report_json_with_containers(&cfg, 1_700_000_020, &c_tick1);
+        let net_report = state.build_report_json_with_containers(&cfg, 1_700_000_030, &c_tick2);
+
+        assert!(net_report.contains("\"total_rx_bps\":1000.000"));
+        assert!(net_report.contains("\"total_tx_bps\":2000.000"));
+        assert!(net_report.contains("\"total_rx_pps\":10.000"));
+        assert!(net_report.contains("\"total_tx_pps\":20.000"));
+
+        // Verify CPU & IO container deltas on a follow-up tick (10s later).
+        let c_tick3 = vec![make_container(11_000_000, 50_000, 100_000, 200, 400, 21_000, 42_000, 210, 420)];
+        let (_, cpu_samples) = extract_container_guard_samples_with_cpu_delta(
+            &mut state.prev_container_cpu,
+            &c_tick3,
+            1_700_000_040,
+            4,
+        );
+        assert_eq!(cpu_samples.len(), 1);
+        assert!((cpu_samples[0].cpu_percent.unwrap() - 50.0).abs() < 1e-6);
+
+        let io_samples = state.extract_container_io_samples(&c_tick3, Some(10.0));
+        assert_eq!(io_samples.len(), 1);
+        assert_eq!(io_samples[0].device_rates[0].0, "8:0");
+        assert!((io_samples[0].device_rates[0].1.rbps - 2000.0).abs() < 1e-6);
+        assert!((io_samples[0].device_rates[0].1.wbps - 4000.0).abs() < 1e-6);
+        assert!((io_samples[0].device_rates[0].1.riops - 5.0).abs() < 1e-6);
+        assert!((io_samples[0].device_rates[0].1.wiops - 10.0).abs() < 1e-6);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -3,9 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -14,6 +16,7 @@ use std::os::unix::net::UnixStream;
 pub const RUNMAN_SOCK_PATH: &str = "/run/narwhal-agent/connlimit.sock";
 pub const MAX_RUNMAN_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 128;
+#[cfg(unix)]
 const RUNMAN_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
@@ -457,6 +460,7 @@ pub fn runman_request(
     Err("Runman Unix socket client is only supported on Unix platforms".to_string())
 }
 
+#[cfg(any(unix, test))]
 fn parse_http_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
     let header_end = raw
         .windows(4)
@@ -509,6 +513,7 @@ fn parse_http_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
     Ok((status_code, body))
 }
 
+#[cfg(any(unix, test))]
 fn decode_chunked_body(mut data: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     loop {
@@ -912,6 +917,40 @@ fn parse_enabled_runtimes(runtimes_cfg: &str) -> BTreeSet<String> {
     set
 }
 
+const MAX_ENRICH_THREADS: usize = 4;
+
+fn enrich_sample_with_oci_fallback(sample: &mut ContainerSample) {
+    if sample.pid.is_none()
+        && (sample.runtime == "podman" || sample.runtime == "docker")
+        && !sample.runtime_bin.is_empty()
+    {
+        sample.pid = inspect_oci_pid(&sample.runtime_bin, &sample.id);
+    }
+    enrich_sample(sample);
+}
+
+fn enrich_samples_parallel(samples: &mut [ContainerSample]) {
+    let n = samples.len();
+    if n <= 1 {
+        for item in samples {
+            enrich_sample_with_oci_fallback(item);
+        }
+        return;
+    }
+
+    let workers = n.min(MAX_ENRICH_THREADS);
+    let chunk_size = (n + workers - 1) / workers;
+    std::thread::scope(|scope| {
+        for chunk in samples.chunks_mut(chunk_size) {
+            scope.spawn(move || {
+                for item in chunk {
+                    enrich_sample_with_oci_fallback(item);
+                }
+            });
+        }
+    });
+}
+
 pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample> {
     let enabled = parse_enabled_runtimes(runtimes_cfg);
     let mut all = Vec::new();
@@ -919,14 +958,7 @@ pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample
     if enabled.contains("podman") {
         if let Some(bin) = find_binary_in_path("podman") {
             if let Some(out) = run_command_stdout(&bin, &["ps", "--format", "json"]) {
-                let mut items = parse_oci_ps_json("podman", &bin, &out);
-                for item in &mut items {
-                    if item.pid.is_none() {
-                        item.pid = inspect_oci_pid(&bin, &item.id);
-                    }
-                    enrich_sample(item);
-                }
-                all.extend(items);
+                all.extend(parse_oci_ps_json("podman", &bin, &out));
             }
         }
     }
@@ -934,14 +966,7 @@ pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample
     if enabled.contains("docker") {
         if let Some(bin) = find_binary_in_path("docker") {
             if let Some(out) = run_command_stdout(&bin, &["ps", "--format", "json"]) {
-                let mut items = parse_oci_ps_json("docker", &bin, &out);
-                for item in &mut items {
-                    if item.pid.is_none() {
-                        item.pid = inspect_oci_pid(&bin, &item.id);
-                    }
-                    enrich_sample(item);
-                }
-                all.extend(items);
+                all.extend(parse_oci_ps_json("docker", &bin, &out));
             }
         }
     }
@@ -958,11 +983,7 @@ pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample
                     "--format=json",
                 ],
             ) {
-                let mut items = parse_incus_list_json(&bin, &out);
-                for item in &mut items {
-                    enrich_sample(item);
-                }
-                all.extend(items);
+                all.extend(parse_incus_list_json(&bin, &out));
             }
         }
     }
@@ -970,15 +991,12 @@ pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample
     if enabled.contains("runman") {
         if let Ok((200, body)) = runman_request(RUNMAN_SOCK_PATH, "GET", "/v1/inventory", None) {
             if let Ok(text) = String::from_utf8(body) {
-                let mut items = parse_runman_inventory_json(&text);
-                for item in &mut items {
-                    enrich_sample(item);
-                }
-                all.extend(items);
+                all.extend(parse_runman_inventory_json(&text));
             }
         }
     }
 
+    enrich_samples_parallel(&mut all);
     all
 }
 
@@ -1214,5 +1232,42 @@ mod tests {
 
         handle.join().expect("server thread");
         let _ = fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn test_enrich_samples_parallel_multi_container() {
+        let self_pid = std::process::id();
+        let mut samples: Vec<ContainerSample> = (0..6)
+            .map(|i| ContainerSample {
+                id: format!("c-{}", i),
+                stable_id: format!("c-{}", i),
+                name: format!("ctr-{}", i),
+                image: "alpine:latest".to_string(),
+                runtime: "incus".to_string(),
+                runtime_bin: String::new(),
+                project: "default".to_string(),
+                pid: if i % 2 == 0 { Some(self_pid) } else { None },
+                status: "running".to_string(),
+                instance_id: String::new(),
+                network_addresses: Vec::new(),
+                pid_metrics_json: None,
+                socket_tables_json: None,
+                cgroup_metrics_json: None,
+            })
+            .collect();
+
+        enrich_samples_parallel(&mut samples);
+
+        assert_eq!(samples.len(), 6);
+        for (i, s) in samples.iter().enumerate() {
+            assert_eq!(s.id, format!("c-{}", i));
+            if i % 2 == 0 {
+                assert!(s.pid_metrics_json.is_some());
+                assert!(s.socket_tables_json.is_some());
+            } else {
+                assert!(s.pid_metrics_json.is_none());
+                assert!(s.socket_tables_json.is_none());
+            }
+        }
     }
 }
