@@ -10,6 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub mod security;
+
 /// Host or cgroup PSI sample (`avg10` primary, `avg60` optional secondary).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PsiSample {

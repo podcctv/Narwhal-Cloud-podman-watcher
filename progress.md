@@ -2,6 +2,15 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 5 扩展：Rust 运行时驱动、4D 安全检测与动作执行闭环（v1.8.45）
+
+- 新增并集成纯 `std`、`#![forbid(unsafe_code)]` 容器运行时驱动 crate `rust/crates/runtime-drivers`（纳入 `rust/Cargo.toml` 与 `agent-core` 依赖）：
+  - 支持 Unix-socket Runman（`/run/narwhal-agent/connlimit.sock`）与 Podman/Docker/Incus 容器发现及 `pid-metrics`/`socket-sec`/`cgroup-probe` 采集，接入 `AgentState::build_report_json()` 填充 `"containers"`。
+- 在 `rust/crates/guard-core/src/security.rs` 实现纯 Rust `guard-core::security`：
+  - `evaluate_socket_abuse`（4D socket 滥用评估）与 `detect_suspicious_processes`（矿机/代理/反弹 Shell 检测与命令行密钥脱敏），并接入 `AgentState::build_report_json()` 的 `"security"` 上报字段。
+- 新增 `rust/crates/agent-core/src/actions.rs`（`agent-core::actions`）并接入 `poll_actions_once()`：
+  - 支持 `managed_upgrade`、`tcp_ping` 与 `cpu_limit`/`memory_limit`/`io_limit`（systemd 限制）动作解析、参数校验、执行与 `/api/v1/actions/result` 回执上报。
+
 ## Phase 5：Rust `narwhal-agent` 全功能代理骨架与双二进制分发（v1.8.44）
 
 - 新增纯 `std`、`#![forbid(unsafe_code)]` 的 Rust workspace crates：

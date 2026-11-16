@@ -10,6 +10,7 @@ members = [
     "crates/narwhal-probe",
     "crates/transport",
     "crates/guard-core",
+    "crates/runtime-drivers",
     "crates/agent-core",
 ]
 

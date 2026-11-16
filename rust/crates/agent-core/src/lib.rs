@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod actions;
+
 use std::collections::HashMap;
 use std::fmt::{self, Write as _};
 use std::fs;
@@ -11,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cgroup_probe::{collect_psi_snapshot, read_psi, PsiStatus};
 use geoip_probe::lookup_countries;
+use guard_core::security::{detect_suspicious_processes, evaluate_socket_abuse, SocketAbuseInput};
 use guard_core::{
     CpuGuardConfig, CpuGuardTracker, HostCpuSample, IoGuardConfig, IoGuardTracker,
     MemoryGuardConfig, MemoryGuardTracker, PsiSample,
@@ -18,6 +21,7 @@ use guard_core::{
 use host_metrics::{collect_host_metrics, parse_loadavg, parse_proc_stat_cpu, CpuMetrics};
 use net_probe::is_allowed_host;
 use proc_probe::{collect_proc_snapshot_from_root, json_escape};
+use runtime_drivers::{discover_and_sample_containers, ContainerSample};
 use socket_sec::collect_conntrack;
 use transport::{TransportClient, TransportConfig, TransportError};
 
@@ -440,10 +444,25 @@ impl AgentState {
             allow_new_limits,
         );
 
+        let containers = discover_and_sample_containers(&config.container_runtimes);
+        let containers_json = serialize_containers_json(&containers);
+
+        let suspicious_findings = if config.security_monitor_enabled {
+            detect_suspicious_processes(&[])
+        } else {
+            Vec::new()
+        };
+        let suspicious_json = serialize_suspicious_findings_json(&suspicious_findings);
+        let socket_abuse_json = evaluate_socket_abuse(&SocketAbuseInput {
+            evaluated_at: timestamp,
+            ..SocketAbuseInput::default()
+        })
+        .to_json();
+
         let mut out = String::with_capacity(4096);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":[],\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":0.0,\"total_tx_bps\":0.0,\"total_rx_pps\":0.0,\"total_tx_pps\":0.0,\"syn_recv_count\":0,\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":0.0,\"total_tx_bps\":0.0,\"total_rx_pps\":0.0,\"total_tx_pps\":0.0,\"syn_recv_count\":0,\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -455,8 +474,11 @@ impl AgentState {
             config.security_monitor_enabled,
             json_escape(AGENT_VERSION),
             timestamp,
+            containers_json,
             config.security_monitor_enabled,
             interval_secs.max(1.0),
+            suspicious_json,
+            socket_abuse_json,
             conntrack_json,
             psi_snapshot_json,
             cpu_out.multi_container_contention,
@@ -515,6 +537,75 @@ impl AgentState {
             psi_some_avg10: cpu_psi,
         }
     }
+}
+
+fn serialize_containers_json(containers: &[ContainerSample]) -> String {
+    if containers.is_empty() {
+        return "[]".to_string();
+    }
+    let mut out = String::from("[");
+    for (idx, c) in containers.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let pid_str = c
+            .pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        let mut addrs_json = String::from("[");
+        for (a_idx, addr) in c.network_addresses.iter().enumerate() {
+            if a_idx > 0 {
+                addrs_json.push(',');
+            }
+            let _ = write!(addrs_json, "\"{}\"", json_escape(addr));
+        }
+        addrs_json.push(']');
+
+        let _ = write!(
+            out,
+            "{{\"id\":\"{}\",\"stable_id\":\"{}\",\"name\":\"{}\",\"image\":\"{}\",\"runtime\":\"{}\",\"runtime_bin\":\"{}\",\"project\":\"{}\",\"pid\":{},\"status\":\"{}\",\"instance_id\":\"{}\",\"network_addresses\":{}",
+            json_escape(&c.id),
+            json_escape(&c.stable_id),
+            json_escape(&c.name),
+            json_escape(&c.image),
+            json_escape(&c.runtime),
+            json_escape(&c.runtime_bin),
+            json_escape(&c.project),
+            pid_str,
+            json_escape(&c.status),
+            json_escape(&c.instance_id),
+            addrs_json,
+        );
+        if let Some(ref pid_metrics) = c.pid_metrics_json {
+            let _ = write!(out, ",\"pid_metrics\":{pid_metrics}");
+        }
+        if let Some(ref socket_tables) = c.socket_tables_json {
+            let _ = write!(out, ",\"socket_tables\":{socket_tables}");
+        }
+        if let Some(ref cgroup_metrics) = c.cgroup_metrics_json {
+            let _ = write!(out, ",\"cgroup_metrics\":{cgroup_metrics}");
+        }
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+fn serialize_suspicious_findings_json(
+    findings: &[guard_core::security::SuspiciousProcFinding],
+) -> String {
+    if findings.is_empty() {
+        return "[]".to_string();
+    }
+    let mut out = String::from("[");
+    for (idx, item) in findings.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&item.to_json());
+    }
+    out.push(']');
+    out
 }
 
 fn read_psi_sample(path: &Path) -> PsiSample {
@@ -640,22 +731,15 @@ pub fn poll_actions_once(
     );
     let resp = client.post_json_signed_verified("/api/v1/actions/poll", poll_body.as_bytes())?;
     let body_str = String::from_utf8_lossy(&resp.body);
-    let actions = extract_polled_actions(&body_str);
-    let count = actions.len();
+    let requests = match actions::parse_poll_actions(&body_str) {
+        Ok(reqs) => reqs,
+        Err(_) => return Ok(0),
+    };
+    let count = requests.len();
 
-    for action in actions {
-        let msg = format!(
-            "action '{}' not implemented in rust agent-core",
-            action.action_type
-        );
-        let result_body = format!(
-            "{{\"action_id\":{},\"host_id\":\"{}\",\"node_id\":\"{}\",\"status\":\"failed\",\"message\":\"{}\"}}",
-            action.id,
-            json_escape(&config.host_id),
-            json_escape(&config.node_id),
-            json_escape(&msg)
-        );
-        let _ = client.post_json_signed_verified("/api/v1/actions/result", result_body.as_bytes())?;
+    for req in &requests {
+        let receipt = actions::execute_action(req);
+        let _ = actions::submit_action_receipt(client, &config.host_id, &config.node_id, &receipt)?;
     }
     Ok(count)
 }
