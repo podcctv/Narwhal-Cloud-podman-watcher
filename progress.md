@@ -2,6 +2,10 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## 发布修复：Rust Agent 使用仓库版本（v1.9.2）
+
+- `rust/crates/agent-core/build.rs` 在构建时读取仓库根目录 `VERSION` 并注入 `AGENT_VERSION`，避免常量求值错误，并让 Agent 上报版本与托管升级目标一致。
+
 ## Phase 7：跨 Python/Rust Agent 的宿主机 RFW 服务告警（v1.9.1）
 
 - Python 与 Rust Agent 只读读取 `rfw.service` 的 systemd 状态；识别停止、systemd 自动重启及短时间反复重启。

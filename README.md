@@ -1,6 +1,6 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.9.1**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.9.2**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
@@ -9,6 +9,10 @@ Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman
 Runman 持续 CPU/内存过载重启策略：[docs/resource-overload-restart.md](docs/resource-overload-restart.md)。
 
 RFW 宿主机服务健康告警：[docs/rfw-service-health.md](docs/rfw-service-health.md)。
+
+### v1.9.2：Rust Agent 版本与仓库发布版本保持一致
+
+- Rust Agent 在构建时从仓库根目录读取 `VERSION`，使上报版本与 Server 及托管升级目标一致。
 
 ### v1.9.1：宿主机 RFW 停止与重启循环告警
 
