@@ -1396,7 +1396,7 @@ fn build_socket_inode_owner_map(
             if let Some(rest) = s.strip_prefix("socket:[") {
                 if let Some(inode_str) = rest.strip_suffix(']') {
                     if let Ok(inode) = inode_str.parse::<u64>() {
-                        owners.insert(inode, (p.pid, p.comm.clone()));
+                        owners.insert(inode, (p.pid, p.process.clone()));
                     }
                 }
             }
@@ -1543,7 +1543,7 @@ fn extract_protocol_configs(
         if cmdline.is_empty() {
             continue;
         }
-        let _ = writeln!(ps_lines, "{} S {} {}", p.pid, p.comm, cmdline);
+        let _ = writeln!(ps_lines, "{} S {} {}", p.pid, p.process, cmdline);
     }
     let cfg_json = app_guard::socks_detector::parse_process_configs_json(&ps_lines);
     let Ok(cfg_val) = runtime_drivers::JsonVal::parse(&cfg_json) else {
