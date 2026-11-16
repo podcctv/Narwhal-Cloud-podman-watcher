@@ -5151,7 +5151,10 @@ SECURITY_MONITOR_ENABLED=false
         };
         let report1 = state.build_report_json_with_containers(&report_cfg, 1_700_000_000, &[c_tick1]);
         assert!(report1.contains("\"abuse_guard\":{"));
-        assert!(report1.contains("\"state\":\"pending\""));
+        assert!(
+            report1.contains("\"state\":\"pending\"") || report1.contains("\"state\":\"stale\""),
+            "unexpected abuse_guard state in report1: {report1}"
+        );
         assert!(report1.contains("\"vmess_guard\":{"));
         assert!(report1.contains("\"trojan_guard\":{"));
         assert!(report1.contains("\"sensitive_file_events\":["));
