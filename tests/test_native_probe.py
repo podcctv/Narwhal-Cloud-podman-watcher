@@ -854,5 +854,38 @@ class PidMetricsBridgeTests(unittest.TestCase):
         self.assertEqual(sec_res["connection_metrics"]["tcp_established"], 2)
 
 
+class TcpProbeNativeBridgeTests(unittest.TestCase):
+    def test_tcp_probe_cli_args_and_fallback(self):
+        from client import tcp_probe
+
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe,
+            "run_probe",
+            return_value={"available": True, "target_id": "t1", "ip": "1.1.1.1", "samples_ms": [12.3], "error": ""},
+        ) as run_mock:
+            res = native_probe.tcp_probe("t1", "example.com", 443, 2)
+        self.assertEqual(res["ip"], "1.1.1.1")
+        run_mock.assert_called_once_with(
+            ["tcp-probe", "--target-id", "t1", "--host", "example.com", "--port", "443", "--samples", "2"],
+            timeout=10.0,
+        )
+
+        target = {"id": "t1", "host": "example.com", "port": 443}
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe,
+            "tcp_probe",
+            return_value={"available": True, "target_id": "t1", "ip": "1.1.1.1", "samples_ms": [10.5, 11.0], "error": ""},
+        ):
+            probed = tcp_probe.probe(target, 2)
+        self.assertEqual(probed, {"target_id": "t1", "ip": "1.1.1.1", "samples_ms": [10.5, 11.0], "error": ""})
+
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            tcp_probe, "resolve", return_value=([], "blocked_dns")
+        ), mock.patch.object(native_probe, "tcp_probe") as tp_mock:
+            fb = tcp_probe.probe(target, 1)
+        tp_mock.assert_not_called()
+        self.assertEqual(fb["error"], "blocked_dns")
+
+
 if __name__ == "__main__":
     unittest.main()

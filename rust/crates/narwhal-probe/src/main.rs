@@ -46,6 +46,12 @@ enum Command {
     PidMetrics {
         pid: u32,
     },
+    TcpProbe {
+        target_id: String,
+        host: String,
+        port: u16,
+        samples: usize,
+    },
     Serve,
 }
 
@@ -293,6 +299,46 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             let pid = pid.ok_or_else(|| "missing required --pid".to_string())?;
             Ok(Command::PidMetrics { pid })
         }
+        "tcp-probe" => {
+            let mut target_id = String::new();
+            let mut host: Option<String> = None;
+            let mut port: Option<u16> = None;
+            let mut samples: usize = 3;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--target-id" => {
+                        target_id = next_arg(args, &mut i, "--target-id")?.to_string();
+                    }
+                    "--host" => {
+                        host = Some(next_arg(args, &mut i, "--host")?.to_string());
+                    }
+                    "--port" => {
+                        let val = next_arg(args, &mut i, "--port")?;
+                        port = Some(
+                            val.parse::<u16>()
+                                .map_err(|_| format!("invalid --port: {val}"))?,
+                        );
+                    }
+                    "--samples" => {
+                        let val = next_arg(args, &mut i, "--samples")?;
+                        samples = val
+                            .parse::<usize>()
+                            .map_err(|_| format!("invalid --samples: {val}"))?;
+                    }
+                    other => return Err(format!("unknown flag for tcp-probe: {other}")),
+                }
+                i += 1;
+            }
+            let host = host.ok_or_else(|| "missing required --host".to_string())?;
+            let port = port.ok_or_else(|| "missing required --port".to_string())?;
+            Ok(Command::TcpProbe {
+                target_id,
+                host,
+                port,
+                samples,
+            })
+        }
         "serve" => Ok(Command::Serve),
         other => Err(format!("unknown subcommand: {other}")),
     }
@@ -370,6 +416,12 @@ fn dispatch(cmd: Command) -> String {
             geoip_probe::lookup_countries(std::path::Path::new(&db), &ips)
         }
         Command::PidMetrics { pid } => proc_probe::collect_pid_metrics(pid),
+        Command::TcpProbe {
+            target_id,
+            host,
+            port,
+            samples,
+        } => net_probe::probe_tcp_target(&target_id, &host, port, samples),
         Command::Serve => "{\"available\":false,\"error\":\"cannot nest serve\"}".to_string(),
     }
 }
@@ -622,5 +674,34 @@ mod tests {
             _ => panic!("unexpected command"),
         }
         assert!(parse_args(&s(&["narwhal-probe", "pid-metrics"])).is_err());
+
+        let tp_cmd = parse_args(&s(&[
+            "narwhal-probe",
+            "tcp-probe",
+            "--target-id",
+            "t123",
+            "--host",
+            "example.com",
+            "--port",
+            "443",
+            "--samples",
+            "2",
+        ]))
+        .expect("tcp-probe");
+        match tp_cmd {
+            Command::TcpProbe {
+                target_id,
+                host,
+                port,
+                samples,
+            } => {
+                assert_eq!(target_id, "t123");
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 443);
+                assert_eq!(samples, 2);
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(parse_args(&s(&["narwhal-probe", "tcp-probe"])).is_err());
     }
 }

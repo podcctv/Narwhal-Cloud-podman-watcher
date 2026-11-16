@@ -6,6 +6,7 @@ members = [
     "crates/cgroup-probe",
     "crates/host-metrics",
     "crates/geoip-probe",
+    "crates/net-probe",
     "crates/narwhal-probe",
 ]
 

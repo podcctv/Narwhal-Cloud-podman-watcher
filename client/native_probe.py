@@ -278,3 +278,25 @@ def pid_metrics(pid: int) -> Dict[str, Any] | None:
     if pid <= 0 or not is_available():
         return None
     return run_probe(["pid-metrics", "--pid", str(int(pid))])
+
+
+def tcp_probe(
+    target_id: str, host: str, port: int, samples: int = 3
+) -> Dict[str, Any] | None:
+    """Resolve and TCP-ping a target via `narwhal-probe tcp-probe`."""
+    if not host or int(port) <= 0 or int(samples) <= 0 or not is_available():
+        return None
+    return run_probe(
+        [
+            "tcp-probe",
+            "--target-id",
+            str(target_id),
+            "--host",
+            str(host),
+            "--port",
+            str(int(port)),
+            "--samples",
+            str(int(samples)),
+        ],
+        timeout=10.0,
+    )

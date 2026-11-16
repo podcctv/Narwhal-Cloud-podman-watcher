@@ -2,6 +2,13 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 4 扩展：`net-probe` Rust 原生 TCP Ping 探测与 `tcp_probe` 桥接（v1.8.42）
+
+- 新增零外部依赖、`#![forbid(unsafe_code)]` 的 `rust/crates/net-probe`：
+  - 实现 `is_global_ipv4`（过滤内网/环回/CGNAT/链路本地/保留/组播 IPv4）、`is_allowed_host` 与 `probe_tcp_target`（原生 DNS 解析 + 多样本 `TcpStream::connect_timeout` 毫秒测速），消除 Python 每目标创建 DNS 子进程的开销。
+  - 在 `rust/crates/narwhal-probe/src/main.rs` 新增 `tcp-probe --target-id --host --port --samples` 子命令及单测。
+- 在 `client/native_probe.py` 与 `client/tcp_probe.py` 接入 `tcp_probe` 桥接，保留 `resolve` / `safe_ip` / `socket.socket` mock 感知与纯 Python 回退；补充 `tests/test_native_probe.py` 单测。
+
 ## Phase 4 扩展：`socket-sec` 全量连接计数/远端 IP 提取与 Tick 缓存复用（v1.8.41）
 
 - 在 `rust/crates/socket-sec/src/lib.rs` 新增 `total_lines` 统计字段并补充单测断言，使单次 `socket-sec` 调用同时满足连接数统计、TCP/UDP 远端 IP 汇总与连接安全分析。

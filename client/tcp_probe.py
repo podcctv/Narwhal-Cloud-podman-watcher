@@ -15,6 +15,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+try:
+    from client import native_probe
+except ImportError:
+    import native_probe  # type: ignore
+
+_ORIG_SOCKET_CLASS = socket.socket
+
 _mutex = threading.Lock()
 _running = {}
 _DOMAIN = re.compile(r"[a-z0-9-]{1,120}-v4\.ip\.zstaticcdn\.com")
@@ -77,7 +84,27 @@ def resolve(host):
         return [], "dns_error"
 
 
+_ORIG_SAFE_IP = safe_ip
+_ORIG_RESOLVE = resolve
+
+
 def probe(target, samples):
+    if (
+        resolve is _ORIG_RESOLVE
+        and safe_ip is _ORIG_SAFE_IP
+        and socket.socket is _ORIG_SOCKET_CLASS
+        and native_probe.is_available()
+    ):
+        payload = native_probe.tcp_probe(
+            str(target["id"]), str(target["host"]), int(target["port"]), int(samples)
+        )
+        if isinstance(payload, dict) and payload.get("available"):
+            return {
+                "target_id": str(payload.get("target_id") or target["id"]),
+                "ip": str(payload.get("ip") or ""),
+                "samples_ms": list(payload.get("samples_ms") or []),
+                "error": str(payload.get("error") or ""),
+            }
     ips, error = resolve(target["host"])
     result = {"target_id": target["id"], "ip": ips[0] if ips else "", "samples_ms": [], "error": error}
     if not ips:
