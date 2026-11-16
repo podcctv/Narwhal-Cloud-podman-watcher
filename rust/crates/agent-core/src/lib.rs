@@ -13,10 +13,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cgroup_probe::{collect_psi_snapshot, read_psi, PsiStatus};
 use geoip_probe::lookup_countries;
-use guard_core::security::{detect_suspicious_processes, evaluate_socket_abuse, SocketAbuseInput};
+use guard_core::security::{
+    detect_suspicious_processes, evaluate_socket_abuse, ProcInfo, SocketAbuseInput,
+};
 use guard_core::{
-    CpuGuardConfig, CpuGuardTracker, HostCpuSample, IoGuardConfig, IoGuardTracker,
-    MemoryGuardConfig, MemoryGuardTracker, PsiSample,
+    CpuContainerSample, CpuGuardConfig, CpuGuardTracker, HostCpuSample, IoGuardConfig,
+    IoGuardTracker, MemoryContainerSample, MemoryGuardConfig, MemoryGuardTracker, PsiSample,
 };
 use host_metrics::{collect_host_metrics, parse_loadavg, parse_proc_stat_cpu, CpuMetrics};
 use net_probe::is_allowed_host;
@@ -428,13 +430,21 @@ impl AgentState {
         let host_io_psi = read_psi_sample(&self.proc_root.join("pressure").join("io"))
             .effective_avg();
 
+        let containers = discover_and_sample_containers(&config.container_runtimes);
+        let containers_json = serialize_containers_json(&containers);
+        let (mem_samples, cpu_samples) =
+            extract_container_guard_samples(&containers, host_cpu_sample.logical_cpus);
+
         let allow_new_limits = config.security_monitor_enabled;
         let cpu_out = self
             .cpu_guard
-            .observe(timestamp, &host_cpu_sample, &[], allow_new_limits);
-        let (mem_decisions, mem_actions) =
-            self.memory_guard
-                .observe(timestamp, host_mem_psi, &[], allow_new_limits);
+            .observe(timestamp, &host_cpu_sample, &cpu_samples, allow_new_limits);
+        let (mem_decisions, mem_actions) = self.memory_guard.observe(
+            timestamp,
+            host_mem_psi,
+            &mem_samples,
+            allow_new_limits,
+        );
         let (io_decisions, io_actions) = self.io_guard.observe(
             timestamp,
             host_cpu_sample.ready,
@@ -444,25 +454,20 @@ impl AgentState {
             allow_new_limits,
         );
 
-        let containers = discover_and_sample_containers(&config.container_runtimes);
-        let containers_json = serialize_containers_json(&containers);
-
         let suspicious_findings = if config.security_monitor_enabled {
-            detect_suspicious_processes(&[])
+            let proc_infos = extract_proc_infos_from_snapshot(&proc_snapshot_json);
+            detect_suspicious_processes(&proc_infos)
         } else {
             Vec::new()
         };
         let suspicious_json = serialize_suspicious_findings_json(&suspicious_findings);
-        let socket_abuse_json = evaluate_socket_abuse(&SocketAbuseInput {
-            evaluated_at: timestamp,
-            ..SocketAbuseInput::default()
-        })
-        .to_json();
+        let socket_abuse_input = aggregate_socket_abuse_from_containers(&containers, timestamp);
+        let socket_abuse_json = evaluate_socket_abuse(&socket_abuse_input).to_json();
 
         let mut out = String::with_capacity(4096);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":0.0,\"total_tx_bps\":0.0,\"total_rx_pps\":0.0,\"total_tx_pps\":0.0,\"syn_recv_count\":0,\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":0.0,\"total_tx_bps\":0.0,\"total_rx_pps\":0.0,\"total_tx_pps\":0.0,\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -477,6 +482,7 @@ impl AgentState {
             containers_json,
             config.security_monitor_enabled,
             interval_secs.max(1.0),
+            socket_abuse_input.tcp_syn_recv,
             suspicious_json,
             socket_abuse_json,
             conntrack_json,
@@ -606,6 +612,212 @@ fn serialize_suspicious_findings_json(
     }
     out.push(']');
     out
+}
+
+pub fn extract_proc_infos_from_snapshot(proc_snapshot_json: &str) -> Vec<ProcInfo> {
+    let Ok(root) = actions::parse_json(proc_snapshot_json) else {
+        return Vec::new();
+    };
+    let Some(items) = root.get("items").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(pid) = item
+            .get("pid")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+        else {
+            continue;
+        };
+        let ppid = item
+            .get("ppid")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
+        let cpu_percent = item
+            .get("cpu_percent")
+            .and_then(|v| v.as_f64())
+            .or_else(|| item.get("lifetime_cpu_percent").and_then(|v| v.as_f64()))
+            .unwrap_or(0.0);
+        let rss_bytes = item.get("rss_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+        let process = item
+            .get("process")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let command = item
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        out.push(ProcInfo {
+            pid,
+            ppid,
+            cpu_percent,
+            rss_bytes,
+            process,
+            command,
+        });
+    }
+    out
+}
+
+fn container_guard_key(container: &ContainerSample) -> String {
+    if !container.stable_id.is_empty() {
+        container.stable_id.clone()
+    } else if !container.id.is_empty() {
+        container.id.clone()
+    } else {
+        container.name.clone()
+    }
+}
+
+fn extract_container_guard_samples(
+    containers: &[ContainerSample],
+    logical_cpus: u32,
+) -> (Vec<MemoryContainerSample>, Vec<CpuContainerSample>) {
+    let default_cpus = logical_cpus.max(1) as f64;
+    let mut mem_samples = Vec::new();
+    let mut cpu_samples = Vec::new();
+
+    for c in containers {
+        let key = container_guard_key(c);
+        if key.is_empty() {
+            continue;
+        }
+        let cg_val = c
+            .cgroup_metrics_json
+            .as_deref()
+            .and_then(|s| actions::parse_json(s).ok());
+        let pm_val = c
+            .pid_metrics_json
+            .as_deref()
+            .and_then(|s| actions::parse_json(s).ok());
+
+        let cg_mem = cg_val.as_ref().and_then(|v| v.get("memory"));
+        let cg_current = cg_mem
+            .and_then(|m| m.get("current_bytes").or_else(|| m.get("current")))
+            .and_then(|v| v.as_u64());
+        let cg_max = cg_mem
+            .and_then(|m| m.get("max_bytes").or_else(|| m.get("max")))
+            .and_then(|v| v.as_u64());
+        let pm_mem = pm_val
+            .as_ref()
+            .and_then(|v| v.get("mem_bytes"))
+            .and_then(|v| v.as_u64());
+
+        if let Some(current_bytes) = cg_current.or(pm_mem) {
+            mem_samples.push(MemoryContainerSample {
+                key: key.clone(),
+                current_bytes,
+                max_bytes: cg_max,
+                original_high_bytes: None,
+                container_psi: PsiSample::default(),
+            });
+        }
+
+        let quota_cpus = cg_val
+            .as_ref()
+            .and_then(|v| v.get("quota_cpus").and_then(|q| q.as_f64()))
+            .or_else(|| {
+                let cpu_max = cg_val.as_ref()?.get("cpu_max")?;
+                let quota = cpu_max.get("quota_usec")?.as_u64()?;
+                let period = cpu_max.get("period_usec")?.as_u64()?;
+                if quota > 0 && period > 0 {
+                    Some(quota as f64 / period as f64)
+                } else {
+                    None
+                }
+            })
+            .filter(|q| q.is_finite() && *q > 0.0);
+
+        let cpu_percent = pm_val
+            .as_ref()
+            .and_then(|v| v.get("cpu_percent"))
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                cg_val
+                    .as_ref()
+                    .and_then(|v| v.get("cpu_percent"))
+                    .and_then(|v| v.as_f64())
+            });
+
+        cpu_samples.push(CpuContainerSample {
+            key,
+            cpu_percent,
+            effective_cpus: quota_cpus.unwrap_or(default_cpus),
+            cgroup_cpu_psi_some_avg10: None,
+        });
+    }
+
+    (mem_samples, cpu_samples)
+}
+
+pub fn aggregate_socket_abuse_from_containers(
+    containers: &[ContainerSample],
+    evaluated_at: u64,
+) -> SocketAbuseInput {
+    let mut input = SocketAbuseInput {
+        evaluated_at,
+        ..SocketAbuseInput::default()
+    };
+    for c in containers {
+        let Some(ref raw) = c.socket_tables_json else {
+            continue;
+        };
+        let Ok(st) = actions::parse_json(raw) else {
+            continue;
+        };
+        let est = st
+            .get("tcp_established")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let tw = st
+            .get("tcp_time_wait")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let syn_sent = st
+            .get("tcp_syn_sent")
+            .or_else(|| st.get("syn_sent_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let syn_recv = st
+            .get("tcp_syn_recv")
+            .or_else(|| st.get("syn_recv_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let udp = st
+            .get("udp_sockets")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let conn = st
+            .get("conn_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| {
+                est.saturating_add(tw)
+                    .saturating_add(syn_sent)
+                    .saturating_add(syn_recv)
+                    .saturating_add(udp)
+            });
+
+        input.tcp_established = input.tcp_established.saturating_add(est);
+        input.tcp_time_wait = input.tcp_time_wait.saturating_add(tw);
+        input.tcp_syn_sent = input.tcp_syn_sent.saturating_add(syn_sent);
+        input.tcp_syn_recv = input.tcp_syn_recv.saturating_add(syn_recv);
+        input.udp_sockets = input.udp_sockets.saturating_add(udp);
+        input.conn_count = input.conn_count.saturating_add(conn);
+
+        if st.get("available").and_then(|v| v.as_bool()) == Some(true)
+            || est > 0
+            || tw > 0
+            || syn_sent > 0
+            || syn_recv > 0
+        {
+            input.has_tcp_states = true;
+        }
+    }
+    input
 }
 
 fn read_psi_sample(path: &Path) -> PsiSample {
@@ -1068,5 +1280,116 @@ SECURITY_MONITOR_ENABLED=false
         let handled = poll_actions_once(&client, &cfg).expect("poll actions");
         assert_eq!(handled, 1);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_extract_proc_infos_and_aggregate_socket_abuse() {
+        let snapshot = r#"{
+            "available": true,
+            "items": [
+                {
+                    "pid": 101,
+                    "ppid": 1,
+                    "lifetime_cpu_percent": 42.5,
+                    "rss_bytes": 1048576,
+                    "process": "xmrig",
+                    "command": "/tmp/xmrig --url stratum+tcp://pool.example:3333"
+                },
+                {
+                    "pid": 102,
+                    "ppid": 1,
+                    "cpu_percent": 3.25,
+                    "rss_bytes": 2048,
+                    "process": "nginx",
+                    "command": "nginx: master process"
+                }
+            ]
+        }"#;
+
+        let procs = extract_proc_infos_from_snapshot(snapshot);
+        assert_eq!(procs.len(), 2);
+        assert_eq!(procs[0].pid, 101);
+        assert_eq!(procs[0].ppid, 1);
+        assert!((procs[0].cpu_percent - 42.5).abs() < 1e-6);
+        assert_eq!(procs[0].rss_bytes, 1_048_576);
+        assert_eq!(procs[0].process, "xmrig");
+        assert_eq!(
+            procs[0].command,
+            "/tmp/xmrig --url stratum+tcp://pool.example:3333"
+        );
+        assert_eq!(procs[1].pid, 102);
+        assert!((procs[1].cpu_percent - 3.25).abs() < 1e-6);
+
+        let findings = detect_suspicious_processes(&procs);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].pid, 101);
+
+        let c1 = ContainerSample {
+            id: "c1".to_string(),
+            stable_id: "docker:c1".to_string(),
+            name: "app1".to_string(),
+            image: "alpine".to_string(),
+            runtime: "docker".to_string(),
+            runtime_bin: "docker".to_string(),
+            project: String::new(),
+            pid: Some(1000),
+            status: "running".to_string(),
+            instance_id: String::new(),
+            network_addresses: Vec::new(),
+            pid_metrics_json: Some(r#"{"available":true,"mem_bytes":52428800}"#.to_string()),
+            socket_tables_json: Some(
+                r#"{"available":true,"tcp_established":10,"tcp_time_wait":4,"syn_sent_count":2,"syn_recv_count":3,"udp_sockets":5}"#
+                    .to_string(),
+            ),
+            cgroup_metrics_json: Some(
+                r#"{"available":true,"cpu_max":{"quota_usec":150000,"period_usec":100000},"memory":{"current_bytes":67108864,"max_bytes":134217728}}"#
+                    .to_string(),
+            ),
+        };
+        let c2 = ContainerSample {
+            id: "c2".to_string(),
+            stable_id: "docker:c2".to_string(),
+            name: "app2".to_string(),
+            image: "alpine".to_string(),
+            runtime: "docker".to_string(),
+            runtime_bin: "docker".to_string(),
+            project: String::new(),
+            pid: Some(2000),
+            status: "running".to_string(),
+            instance_id: String::new(),
+            network_addresses: Vec::new(),
+            pid_metrics_json: Some(r#"{"available":true,"mem_bytes":16777216}"#.to_string()),
+            socket_tables_json: Some(
+                r#"{"available":true,"tcp_established":5,"tcp_time_wait":1,"tcp_syn_sent":1,"tcp_syn_recv":2,"udp_sockets":3,"conn_count":20}"#
+                    .to_string(),
+            ),
+            cgroup_metrics_json: None,
+        };
+
+        let containers = vec![c1, c2];
+        let agg = aggregate_socket_abuse_from_containers(&containers, 1_700_000_123);
+        assert_eq!(agg.evaluated_at, 1_700_000_123);
+        assert_eq!(agg.tcp_established, 15);
+        assert_eq!(agg.tcp_time_wait, 5);
+        assert_eq!(agg.tcp_syn_sent, 3);
+        assert_eq!(agg.tcp_syn_recv, 5);
+        assert_eq!(agg.udp_sockets, 8);
+        assert_eq!(agg.conn_count, 44);
+        assert!(agg.has_tcp_states);
+
+        let (mem_samples, cpu_samples) = extract_container_guard_samples(&containers, 4);
+        assert_eq!(mem_samples.len(), 2);
+        assert_eq!(mem_samples[0].key, "docker:c1");
+        assert_eq!(mem_samples[0].current_bytes, 67_108_864);
+        assert_eq!(mem_samples[0].max_bytes, Some(134_217_728));
+        assert_eq!(mem_samples[1].key, "docker:c2");
+        assert_eq!(mem_samples[1].current_bytes, 16_777_216);
+        assert_eq!(mem_samples[1].max_bytes, None);
+
+        assert_eq!(cpu_samples.len(), 2);
+        assert_eq!(cpu_samples[0].key, "docker:c1");
+        assert!((cpu_samples[0].effective_cpus - 1.5).abs() < 1e-6);
+        assert_eq!(cpu_samples[1].key, "docker:c2");
+        assert!((cpu_samples[1].effective_cpus - 4.0).abs() < 1e-6);
     }
 }

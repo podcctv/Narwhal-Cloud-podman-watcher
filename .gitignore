@@ -12,3 +12,5 @@ id_*
 *.log
 .agents/mcp_config.json
 mcp_config.json
+rust/target/
+rust/Cargo.lock

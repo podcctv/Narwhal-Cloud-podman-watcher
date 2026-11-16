@@ -2,6 +2,12 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 5 收口：`narwhal-agent` 全链路真实采集与 Runman/进程处置闭环（v1.8.48）
+
+- **`rust/crates/agent-core/src/lib.rs`**：`AgentState::build_report_json()` 接入真实进程快照解析（`extract_proc_infos_from_snapshot` -> `detect_suspicious_processes`）、容器 cgroup 内存/CPU 样本（`extract_container_guard_samples` -> `memory_guard`/`cpu_guard`）及容器 socket 统计聚合（`aggregate_socket_abuse_from_containers` -> `evaluate_socket_abuse`），并补充单元测试。
+- **`rust/crates/agent-core/src/actions.rs`**：新增 `kill_pid` / `stop_socks_process`（`pid > 1` 与 `/proc/<pid>/stat` 校验）与 `runman_restart_overload` / `runman_stop_overload`（`runtime_drivers::runman_request` Unix-socket 处置）及参数拦截单测。
+- **`.gitignore`**：忽略本地构建产物 `rust/target/` 与 `rust/Cargo.lock`。
+
 ## Phase 5 扩展：Rust 运行时驱动、4D 安全检测与动作执行闭环（v1.8.47）
 
 - 新增并集成纯 `std`、`#![forbid(unsafe_code)]` 容器运行时驱动 crate `rust/crates/runtime-drivers`（纳入 `rust/Cargo.toml` 与 `agent-core` 依赖）：

@@ -643,6 +643,8 @@ pub fn execute_action(req: &ActionRequest) -> ActionReceipt {
         "managed_upgrade" => execute_managed_upgrade(req, Path::new(MANAGED_UPDATE_SCRIPT)),
         "tcp_ping" => execute_tcp_ping(req),
         "cpu_limit" | "memory_limit" | "io_limit" => execute_systemd_limit(req),
+        "kill_pid" | "stop_socks_process" => execute_kill_pid(req),
+        "runman_restart_overload" | "runman_stop_overload" => execute_runman_overload(req),
         other => ActionReceipt::failed(
             req.id,
             other,
@@ -1103,6 +1105,247 @@ fn execute_systemd_limit(req: &ActionRequest) -> ActionReceipt {
     }
 }
 
+/// Validate a Runman container or instance identifier: non-empty ASCII `[A-Za-z0-9_.-]{1,128}`.
+pub fn is_valid_runman_identifier(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+fn parse_valid_pid(val: Option<&JsonValue>) -> Result<u32, String> {
+    let Some(v) = val else {
+        return Err("missing required pid parameter".to_string());
+    };
+    if let Some(n) = v.as_u64() {
+        if n > 1 && n <= u32::MAX as u64 {
+            return Ok(n as u32);
+        }
+        return Err(format!("invalid pid {n}: must be > 1 and <= {}", u32::MAX));
+    }
+    if let Some(s) = v.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(n) = trimmed.parse::<u32>() {
+                if n > 1 {
+                    return Ok(n);
+                }
+            }
+        }
+        return Err(format!("invalid pid '{s}': expected integer > 1"));
+    }
+    Err("invalid pid: expected integer > 1".to_string())
+}
+
+fn execute_kill_pid(req: &ActionRequest) -> ActionReceipt {
+    let pid = match parse_valid_pid(req.params.get("pid")) {
+        Ok(p) => p,
+        Err(msg) => return ActionReceipt::failed(req.id, &req.action_type, msg),
+    };
+
+    #[cfg(unix)]
+    {
+        let proc_stat = format!("/proc/{pid}/stat");
+        if !Path::new(&proc_stat).is_file() {
+            return ActionReceipt::failed(
+                req.id,
+                &req.action_type,
+                format!("target process {pid} does not exist ({proc_stat} not found)"),
+            );
+        }
+
+        match Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .output()
+        {
+            Ok(output) if output.status.success() => ActionReceipt::succeeded(
+                req.id,
+                &req.action_type,
+                format!("sent SIGTERM to pid {pid}"),
+            ),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr.trim();
+                let msg = if detail.is_empty() {
+                    format!(
+                        "kill -TERM {pid} failed with status {}",
+                        output.status.code().unwrap_or(-1)
+                    )
+                } else {
+                    format!("kill -TERM {pid} failed: {detail}")
+                };
+                ActionReceipt::failed(req.id, &req.action_type, msg)
+            }
+            Err(err) => ActionReceipt::failed(
+                req.id,
+                &req.action_type,
+                format!("failed to invoke kill for pid {pid}: {err}"),
+            ),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("{} is only supported on Unix platforms (validated pid {pid})", req.action_type),
+        )
+    }
+}
+
+fn validate_optional_runman_id<'a>(
+    params: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    let Some(val) = params.get(key) else {
+        return Ok(None);
+    };
+    if matches!(val, JsonValue::Null) {
+        return Ok(None);
+    }
+    let Some(raw) = val.as_str() else {
+        return Err(format!("invalid {key}: expected string"));
+    };
+    let trimmed = raw.trim();
+    if !is_valid_runman_identifier(trimmed) {
+        return Err(format!(
+            "invalid {key}: must match [A-Za-z0-9_.-]{{1,128}}"
+        ));
+    }
+    Ok(Some(trimmed))
+}
+
+fn execute_runman_overload(req: &ActionRequest) -> ActionReceipt {
+    let container_param = match validate_optional_runman_id(&req.params, "container") {
+        Ok(v) => v,
+        Err(msg) => return ActionReceipt::failed(req.id, &req.action_type, msg),
+    };
+    let container_name_param = match validate_optional_runman_id(&req.params, "container_name") {
+        Ok(v) => v,
+        Err(msg) => return ActionReceipt::failed(req.id, &req.action_type, msg),
+    };
+    let instance_id = match validate_optional_runman_id(&req.params, "instance_id") {
+        Ok(v) => v,
+        Err(msg) => return ActionReceipt::failed(req.id, &req.action_type, msg),
+    };
+
+    let fallback_container = {
+        let trimmed = req.container_name.trim();
+        if trimmed.is_empty() {
+            None
+        } else if is_valid_runman_identifier(trimmed) {
+            Some(trimmed)
+        } else {
+            return ActionReceipt::failed(
+                req.id,
+                &req.action_type,
+                "invalid container_name: must match [A-Za-z0-9_.-]{1,128}",
+            );
+        }
+    };
+
+    let Some(target_container) = container_param
+        .or(container_name_param)
+        .or(fallback_container)
+        .or(instance_id)
+    else {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            "missing required container or instance_id",
+        );
+    };
+
+    let generation = match req.params.get("generation") {
+        None | Some(JsonValue::Null) => None,
+        Some(val) => {
+            let Some(s) = val.as_str() else {
+                return ActionReceipt::failed(
+                    req.id,
+                    &req.action_type,
+                    "invalid generation: expected string",
+                );
+            };
+            let trimmed = s.trim();
+            if trimmed.chars().count() > 128 || trimmed.chars().any(|c| c.is_control()) {
+                return ActionReceipt::failed(
+                    req.id,
+                    &req.action_type,
+                    "invalid generation: must be <= 128 non-control characters",
+                );
+            }
+            Some(trimmed)
+        }
+    };
+
+    let endpoint = match req.action_type.as_str() {
+        "runman_restart_overload" => "/v1/restart-overload",
+        "runman_stop_overload" => "/v1/stop-overload",
+        other => {
+            return ActionReceipt::failed(
+                req.id,
+                &req.action_type,
+                format!("unsupported runman overload action: {other}"),
+            );
+        }
+    };
+
+    let mut body = String::from("{");
+    let _ = write!(body, "\"container_name\":{}", json_quote(target_container));
+    if let Some(inst) = instance_id {
+        let _ = write!(body, ",\"instance_id\":{}", json_quote(inst));
+    }
+    if let Some(gen) = generation {
+        let _ = write!(body, ",\"generation\":{}", json_quote(gen));
+    }
+    if !req.project.is_empty() {
+        let _ = write!(body, ",\"project\":{}", json_quote(&req.project));
+    }
+    body.push('}');
+
+    #[cfg(unix)]
+    if !Path::new(runtime_drivers::RUNMAN_SOCK_PATH).exists() {
+        return ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("runman socket unavailable: {}", runtime_drivers::RUNMAN_SOCK_PATH),
+        );
+    }
+
+    match runtime_drivers::runman_request(
+        runtime_drivers::RUNMAN_SOCK_PATH,
+        "POST",
+        endpoint,
+        Some(body.as_bytes()),
+    ) {
+        Ok((status, resp_body)) if (200..300).contains(&status) => {
+            let detail = String::from_utf8_lossy(&resp_body);
+            let msg = if detail.trim().is_empty() {
+                format!("runman {endpoint} succeeded for {target_container} (HTTP {status})")
+            } else {
+                format!("runman {endpoint} succeeded for {target_container} (HTTP {status}): {}", detail.trim())
+            };
+            ActionReceipt::succeeded(req.id, &req.action_type, msg)
+        }
+        Ok((status, resp_body)) => {
+            let detail = String::from_utf8_lossy(&resp_body);
+            ActionReceipt::failed(
+                req.id,
+                &req.action_type,
+                format!("runman {endpoint} returned HTTP {status}: {}", detail.trim()),
+            )
+        }
+        Err(err) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("runman {endpoint} request failed: {err}"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1303,5 +1546,93 @@ mod tests {
         let r_unknown = execute_action(&unknown);
         assert!(!r_unknown.ok);
         assert_eq!(r_unknown.status, "failed");
+    }
+
+    #[test]
+    fn test_kill_pid_validation_rejects_pid_le_one_and_invalid_values() {
+        for (idx, payload) in [
+            r#"{"id":30,"action_type":"kill_pid","params":{}}"#,
+            r#"{"id":31,"action_type":"kill_pid","params":{"pid":0}}"#,
+            r#"{"id":32,"action_type":"kill_pid","params":{"pid":1}}"#,
+            r#"{"id":33,"action_type":"stop_socks_process","params":{"pid":1}}"#,
+            r#"{"id":34,"action_type":"kill_pid","params":{"pid":-5}}"#,
+            r#"{"id":35,"action_type":"kill_pid","params":{"pid":"1"}}"#,
+            r#"{"id":36,"action_type":"kill_pid","params":{"pid":"123;id"}}"#,
+            r#"{"id":37,"action_type":"kill_pid","params":{"pid":4294967296}}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let req = ActionRequest::from_json(payload).unwrap();
+            let receipt = execute_action(&req);
+            assert!(!receipt.ok, "case {idx} should fail: {payload}");
+            assert_eq!(receipt.status, "failed");
+            assert!(
+                receipt.message.contains("pid"),
+                "case {idx} should mention pid validation error, got: {}",
+                receipt.message
+            );
+        }
+
+        // Valid pid > 1 passes validation (fails gracefully on non-Unix or missing /proc/<pid>/stat)
+        let valid_req = ActionRequest::from_json(
+            r#"{"id":38,"action_type":"stop_socks_process","params":{"pid":99999999}}"#,
+        )
+        .unwrap();
+        let valid_receipt = execute_action(&valid_req);
+        assert!(!valid_receipt.ok);
+        assert!(
+            valid_receipt.message.contains("does not exist")
+                || valid_receipt.message.contains("only supported on Unix"),
+            "unexpected message for valid pid: {}",
+            valid_receipt.message
+        );
+    }
+
+    #[test]
+    fn test_runman_overload_validation_rejects_empty_and_unsafe_container_id() {
+        let too_long_id = "a".repeat(129);
+        let too_long_gen = "g".repeat(129);
+        let long_id_json = format!(
+            r#"{{"id":40,"action_type":"runman_restart_overload","params":{{"container":"{too_long_id}"}}}}"#
+        );
+        let long_gen_json = format!(
+            r#"{{"id":41,"action_type":"runman_stop_overload","params":{{"container":"ct-1","generation":"{too_long_gen}"}}}}"#
+        );
+
+        let invalid_cases = [
+            r#"{"id":42,"action_type":"runman_restart_overload","params":{}}"#,
+            r#"{"id":43,"action_type":"runman_stop_overload","params":{"container":""}}"#,
+            r#"{"id":44,"action_type":"runman_restart_overload","params":{"container":"../evil"}}"#,
+            r#"{"id":45,"action_type":"runman_stop_overload","params":{"container":"ct;rm -rf /"}}"#,
+            r#"{"id":46,"action_type":"runman_restart_overload","params":{"instance_id":"bad/id"}}"#,
+            r#"{"id":47,"action_type":"runman_stop_overload","params":{"container":"ct-1","generation":"bad\nline"}}"#,
+            long_id_json.as_str(),
+            long_gen_json.as_str(),
+        ];
+
+        for (idx, payload) in invalid_cases.iter().enumerate() {
+            let req = ActionRequest::from_json(payload).unwrap();
+            let receipt = execute_action(&req);
+            assert!(!receipt.ok, "case {idx} should fail: {payload}");
+            assert_eq!(receipt.status, "failed");
+        }
+
+        // Valid container + generation passes validation and fails gracefully when socket is absent / non-Unix
+        for action_type in ["runman_restart_overload", "runman_stop_overload"] {
+            let valid_json = format!(
+                r#"{{"id":50,"action_type":"{action_type}","params":{{"container":"ct_1.prod-01","instance_id":"inst-123","generation":"gen-42"}}}}"#
+            );
+            let req = ActionRequest::from_json(&valid_json).unwrap();
+            let receipt = execute_action(&req);
+            assert!(!receipt.ok);
+            assert!(
+                receipt.message.contains("socket")
+                    || receipt.message.contains("Unix")
+                    || receipt.message.contains("request failed"),
+                "expected graceful socket/platform failure, got: {}",
+                receipt.message
+            );
+        }
     }
 }
