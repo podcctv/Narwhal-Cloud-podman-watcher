@@ -131,6 +131,7 @@ export const api = {
       const accessRequests = Number(access.requests || 0);
 
       return {
+        ...item,
         enabled: Boolean(item.enabled),
         stale: Boolean(item.stale),
         interval_seconds: Number(item.interval_seconds || 0),

@@ -2,6 +2,10 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## 发布修复：前端 `getSecurityStatus` 透传 RFW 与 Agent 元数据字段（v1.9.6）
+
+- **`frontend/src/api/client.ts`**：`getSecurityStatus()` 在映射 `/api/v1/security/status` 返回项时先展开 `...item`，修复之前手动重建对象时丢弃 `rfw_service_health`、`agent_version`、`last_seen`、`last_seen_utc8` 与 `collection_health` 导致界面始终显示 `Agent 未知 · 最近上报 —` 和 `主机 RFW | Agent 未上报 | 需升级 Agent 获取检查结果` 的问题，并重新构建 `server/static/` 静态资源。
+
 ## 发布修复：托管 Agent 升级的 Git 锁与定时器状态（v1.9.5）
 
 - 生产回执显示，多台旧 Agent 在升级回滚时遇到配置仓库 `.git/index.lock`。只在托管升级安装阶段，锁文件超过 5 分钟且确认无该仓库 Git 进程时清除精确锁文件。
