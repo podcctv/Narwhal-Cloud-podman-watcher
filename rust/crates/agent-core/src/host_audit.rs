@@ -44,6 +44,7 @@ pub struct HostAuditState {
     pub file_hashes: BTreeMap<String, String>,
     pub ssh_log_offset: u64,
     pub cached_json: String,
+    pub firewall_event_cursor: String,
 }
 
 impl Default for HostAuditState {
@@ -56,6 +57,7 @@ impl Default for HostAuditState {
             file_hashes: BTreeMap::new(),
             ssh_log_offset: 0,
             cached_json: String::new(),
+            firewall_event_cursor: String::new(),
         }
     }
 }
@@ -693,7 +695,11 @@ pub fn collect_interface_inventory_json(timestamp: u64, containers: &[ContainerS
     format!("{{\"status\":\"unavailable\",\"observed_at\":{},\"interfaces\":[]}}", timestamp)
 }
 
-pub fn collect_host_firewall_full_json(timestamp: u64, containers: &[ContainerSample]) -> String {
+pub fn collect_host_firewall_full_json(
+    timestamp: u64,
+    containers: &[ContainerSample],
+    state: &mut HostAuditState,
+) -> String {
     let (available, backend) =
         if Path::new("/usr/sbin/nft").exists() || Path::new("/sbin/nft").exists() {
             (true, "nftables")
@@ -707,29 +713,92 @@ pub fn collect_host_firewall_full_json(timestamp: u64, containers: &[ContainerSa
         };
     let inventory_json = collect_interface_inventory_json(timestamp, containers);
 
-    let readback_field = if Path::new(RUNMAN_FIREWALL_SOCK).exists() {
-        match runman_request(RUNMAN_FIREWALL_SOCK, "GET", "/v1/firewall/policy", None) {
+    let (readback_json, events_field) = if Path::new(RUNMAN_FIREWALL_SOCK).exists() {
+        let rb = match runman_request(RUNMAN_FIREWALL_SOCK, "GET", "/v1/firewall/policy", None) {
             Ok((200, body)) => {
                 let text = String::from_utf8_lossy(&body);
                 let trimmed = text.trim();
                 if trimmed.starts_with('{') && parse_json(trimmed).is_ok() {
-                    format!(",\"readback\":{{\"status\":\"ok\",\"snapshot\":{trimmed}}}")
+                    format!(
+                        "{{\"status\":\"ready\",\"observed_at\":{},\"snapshot\":{},\"reason\":\"\"}}",
+                        timestamp, trimmed
+                    )
                 } else {
-                    String::new()
+                    format!(
+                        "{{\"status\":\"unavailable\",\"observed_at\":{},\"snapshot\":null,\"reason\":\"invalid_json\"}}",
+                        timestamp
+                    )
                 }
             }
-            _ => String::new(),
-        }
+            Ok((404, _)) => format!(
+                "{{\"status\":\"unavailable\",\"observed_at\":{},\"snapshot\":null,\"reason\":\"readback_endpoint_missing\"}}",
+                timestamp
+            ),
+            Ok(_) => format!(
+                "{{\"status\":\"unavailable\",\"observed_at\":{},\"snapshot\":null,\"reason\":\"readback_http_error\"}}",
+                timestamp
+            ),
+            Err(_) => format!(
+                "{{\"status\":\"unavailable\",\"observed_at\":{},\"snapshot\":null,\"reason\":\"socket_error\"}}",
+                timestamp
+            ),
+        };
+        let cursor = state.firewall_event_cursor.as_str();
+        let ev_path = format!("/v1/firewall/events?cursor={cursor}&limit=100");
+        let ev = match runman_request(RUNMAN_FIREWALL_SOCK, "GET", &ev_path, None) {
+            Ok((200, body)) => {
+                let text = String::from_utf8_lossy(&body);
+                if let Ok(parsed) = parse_json(text.trim()) {
+                    if let Some(next_c) = parsed.get("next_cursor").and_then(JsonValue::as_str) {
+                        if next_c.len() <= 160 {
+                            state.firewall_event_cursor = next_c.to_string();
+                        }
+                    }
+                    let events_arr = parsed
+                        .get("events")
+                        .map(JsonValue::to_json)
+                        .unwrap_or_else(|| "[]".to_string());
+                    let dropped = parsed.get("dropped").and_then(JsonValue::as_u64).unwrap_or(0);
+                    let dropped_total = parsed
+                        .get("dropped_total")
+                        .and_then(JsonValue::as_u64)
+                        .unwrap_or(0);
+                    format!(
+                        ",\"events_api\":\"ready\",\"next_cursor\":\"{}\",\"dropped\":{},\"dropped_total\":{},\"events\":{}",
+                        json_escape(&state.firewall_event_cursor),
+                        dropped,
+                        dropped_total,
+                        events_arr
+                    )
+                } else {
+                    ",\"events_api\":\"unavailable\",\"events\":[]".to_string()
+                }
+            }
+            Ok((404, _)) => ",\"events_api\":\"unsupported\",\"events\":[]".to_string(),
+            _ => ",\"events_api\":\"unavailable\",\"events\":[]".to_string(),
+        };
+        (rb, ev)
     } else {
-        String::new()
+        (
+            format!(
+                "{{\"status\":\"unavailable\",\"observed_at\":{},\"snapshot\":null,\"reason\":\"{}\"}}",
+                timestamp,
+                if cfg!(unix) { "socket_missing" } else { "platform_unsupported" }
+            ),
+            format!(
+                ",\"events_api\":\"{}\",\"events\":[]",
+                if cfg!(unix) { "unavailable" } else { "unsupported" }
+            ),
+        )
     };
 
     format!(
-        "{{\"available\":{},\"backend\":\"{}\",\"interface_inventory\":{}{}}}",
+        "{{\"available\":{},\"backend\":\"{}\",\"interface_inventory\":{},\"readback\":{}{}}}",
         available,
         backend,
         inventory_json,
-        readback_field
+        readback_json,
+        events_field
     )
 }
 

@@ -2,6 +2,12 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 10：防火墙事件流与读回对齐、Runman 限流/停止/清马 Action 与服务探针（v1.9.10）
+
+- **`rust/crates/agent-core/src/host_audit.rs`**：对齐服务端 `_validate_host_firewall_readback` 契约，将 `readback` 输出修正为 `status: "ready" | "unavailable"` + `observed_at` + `snapshot` + `reason`，并新增 `/run/narwhal-agent/firewall.sock` `GET /v1/firewall/events` 游标增量拉取（`firewall_event_cursor`）。
+- **`rust/crates/agent-core/src/actions.rs`**：修正 `apply_host_firewall_policy` 读回校验同时核对 `policy_revision`、`status == "in_sync"`、`drift_count == 0`、`missing_count == 0`；新增 `apply_container_connlimit` / `release_container_connlimit`（`/v1/connlimit/target` 实证复核 + `/v1/connlimit`）、`stop_container`、`request_deep_sample` 与 `remediate_malicious_process`（白名单 + `start_ticks` 核验）及对应单元测试。
+- **`rust/crates/agent-core/src/lib.rs`**：自动探测系统 GeoIP MMDB（`GEOIP_MMDB_PATH` / `/opt/narwhal-monitor/GeoLite2-Country.mmdb` / `/usr/share/GeoIP/GeoLite2-Country.mmdb`），并新增纯 `std` 的 `operations.services` TCP/HTTP 服务探针（`configure_operations_services` / `probe_operations_services_json`）与单测。
+
 ## Phase 9：Rust `narwhal-agent` 主线功能齐备与默认主线切换（v1.9.9）
 
 - **Rust `gfw_probe` 与 `host_audit`（`rust/crates/agent-core/src/{gfw_probe.rs,host_audit.rs}`）**：

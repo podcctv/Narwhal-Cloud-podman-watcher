@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
-use std::net::UdpSocket;
+use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -414,6 +414,15 @@ pub struct AgentState {
     rfw_restart_observation: Option<RfwRestartObservation>,
     access_log_states: HashMap<String, AccessLogCursor>,
     host_audit_state: host_audit::HostAuditState,
+    operations_services: Vec<ServiceProbeSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceProbeSpec {
+    pub id: String,
+    pub kind: String,
+    pub target: String,
+    pub latency_warning_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -490,6 +499,7 @@ impl AgentState {
             rfw_restart_observation: None,
             access_log_states: HashMap::new(),
             host_audit_state: host_audit::HostAuditState::default(),
+            operations_services: Vec::new(),
         }
     }
 
@@ -607,9 +617,11 @@ impl AgentState {
         );
         let ops_arch = normalize_arch(std::env::consts::ARCH);
         let upgrade_result_json = read_managed_upgrade_result_json(Path::new(MANAGED_UPDATE_RESULT_FILE));
+        let ops_services_json = probe_operations_services_json(&self.operations_services, timestamp);
 
         let agent_ver = resolved_agent_version();
-        let host_fw_json = host_audit::collect_host_firewall_full_json(timestamp, containers);
+        let host_fw_json =
+            host_audit::collect_host_firewall_full_json(timestamp, containers, &mut self.host_audit_state);
         let host_audit_json = if config.security_monitor_enabled {
             host_audit::collect_host_audit_json(
                 timestamp,
@@ -622,7 +634,7 @@ impl AgentState {
         let mut out = String::with_capacity(8192);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":[\"operations-v1\",\"agent-rust-v2\",\"public-tcp-v2\"],\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":[\"operations-v1\",\"agent-rust-v2\",\"service-probes\",\"log-discovery\",\"public-tcp-v2\"],\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -668,6 +680,7 @@ impl AgentState {
             proc_snapshot_json,
             ops_health_json,
             runtime_inventory_json,
+            ops_services_json,
             json_escape(ops_arch),
             effective_interval,
             upgrade_result_json,
@@ -1818,6 +1831,170 @@ fn build_operations_health_json(
     )
 }
 
+fn parse_service_target(kind: &str, target: &str) -> Result<(String, u16, String, String), &'static str> {
+    if target.is_empty() || target.len() > 512 {
+        return Err("invalid probe target");
+    }
+    let Some((scheme_raw, rest)) = target.split_once("://") else {
+        return Err("invalid probe target");
+    };
+    let scheme = scheme_raw.to_ascii_lowercase();
+    if !matches!((kind, scheme.as_str()), ("tcp", "tcp") | ("http", "http") | ("http", "https")) {
+        return Err("invalid probe target");
+    }
+    let (authority, path_part) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    if authority.contains('@') || authority.is_empty() {
+        return Err("invalid probe target");
+    }
+    let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
+        let Some((h, after)) = stripped.split_once(']') else {
+            return Err("invalid probe target");
+        };
+        let port = if let Some(pstr) = after.strip_prefix(':') {
+            pstr.parse::<u16>().map_err(|_| "invalid probe target")?
+        } else {
+            default_scheme_port(&scheme)
+        };
+        (h.to_string(), port)
+    } else if let Some((h, pstr)) = authority.rsplit_once(':') {
+        let port = pstr.parse::<u16>().map_err(|_| "invalid probe target")?;
+        (h.to_string(), port)
+    } else {
+        (authority.to_string(), default_scheme_port(&scheme))
+    };
+    if host.is_empty() || port == 0 {
+        return Err("invalid probe target");
+    }
+    Ok((host, port, scheme, path_part.to_string()))
+}
+
+fn default_scheme_port(scheme: &str) -> u16 {
+    match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => 0,
+    }
+}
+
+pub fn probe_operations_services_json(services: &[ServiceProbeSpec], checked_at: u64) -> String {
+    if services.is_empty() {
+        return "[]".to_string();
+    }
+    let mut results = Vec::with_capacity(services.len().min(20));
+    for svc in services.iter().take(20) {
+        let started = Instant::now();
+        let probe_res: Result<(Option<u16>, f64), String> = (|| {
+            let (host, port, scheme, path) =
+                parse_service_target(&svc.kind, &svc.target).map_err(|e| e.to_string())?;
+            let addrs: Vec<_> = (host.as_str(), port)
+                .to_socket_addrs()
+                .map_err(|e| format!("resolve error: {e}"))?
+                .collect();
+            let addr = addrs.into_iter().next().ok_or_else(|| "resolve empty".to_string())?;
+            let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+                .map_err(|e| format!("connect error: {e}"))?;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+            let mut http_status: Option<u16> = None;
+            if svc.kind == "http" && scheme == "http" {
+                let req_str = format!(
+                    "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Narwhal-Agent-Rust/1.0\r\nConnection: close\r\n\r\n",
+                    path, host
+                );
+                let _ = stream.write_all(req_str.as_bytes());
+                let mut buf = [0u8; 256];
+                if let Ok(n) = std::io::Read::read(&mut stream, &mut buf) {
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    if let Some(code_str) = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                    {
+                        if let Ok(code) = code_str.parse::<u16>() {
+                            http_status = Some(code);
+                            if !(200..400).contains(&code) {
+                                return Err(format!("HTTP {code}"));
+                            }
+                        }
+                    }
+                }
+            }
+            let ms = (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
+            Ok((http_status, ms))
+        })();
+
+        match probe_res {
+            Ok((http_status, latency_ms)) => {
+                let warn_ms = svc.latency_warning_ms.max(1) as f64;
+                let status = if latency_ms >= warn_ms {
+                    "warning"
+                } else {
+                    "healthy"
+                };
+                let http_field = match http_status {
+                    Some(code) => format!(",\"http_status\":{code}"),
+                    None => String::new(),
+                };
+                results.push(format!(
+                    "{{\"id\":\"{}\",\"status\":\"{}\",\"latency_ms\":{:.1},\"checked_at\":{}{}}}",
+                    json_escape(&svc.id),
+                    status,
+                    latency_ms,
+                    checked_at,
+                    http_field
+                ));
+            }
+            Err(err_msg) => {
+                let truncated: String = err_msg.chars().take(150).collect();
+                results.push(format!(
+                    "{{\"id\":\"{}\",\"status\":\"failed\",\"latency_ms\":null,\"checked_at\":{},\"error\":\"{}\"}}",
+                    json_escape(&svc.id),
+                    checked_at,
+                    json_escape(&truncated)
+                ));
+            }
+        }
+    }
+    format!("[{}]", results.join(","))
+}
+
+impl AgentState {
+    pub fn configure_operations_services(&mut self, poll_body: &str) {
+        let Ok(root) = actions::parse_json(poll_body) else {
+            return;
+        };
+        let Some(services) = root
+            .get("operations")
+            .and_then(|o| o.get("services"))
+            .and_then(|v| v.as_array())
+        else {
+            return;
+        };
+        let mut parsed = Vec::new();
+        for svc in services.iter().take(20) {
+            let Some(id) = svc.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let kind = svc.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let target = svc.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let warn = svc
+                .get("latency_warning_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1000);
+            parsed.push(ServiceProbeSpec {
+                id: id.to_string(),
+                kind: kind.to_string(),
+                target: target.to_string(),
+                latency_warning_ms: warn,
+            });
+        }
+        self.operations_services = parsed;
+    }
+}
+
 pub fn extract_proc_infos_from_snapshot(proc_snapshot_json: &str) -> Vec<ProcInfo> {
     let Ok(root) = actions::parse_json(proc_snapshot_json) else {
         return Vec::new();
@@ -2192,6 +2369,7 @@ pub fn poll_actions_with_state(
     );
     let resp = client.post_json_signed_verified("/api/v1/actions/poll", poll_body.as_bytes())?;
     let body_str = String::from_utf8_lossy(&resp.body);
+    state.configure_operations_services(&body_str);
     gfw_probe::handle_poll_gfw_probe(&body_str, &config.host_id, &config.node_id, client);
 
     let requests = match actions::parse_poll_actions(&body_str) {
@@ -3072,6 +3250,21 @@ SECURITY_MONITOR_ENABLED=false
         assert!(health.contains("\"status\":\"healthy\""));
         assert_eq!(normalize_arch("x86_64"), "x86_64");
         assert_eq!(normalize_arch("arm64"), "aarch64");
+
+        // Service probes configure & check local TCP + invalid scheme
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut svc_state = AgentState::new(&Config::default());
+        let poll_payload = format!(
+            "{{\"actions\":[],\"operations\":{{\"services\":[{{\"id\":\"svc-tcp\",\"kind\":\"tcp\",\"target\":\"tcp://127.0.0.1:{port}\",\"latency_warning_ms\":5000}},{{\"id\":\"svc-bad\",\"kind\":\"http\",\"target\":\"ftp://example.com\",\"latency_warning_ms\":1000}}]}}}}"
+        );
+        svc_state.configure_operations_services(&poll_payload);
+        assert_eq!(svc_state.operations_services.len(), 2);
+        let svc_out = probe_operations_services_json(&svc_state.operations_services, 1_700_000_000);
+        assert!(svc_out.contains("\"id\":\"svc-tcp\""));
+        assert!(svc_out.contains("\"status\":\"healthy\""));
+        assert!(svc_out.contains("\"id\":\"svc-bad\""));
+        assert!(svc_out.contains("\"status\":\"failed\""));
 
         let _ = fs::remove_dir_all(&dir);
     }

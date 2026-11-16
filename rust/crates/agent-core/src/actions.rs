@@ -717,11 +717,16 @@ pub fn execute_action_with_context(
         "update_host_config" => execute_update_host_config(req, ctx),
         "self_uninstall" => execute_self_uninstall(req, Path::new(SELF_UNINSTALL_SCRIPT), ctx),
         "discover_access_logs" => execute_discover_access_logs(req, ctx),
-        "host_security_rescan" => execute_host_security_rescan(req, ctx),
+        "host_security_rescan" | "request_deep_sample" => execute_host_security_rescan(req, ctx),
         "restart_container" => execute_restart_container(req, ctx),
+        "stop_container" => execute_stop_container(req),
         "freeze_container" | "unfreeze_container" => execute_freeze_container(req),
         "apply_host_firewall_policy" => execute_apply_host_firewall_policy(req, ctx),
         "delete_host_firewall_rule" => execute_delete_host_firewall_rule(req, ctx),
+        "apply_container_connlimit" | "release_container_connlimit" => {
+            execute_container_connlimit(req, ctx)
+        }
+        "remediate_malicious_process" => execute_remediate_malicious_process(req),
         other => ActionReceipt::failed(
             req.id,
             other,
@@ -1901,14 +1906,23 @@ fn execute_apply_host_firewall_policy(
                 .ok()
                 .and_then(|v| v.get("message").and_then(JsonValue::as_str).map(|s| s.to_string()))
                 .unwrap_or_else(|| "Runman host firewall policy updated".to_string());
-            // Read back revision to verify persistence.
+            // Read back revision and sync status to verify persistence.
             match runtime_drivers::runman_request(RUNMAN_FIREWALL_SOCK_PATH, "GET", "/v1/firewall/policy", None) {
                 Ok((200, rb_body)) => {
                     let rb_text = String::from_utf8_lossy(&rb_body);
-                    let rb_rev = parse_json(&rb_text)
-                        .ok()
-                        .and_then(|v| v.get("revision").and_then(JsonValue::as_i64));
-                    if rb_rev == Some(revision) {
+                    let parsed = parse_json(&rb_text).ok();
+                    let snap = parsed.as_ref().and_then(|v| v.get("snapshot")).or(parsed.as_ref());
+                    let rb_rev = snap
+                        .and_then(|s| s.get("policy_revision").or_else(|| s.get("revision")))
+                        .and_then(JsonValue::as_i64);
+                    let rb_sync = snap.and_then(|s| s.get("status")).and_then(JsonValue::as_str);
+                    let rb_drift = snap.and_then(|s| s.get("drift_count")).and_then(JsonValue::as_i64).unwrap_or(0);
+                    let rb_missing = snap.and_then(|s| s.get("missing_count")).and_then(JsonValue::as_i64).unwrap_or(0);
+                    if rb_rev == Some(revision)
+                        && rb_sync.map(|s| s == "in_sync").unwrap_or(true)
+                        && rb_drift == 0
+                        && rb_missing == 0
+                    {
                         ActionReceipt::succeeded(
                             req.id,
                             &req.action_type,
@@ -1918,7 +1932,7 @@ fn execute_apply_host_firewall_policy(
                         ActionReceipt::failed(
                             req.id,
                             &req.action_type,
-                            format!("host firewall readback mismatch: expected revision {revision}"),
+                            format!("host firewall readback mismatch or drift: expected revision {revision}"),
                         )
                     }
                 }
@@ -2005,6 +2019,231 @@ fn execute_delete_host_firewall_rule(
             &req.action_type,
             format!("Runman firewall socket error: {err}"),
         ),
+    }
+}
+
+fn is_hex_32(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_uuid_hex(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes()
+            .enumerate()
+            .all(|(i, b)| if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() })
+}
+
+fn execute_container_connlimit(req: &ActionRequest, ctx: &ActionContext) -> ActionReceipt {
+    if let Err(_) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, "action belongs to another watcher node; no local firewall request sent");
+    }
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let project = req.project.trim();
+    let name = req.container_name.trim();
+    if !matches!(runtime.as_str(), "incus" | "runman") || project != "default" {
+        return ActionReceipt::failed(req.id, &req.action_type, "TCP connection limits require the default Incus or Runman runtime");
+    }
+    if runtime == "runman" && !is_uuid_hex(name) {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid Runman VM UUID");
+    }
+    if !is_safe_container_target(name) {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid container target");
+    }
+    let instance_id = req.params.get("instance_id").and_then(JsonValue::as_str).unwrap_or("");
+    if !is_uuid_hex(instance_id) {
+        return ActionReceipt::failed(req.id, &req.action_type, "a stable instance UUID is required");
+    }
+    let policy_id = req.params.get("policy_id").and_then(JsonValue::as_str).unwrap_or("");
+    if !is_hex_32(policy_id) {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid temporary policy identity");
+    }
+    let now = crate::current_unix_ts() as i64;
+    let action_exp = req.params.get("action_expires_at").and_then(JsonValue::as_i64).unwrap_or(0);
+    if now > action_exp {
+        return ActionReceipt::failed(req.id, &req.action_type, "connection-limit action expired; no firewall change was made");
+    }
+
+    let op = if req.action_type == "release_container_connlimit" { "release" } else { "apply" };
+    let mut payload = format!(
+        "{{\"action\":{},\"policy_id\":{},\"container_name\":{},\"project\":{},\"instance_id\":{}",
+        json_quote(op),
+        json_quote(policy_id),
+        json_quote(name),
+        json_quote(project),
+        json_quote(&instance_id.to_ascii_lowercase())
+    );
+    if op == "apply" {
+        let limit = req.params.get("max_connections").and_then(JsonValue::as_i64).unwrap_or(0);
+        let lease_exp = req.params.get("lease_expires_at").and_then(JsonValue::as_i64).unwrap_or(0);
+        let obs = req.params.get("observed_tcp_connections").and_then(JsonValue::as_i64).unwrap_or(0);
+        let obs_at = req.params.get("observed_at").and_then(JsonValue::as_i64).unwrap_or(0);
+        if !(100..=10000).contains(&limit) {
+            return ActionReceipt::failed(req.id, &req.action_type, "invalid TCP connection limit");
+        }
+        if lease_exp < now + 60 || lease_exp > now + 3600 {
+            return ActionReceipt::failed(req.id, &req.action_type, "connection-limit lease is expired or exceeds one hour");
+        }
+        if obs <= limit || now - obs_at > 900 {
+            return ActionReceipt::failed(req.id, &req.action_type, "reported TCP connection evidence is stale or below limit");
+        }
+        if runtime == "runman" {
+            let target_path = format!("/v1/connlimit/target?container_name={name}&project=default");
+            let Ok((200, tbody)) = runtime_drivers::runman_request(runtime_drivers::RUNMAN_SOCK_PATH, "GET", &target_path, None) else {
+                return ActionReceipt::failed(req.id, &req.action_type, "could not verify current container TCP evidence; no rule applied");
+            };
+            let ttxt = String::from_utf8_lossy(&tbody);
+            let Ok(tv) = parse_json(&ttxt) else {
+                return ActionReceipt::failed(req.id, &req.action_type, "invalid Runman target telemetry");
+            };
+            let fresh_est = tv.get("connection_metrics").and_then(|m| m.get("tcp_established")).and_then(JsonValue::as_i64).unwrap_or(0);
+            let fresh_pend = tv.get("connection_metrics").and_then(|m| m.get("tcp_pending")).and_then(JsonValue::as_i64).unwrap_or(0);
+            let fresh_inst = tv.get("instance_id").and_then(JsonValue::as_str).unwrap_or("");
+            if tv.get("managed").and_then(JsonValue::as_bool) != Some(true)
+                || tv.get("running").and_then(JsonValue::as_bool) != Some(true)
+                || !fresh_inst.eq_ignore_ascii_case(instance_id)
+                || fresh_est + fresh_pend <= limit
+            {
+                return ActionReceipt::failed(req.id, &req.action_type, "fresh Runman identity or TCP evidence no longer matches; no rule applied");
+            }
+        }
+        let _ = write!(payload, ",\"max_connections\":{limit},\"expires_at\":{lease_exp}");
+    }
+    payload.push('}');
+
+    match runtime_drivers::runman_request(
+        runtime_drivers::RUNMAN_SOCK_PATH,
+        "POST",
+        "/v1/connlimit",
+        Some(payload.as_bytes()),
+    ) {
+        Ok((200, resp_body)) => {
+            let txt = String::from_utf8_lossy(&resp_body);
+            if let Ok(v) = parse_json(&txt) {
+                if v.get("ok").and_then(JsonValue::as_bool) == Some(true) {
+                    let msg = v.get("message").and_then(JsonValue::as_str).unwrap_or("Runman firewall policy updated");
+                    return ActionReceipt::succeeded(req.id, &req.action_type, msg);
+                }
+                let err_msg = v.get("message").and_then(JsonValue::as_str).unwrap_or("Runman local firewall rejected request");
+                return ActionReceipt::failed(req.id, &req.action_type, err_msg);
+            }
+            ActionReceipt::failed(req.id, &req.action_type, "invalid Runman connlimit response")
+        }
+        Ok((st, resp_body)) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("Runman connlimit HTTP {st}: {}", String::from_utf8_lossy(&resp_body).trim()),
+        ),
+        Err(err) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("Runman local firewall socket unavailable: {err}"),
+        ),
+    }
+}
+
+fn execute_stop_container(req: &ActionRequest) -> ActionReceipt {
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let target = req.container_name.trim();
+    if !matches!(runtime.as_str(), "podman" | "docker" | "incus" | "runman") || !is_safe_container_target(target) {
+        return ActionReceipt::failed(req.id, &req.action_type, "unsupported runtime or invalid container target");
+    }
+    if req.params.get("reason").and_then(JsonValue::as_str) != Some("sustained_connection_overload") {
+        return ActionReceipt::failed(req.id, &req.action_type, "automatic stop reason is missing or invalid");
+    }
+    if req.params.get("metric_schema").and_then(JsonValue::as_i64) != Some(1) {
+        return ActionReceipt::failed(req.id, &req.action_type, "legacy automatic stop lacks validated socket evidence");
+    }
+    let now = crate::current_unix_ts() as i64;
+    let expires = req.params.get("expires_at").and_then(JsonValue::as_i64).unwrap_or(0);
+    let required = req.params.get("required_duration_seconds").and_then(JsonValue::as_i64).unwrap_or(0);
+    let duration = req.params.get("duration_seconds").and_then(JsonValue::as_i64).unwrap_or(0);
+    if required < 1 || duration < required || now > expires {
+        return ActionReceipt::failed(req.id, &req.action_type, "automatic stop evidence expired or continuous duration is insufficient");
+    }
+    if runtime == "runman" {
+        return execute_runman_overload(&ActionRequest {
+            id: req.id,
+            action_type: "runman_stop_overload".to_string(),
+            runtime: req.runtime.clone(),
+            project: req.project.clone(),
+            container_name: req.container_name.clone(),
+            params: req.params.clone(),
+        });
+    }
+    let mut cmd = Command::new(&runtime);
+    if runtime == "incus" && !req.project.is_empty() && is_safe_container_target(&req.project) {
+        cmd.arg("--project").arg(&req.project);
+    }
+    cmd.arg("stop").arg(target);
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            ActionReceipt::succeeded(req.id, &req.action_type, format!("{runtime} stopped {target}"))
+        }
+        Ok(out) => ActionReceipt::failed(
+            req.id,
+            &req.action_type,
+            format!("{runtime} stop failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        ),
+        Err(err) => ActionReceipt::failed(req.id, &req.action_type, format!("unable to execute {runtime} stop: {err}")),
+    }
+}
+
+fn read_proc_start_ticks(pid: i64) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rparen = raw.rfind(')')?;
+    let after = raw[rparen + 1..].trim_start();
+    // Fields after `(comm) ` start at field 3 (`state`); field 22 (`starttime`) is index 19.
+    after.split_whitespace().nth(19).map(str::to_string)
+}
+
+fn execute_remediate_malicious_process(req: &ActionRequest) -> ActionReceipt {
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    if !matches!(runtime.as_str(), "podman" | "incus" | "runman") {
+        return ActionReceipt::failed(req.id, &req.action_type, "Docker and unknown runtimes are notice-only");
+    }
+    if !is_safe_container_target(req.container_name.trim()) {
+        return ActionReceipt::failed(req.id, &req.action_type, "invalid container target");
+    }
+    let allowlist = ["xmrig", "minerd", "cpuminer", "nbminer", "t-rex", "lolminer", "gminer", "nanominer"];
+    let mut killed = 0usize;
+    if let Some(proc_targets) = req.params.get("process_targets").and_then(JsonValue::as_array) {
+        for item in proc_targets.iter().take(32) {
+            let pid = item.get("pid").and_then(JsonValue::as_i64).unwrap_or(0);
+            let proc_name = item.get("process").and_then(JsonValue::as_str).unwrap_or("").trim().to_ascii_lowercase();
+            let start_ticks = item.get("start_ticks").and_then(JsonValue::as_str).unwrap_or("").trim();
+            if pid <= 1 || !allowlist.contains(&proc_name.as_str()) {
+                continue;
+            }
+            if !start_ticks.is_empty() {
+                let Some(live_ticks) = read_proc_start_ticks(pid) else {
+                    continue;
+                };
+                if live_ticks != start_ticks {
+                    continue;
+                }
+            }
+            if Command::new("kill").arg("-KILL").arg(pid.to_string()).status().map(|s| s.success()).unwrap_or(false) {
+                killed += 1;
+            }
+        }
+    }
+    if killed == 0 {
+        if let Some(pid) = req.params.get("pid").and_then(JsonValue::as_i64).filter(|&p| p > 1) {
+            let proc_name = req.params.get("process").and_then(JsonValue::as_str).unwrap_or("").trim().to_ascii_lowercase();
+            if allowlist.contains(&proc_name.as_str())
+                && Command::new("kill").arg("-KILL").arg(pid.to_string()).status().map(|s| s.success()).unwrap_or(false)
+            {
+                killed += 1;
+            }
+        }
+    }
+    if killed > 0 {
+        ActionReceipt::succeeded(req.id, &req.action_type, format!("terminated {killed} confirmed malware process(es)"))
+    } else {
+        ActionReceipt::failed(req.id, &req.action_type, "no matching live malware process targets confirmed for remediation")
     }
 }
 
@@ -2382,6 +2621,37 @@ mod tests {
         )
         .unwrap();
         assert!(!execute_action_with_context(&bad_del, &mut ctx).ok);
+
+        // apply_container_connlimit rejects non-default project and expired action
+        let bad_cl = ActionRequest::from_json(
+            r#"{"id":67,"action_type":"apply_container_connlimit","runtime":"runman","project":"other","container_name":"00000000-0000-4000-8000-000000000001","params":{"expected_node_id":"node-xyz"}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_cl, &mut ctx).ok);
+
+        // stop_container rejects missing reason/expired evidence
+        let bad_stop = ActionRequest::from_json(
+            r#"{"id":68,"action_type":"stop_container","runtime":"podman","container_name":"c1","params":{"reason":"other"}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_stop, &mut ctx).ok);
+
+        // request_deep_sample sets rescan_requested
+        ctx.rescan_requested = false;
+        let deep_req = ActionRequest::from_json(
+            r#"{"id":69,"action_type":"request_deep_sample","params":{"expected_node_id":"node-xyz"}}"#,
+        )
+        .unwrap();
+        let r_deep = execute_action_with_context(&deep_req, &mut ctx);
+        assert!(r_deep.ok);
+        assert!(ctx.rescan_requested);
+
+        // remediate_malicious_process rejects Docker
+        let bad_rem = ActionRequest::from_json(
+            r#"{"id":70,"action_type":"remediate_malicious_process","runtime":"docker","container_name":"c1","params":{}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_rem, &mut ctx).ok);
 
         let _ = fs::remove_dir_all(&dir);
     }
