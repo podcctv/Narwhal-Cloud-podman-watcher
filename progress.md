@@ -2,7 +2,7 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
-## Phase 5 扩展：Rust 运行时驱动、4D 安全检测与动作执行闭环（v1.8.46）
+## Phase 5 扩展：Rust 运行时驱动、4D 安全检测与动作执行闭环（v1.8.47）
 
 - 新增并集成纯 `std`、`#![forbid(unsafe_code)]` 容器运行时驱动 crate `rust/crates/runtime-drivers`（纳入 `rust/Cargo.toml` 与 `agent-core` 依赖）：
   - 支持 Unix-socket Runman（`/run/narwhal-agent/connlimit.sock`）与 Podman/Docker/Incus 容器发现及 `pid-metrics`/`socket-sec`/`cgroup-probe` 采集，接入 `AgentState::build_report_json()` 填充 `"containers"`。

@@ -834,7 +834,7 @@ fn execute_tcp_ping(req: &ActionRequest) -> ActionReceipt {
     }
 
     let mut collected = match results.lock() {
-        Ok(g) => std::mem::take(&mut *g),
+        Ok(mut g) => std::mem::take(&mut *g),
         Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
     };
     collected.sort_by_key(|(idx, _)| *idx);
