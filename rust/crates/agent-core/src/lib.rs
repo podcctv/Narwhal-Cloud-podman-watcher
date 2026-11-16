@@ -38,6 +38,8 @@ pub const DEFAULT_REPORT_INTERVAL: u64 = 300;
 pub const MIN_REPORT_INTERVAL: u64 = 60;
 pub const DEFAULT_ACTION_POLL_INTERVAL: u64 = 10;
 pub const MIN_ACTION_POLL_INTERVAL: u64 = 5;
+pub const DEFAULT_GUARD_INTERVAL: u64 = 30;
+pub const MIN_GUARD_INTERVAL: u64 = 15;
 pub const DEFAULT_CONTAINER_RUNTIMES: &str = "auto";
 pub const DEFAULT_DOCKER_MONITOR_MODE: &str = "notice";
 pub const DEFAULT_INCUS_PROJECT: &str = "all";
@@ -95,6 +97,7 @@ pub struct Config {
     pub shared_secret: String,
     pub report_interval: u64,
     pub action_poll_interval: u64,
+    pub guard_interval: u64,
     pub host_id: String,
     pub node_id: String,
     pub server_tls_ca_file: Option<PathBuf>,
@@ -114,6 +117,7 @@ impl Default for Config {
             shared_secret: DEFAULT_SHARED_SECRET.to_string(),
             report_interval: DEFAULT_REPORT_INTERVAL,
             action_poll_interval: DEFAULT_ACTION_POLL_INTERVAL,
+            guard_interval: DEFAULT_GUARD_INTERVAL,
             host_id: detect_default_host_id(),
             node_id: String::new(),
             server_tls_ca_file: None,
@@ -183,6 +187,13 @@ impl Config {
         if let Some(v) = non_empty_env(&merged, "ACTION_POLL_INTERVAL") {
             if let Ok(parsed) = v.parse::<u64>() {
                 cfg.action_poll_interval = parsed.max(MIN_ACTION_POLL_INTERVAL);
+            }
+        }
+        if let Some(v) = non_empty_env(&merged, "GUARD_SAMPLE_INTERVAL")
+            .or_else(|| non_empty_env(&merged, "NARWHAL_GUARD_INTERVAL"))
+        {
+            if let Ok(parsed) = v.parse::<u64>() {
+                cfg.guard_interval = parsed.max(MIN_GUARD_INTERVAL);
             }
         }
         if let Some(v) = non_empty_env(&merged, "HOST_ID") {
@@ -391,6 +402,7 @@ pub struct AgentState {
     rfw_restart_observation: Option<RfwRestartObservation>,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct RfwRestartObservation {
     boot_id: String,
     restart_count: u64,
@@ -801,6 +813,7 @@ impl AgentState {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn agent_container_scope(proc_root: &Path) -> bool {
     if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
         return true;
@@ -840,6 +853,7 @@ fn agent_container_scope(proc_root: &Path) -> bool {
     false
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn systemd_rfw_properties() -> Result<String, &'static str> {
     let mut child = Command::new("systemctl")
         .args([
@@ -1453,6 +1467,62 @@ pub fn poll_actions_once(
     Ok(count)
 }
 
+pub fn deterministic_jitter_secs(node_id: &str, host_id: &str, max_jitter: u64) -> u64 {
+    if max_jitter == 0 {
+        return 0;
+    }
+    let key = if !node_id.is_empty() { node_id } else { host_id };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in key.as_bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash % (max_jitter + 1)
+}
+
+impl AgentState {
+    /// Lightweight fast-tick guard sampling (CPU/Memory/IO + delta baselines) without HTTP report serialization.
+    pub fn sample_guards_tick(&mut self, config: &Config, timestamp: u64) -> (usize, usize, usize) {
+        let dt = match self.last_sample_ts {
+            Some(prev) if timestamp > prev => Some((timestamp - prev) as f64),
+            _ => None,
+        };
+        self.last_sample_ts = Some(timestamp);
+
+        let host_cpu_sample = self.sample_host_cpu();
+        let host_mem_psi = read_psi_sample(&self.proc_root.join("pressure").join("memory"));
+        let host_io_psi = read_psi_sample(&self.proc_root.join("pressure").join("io"))
+            .effective_avg();
+        let containers = discover_and_sample_containers(&config.container_runtimes);
+        let (mem_samples, cpu_samples) = extract_container_guard_samples_with_cpu_delta(
+            &mut self.prev_container_cpu,
+            &containers,
+            timestamp,
+            host_cpu_sample.logical_cpus,
+        );
+        let host_devices = self.sample_host_disks(dt);
+        let io_samples = self.extract_container_io_samples(&containers, dt);
+        let _ = self.compute_container_net_rates(&containers, dt);
+
+        let allow_new_limits = config.security_monitor_enabled;
+        let cpu_out = self
+            .cpu_guard
+            .observe(timestamp, &host_cpu_sample, &cpu_samples, allow_new_limits);
+        let (_, mem_actions) =
+            self.memory_guard
+                .observe(timestamp, host_mem_psi, &mem_samples, allow_new_limits);
+        let (_, io_actions) = self.io_guard.observe(
+            timestamp,
+            host_cpu_sample.ready,
+            &host_devices,
+            host_io_psi,
+            &io_samples,
+            allow_new_limits,
+        );
+        (cpu_out.actions.len(), mem_actions.len(), io_actions.len())
+    }
+}
+
 pub fn run_with_config(
     config: &Config,
     state: &mut AgentState,
@@ -1482,31 +1552,62 @@ pub fn run_with_config(
 
     let report_delay = Duration::from_secs(config.report_interval.max(MIN_REPORT_INTERVAL));
     let poll_delay = Duration::from_secs(config.action_poll_interval.max(MIN_ACTION_POLL_INTERVAL));
+    let guard_delay = Duration::from_secs(config.guard_interval.max(MIN_GUARD_INTERVAL));
+
+    let max_jitter = (report_delay.as_secs() / 4).min(30);
+    let jitter = Duration::from_secs(deterministic_jitter_secs(
+        &config.node_id,
+        &config.host_id,
+        max_jitter,
+    ));
+
+    let now = Instant::now();
+    let mut next_report = now + jitter;
+    let mut next_action_poll = now + poll_delay;
+    let mut next_guard_tick = now + guard_delay;
 
     while !stop.load(Ordering::Relaxed) {
-        let payload = state.build_report_json(config, current_unix_ts());
-        if let Err(err) = client.post_json_signed("/api/v1/report", payload.as_bytes()) {
-            let _ = writeln!(out, "report failed: {err}");
+        let now = Instant::now();
+        if now >= next_report {
+            let payload = state.build_report_json(config, current_unix_ts());
+            if let Err(err) = client.post_json_signed("/api/v1/report", payload.as_bytes()) {
+                let _ = writeln!(out, "report failed: {err}");
+            }
+            next_report = advance_deadline(next_report, report_delay, now);
+            next_guard_tick = advance_deadline(now, guard_delay, now);
+        } else if now >= next_guard_tick {
+            let _ = state.sample_guards_tick(config, current_unix_ts());
+            next_guard_tick = advance_deadline(next_guard_tick, guard_delay, now);
         }
 
-        let deadline = Instant::now() + report_delay;
-        while !stop.load(Ordering::Relaxed) {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            let sleep_for = poll_delay.min(deadline - now);
-            thread::sleep(sleep_for);
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
+        if now >= next_action_poll {
             if let Err(err) = poll_actions_once(&client, config) {
                 let _ = writeln!(out, "action poll failed: {err}");
             }
+            next_action_poll = advance_deadline(next_action_poll, poll_delay, now);
+        }
+
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let earliest = next_report.min(next_action_poll).min(next_guard_tick);
+        let sleep_for = earliest
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(1));
+        if !sleep_for.is_zero() {
+            thread::sleep(sleep_for);
         }
     }
 
     Ok(0)
+}
+
+fn advance_deadline(prev: Instant, period: Duration, now: Instant) -> Instant {
+    let mut next = prev + period;
+    if next <= now {
+        next = now + period;
+    }
+    next
 }
 
 #[cfg(test)]
@@ -2031,6 +2132,41 @@ SECURITY_MONITOR_ENABLED=false
         assert!((io_samples[0].device_rates[0].1.wbps - 4000.0).abs() < 1e-6);
         assert!((io_samples[0].device_rates[0].1.riops - 5.0).abs() < 1e-6);
         assert!((io_samples[0].device_rates[0].1.wiops - 10.0).abs() < 1e-6);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_deterministic_jitter_and_guard_tick_scheduler() {
+        let j1 = deterministic_jitter_secs("node-abc", "host-1", 30);
+        let j2 = deterministic_jitter_secs("node-abc", "host-1", 30);
+        assert_eq!(j1, j2);
+        assert!(j1 <= 30);
+        assert_eq!(deterministic_jitter_secs("node-abc", "host-1", 0), 0);
+
+        let mut env = HashMap::new();
+        env.insert("GUARD_SAMPLE_INTERVAL".to_string(), "5".to_string());
+        let cfg = Config::from_sources(None, &env, &[]).unwrap();
+        assert_eq!(cfg.guard_interval, MIN_GUARD_INTERVAL);
+
+        let dir = make_temp_dir("guard_tick");
+        let proc_root = dir.join("proc");
+        fs::create_dir_all(proc_root.join("pressure")).unwrap();
+        fs::write(proc_root.join("stat"), "cpu  1000 0 100 9000 0 0 0 0 0 0\n").unwrap();
+        fs::write(proc_root.join("loadavg"), "0.10 0.10 0.10 1/100 1\n").unwrap();
+        fs::write(proc_root.join("diskstats"), "   8       0 sda 1 0 8 1 2 0 16 2 0 3 3\n").unwrap();
+        fs::write(proc_root.join("pressure/cpu"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+        fs::write(proc_root.join("pressure/memory"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+        fs::write(proc_root.join("pressure/io"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+
+        let cfg_none = Config {
+            container_runtimes: "none".to_string(),
+            ..cfg
+        };
+        let mut state = AgentState::with_paths(&cfg_none, proc_root, dir.join("conntrack"));
+        let (c_act, m_act, i_act) = state.sample_guards_tick(&cfg_none, 1_700_000_000);
+        assert_eq!((c_act, m_act, i_act), (0, 0, 0));
+        assert_eq!(state.last_sample_ts, Some(1_700_000_000));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -2,6 +2,13 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 7 性能优化：纯 Rust 多截止期无漂移事件调度器（替换 Python 轮询计时器）（v1.9.4）
+
+- **`rust/crates/agent-core/src/lib.rs`**：
+  - 将 `run_with_config` 升级为基于 `Instant` 的多截止期无漂移调度器（独立驱动 `report_interval` 上报、`action_poll_interval` 动作轮询与 `guard_interval` 快速守卫采样，默认 `30s`/下限 `15s`），并加入基于 `node_id` FNV-1a 哈希的确定性启动抖动（`deterministic_jitter_secs`），彻底摆脱 Python 固定 sleep 轮询与 GIL 调度拖累。
+  - 新增 `AgentState::sample_guards_tick()`，在不序列化完整上报 JSON 的前提下高频更新 CPU/Memory/IO 守卫状态机与跨 Tick 增量基线。
+  - 消除 Windows 非 Linux 目标下的 3 处 `dead_code` 警告，保持全 workspace 零编译器警告并补充单元测试。
+
 ## Phase 7 完善：统一探针版本注入与宿主机防火墙零子进程检测（v1.9.3）
 
 - **`rust/crates/narwhal-probe/src/main.rs`**：通过 `include_str!("../../../../VERSION")` 嵌入仓库根目录版本号，使 `narwhal-probe --version` 与发行版本一致。
