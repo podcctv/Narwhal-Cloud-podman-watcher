@@ -447,6 +447,36 @@ impl Guard<LiveNftRunner, NoopQueueBackend> {
     }
 }
 
+#[cfg(unix)]
+impl Guard<LiveNftRunner, crate::linux::SubprocessNfqBackend> {
+    /// Opens a live Unix `Guard` backed by `SubprocessNfqBackend` (`libnetfilter_queue`).
+    pub fn open_live_unix() -> Result<Arc<Self>, AdmissionError> {
+        let guard_slot: Arc<
+            Mutex<Option<std::sync::Weak<Guard<LiveNftRunner, crate::linux::SubprocessNfqBackend>>>>,
+        > = Arc::new(Mutex::new(None));
+        let slot_for_cb = Arc::clone(&guard_slot);
+        let backend = crate::linux::SubprocessNfqBackend::new(move |queue, raw| {
+            let weak = slot_for_cb.lock().ok().and_then(|g| g.clone());
+            if let Some(w) = weak {
+                if let Some(g) = w.upgrade() {
+                    return g.decision(queue, raw).unwrap_or(false);
+                }
+            }
+            false
+        })?;
+        let guard = Arc::new(Self::new(
+            AdmissionJournal::default(),
+            Nft::default(),
+            backend,
+            None,
+        )?);
+        if let Ok(mut slot) = guard_slot.lock() {
+            *slot = Some(Arc::downgrade(&guard));
+        }
+        Ok(guard)
+    }
+}
+
 impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
     pub fn new(
         journal: AdmissionJournal,

@@ -430,7 +430,19 @@ pub struct AgentState {
     last_traffic_samples: Vec<tc_guard::TrafficSampleInput>,
     last_sample_interval_secs: u64,
     abuse_engine: Option<Arc<abuse_guard::SharedAbuseEngine>>,
+    #[cfg(unix)]
+    admission_controller: Option<
+        Arc<
+            admission_guard::AdmissionController<
+                admission_guard::LiveNftRunner,
+                admission_guard::SubprocessNfqBackend,
+            >,
+        >,
+    >,
+    #[cfg(not(unix))]
     admission_controller: Option<Arc<admission_guard::AdmissionController>>,
+    #[cfg(unix)]
+    admission_init_error: Option<String>,
     pasarguard: protocol_guard::pasarguard::PasarGuardMonitor,
     microburst: protocol_guard::microburst::MicroburstDetector,
     udp_blackhole_auto_states: HashMap<String, (u32, u64)>,
@@ -504,6 +516,15 @@ impl AgentState {
             interval_seconds: interval,
             ..IoGuardConfig::default()
         };
+        #[cfg(unix)]
+        let (admission_controller, admission_init_error) =
+            match admission_guard::Guard::open_live_unix() {
+                Ok(g) => (
+                    Some(Arc::new(admission_guard::AdmissionController::new(g))),
+                    None,
+                ),
+                Err(e) => (None, Some(e.to_string())),
+            };
         Self {
             cpu_guard: CpuGuardTracker::new(cpu_cfg),
             memory_guard: MemoryGuardTracker::new(mem_cfg),
@@ -532,6 +553,11 @@ impl AgentState {
             abuse_engine: abuse_guard::AbuseEngine::with_defaults()
                 .ok()
                 .map(|e| Arc::new(abuse_guard::SharedAbuseEngine::new(e))),
+            #[cfg(unix)]
+            admission_controller,
+            #[cfg(unix)]
+            admission_init_error,
+            #[cfg(not(unix))]
             admission_controller: admission_guard::Guard::open_default()
                 .ok()
                 .map(|g| Arc::new(admission_guard::AdmissionController::new(Arc::new(g)))),
@@ -1346,6 +1372,503 @@ fn build_udp_flood_blackhole_alert_json(
     )
 }
 
+#[cfg(unix)]
+fn build_socket_inode_owner_map(
+    pid: u32,
+    proc_root: &Path,
+) -> HashMap<u64, (u32, String)> {
+    let mut owners = HashMap::new();
+    let Ok(procs) = abuse_guard::scoped_host_processes(pid) else {
+        return owners;
+    };
+    for p in procs.into_iter().take(256) {
+        let fd_dir = proc_root.join(p.pid.to_string()).join("fd");
+        let Ok(entries) = fs::read_dir(&fd_dir) else {
+            continue;
+        };
+        for entry in entries.flatten().take(512) {
+            let Ok(target) = fs::read_link(entry.path()) else {
+                continue;
+            };
+            let Some(s) = target.to_str() else {
+                continue;
+            };
+            if let Some(rest) = s.strip_prefix("socket:[") {
+                if let Some(inode_str) = rest.strip_suffix(']') {
+                    if let Ok(inode) = inode_str.parse::<u64>() {
+                        owners.insert(inode, (p.pid, p.comm.clone()));
+                    }
+                }
+            }
+        }
+    }
+    owners
+}
+
+#[cfg(not(unix))]
+fn build_socket_inode_owner_map(
+    _pid: u32,
+    _proc_root: &Path,
+) -> HashMap<u64, (u32, String)> {
+    HashMap::new()
+}
+
+fn map_tcp_state_hex(state_hex: &str) -> &'static str {
+    match state_hex {
+        "01" => "established",
+        "02" => "syn_sent",
+        "03" => "syn_recv",
+        "06" => "time_wait",
+        "0A" => "listen",
+        _ => "other",
+    }
+}
+
+fn extract_live_listeners_and_sockets(
+    c: &ContainerSample,
+    proc_root: &Path,
+) -> (
+    Vec<protocol_guard::vmess::ServiceListener>,
+    bool,
+    Vec<abuse_guard::SocketRecord>,
+) {
+    let raw_opt = c.socket_tables_json.clone().or_else(|| {
+        #[cfg(unix)]
+        {
+            c.pid
+                .filter(|&p| p > 1)
+                .map(|p| socket_sec::collect_socket_tables_from_root(proc_root, p))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    });
+    let Some(raw) = raw_opt else {
+        return (Vec::new(), false, Vec::new());
+    };
+    let Ok(val) = runtime_drivers::JsonVal::parse(&raw) else {
+        return (Vec::new(), false, Vec::new());
+    };
+    let available = val.get_bool("available").unwrap_or(false);
+    let malformed = val.get_bool("malformed").unwrap_or(true);
+    let complete = available && !malformed;
+
+    let inode_owners = c
+        .pid
+        .filter(|&p| p > 1)
+        .map(|p| build_socket_inode_owner_map(p, proc_root))
+        .unwrap_or_default();
+
+    let mut listeners = Vec::new();
+    let mut sockets = Vec::new();
+
+    for (field, proto_name) in [("tcp_entries", "tcp"), ("udp_entries", "udp")] {
+        let Some(entries) = val.get(field).and_then(|v| v.as_arr()) else {
+            continue;
+        };
+        for entry in entries {
+            let local_ip = entry.get_str("local_ip").unwrap_or("");
+            let local_port = entry.get_i64("local_port").unwrap_or(0);
+            let remote_ip = entry.get_str("remote_ip").unwrap_or("");
+            let remote_port = entry.get_i64("remote_port").unwrap_or(0);
+            let state_hex = entry.get_str("state_hex").unwrap_or("");
+            let inode = entry.get_i64("inode").unwrap_or(0).max(0) as u64;
+            let (owner_pid, owner_comm) = inode_owners
+                .get(&inode)
+                .cloned()
+                .unwrap_or((0, String::new()));
+
+            let is_listener = if proto_name == "tcp" {
+                state_hex == "0A" && local_port > 0 && local_port <= 65535
+            } else {
+                local_port > 0 && local_port <= 65535 && remote_port == 0
+            };
+
+            if is_listener {
+                listeners.push(protocol_guard::vmess::ServiceListener {
+                    pid: owner_pid,
+                    process: owner_comm.to_ascii_lowercase(),
+                    proto: proto_name.to_string(),
+                    local: local_ip.to_string(),
+                    port: local_port as u16,
+                    ..Default::default()
+                });
+            } else if remote_port > 0 && !remote_ip.is_empty() {
+                let state = if proto_name == "tcp" {
+                    map_tcp_state_hex(state_hex).to_string()
+                } else {
+                    "udp".to_string()
+                };
+                sockets.push(abuse_guard::SocketRecord {
+                    pid: owner_pid,
+                    remote_ip: remote_ip.to_string(),
+                    remote: format!("{remote_ip}:{remote_port}"),
+                    state,
+                    proto: proto_name.to_string(),
+                    direction: "outbound".to_string(),
+                });
+            }
+        }
+    }
+
+    (listeners, complete, sockets)
+}
+
+#[cfg(unix)]
+fn extract_protocol_configs(
+    c: &ContainerSample,
+    proc_root: &Path,
+) -> (
+    Vec<protocol_guard::vmess::ConfiguredProtocol>,
+    Vec<protocol_guard::vmess::ProcessScanState>,
+    &'static str,
+) {
+    let Some(container_pid) = c.pid.filter(|&p| p > 1) else {
+        return (Vec::new(), Vec::new(), "partial");
+    };
+    let Ok(procs) = abuse_guard::scoped_host_processes(container_pid) else {
+        return (Vec::new(), Vec::new(), "partial");
+    };
+    let mut ps_lines = String::new();
+    for p in procs.iter().take(256) {
+        let cmdline_raw = fs::read(proc_root.join(p.pid.to_string()).join("cmdline"))
+            .unwrap_or_default();
+        let cmdline = cmdline_raw
+            .split(|&b| b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if cmdline.is_empty() {
+            continue;
+        }
+        let _ = writeln!(ps_lines, "{} S {} {}", p.pid, p.comm, cmdline);
+    }
+    let cfg_json = app_guard::socks_detector::parse_process_configs_json(&ps_lines);
+    let Ok(cfg_val) = runtime_drivers::JsonVal::parse(&cfg_json) else {
+        return (Vec::new(), Vec::new(), "partial");
+    };
+    let Some(rows) = cfg_val.as_arr() else {
+        return (Vec::new(), Vec::new(), "partial");
+    };
+
+    let mut configured = Vec::new();
+    let mut scan_states = Vec::new();
+    let mut all_complete = true;
+
+    for row in rows {
+        let proc_pid = row.get_i64("pid").unwrap_or(0).max(0) as u32;
+        let process = row.get_str("process").unwrap_or("").to_ascii_lowercase();
+        let unparsed = row.get_bool("unparsed").unwrap_or(false);
+        let mut config_files = Vec::new();
+        let mut proc_complete = !unparsed && proc_pid > 1;
+        let proc_root_dir = proc_root.join(proc_pid.to_string()).join("root");
+
+        if let Some(paths) = row.get("paths").and_then(|v| v.as_arr()) {
+            for path_val in paths.iter().take(8) {
+                let Some(rel) = path_val.as_str() else {
+                    continue;
+                };
+                if !rel.starts_with('/') || rel.contains("..") {
+                    proc_complete = false;
+                    continue;
+                }
+                config_files.push(rel.to_string());
+                let host_path = proc_root_dir.join(rel.trim_start_matches('/'));
+                match fs::read_to_string(&host_path) {
+                    Ok(raw) => {
+                        let parsed_inbounds =
+                            app_guard::socks_detector::parse_inbound_protocols_json(&raw, &process);
+                        if let Ok(inb_val) = runtime_drivers::JsonVal::parse(&parsed_inbounds) {
+                            if inb_val.get_bool("parsed") != Some(true) {
+                                proc_complete = false;
+                            }
+                            if let Some(eps) = inb_val.get("endpoints").and_then(|v| v.as_arr()) {
+                                for ep in eps {
+                                    let proto = ep.get_str("protocol").unwrap_or("").to_ascii_lowercase();
+                                    let port = ep.get_i64("port").unwrap_or(0);
+                                    if port <= 0 || port > 65535 {
+                                        continue;
+                                    }
+                                    let listen = ep.get_str("listen").unwrap_or("*").to_string();
+                                    let transports = ep
+                                        .get("transports")
+                                        .and_then(|v| v.as_arr())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|t| t.as_str().map(str::to_string))
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .filter(|v| !v.is_empty());
+                                    let complete_ep =
+                                        ep.get_bool("port_config_complete").unwrap_or(false);
+                                    configured.push(protocol_guard::vmess::ConfiguredProtocol {
+                                        pid: proc_pid,
+                                        process: process.clone(),
+                                        protocol: proto,
+                                        port: port as u16,
+                                        listen,
+                                        transports,
+                                        port_config_complete: complete_ep,
+                                        config_file: rel.to_string(),
+                                    });
+                                }
+                            }
+                        } else {
+                            proc_complete = false;
+                        }
+                    }
+                    Err(_) => {
+                        proc_complete = false;
+                    }
+                }
+            }
+        }
+        if !proc_complete {
+            all_complete = false;
+        }
+        scan_states.push(protocol_guard::vmess::ProcessScanState {
+            pid: proc_pid,
+            process,
+            state: if proc_complete { "complete" } else { "partial" }.to_string(),
+            start_ticks: protocol_guard::vmess::pid_epoch_from(proc_root, proc_pid),
+            config_files,
+            ..Default::default()
+        });
+    }
+
+    (
+        configured,
+        scan_states,
+        if all_complete { "complete" } else { "partial" },
+    )
+}
+
+#[cfg(not(unix))]
+fn extract_protocol_configs(
+    _c: &ContainerSample,
+    _proc_root: &Path,
+) -> (
+    Vec<protocol_guard::vmess::ConfiguredProtocol>,
+    Vec<protocol_guard::vmess::ProcessScanState>,
+    &'static str,
+) {
+    (Vec::new(), Vec::new(), "partial")
+}
+
+#[cfg(unix)]
+fn run_container_guest_script(
+    runtime: &str,
+    project: &str,
+    name: &str,
+    instance_id: &str,
+    podman_bin: Option<&str>,
+    script: &str,
+) -> (bool, String) {
+    match runtime {
+        "incus" => {
+            let mut cmd = Command::new("incus");
+            if !project.is_empty() {
+                cmd.arg("--project").arg(project);
+            }
+            cmd.args(["exec", name, "--", "sh", "-c", script]);
+            match cmd.output() {
+                Ok(out) => (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                ),
+                Err(_) => (false, String::new()),
+            }
+        }
+        "podman" => {
+            let bin = podman_bin.filter(|s| !s.is_empty()).unwrap_or("podman");
+            let mut cmd = Command::new(bin);
+            cmd.args(["exec", name, "sh", "-c", script]);
+            match cmd.output() {
+                Ok(out) => (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                ),
+                Err(_) => (false, String::new()),
+            }
+        }
+        "runman" => {
+            if name.is_empty() || instance_id.is_empty() || script.is_empty() {
+                return (false, String::new());
+            }
+            let body = format!(
+                "{{\"container_name\":\"{}\",\"project\":\"default\",\"instance_id\":\"{}\",\"command\":\"{}\",\"timeout_seconds\":30}}",
+                json_escape(name),
+                json_escape(instance_id),
+                json_escape(script),
+            );
+            let Ok((status, raw)) = runtime_drivers::runman_request(
+                runtime_drivers::RUNMAN_SOCK_PATH,
+                "POST",
+                "/v1/exec",
+                Some(body.as_bytes()),
+            ) else {
+                return (false, String::new());
+            };
+            if status != 200 {
+                return (false, String::new());
+            }
+            let text = String::from_utf8_lossy(&raw);
+            let Ok(val) = runtime_drivers::JsonVal::parse(&text) else {
+                return (false, String::new());
+            };
+            let ok = val.get_bool("ok") == Some(true);
+            let inst_ok = val.get_str("instance_id") == Some(instance_id);
+            let exit_ok = val.get_i64("exit_code") == Some(0);
+            let stdout = val.get_str("stdout").unwrap_or("").to_string();
+            (ok && inst_ok && exit_ok, stdout)
+        }
+        _ => (false, String::new()),
+    }
+}
+
+#[cfg(unix)]
+struct OwnedPodmanIsolation {
+    binary: String,
+    name: String,
+    instance_id: String,
+}
+
+#[cfg(unix)]
+impl net_guard::IsolationDriver for OwnedPodmanIsolation {
+    fn snapshot(&mut self) -> Result<runtime_drivers::JsonVal, String> {
+        let mut runner = net_guard::LiveCommandRunner;
+        net_guard::PodmanIsolation::new(&mut runner, &self.binary, &self.name, &self.instance_id)
+            .snapshot()
+    }
+    fn refresh_backup(&mut self, backup: &mut runtime_drivers::JsonVal) -> Result<(), String> {
+        let mut runner = net_guard::LiveCommandRunner;
+        net_guard::PodmanIsolation::new(&mut runner, &self.binary, &self.name, &self.instance_id)
+            .refresh_backup(backup)
+    }
+    fn isolate(&mut self, backup: &runtime_drivers::JsonVal) -> Result<(), String> {
+        let mut runner = net_guard::LiveCommandRunner;
+        net_guard::PodmanIsolation::new(&mut runner, &self.binary, &self.name, &self.instance_id)
+            .isolate(backup)
+    }
+    fn verify(&mut self, backup: &runtime_drivers::JsonVal) -> Result<(), String> {
+        let mut runner = net_guard::LiveCommandRunner;
+        net_guard::PodmanIsolation::new(&mut runner, &self.binary, &self.name, &self.instance_id)
+            .verify(backup)
+    }
+    fn release(
+        &mut self,
+        backup: &runtime_drivers::JsonVal,
+    ) -> Result<net_guard::DriverReleaseOutcome, String> {
+        let mut runner = net_guard::LiveCommandRunner;
+        net_guard::PodmanIsolation::new(&mut runner, &self.binary, &self.name, &self.instance_id)
+            .release(backup)
+    }
+    fn prove_replaced(&mut self) -> Result<String, String> {
+        let mut runner = net_guard::LiveCommandRunner;
+        net_guard::PodmanIsolation::new(&mut runner, &self.binary, &self.name, &self.instance_id)
+            .prove_replaced()
+    }
+}
+
+#[cfg(unix)]
+enum LiveIsolationDriver {
+    Incus(net_guard::IncusIsolation<net_guard::UnixIncusApi>),
+    Podman(OwnedPodmanIsolation),
+    Runman(net_guard::RunmanIsolation<net_guard::LiveRunmanTransport>),
+    Unsupported(String),
+}
+
+#[cfg(unix)]
+impl LiveIsolationDriver {
+    fn from_target(t: &abuse_guard::ContainerTarget, inst_id: &str) -> Self {
+        match t.runtime.as_str() {
+            "incus" => Self::Incus(net_guard::IncusIsolation::new(
+                net_guard::UnixIncusApi::new(&t.project, net_guard::DEFAULT_INCUS_SOCKET),
+                &t.name,
+                inst_id,
+            )),
+            "podman" => {
+                let binary = if !t.runtime_bin.is_empty() {
+                    Some(t.runtime_bin.clone())
+                } else {
+                    net_guard::NetToolPaths::discover().podman_bin
+                };
+                match binary {
+                    Some(bin) => Self::Podman(OwnedPodmanIsolation {
+                        binary: bin,
+                        name: t.name.clone(),
+                        instance_id: inst_id.to_string(),
+                    }),
+                    None => Self::Unsupported("Podman unavailable".to_string()),
+                }
+            }
+            "runman" => Self::Runman(net_guard::RunmanIsolation::new(
+                net_guard::LiveRunmanTransport::new(net_guard::DEFAULT_RUNMAN_SOCKET),
+                &t.name,
+                inst_id,
+            )),
+            other => Self::Unsupported(format!("unsupported runtime: {other}")),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl net_guard::IsolationDriver for LiveIsolationDriver {
+    fn snapshot(&mut self) -> Result<runtime_drivers::JsonVal, String> {
+        match self {
+            Self::Incus(d) => d.snapshot(),
+            Self::Podman(d) => d.snapshot(),
+            Self::Runman(d) => d.snapshot(),
+            Self::Unsupported(e) => Err(e.clone()),
+        }
+    }
+    fn refresh_backup(&mut self, backup: &mut runtime_drivers::JsonVal) -> Result<(), String> {
+        match self {
+            Self::Incus(d) => d.refresh_backup(backup),
+            Self::Podman(d) => d.refresh_backup(backup),
+            Self::Runman(d) => d.refresh_backup(backup),
+            Self::Unsupported(e) => Err(e.clone()),
+        }
+    }
+    fn isolate(&mut self, backup: &runtime_drivers::JsonVal) -> Result<(), String> {
+        match self {
+            Self::Incus(d) => d.isolate(backup),
+            Self::Podman(d) => d.isolate(backup),
+            Self::Runman(d) => d.isolate(backup),
+            Self::Unsupported(e) => Err(e.clone()),
+        }
+    }
+    fn verify(&mut self, backup: &runtime_drivers::JsonVal) -> Result<(), String> {
+        match self {
+            Self::Incus(d) => d.verify(backup),
+            Self::Podman(d) => d.verify(backup),
+            Self::Runman(d) => d.verify(backup),
+            Self::Unsupported(e) => Err(e.clone()),
+        }
+    }
+    fn release(
+        &mut self,
+        backup: &runtime_drivers::JsonVal,
+    ) -> Result<net_guard::DriverReleaseOutcome, String> {
+        match self {
+            Self::Incus(d) => d.release(backup),
+            Self::Podman(d) => d.release(backup),
+            Self::Runman(d) => d.release(backup),
+            Self::Unsupported(e) => Err(e.clone()),
+        }
+    }
+    fn prove_replaced(&mut self) -> Result<String, String> {
+        match self {
+            Self::Incus(d) => d.prove_replaced(),
+            Self::Podman(d) => d.prove_replaced(),
+            Self::Runman(d) => d.prove_replaced(),
+            Self::Unsupported(e) => Err(e.clone()),
+        }
+    }
+}
+
 impl AgentState {
     pub fn build_container_telemetry_and_alerts(
         &mut self,
@@ -1403,27 +1926,104 @@ impl AgentState {
             let abuse_json = abuse_res.to_json();
 
             // 2. vmess_guard & trojan_guard
-            let mut vmess_status = protocol_guard::vmess::plan(
-                &rt,
-                &[],
-                &[],
-                &[],
-                "partial",
-                Some(&[]),
-                Some(false),
-                "vmess",
-            );
+            let (listeners, listener_inventory_complete, _) =
+                extract_live_listeners_and_sockets(c, &self.proc_root);
+            let (configured_protocols, process_scan_states, scan_state) =
+                extract_protocol_configs(c, &self.proc_root);
+            let ns_epoch = c
+                .pid
+                .filter(|&p| p > 1)
+                .map(|p| protocol_guard::vmess::pid_epoch_from(&self.proc_root, p))
+                .unwrap_or_default();
+
+            let mut vmess_status = if supported_rt {
+                let vmess_plan = protocol_guard::vmess::plan(
+                    &rt,
+                    &configured_protocols,
+                    &listeners,
+                    &[],
+                    scan_state,
+                    Some(&process_scan_states),
+                    Some(listener_inventory_complete),
+                    "vmess",
+                );
+                #[cfg(unix)]
+                {
+                    protocol_guard::vmess::apply_protocol_guard_plan(
+                        &vmess_plan,
+                        "vmess",
+                        &rt,
+                        &inst_id,
+                        c.pid.unwrap_or(0),
+                        &ns_epoch,
+                        false,
+                        true,
+                        scan_state,
+                        listener_inventory_complete,
+                        &listeners,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    vmess_plan
+                }
+            } else {
+                protocol_guard::vmess::plan(
+                    &rt,
+                    &[],
+                    &[],
+                    &[],
+                    "partial",
+                    Some(&[]),
+                    Some(false),
+                    "vmess",
+                )
+            };
             protocol_guard::vmess::finalize_protocol_guard_evidence(&mut vmess_status);
-            let mut trojan_status = protocol_guard::vmess::plan(
-                &rt,
-                &[],
-                &[],
-                &[],
-                "partial",
-                Some(&[]),
-                Some(false),
-                "trojan",
-            );
+
+            let mut trojan_status = if supported_rt {
+                let trojan_plan = protocol_guard::vmess::plan(
+                    &rt,
+                    &configured_protocols,
+                    &listeners,
+                    &[],
+                    scan_state,
+                    Some(&process_scan_states),
+                    Some(listener_inventory_complete),
+                    "trojan",
+                );
+                #[cfg(unix)]
+                {
+                    protocol_guard::vmess::apply_protocol_guard_plan(
+                        &trojan_plan,
+                        "trojan",
+                        &rt,
+                        &inst_id,
+                        c.pid.unwrap_or(0),
+                        &ns_epoch,
+                        false,
+                        true,
+                        scan_state,
+                        listener_inventory_complete,
+                        &listeners,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    trojan_plan
+                }
+            } else {
+                protocol_guard::vmess::plan(
+                    &rt,
+                    &[],
+                    &[],
+                    &[],
+                    "partial",
+                    Some(&[]),
+                    Some(false),
+                    "trojan",
+                )
+            };
             protocol_guard::vmess::finalize_protocol_guard_evidence(&mut trojan_status);
 
             let alert_ctx = protocol_guard::vmess::AlertContainerContext {
@@ -1450,11 +2050,11 @@ impl AgentState {
                         project: &c.project,
                         identity: &identity,
                         pid: c.pid.unwrap_or(0),
-                        namespace_epoch: "",
+                        namespace_epoch: &ns_epoch,
                         network_shared: false,
                         image: &c.image,
-                        listeners: &[],
-                        listener_inventory_complete: false,
+                        listeners: &listeners,
+                        listener_inventory_complete,
                         policy: pol,
                         observed_at: Some(timestamp as i64),
                     };
@@ -1463,9 +2063,19 @@ impl AgentState {
                         let tools = net_guard::NetToolPaths::discover();
                         let mut host_runner = net_guard::LiveCommandRunner;
                         let mut epoch_fn = protocol_guard::vmess::pid_epoch;
+                        let mut guest_runner = |script: &str| {
+                            run_container_guest_script(
+                                &rt,
+                                &c.project,
+                                &c.name,
+                                &inst_id,
+                                Some(c.runtime_bin.as_str()),
+                                script,
+                            )
+                        };
                         protocol_guard::speedtest::reconcile_container_with(
                             &st_input,
-                            None,
+                            Some(&mut guest_runner),
                             None,
                             &mut self.speedtest_caches,
                             &tools,
@@ -1664,7 +2274,19 @@ impl AgentState {
                         )
                     }
                 } else {
-                    String::new()
+                    #[cfg(unix)]
+                    if let Some(ref err) = self.admission_init_error {
+                        format!(
+                            ",\"admission\":{{\"state\":\"unverified\",\"reason\":\"{}\"}}",
+                            json_escape(err)
+                        )
+                    } else {
+                        String::new()
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        String::new()
+                    }
                 }
             } else {
                 String::new()
@@ -1729,6 +2351,20 @@ impl AgentState {
                             instance_id: c.instance_id.clone(),
                         })
                         .collect();
+                    let sample_by_key: HashMap<(String, String, String), ContainerSample> = containers
+                        .iter()
+                        .map(|c| {
+                            (
+                                (
+                                    c.runtime.to_ascii_lowercase(),
+                                    c.project.clone(),
+                                    c.name.clone(),
+                                ),
+                                c.clone(),
+                            )
+                        })
+                        .collect();
+                    let proc_root = self.proc_root.clone();
                     let transport_cfg = config.to_transport_config();
                     let host_id = config.host_id.clone();
                     let node_id = config.node_id.clone();
@@ -1744,18 +2380,33 @@ impl AgentState {
                             } else {
                                 t.id.clone()
                             };
+                            let sockets = sample_by_key
+                                .get(&(t.runtime.clone(), t.project.clone(), t.name.clone()))
+                                .map(|s| extract_live_listeners_and_sockets(s, &proc_root).2)
+                                .unwrap_or_default();
                             let scoped = abuse_guard::scoped_host_processes(pid)?;
                             let procs = abuse_guard::collect_host(
                                 &scoped,
-                                &[],
+                                &sockets,
                                 t,
-                                &mut |_target, _cmd| (false, String::new()),
+                                &mut |target, cmd| {
+                                    run_container_guest_script(
+                                        &target.runtime,
+                                        &target.project,
+                                        &target.name,
+                                        &inst_id,
+                                        Some(target.runtime_bin.as_str()),
+                                        cmd,
+                                    )
+                                },
                             )?;
                             Ok((
-                                inst_id,
-                                abuse_guard::PlainIsolationDriver(NoopAbuseDriver),
+                                inst_id.clone(),
+                                abuse_guard::PlainIsolationDriver(
+                                    LiveIsolationDriver::from_target(t, &inst_id),
+                                ),
                                 procs,
-                                Vec::new(),
+                                sockets,
                             ))
                         },
                         move |alert| {
@@ -1779,6 +2430,12 @@ impl AgentState {
                 }
             }
 
+            let tools = net_guard::NetToolPaths::discover();
+            let mut runtime_bins = std::collections::BTreeMap::new();
+            if let Some(ref podman) = tools.podman_bin {
+                runtime_bins.insert("podman".to_string(), podman.clone());
+            }
+
             // 2. Bounded admission_guard cycle
             if let Some(ref ctrl) = self.admission_controller {
                 let descriptors: Vec<admission_guard::ContainerDescriptor> = containers
@@ -1793,7 +2450,6 @@ impl AgentState {
                         network_addresses: c.network_addresses.clone(),
                     })
                     .collect();
-                let runtime_bins = std::collections::BTreeMap::new();
                 let mut runner = net_guard::LiveCommandRunner;
                 ctrl.run_batch(
                     &descriptors,
@@ -1831,11 +2487,19 @@ impl AgentState {
                         name: c.name.clone(),
                     })
                     .collect();
+                let runman_instance_ids: HashMap<String, String> = containers
+                    .iter()
+                    .filter(|c| c.runtime.eq_ignore_ascii_case("runman") && !c.instance_id.is_empty())
+                    .map(|c| (c.name.clone(), c.instance_id.clone()))
+                    .collect();
                 let mut backend = LivePasarBackend {
                     client,
                     host_id: &config.host_id,
                     node_id: &config.node_id,
                     timestamp,
+                    podman_bin: tools.podman_bin.clone(),
+                    runtime_bins,
+                    runman_instance_ids,
                 };
                 self.pasarguard
                     .scan_containers(&pg_targets, &mut backend, timestamp as i64);
@@ -1845,36 +2509,14 @@ impl AgentState {
 }
 
 #[cfg(unix)]
-struct NoopAbuseDriver;
-
-#[cfg(unix)]
-impl net_guard::IsolationDriver for NoopAbuseDriver {
-    fn snapshot(&mut self) -> Result<runtime_drivers::JsonVal, String> {
-        Err("live runtime isolation driver unavailable in passive probe".to_string())
-    }
-    fn isolate(&mut self, _backup: &runtime_drivers::JsonVal) -> Result<(), String> {
-        Err("live runtime isolation driver unavailable in passive probe".to_string())
-    }
-    fn verify(&mut self, _backup: &runtime_drivers::JsonVal) -> Result<(), String> {
-        Err("live runtime isolation driver unavailable in passive probe".to_string())
-    }
-    fn release(
-        &mut self,
-        _backup: &runtime_drivers::JsonVal,
-    ) -> Result<net_guard::DriverReleaseOutcome, String> {
-        Err("live runtime isolation driver unavailable in passive probe".to_string())
-    }
-    fn prove_replaced(&mut self) -> Result<String, String> {
-        Err("live runtime isolation driver unavailable in passive probe".to_string())
-    }
-}
-
-#[cfg(unix)]
 struct LivePasarBackend<'a> {
     client: &'a TransportClient,
     host_id: &'a str,
     node_id: &'a str,
     timestamp: u64,
+    podman_bin: Option<String>,
+    runtime_bins: std::collections::BTreeMap<String, String>,
+    runman_instance_ids: HashMap<String, String>,
 }
 
 #[cfg(unix)]
@@ -1888,13 +2530,16 @@ impl<'a> protocol_guard::pasarguard::PasarGuardBackend for LivePasarBackend<'a> 
             project: container.project.clone(),
             name: container.name.clone(),
             id: String::new(),
-            instance_id: String::new(),
+            instance_id: self
+                .runman_instance_ids
+                .get(&container.name)
+                .cloned()
+                .unwrap_or_default(),
             pid: None,
             network_addresses: Vec::new(),
         };
-        let bins = std::collections::BTreeMap::new();
         let mut runner = net_guard::LiveCommandRunner;
-        let snap = admission_guard::snapshot(&desc, &bins, &mut runner, false)
+        let snap = admission_guard::snapshot(&desc, &self.runtime_bins, &mut runner, false)
             .map_err(|e| e.to_string())?;
         Ok(protocol_guard::pasarguard::PasarContainerSnapshot {
             instance_id: snap.instance_id,
@@ -1904,7 +2549,7 @@ impl<'a> protocol_guard::pasarguard::PasarGuardBackend for LivePasarBackend<'a> 
     }
 
     fn podman_bin(&self) -> Option<String> {
-        None
+        self.podman_bin.clone()
     }
 
     fn run_host(&mut self, args: &[String]) -> (bool, String) {
@@ -1918,29 +2563,23 @@ impl<'a> protocol_guard::pasarguard::PasarGuardBackend for LivePasarBackend<'a> 
         container: &protocol_guard::pasarguard::PasarContainerTarget,
         script: &str,
     ) -> (bool, String) {
-        let mut cmd = match container.runtime.as_str() {
-            "incus" => {
-                let mut c = Command::new("incus");
-                if !container.project.is_empty() {
-                    c.arg("--project").arg(&container.project);
-                }
-                c.args(["exec", &container.name, "--", "sh", "-c", script]);
-                c
-            }
-            "podman" => {
-                let mut c = Command::new("podman");
-                c.args(["exec", &container.name, "sh", "-c", script]);
-                c
-            }
-            _ => return (false, String::new()),
+        let inst_id = if container.runtime == "runman" {
+            self.runman_instance_ids
+                .get(&container.name)
+                .cloned()
+                .or_else(|| self.snapshot(container).ok().map(|s| s.instance_id))
+                .unwrap_or_default()
+        } else {
+            String::new()
         };
-        match cmd.output() {
-            Ok(out) => (
-                out.status.success(),
-                String::from_utf8_lossy(&out.stdout).into_owned(),
-            ),
-            Err(_) => (false, String::new()),
-        }
+        run_container_guest_script(
+            &container.runtime,
+            &container.project,
+            &container.name,
+            &inst_id,
+            self.podman_bin.as_deref(),
+            script,
+        )
     }
 
     fn emit_event(
@@ -4556,5 +5195,41 @@ SECURITY_MONITOR_ENABLED=false
         assert!(alert_json.contains("\"severity\":\"critical\""));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_extract_live_listeners_and_sockets_from_socket_tables() {
+        let sample = ContainerSample {
+            id: "c-sock".to_string(),
+            stable_id: "incus:default:c-sock".to_string(),
+            name: "c-sock".to_string(),
+            image: "alpine".to_string(),
+            runtime: "incus".to_string(),
+            runtime_bin: "incus".to_string(),
+            project: "default".to_string(),
+            pid: None,
+            status: "running".to_string(),
+            instance_id: "inst-sock".to_string(),
+            network_addresses: vec!["10.0.0.2".to_string()],
+            pid_metrics_json: None,
+            socket_tables_json: Some(
+                r#"{"available":true,"malformed":false,"tcp_entries":[{"local_ip":"0.0.0.0","local_port":443,"remote_ip":"0.0.0.0","remote_port":0,"state_hex":"0A","inode":101},{"local_ip":"10.0.0.2","local_port":51234,"remote_ip":"1.1.1.1","remote_port":22,"state_hex":"02","inode":102}],"udp_entries":[{"local_ip":"0.0.0.0","local_port":5201,"remote_ip":"0.0.0.0","remote_port":0,"state_hex":"07","inode":103}]}"#
+                    .to_string(),
+            ),
+            cgroup_metrics_json: None,
+        };
+        let (listeners, complete, sockets) =
+            extract_live_listeners_and_sockets(&sample, Path::new("/proc"));
+        assert!(complete);
+        assert_eq!(listeners.len(), 2);
+        assert_eq!(listeners[0].proto, "tcp");
+        assert_eq!(listeners[0].port, 443);
+        assert_eq!(listeners[1].proto, "udp");
+        assert_eq!(listeners[1].port, 5201);
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(sockets[0].remote_ip, "1.1.1.1");
+        assert_eq!(sockets[0].remote, "1.1.1.1:22");
+        assert_eq!(sockets[0].state, "syn_sent");
+        assert_eq!(sockets[0].direction, "outbound");
     }
 }
