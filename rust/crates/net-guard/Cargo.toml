@@ -1,0 +1,8 @@
+[package]
+name = "net-guard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+proc-probe = { path = "../proc-probe" }
+runtime-drivers = { path = "../runtime-drivers" }
