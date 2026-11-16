@@ -2,6 +2,17 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 12：Swarm 全量迁移 `abuse-guard` / `admission-guard` / `protocol-guard` 并接入 `agent-core`（v1.9.12）
+
+- **新增纯 `std`、`#![forbid(unsafe_code)]` Rust crates（零新增外部 Cargo 依赖，纳入 `rust/Cargo.toml` workspace）**：
+  - **`rust/crates/abuse-guard`**：迁移 `abuse_collection.py`、`abuse_detection.py`、`abuse_guard.py`（含纯 Rust Python 入口静态结构与可达性分析器 `py_ast`/`source_evidence`、`/proc` 进程作用域与 symlink-safe 入口读取、`network_evidence` SYN-fanout 归属、>=20s 多样本核实与 `net-guard` 隔离触发/降级状态机）。
+  - **`rust/crates/admission-guard`**：迁移 `admission_policy.py`、`admission_observe.py`、`admission_linux.py`、`admission_guard.py`（含观测与 TCP 并发准入策略 `Policy`、veth/bridge 归属校验、IPv4/IPv6 包解析、`nwguard_<16hex>` `nftables` 生成与回读摘要校验、Linux `#[cfg(unix)]` `SubprocessNfqBackend`、恢复日志与 `--release-all`/`--release-admission` 清理）。
+  - **`rust/crates/protocol-guard`**：迁移 `vmess_guard.py`、`speedtest_guard.py`、`pasarguard_guard.py`、`microburst_guard.py`、`file_guard.py`（含 VMess/Trojan 保守端口阻断与安全恢复、Speedtest 策略持久化与 hosts/nftables 协同、PasarGuard ELF `.go.buildinfo` 解析与清理脚本、微突发检测及容器敏感落盘扫描）。
+- **`rust/crates/agent-core` 主线全量集成（`lib.rs` + `actions.rs` + `main.rs`）**：
+  - **`lib.rs`**：为每个容器采集并上报 `security` 遥测（`abuse_guard`、`vmess_guard`、`trojan_guard`、`speedtest_guard`、`sensitive_file_events`、`microburst`、`udp_blackhole`、`anti_spoof`、`admission`）与告警事件（含自动 `udp_flood_blackhole` 触发）；周期调度 `abuse_guard`、`admission_guard`（Unix 启用 `SubprocessNfqBackend`，缺失依赖 fail-closed 为 `unverified`）与 `pasarguard_guard`（含 `runman` `/v1/exec` 支持），投递 `/api/v1/abuse/events`、`/api/v1/admission/status`、`/api/v1/admission/events`。
+  - **`actions.rs` & `main.rs`**：`apply_host_firewall_policy` 补齐 `requires_rfw` 分支与 `speedtest::save_policy` 持久化；`release_network_quarantine` / `confirm_replaced_network_quarantine` 同步清理 `abuse_guard` 状态；新增 `--release-admission` CLI 入口。
+- **兼容性保留**：`client/*.py` 原样保留供显式配置 `NARWHAL_AGENT_MODE=python` 的宿主机兼容回退，Server 控制面 `server/` 维持 Python；后续新客户端功能均在 Rust 实现。
+
 ## Phase 11：Swarm 多 Agent 协同迁移 `net-guard` / `tc-guard` / `app-guard` 并接入 `agent-core`（v1.9.11）
 
 - **新增纯 `std`、`#![forbid(unsafe_code)]` Rust crates（零新增外部 Cargo 依赖，纳入 `rust/Cargo.toml` workspace）**：
