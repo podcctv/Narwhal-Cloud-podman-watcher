@@ -17,3 +17,6 @@ host-metrics = { path = "../host-metrics" }
 geoip-probe = { path = "../geoip-probe" }
 net-probe = { path = "../net-probe" }
 runtime-drivers = { path = "../runtime-drivers" }
+net-guard = { path = "../net-guard" }
+tc-guard = { path = "../tc-guard" }
+app-guard = { path = "../app-guard" }

@@ -11,6 +11,9 @@ members = [
     "crates/transport",
     "crates/guard-core",
     "crates/runtime-drivers",
+    "crates/net-guard",
+    "crates/tc-guard",
+    "crates/app-guard",
     "crates/agent-core",
 ]
 

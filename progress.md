@@ -2,6 +2,16 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 11：Swarm 多 Agent 协同迁移 `net-guard` / `tc-guard` / `app-guard` 并接入 `agent-core`（v1.9.11）
+
+- **新增纯 `std`、`#![forbid(unsafe_code)]` Rust crates（零新增外部 Cargo 依赖，纳入 `rust/Cargo.toml` workspace）**：
+  - **`rust/crates/net-guard`**：迁移 `udp_guard.py`、`anti_spoof_guard.py` 与 `network_quarantine.py` 的隔离日志/驱动（Incus/Podman/Runman）与恢复契约。
+  - **`rust/crates/tc-guard`**：迁移 `manual_bandwidth.py`（策略校验、`0x6` SHA-256 句柄、`tc clsact` 应用与读回校验、80%/300s/600s 自动节流分级状态机、原子状态持久化及 Podman `""`/`"default"` 项目名对齐）。
+  - **`rust/crates/app-guard`**：迁移 `incus_health.py`、`socks_detector.py`（含 `allow_panel_domains`/`disallow_panel_domains` 原子写入）、`disk_cleanup.py`/`disk_cleanup_worker.py`（只读快照、策略校验、安全白名单清扫与自动调度）及 `security_banner.py`。
+- **`rust/crates/agent-core` 主线集成（`actions.rs` + `lib.rs`）**：
+  - **`actions.rs`**：接入 `apply_udp_blackhole` / `release_udp_blackhole`、`apply_anti_spoof` / `release_anti_spoof`、`release_network_quarantine` / `confirm_replaced_network_quarantine`、`allow_panel_domains` / `disallow_panel_domains`、`disk_cleanup_scan` / `disk_cleanup_execute`（含后端异步安全清扫与脱敏日志 fail-closed 核验），在 `stop_container`（Incus）接入带超时控制（`command_timeout_seconds`）的 `incus_stop_preflight`，并将 `check_expected_node_id` 加固为 `node_id` 为空时拒绝执行。
+  - **`lib.rs`**：在 `/api/v1/actions/poll` 同步 `operations.bandwidth_limits`（含 `host_audit::collect_interface_inventory_json` 桥接清单）与 `operations.disk_cleanup`（强制校验 `node_id`）、按周期投递清理完成回执与自动调度，并在 `/api/v1/report` 上报 `security.manual_bandwidth_limits`、`security.incus_runtime`（及 `operations.health` / `incus-runtime-health-v1`）与 `operations.disk_cleanup`。
+
 ## Phase 10：防火墙事件流与读回对齐、Runman 限流/停止/清马 Action 与服务探针（v1.9.10）
 
 - **`rust/crates/agent-core/src/host_audit.rs`**：对齐服务端 `_validate_host_firewall_readback` 契约，将 `readback` 输出修正为 `status: "ready" | "unavailable"` + `observed_at` + `snapshot` + `reason`，并新增 `/run/narwhal-agent/firewall.sock` `GET /v1/firewall/events` 游标增量拉取（`firewall_event_cursor`）。

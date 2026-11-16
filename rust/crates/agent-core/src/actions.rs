@@ -3,10 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use net_probe::{is_allowed_host, probe_tcp_target};
 use transport::{SignedResponse, TransportClient, TransportError};
@@ -518,6 +521,7 @@ pub struct ActionReceipt {
     pub status: String,
     pub message: String,
     pub data_json: Option<String>,
+    pub cleanup_run_json: Option<String>,
 }
 
 impl ActionReceipt {
@@ -533,6 +537,7 @@ impl ActionReceipt {
             status: "succeeded".to_string(),
             message: message.into(),
             data_json: None,
+            cleanup_run_json: None,
         }
     }
 
@@ -549,6 +554,7 @@ impl ActionReceipt {
             status: "succeeded".to_string(),
             message: message.into(),
             data_json: Some(data_json.into()),
+            cleanup_run_json: None,
         }
     }
 
@@ -564,6 +570,7 @@ impl ActionReceipt {
             status: "running".to_string(),
             message: message.into(),
             data_json: None,
+            cleanup_run_json: None,
         }
     }
 
@@ -579,7 +586,13 @@ impl ActionReceipt {
             status: "failed".to_string(),
             message: message.into(),
             data_json: None,
+            cleanup_run_json: None,
         }
+    }
+
+    pub fn with_cleanup_run(mut self, cleanup_run_json: impl Into<String>) -> Self {
+        self.cleanup_run_json = Some(cleanup_run_json.into());
+        self
     }
 
     pub fn to_json(&self) -> String {
@@ -595,6 +608,9 @@ impl ActionReceipt {
         );
         if let Some(ref data) = self.data_json {
             let _ = write!(out, ",\"data\":{data}");
+        }
+        if let Some(ref cleanup_run) = self.cleanup_run_json {
+            let _ = write!(out, ",\"cleanup_run\":{cleanup_run}");
         }
         out.push('}');
         out
@@ -615,6 +631,9 @@ impl ActionReceipt {
         );
         if let Some(ref data) = self.data_json {
             let _ = write!(out, ",\"data\":{data}");
+        }
+        if let Some(ref cleanup_run) = self.cleanup_run_json {
+            let _ = write!(out, ",\"cleanup_run\":{cleanup_run}");
         }
         out.push('}');
         out
@@ -683,6 +702,16 @@ pub struct ActionContext {
     pub configured_access_logs: Vec<String>,
     pub rescan_requested: bool,
     pub restart_required: bool,
+    pub panel_allowlist_path: PathBuf,
+    pub panel_auto_remediate_path: PathBuf,
+    pub cleanup_journal_path: PathBuf,
+    pub quarantine_journal_path: Option<PathBuf>,
+    pub cleanup_host_available: Option<bool>,
+    pub cleanup_policy: app_guard::disk_cleanup::CleanupPolicy,
+    pub cleanup_containers: Vec<app_guard::disk_cleanup::CleanupContainerCandidate>,
+    pub disk_cleanup_host_root: Option<PathBuf>,
+    pub cleanup_now_epoch: Option<i64>,
+    pub disk_cleanup_running: Arc<AtomicBool>,
 }
 
 impl Default for ActionContext {
@@ -693,6 +722,18 @@ impl Default for ActionContext {
             configured_access_logs: Vec::new(),
             rescan_requested: false,
             restart_required: false,
+            panel_allowlist_path: PathBuf::from(app_guard::socks_detector::DEFAULT_PANEL_ALLOWLIST_FILE),
+            panel_auto_remediate_path: PathBuf::from(
+                app_guard::socks_detector::DEFAULT_PANEL_AUTO_REMEDIATE_FILE,
+            ),
+            cleanup_journal_path: PathBuf::from(app_guard::disk_cleanup::DEFAULT_STATE_PATH),
+            quarantine_journal_path: None,
+            cleanup_host_available: None,
+            cleanup_policy: app_guard::disk_cleanup::CleanupPolicy::default(),
+            cleanup_containers: Vec::new(),
+            disk_cleanup_host_root: None,
+            cleanup_now_epoch: None,
+            disk_cleanup_running: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -727,6 +768,16 @@ pub fn execute_action_with_context(
             execute_container_connlimit(req, ctx)
         }
         "remediate_malicious_process" => execute_remediate_malicious_process(req),
+        "apply_udp_blackhole" => execute_apply_udp_blackhole(req),
+        "release_udp_blackhole" => execute_release_udp_blackhole(req),
+        "apply_anti_spoof" => execute_apply_anti_spoof(req),
+        "release_anti_spoof" => execute_release_anti_spoof(req),
+        "release_network_quarantine" => execute_release_network_quarantine(req, ctx),
+        "confirm_replaced_network_quarantine" => {
+            execute_confirm_replaced_network_quarantine(req, ctx)
+        }
+        "allow_panel_domains" | "disallow_panel_domains" => execute_panel_domains(req, ctx),
+        "disk_cleanup_scan" | "disk_cleanup_execute" => execute_disk_cleanup(req, ctx),
         other => ActionReceipt::failed(
             req.id,
             other,
@@ -737,7 +788,7 @@ pub fn execute_action_with_context(
 
 fn check_expected_node_id(req: &ActionRequest, ctx: &ActionContext) -> Result<(), String> {
     if ctx.node_id.is_empty() {
-        return Ok(());
+        return Err("node identity unavailable; host action refused".to_string());
     }
     let expected = req
         .params
@@ -2170,6 +2221,16 @@ fn execute_stop_container(req: &ActionRequest) -> ActionReceipt {
             params: req.params.clone(),
         });
     }
+    if runtime == "incus" {
+        let proj = if req.project.trim().is_empty() {
+            "default"
+        } else {
+            req.project.trim()
+        };
+        if let Err(msg) = incus_stop_preflight(proj, target) {
+            return ActionReceipt::failed(req.id, &req.action_type, msg);
+        }
+    }
     let mut cmd = Command::new(&runtime);
     if runtime == "incus" && !req.project.is_empty() && is_safe_container_target(&req.project) {
         cmd.arg("--project").arg(&req.project);
@@ -2245,6 +2306,429 @@ fn execute_remediate_malicious_process(req: &ActionRequest) -> ActionReceipt {
     } else {
         ActionReceipt::failed(req.id, &req.action_type, "no matching live malware process targets confirmed for remediation")
     }
+}
+
+pub(crate) fn run_incus_cli_scan(
+    project: &str,
+    extra_args: &[&str],
+    timeout_secs: f64,
+) -> app_guard::incus_health::IncusScan {
+    let trimmed = project.trim();
+    let all_projects = trimmed.is_empty() || matches!(trimmed.to_ascii_lowercase().as_str(), "all" | "*");
+    let mut cmd = Command::new("incus");
+    if !all_projects {
+        if !is_safe_container_target(trimmed) {
+            return app_guard::incus_health::IncusScan::unavailable("invalid_project", 0.0);
+        }
+        cmd.arg("--project").arg(trimmed);
+    }
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let timeout = Duration::from_secs_f64(timeout_secs.clamp(1.0, 15.0));
+    let started = Instant::now();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return app_guard::incus_health::IncusScan::unavailable(
+                "command_unavailable",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Err(_) => {
+            return app_guard::incus_health::IncusScan::unavailable(
+                "command_failed",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    };
+    let reader_handle = child.stdout.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = (&mut pipe).take(8 * 1024 * 1024).read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = started + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return app_guard::incus_health::IncusScan::unavailable(
+                    "command_failed",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
+    };
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let raw_bytes = reader_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let Some(exit_status) = status else {
+        return app_guard::incus_health::IncusScan::unavailable("timeout", latency_ms);
+    };
+    let stdout = String::from_utf8_lossy(&raw_bytes);
+    app_guard::incus_health::IncusScan::from_cli_output(
+        exit_status.success(),
+        &stdout,
+        latency_ms,
+        "command_failed",
+    )
+}
+
+fn incus_stop_preflight(project: &str, name: &str) -> Result<(), String> {
+    let proj = project.trim();
+    let target_name = name.trim();
+    if proj.is_empty()
+        || matches!(proj.to_ascii_lowercase().as_str(), "all" | "*")
+        || target_name.is_empty()
+        || !is_safe_container_target(proj)
+        || !is_safe_container_target(target_name)
+    {
+        return Err("Incus stop skipped: exact project and instance identity are required".to_string());
+    }
+    let cfg = app_guard::incus_health::IncusHealthConfig::from_env();
+    let inst_scan = run_incus_cli_scan(
+        proj,
+        &["list", target_name, "type=container", "--format=json"],
+        cfg.command_timeout_seconds,
+    );
+    let op_scan = run_incus_cli_scan(
+        proj,
+        &["operation", "list", "--format=json"],
+        cfg.command_timeout_seconds,
+    );
+    app_guard::incus_health::evaluate_incus_stop_preflight(&inst_scan, &op_scan, proj, target_name, &cfg)
+}
+
+fn outcome_to_receipt(req: &ActionRequest, outcome: net_guard::ActionOutcome) -> ActionReceipt {
+    if outcome.ok {
+        ActionReceipt::succeeded(req.id, &req.action_type, outcome.message)
+    } else {
+        ActionReceipt::failed(req.id, &req.action_type, outcome.message)
+    }
+}
+
+fn execute_apply_udp_blackhole(req: &ActionRequest) -> ActionReceipt {
+    let pid = req
+        .params
+        .get("pid")
+        .and_then(JsonValue::as_i64)
+        .unwrap_or(0)
+        .clamp(0, u32::MAX as i64) as u32;
+    let instance_id = req
+        .params
+        .get("instance_id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let allow_dns = req
+        .params
+        .get("allow_dns")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(true);
+    let proj = req.project.trim();
+    let mut apply = net_guard::UdpBlackholeApply::new(
+        req.runtime.trim().to_ascii_lowercase(),
+        req.container_name.trim(),
+        pid,
+    );
+    apply.instance_id = instance_id;
+    apply.allow_dns = allow_dns;
+    apply.project = if proj.is_empty() {
+        "default".to_string()
+    } else {
+        proj.to_string()
+    };
+    apply.auto_triggered = req
+        .params
+        .get("auto_triggered")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    if let Some(dur) = req.params.get("duration").and_then(JsonValue::as_i64).filter(|&d| d > 0) {
+        apply.duration = dur as u64;
+    }
+    apply.reason = req
+        .params
+        .get("reason")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    outcome_to_receipt(req, net_guard::apply_udp_blackhole(&apply))
+}
+
+fn execute_release_udp_blackhole(req: &ActionRequest) -> ActionReceipt {
+    let pid = req
+        .params
+        .get("pid")
+        .and_then(JsonValue::as_i64)
+        .unwrap_or(0)
+        .clamp(0, u32::MAX as i64) as u32;
+    let instance_id = req
+        .params
+        .get("instance_id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim();
+    let proj = req.project.trim();
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let out = net_guard::release_udp_blackhole(
+        &runtime,
+        req.container_name.trim(),
+        pid,
+        instance_id,
+        if proj.is_empty() { "default" } else { proj },
+    );
+    outcome_to_receipt(req, out)
+}
+
+fn execute_apply_anti_spoof(req: &ActionRequest) -> ActionReceipt {
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let veth = req
+        .params
+        .get("veth_name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("");
+    let allocated_ips: Vec<String> = req
+        .params
+        .get("allocated_ips")
+        .and_then(JsonValue::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let out = net_guard::apply_anti_spoof(
+        veth,
+        &allocated_ips,
+        &runtime,
+        req.container_name.trim(),
+    );
+    outcome_to_receipt(req, out)
+}
+
+fn execute_release_anti_spoof(req: &ActionRequest) -> ActionReceipt {
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let veth = req
+        .params
+        .get("veth_name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("");
+    let out = net_guard::release_anti_spoof(veth, &runtime, req.container_name.trim());
+    outcome_to_receipt(req, out)
+}
+
+fn execute_release_network_quarantine(
+    req: &ActionRequest,
+    ctx: &ActionContext,
+) -> ActionReceipt {
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let instance_id = req
+        .params
+        .get("instance_id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim();
+    let out = net_guard::release_network_quarantine(
+        &runtime,
+        req.project.trim(),
+        req.container_name.trim(),
+        instance_id,
+    );
+    outcome_to_receipt(req, out)
+}
+
+fn execute_confirm_replaced_network_quarantine(
+    req: &ActionRequest,
+    ctx: &ActionContext,
+) -> ActionReceipt {
+    if let Err(msg) = check_expected_node_id(req, ctx) {
+        return ActionReceipt::failed(req.id, &req.action_type, msg);
+    }
+    let runtime = req.runtime.trim().to_ascii_lowercase();
+    let instance_id = req
+        .params
+        .get("instance_id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim();
+    let out = net_guard::confirm_replaced_network_quarantine(
+        &runtime,
+        req.project.trim(),
+        req.container_name.trim(),
+        instance_id,
+    );
+    outcome_to_receipt(req, out)
+}
+
+fn execute_panel_domains(req: &ActionRequest, ctx: &ActionContext) -> ActionReceipt {
+    let Ok(action) = app_guard::socks_detector::PanelDomainAction::parse(&req.action_type) else {
+        return ActionReceipt::failed(req.id, &req.action_type, "unsupported panel domain action");
+    };
+    let domains: Vec<String> = req
+        .params
+        .get("domains")
+        .and_then(JsonValue::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let store = app_guard::socks_detector::PanelDomainStore {
+        allowlist_path: ctx.panel_allowlist_path.clone(),
+        auto_remediate_path: Some(ctx.panel_auto_remediate_path.clone()),
+        env_file_path: Some(ctx.env_file.clone()),
+        env_allowed_domains: Vec::new(),
+    };
+    match app_guard::socks_detector::manage_panel_domains(
+        &store,
+        action,
+        &domains,
+        crate::current_unix_ts(),
+    ) {
+        Ok(outcome) => ActionReceipt::succeeded(req.id, &req.action_type, outcome.message),
+        Err(err) => ActionReceipt::failed(req.id, &req.action_type, err),
+    }
+}
+
+fn serialize_action_request_json(req: &ActionRequest) -> String {
+    let params_val = JsonValue::Object(req.params.clone());
+    format!(
+        "{{\"id\":{},\"action_type\":{},\"runtime\":{},\"project\":{},\"container_name\":{},\"params\":{}}}",
+        req.id,
+        json_quote(&req.action_type),
+        json_quote(&req.runtime),
+        json_quote(&req.project),
+        json_quote(&req.container_name),
+        params_val.to_json(),
+    )
+}
+
+pub(crate) fn read_quarantined_identities(override_path: Option<&Path>) -> Result<BTreeSet<String>, String> {
+    let mut ids = BTreeSet::new();
+    let q_path = match override_path {
+        Some(p) => p.to_path_buf(),
+        None => match net_guard::resolve_quarantine_journal_path() {
+            Ok(p) => p,
+            Err(_) => {
+                return Err(
+                    "quarantine recovery journal unavailable; refusing disk cleanup".to_string(),
+                );
+            }
+        },
+    };
+    if !q_path.exists() {
+        return Ok(ids);
+    }
+    let Ok(journal) = net_guard::QuarantineJournal::new(Some(&q_path)) else {
+        return Err("quarantine recovery journal unavailable; refusing disk cleanup".to_string());
+    };
+    let Ok(entries) = journal.read() else {
+        return Err("quarantine recovery journal unreadable; refusing disk cleanup".to_string());
+    };
+    for (raw_key, val) in entries {
+        if let Some(id_str) = val
+            .as_obj()
+            .and_then(|m| m.get("id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            ids.insert(id_str.to_string());
+        }
+        if let Ok(JsonValue::Array(arr)) = parse_json(&raw_key) {
+            if let Some(last) = arr.last().and_then(JsonValue::as_str).filter(|s| !s.is_empty()) {
+                ids.insert(last.to_string());
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn execute_disk_cleanup(req: &ActionRequest, ctx: &ActionContext) -> ActionReceipt {
+    let quarantined_identities =
+        match read_quarantined_identities(ctx.quarantine_journal_path.as_deref()) {
+            Ok(ids) => ids,
+            Err(msg) => return ActionReceipt::failed(req.id, &req.action_type, msg),
+        };
+    let action_json = serialize_action_request_json(req);
+    let now_epoch = ctx
+        .cleanup_now_epoch
+        .unwrap_or_else(|| crate::current_unix_ts() as i64);
+    let active_running = ctx.disk_cleanup_running.load(Ordering::SeqCst);
+    let cleanup_ctx = app_guard::disk_cleanup::CleanupActionContext {
+        host_available: ctx
+            .cleanup_host_available
+            .unwrap_or_else(app_guard::disk_cleanup::live_disk_cleanup_available),
+        node_id: ctx.node_id.clone(),
+        now_epoch,
+        journal_path: ctx.cleanup_journal_path.clone(),
+        policy: ctx.cleanup_policy,
+        containers: ctx.cleanup_containers.clone(),
+        quarantined_identities,
+        active_run_in_progress: active_running,
+    };
+    let outcome = app_guard::disk_cleanup::execute_disk_cleanup_action(&action_json, &cleanup_ctx);
+    if !outcome.ok {
+        return ActionReceipt::failed(req.id, &req.action_type, outcome.message);
+    }
+    if outcome.status == "accepted" {
+        if let Some(ref run) = outcome.run {
+            let mut receipt = match run.status.as_str() {
+                "running" => ActionReceipt::running(req.id, &req.action_type, outcome.message),
+                "scanned" | "succeeded" => {
+                    ActionReceipt::succeeded(req.id, &req.action_type, outcome.message)
+                }
+                _ => ActionReceipt::failed(req.id, &req.action_type, outcome.message),
+            };
+            receipt = receipt.with_cleanup_run(run.to_json());
+            return receipt;
+        }
+    }
+
+    let mut receipt = ActionReceipt::running(req.id, &req.action_type, outcome.message);
+    if let Some(ref run) = outcome.run {
+        receipt = receipt.with_cleanup_run(run.to_json());
+        if outcome.status == "running" {
+            let journal_path = ctx.cleanup_journal_path.clone();
+            let run_id = run.run_id.clone();
+            let policy = ctx.cleanup_policy;
+            let host_root = ctx.disk_cleanup_host_root.clone();
+            let flag = ctx.disk_cleanup_running.clone();
+            flag.store(true, Ordering::SeqCst);
+            thread::spawn(move || {
+                let _ = app_guard::disk_cleanup::execute_and_finalize_cleanup_run(
+                    &journal_path,
+                    &run_id,
+                    &policy,
+                    host_root.as_deref(),
+                    now_epoch,
+                );
+                flag.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+    receipt
 }
 
 #[cfg(test)]
@@ -2558,6 +3042,7 @@ mod tests {
             configured_access_logs: vec![log_file.to_string_lossy().into_owned()],
             rescan_requested: false,
             restart_required: false,
+            ..ActionContext::default()
         };
 
         // Mismatched node_id must be rejected
@@ -2652,6 +3137,195 @@ mod tests {
         )
         .unwrap();
         assert!(!execute_action_with_context(&bad_rem, &mut ctx).ok);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_net_guard_panel_domain_and_disk_cleanup_actions() {
+        let dir = std::env::temp_dir().join("narwhal-actions-new-crates-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let env_file = dir.join("client.env");
+        fs::write(
+            &env_file,
+            "SHARED_SECRET=keep-me-secret\nNODE_ID=node-xyz\n",
+        )
+        .unwrap();
+        let allowlist_file = dir.join("panel-allowlist.json");
+        let auto_file = dir.join("panel-auto-remediate.json");
+        let cleanup_journal = dir.join("disk-cleanup.json");
+        let quarantine_journal = dir.join("quarantine-journal.json");
+
+        let mut ctx = ActionContext {
+            node_id: "node-xyz".to_string(),
+            env_file: env_file.clone(),
+            panel_allowlist_path: allowlist_file.clone(),
+            panel_auto_remediate_path: auto_file.clone(),
+            cleanup_journal_path: cleanup_journal.clone(),
+            quarantine_journal_path: Some(quarantine_journal.clone()),
+            cleanup_host_available: Some(true),
+            cleanup_policy: app_guard::disk_cleanup::CleanupPolicy {
+                enabled: true,
+                include_containers: true,
+                retention_days: 14,
+                interval_hours: 24,
+            },
+            ..ActionContext::default()
+        };
+
+        // 1. UDP blackhole validation (rejects Docker & pid<=1)
+        let bad_udp = ActionRequest::from_json(
+            r#"{"id":71,"action_type":"apply_udp_blackhole","runtime":"podman","container_name":"c1","params":{"pid":0}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_udp, &mut ctx).ok);
+
+        let rel_udp_bad = ActionRequest::from_json(
+            r#"{"id":72,"action_type":"release_udp_blackhole","runtime":"docker","container_name":"c1","params":{}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&rel_udp_bad, &mut ctx).ok);
+
+        // 2. Anti-spoof validation (rejects invalid veth name)
+        let bad_spoof = ActionRequest::from_json(
+            r#"{"id":73,"action_type":"apply_anti_spoof","runtime":"podman","container_name":"c1","params":{"veth_name":"bad;veth","allocated_ips":["10.0.0.2"]}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_spoof, &mut ctx).ok);
+
+        let bad_spoof_rel = ActionRequest::from_json(
+            r#"{"id":74,"action_type":"release_anti_spoof","runtime":"podman","container_name":"c1","params":{"veth_name":""}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_spoof_rel, &mut ctx).ok);
+
+        // 3. Quarantine release / confirm replaced node check
+        let bad_q = ActionRequest::from_json(
+            r#"{"id":75,"action_type":"release_network_quarantine","runtime":"incus","container_name":"c1","params":{"expected_node_id":"wrong","instance_id":"inst-1"}}"#,
+        )
+        .unwrap();
+        let r_bad_q = execute_action_with_context(&bad_q, &mut ctx);
+        assert!(!r_bad_q.ok);
+        assert!(r_bad_q.message.contains("mismatch"));
+
+        let bad_rep = ActionRequest::from_json(
+            r#"{"id":76,"action_type":"confirm_replaced_network_quarantine","runtime":"docker","container_name":"c1","params":{"expected_node_id":"node-xyz","instance_id":"inst-1"}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&bad_rep, &mut ctx).ok);
+
+        // 4. Panel domains allow & disallow update files cleanly while preserving env secrets
+        let allow_req = ActionRequest::from_json(
+            r#"{"id":77,"action_type":"allow_panel_domains","runtime":"host","container_name":"__host__","params":{"domains":["panel.example.com","API.EXAMPLE.COM."]}}"#,
+        )
+        .unwrap();
+        let r_allow = execute_action_with_context(&allow_req, &mut ctx);
+        assert!(r_allow.ok, "allow_panel_domains failed: {}", r_allow.message);
+        let env_after_allow = fs::read_to_string(&env_file).unwrap();
+        assert!(env_after_allow.contains("SHARED_SECRET=keep-me-secret"));
+        assert!(env_after_allow.contains("SECURITY_ALLOWED_PANEL_DOMAINS=api.example.com,panel.example.com"));
+
+        let disallow_req = ActionRequest::from_json(
+            r#"{"id":78,"action_type":"disallow_panel_domains","runtime":"host","container_name":"__host__","params":{"domains":["api.example.com"]}}"#,
+        )
+        .unwrap();
+        let r_disallow = execute_action_with_context(&disallow_req, &mut ctx);
+        assert!(r_disallow.ok);
+        let env_after_disallow = fs::read_to_string(&env_file).unwrap();
+        assert!(env_after_disallow.contains("SECURITY_ALLOWED_PANEL_DOMAINS=panel.example.com"));
+
+        // 5. Disk cleanup scan executes against mock host root, transitions to scanned, then execute deletes
+        let mock_root = dir.join("mock_host");
+        let apt_dir = mock_root.join("var/cache/apt/archives");
+        fs::create_dir_all(&apt_dir).unwrap();
+        let old_deb = apt_dir.join("stale.deb");
+        fs::write(&old_deb, b"deb-bytes").unwrap();
+        ctx.disk_cleanup_host_root = Some(mock_root.clone());
+        ctx.cleanup_now_epoch = Some(crate::current_unix_ts() as i64 + 15 * 86_400);
+
+        let scan_req = ActionRequest::from_json(
+            r#"{"id":79,"action_type":"disk_cleanup_scan","runtime":"host","container_name":"__host__","params":{"expected_node_id":"node-xyz"}}"#,
+        )
+        .unwrap();
+        let r_scan = execute_action_with_context(&scan_req, &mut ctx);
+        assert!(r_scan.ok, "disk_cleanup_scan failed: {}", r_scan.message);
+        assert_eq!(r_scan.status, "running");
+        let receipt_json = r_scan.to_result_json("h1", "node-xyz");
+        assert!(receipt_json.contains("\"cleanup_run\":{\"run_id\":\"action-79\""));
+
+        // Wait briefly for worker thread to finalize action-79
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let j = app_guard::disk_cleanup::read_cleanup_journal_readonly(&cleanup_journal).unwrap();
+            if j.runs.iter().any(|r| r.run_id == "action-79" && r.status == "scanned") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "disk cleanup worker did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Duplicate scan must reflect already-scanned state without re-running as running
+        let r_scan_dup = execute_action_with_context(&scan_req, &mut ctx);
+        assert!(r_scan_dup.ok);
+        assert_eq!(r_scan_dup.status, "succeeded");
+
+        // Unconfirmed execute must fail; confirmed execute deletes stale.deb
+        let exec_unconfirmed = ActionRequest::from_json(
+            r#"{"id":80,"action_type":"disk_cleanup_execute","runtime":"host","container_name":"__host__","params":{"expected_node_id":"node-xyz","confirmed":false,"plan_id":"action-79"}}"#,
+        )
+        .unwrap();
+        assert!(!execute_action_with_context(&exec_unconfirmed, &mut ctx).ok);
+
+        let exec_confirmed = ActionRequest::from_json(
+            r#"{"id":82,"action_type":"disk_cleanup_execute","runtime":"host","container_name":"__host__","params":{"expected_node_id":"node-xyz","confirmed":true,"plan_id":"action-79"}}"#,
+        )
+        .unwrap();
+        let r_exec = execute_action_with_context(&exec_confirmed, &mut ctx);
+        assert!(r_exec.ok, "disk_cleanup_execute failed: {}", r_exec.message);
+        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let j = app_guard::disk_cleanup::read_cleanup_journal_readonly(&cleanup_journal).unwrap();
+            if j.runs.iter().any(|r| r.run_id == "action-82" && r.status == "succeeded") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline2, "disk cleanup execute did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!old_deb.exists());
+
+        // 5b. Empty node_id fails closed on node-bound quarantine & upgrade actions
+        let mut empty_ctx = ActionContext::default();
+        let q_empty = ActionRequest::from_json(
+            r#"{"id":83,"action_type":"release_network_quarantine","runtime":"incus","container_name":"c1","params":{"expected_node_id":"","instance_id":"inst-1"}}"#,
+        )
+        .unwrap();
+        let r_q_empty = execute_action_with_context(&q_empty, &mut empty_ctx);
+        assert!(!r_q_empty.ok);
+        assert!(r_q_empty.message.contains("node identity unavailable"));
+
+        // 5c. Corrupt quarantine journal fails closed on disk_cleanup
+        fs::write(&quarantine_journal, "{not-valid-json").unwrap();
+        let corrupt_scan = ActionRequest::from_json(
+            r#"{"id":84,"action_type":"disk_cleanup_scan","runtime":"host","container_name":"__host__","params":{"expected_node_id":"node-xyz"}}"#,
+        )
+        .unwrap();
+        let r_corrupt = execute_action_with_context(&corrupt_scan, &mut ctx);
+        assert!(!r_corrupt.ok);
+        assert!(r_corrupt.message.contains("quarantine recovery journal"));
+        let _ = fs::remove_file(&quarantine_journal);
+
+        // 6. stop_container with incus + all/missing project fails closed via incus_health preflight
+        let now_ts = crate::current_unix_ts() as i64;
+        let stop_incus_json = format!(
+            r#"{{"id":81,"action_type":"stop_container","runtime":"incus","project":"all","container_name":"c1","params":{{"reason":"sustained_connection_overload","metric_schema":1,"required_duration_seconds":10,"duration_seconds":20,"expires_at":{}}}}}"#,
+            now_ts + 300
+        );
+        let stop_incus = ActionRequest::from_json(&stop_incus_json).unwrap();
+        let r_stop = execute_action_with_context(&stop_incus, &mut ctx);
+        assert!(!r_stop.ok);
+        assert!(r_stop.message.contains("Incus stop skipped"));
 
         let _ = fs::remove_dir_all(&dir);
     }

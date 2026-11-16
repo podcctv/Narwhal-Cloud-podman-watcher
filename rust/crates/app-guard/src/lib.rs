@@ -3573,8 +3573,8 @@ pub mod disk_cleanup {
         }
     }
 
-    /// Load cleanup journal state fail-closed and mark any `running` run as `interrupted`.
-    pub fn load_cleanup_journal(path: &Path, now_epoch: i64) -> Result<CleanupJournalState, String> {
+    /// Read cleanup journal state fail-closed WITHOUT mutating `running` runs to `interrupted`.
+    pub fn read_cleanup_journal_readonly(path: &Path) -> Result<CleanupJournalState, String> {
         if !path.is_absolute() {
             return Err("journal path must be absolute".to_string());
         }
@@ -3609,12 +3609,7 @@ pub mod disk_cleanup {
                 return Err("invalid cleanup state; no automatic deletion".to_string());
             }
             for r in arr {
-                let mut rec = CleanupRunRecord::from_json(r)?;
-                if rec.status == "running" {
-                    rec.status = "interrupted".to_string();
-                    rec.finished_at = Some(now_epoch);
-                }
-                runs.push(rec);
+                runs.push(CleanupRunRecord::from_json(r)?);
             }
         }
 
@@ -3633,6 +3628,18 @@ pub mod disk_cleanup {
         }
 
         Ok(CleanupJournalState { runs, attempts })
+    }
+
+    /// Load cleanup journal state fail-closed and mark any `running` run as `interrupted`.
+    pub fn load_cleanup_journal(path: &Path, now_epoch: i64) -> Result<CleanupJournalState, String> {
+        let mut state = read_cleanup_journal_readonly(path)?;
+        for rec in &mut state.runs {
+            if rec.status == "running" {
+                rec.status = "interrupted".to_string();
+                rec.finished_at = Some(now_epoch);
+            }
+        }
+        Ok(state)
     }
 
     /// Save cleanup journal state atomically (`0600` on Unix), bounded to 20 runs and 1000 attempts.
@@ -3874,7 +3881,7 @@ pub mod disk_cleanup {
             ctx.now_epoch
         };
 
-        let mut state = match load_cleanup_journal(&ctx.journal_path, now) {
+        let mut state = match read_cleanup_journal_readonly(&ctx.journal_path) {
             Ok(s) => s,
             Err(err) => return CleanupActionOutcome::fail(err),
         };
@@ -4522,6 +4529,389 @@ pub mod disk_cleanup {
             out.status = "partial".to_string();
         }
         Ok(out)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct DiskUsageStats {
+        pub total_bytes: u64,
+        pub available_bytes: u64,
+        pub used_percent: f64,
+    }
+
+    impl DiskUsageStats {
+        pub fn to_json(&self) -> String {
+            let mut b = JsonObjBuilder::new();
+            b.u64("total_bytes", self.total_bytes);
+            b.u64("available_bytes", self.available_bytes);
+            b.f64("used_percent", (self.used_percent * 100.0).round() / 100.0);
+            b.finish()
+        }
+    }
+
+    /// Best-effort POSIX `df -P -k <path>` disk usage without unsafe FFI.
+    pub fn disk_usage_for_path(path: &Path) -> Option<DiskUsageStats> {
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            None
+        }
+        #[cfg(unix)]
+        {
+            let out = std::process::Command::new("df")
+                .args(["-P", "-k"])
+                .arg(path)
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let data_line = stdout.lines().nth(1)?.trim();
+            let cols: Vec<&str> = data_line.split_whitespace().collect();
+            if cols.len() < 4 {
+                return None;
+            }
+            let blocks_1k: u64 = cols[1].parse().ok()?;
+            let used_1k: u64 = cols[2].parse().ok()?;
+            let avail_1k: u64 = cols[3].parse().ok()?;
+            let total_bytes = blocks_1k.saturating_mul(1024);
+            let used_bytes = used_1k.saturating_mul(1024);
+            let available_bytes = avail_1k.saturating_mul(1024);
+            let denom = used_bytes.saturating_add(available_bytes);
+            let used_percent = if denom > 0 {
+                (100.0 * (used_bytes as f64) / (denom as f64) * 100.0).round() / 100.0
+            } else {
+                0.0
+            };
+            Some(DiskUsageStats {
+                total_bytes,
+                available_bytes,
+                used_percent,
+            })
+        }
+    }
+
+    pub fn host_disk_usage_json(path: &Path) -> String {
+        disk_usage_for_path(path)
+            .map(|d| d.to_json())
+            .unwrap_or_else(|| "{}".to_string())
+    }
+
+    /// Fail-closed enumeration of open regular file `(dev, ino)` across `/proc/*/fd`.
+    pub fn collect_busy_inodes(max_fds: usize) -> Result<BTreeSet<(u64, u64)>, String> {
+        #[cfg(not(unix))]
+        {
+            let _ = max_fds;
+            Ok(BTreeSet::new())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let Ok(proc_entries) = fs::read_dir("/proc") else {
+                return Err("open-file check unavailable".to_string());
+            };
+            let mut busy = BTreeSet::new();
+            let mut seen = 0usize;
+            for entry in proc_entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if !name_str.bytes().all(|b| b.is_ascii_digit()) {
+                    continue;
+                }
+                let fd_dir = entry.path().join("fd");
+                let fds = match fs::read_dir(&fd_dir) {
+                    Ok(rd) => rd,
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        return Err("open-file permissions unavailable".to_string());
+                    }
+                    Err(_) => continue,
+                };
+                for fd_entry in fds.flatten() {
+                    seen += 1;
+                    if seen > max_fds {
+                        return Err("open-file check budget exhausted".to_string());
+                    }
+                    if let Ok(meta) = fs::metadata(fd_entry.path()) {
+                        if meta.is_file() {
+                            busy.insert((meta.dev(), meta.ino()));
+                        }
+                    }
+                }
+            }
+            Ok(busy)
+        }
+    }
+
+    fn verify_target_root_for_cleanup(
+        target: &CleanupTarget,
+        host_root_override: Option<&Path>,
+    ) -> Result<(PathBuf, String), String> {
+        if target.runtime == "host" {
+            let root = host_root_override
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/"));
+            let meta = fs::symlink_metadata(&root)
+                .map_err(|_| "host root unavailable".to_string())?;
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err("invalid host filesystem root".to_string());
+            }
+            return Ok((root, "host".to_string()));
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("identity, mount, evidence or filesystem safety check unavailable".to_string())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let pid: u32 = target
+                .pid
+                .trim()
+                .parse()
+                .ok()
+                .filter(|&p| p > 1)
+                .ok_or_else(|| "container is not running".to_string())?;
+            let pid1_ns = fs::metadata("/proc/1/ns/pid")
+                .map_err(|_| "host PID namespace unavailable".to_string())?;
+            let c_ns = fs::metadata(format!("/proc/{pid}/ns/pid"))
+                .map_err(|_| "container PID namespace unavailable".to_string())?;
+            if (c_ns.dev(), c_ns.ino()) == (pid1_ns.dev(), pid1_ns.ino()) {
+                return Err("shared host PID namespace".to_string());
+            }
+            if !target.pid_start_ticks.is_empty() {
+                let raw_stat = fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .map_err(|_| "container process unavailable".to_string())?;
+                let ticks = raw_stat
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+                    .unwrap_or("");
+                if ticks != target.pid_start_ticks {
+                    return Err("container restarted".to_string());
+                }
+            }
+            let host_root_meta = fs::metadata("/")
+                .map_err(|_| "host filesystem root unavailable".to_string())?;
+            let guest_root = PathBuf::from(format!("/proc/{pid}/root"));
+            let guest_meta = fs::metadata(&guest_root)
+                .map_err(|_| "container root unavailable".to_string())?;
+            if !guest_meta.is_dir()
+                || (guest_meta.dev(), guest_meta.ino())
+                    == (host_root_meta.dev(), host_root_meta.ino())
+            {
+                return Err("host filesystem root refused".to_string());
+            }
+            let identity = if target.runtime == "runman" {
+                target.instance_id.clone()
+            } else if !target.stable_id.is_empty() {
+                target.stable_id.clone()
+            } else {
+                target.id.clone()
+            };
+            if identity.is_empty() {
+                return Err("container identity unavailable".to_string());
+            }
+            Ok((guest_root, identity))
+        }
+    }
+
+    /// Execute bounded scan/clean across staged targets of `run_id` and persist terminal status to `journal_path`.
+    pub fn execute_and_finalize_cleanup_run(
+        journal_path: &Path,
+        run_id: &str,
+        policy: &CleanupPolicy,
+        host_root_override: Option<&Path>,
+        now_epoch: i64,
+    ) -> Result<CleanupRunRecord, String> {
+        let state = read_cleanup_journal_readonly(journal_path)?;
+        let Some(initial_run) = state.runs.iter().find(|r| r.run_id == run_id).cloned() else {
+            return Err("cleanup run record not found".to_string());
+        };
+        if initial_run.status != "running" {
+            return Ok(initial_run);
+        }
+
+        let execute = initial_run.mode == "clean";
+        let busy_inodes = if host_root_override.is_some() {
+            BTreeSet::new()
+        } else {
+            match collect_busy_inodes(50_000) {
+                Ok(set) => set,
+                Err(_) => {
+                    let mut st = read_cleanup_journal_readonly(journal_path)?;
+                    if let Some(rec) = st.runs.iter_mut().find(|r| r.run_id == run_id) {
+                        rec.status = "failed".to_string();
+                        rec.finished_at = Some(now_epoch);
+                        rec.error = "cleanup worker could not verify open files".to_string();
+                        let snapshot = rec.clone();
+                        let _ = save_cleanup_journal(journal_path, &mut st);
+                        return Ok(snapshot);
+                    }
+                    return Err("cleanup run missing during failure update".to_string());
+                }
+            }
+        };
+
+        let mut remaining_bytes = MAX_BYTES;
+        let mut remaining_files = MAX_FILES;
+        let mut items = Vec::with_capacity(initial_run.targets.len());
+
+        for target in &initial_run.targets {
+            let mut item = CleanupRunItem {
+                runtime: target.runtime.clone(),
+                name: target.name.clone(),
+                project: target.project.clone(),
+                status: "skipped".to_string(),
+                reason: String::new(),
+                instance_id: String::new(),
+                candidate_files: 0,
+                candidate_bytes: 0,
+                deleted_files: 0,
+                unlinked_bytes: 0,
+                freed_bytes: 0,
+                skipped: 0,
+                errors: 0,
+                bounded: false,
+                extra_fields: BTreeMap::new(),
+            };
+            match verify_target_root_for_cleanup(target, host_root_override) {
+                Ok((root, identity)) => {
+                    let before_avail = disk_usage_for_path(&root);
+                    match sweep_cleanup_root(
+                        &root,
+                        execute,
+                        policy.retention_days,
+                        remaining_bytes,
+                        remaining_files,
+                        now_epoch,
+                        &busy_inodes,
+                    ) {
+                        Ok(sweep) => {
+                            let after_avail = if execute {
+                                disk_usage_for_path(&root)
+                            } else {
+                                before_avail
+                            };
+                            let freed = match (before_avail, after_avail) {
+                                (Some(b), Some(a)) if execute => {
+                                    a.available_bytes.saturating_sub(b.available_bytes)
+                                }
+                                _ => 0,
+                            };
+                            item.status = sweep.status;
+                            item.instance_id = identity;
+                            item.candidate_files = sweep.candidate_files;
+                            item.candidate_bytes = sweep.candidate_bytes;
+                            item.deleted_files = sweep.deleted_files;
+                            item.unlinked_bytes = sweep.unlinked_bytes;
+                            item.freed_bytes = freed;
+                            item.skipped = sweep.skipped;
+                            item.errors = sweep.errors;
+                            item.bounded = sweep.bounded;
+                            remaining_bytes = remaining_bytes.saturating_sub(sweep.unlinked_bytes);
+                            remaining_files = remaining_files.saturating_sub(sweep.deleted_files);
+                        }
+                        Err(_) => {
+                            item.reason = "identity, mount, evidence or filesystem safety check unavailable"
+                                .to_string();
+                        }
+                    }
+                }
+                Err(_) => {
+                    item.reason =
+                        "identity, mount, evidence or filesystem safety check unavailable"
+                            .to_string();
+                }
+            }
+            items.push(item);
+        }
+
+        let has_partial = items
+            .iter()
+            .any(|i| matches!(i.status.as_str(), "skipped" | "partial"));
+        let final_status = if has_partial {
+            "partial"
+        } else if execute {
+            "succeeded"
+        } else {
+            "scanned"
+        };
+
+        let mut st = read_cleanup_journal_readonly(journal_path)?;
+        let fin_epoch = now_unix_secs().max(now_epoch);
+        let Some(rec) = st.runs.iter_mut().find(|r| r.run_id == run_id) else {
+            return Err("cleanup run record missing during finalization".to_string());
+        };
+        rec.items = items;
+        rec.status = final_status.to_string();
+        rec.finished_at = Some(fin_epoch);
+        let finalized = rec.clone();
+        save_cleanup_journal(journal_path, &mut st)?;
+        Ok(finalized)
+    }
+
+    pub fn mark_cleanup_run_delivered(journal_path: &Path, run_id: &str) -> Result<(), String> {
+        let mut st = read_cleanup_journal_readonly(journal_path)?;
+        if let Some(rec) = st.runs.iter_mut().find(|r| r.run_id == run_id) {
+            rec.delivered = true;
+            save_cleanup_journal(journal_path, &mut st)?;
+        }
+        Ok(())
+    }
+
+    /// Stage an automatic scheduled cleanup run for due targets (`now - last_attempt >= interval_hours * 3600`).
+    /// Returns `Ok(Some(run_id))` when a new automatic run was staged, or `Ok(None)` when none are due.
+    pub fn stage_automatic_cleanup(
+        journal_path: &Path,
+        policy: &CleanupPolicy,
+        node_id: &str,
+        containers: &[CleanupContainerCandidate],
+        quarantined_identities: &BTreeSet<String>,
+        now_epoch: i64,
+    ) -> Result<Option<String>, String> {
+        if !policy.enabled || node_id.is_empty() {
+            return Ok(None);
+        }
+        let mut st = read_cleanup_journal_readonly(journal_path)?;
+        if st.runs.iter().any(|r| r.status == "running") {
+            return Ok(None);
+        }
+        let interval_secs = (policy.interval_hours as f64) * 3600.0;
+        let now_f = now_epoch as f64;
+        let due: Vec<CleanupTarget> = select_cleanup_targets(policy, containers)
+            .into_iter()
+            .filter(|t| !target_quarantined(t, quarantined_identities))
+            .filter(|t| {
+                let last = st.attempts.get(&cleanup_cooldown_key(t)).copied().unwrap_or(0.0);
+                now_f - last >= interval_secs
+            })
+            .take(MAX_TARGETS_PER_RUN)
+            .collect();
+        if due.is_empty() {
+            return Ok(None);
+        }
+        let run_id = format!("{:032x}", (now_epoch as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let rec = CleanupRunRecord {
+            run_id: run_id.clone(),
+            action_id: 0,
+            node_id: node_id.to_string(),
+            mode: "clean".to_string(),
+            automatic: true,
+            started_at: now_epoch,
+            finished_at: None,
+            status: "running".to_string(),
+            targets: due.clone(),
+            items: Vec::new(),
+            plan_id: String::new(),
+            delivered: false,
+            error: String::new(),
+        };
+        for t in &due {
+            st.attempts.insert(cleanup_cooldown_key(t), now_f);
+        }
+        st.runs.push(rec);
+        save_cleanup_journal(journal_path, &mut st)?;
+        Ok(Some(run_id))
     }
 }
 
@@ -6977,6 +7367,83 @@ mod tests {
         assert_eq!(selected.len(), 4);
         assert_eq!(selected[0].entry_type, "user_notice");
         assert!(selected[3].historical);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_readonly_journal_and_finalize_run() {
+        use disk_cleanup::{
+            execute_and_finalize_cleanup_run, execute_disk_cleanup_action,
+            mark_cleanup_run_delivered, read_cleanup_journal_readonly, CleanupActionContext,
+            CleanupPolicy, DAY_SECONDS,
+        };
+        let dir = temp_dir("cleanup_finalize");
+        let root = dir.join("mock_host");
+        let apt_dir = root.join("var/cache/apt/archives");
+        fs::create_dir_all(&apt_dir).unwrap();
+        let pkg = apt_dir.join("old.deb");
+        fs::write(&pkg, b"deb-bytes").unwrap();
+
+        let journal_path = dir.join("disk-cleanup.json");
+        let now_epoch = super::util::now_unix_secs() + 10 * DAY_SECONDS;
+        let ctx = CleanupActionContext {
+            host_available: true,
+            node_id: "node-1".to_string(),
+            now_epoch,
+            journal_path: journal_path.clone(),
+            policy: CleanupPolicy {
+                enabled: true,
+                include_containers: false,
+                retention_days: 14,
+                interval_hours: 24,
+            },
+            ..CleanupActionContext::default()
+        };
+
+        let scan_action = r#"{"id":101,"action_type":"disk_cleanup_scan","params":{"expected_node_id":"node-1"}}"#;
+        let scan_stage = execute_disk_cleanup_action(scan_action, &ctx);
+        assert!(scan_stage.ok);
+        assert_eq!(scan_stage.status, "running");
+
+        // Readonly inspect must preserve "running" (never turn it into "interrupted")
+        let ro = read_cleanup_journal_readonly(&journal_path).unwrap();
+        assert_eq!(ro.runs.len(), 1);
+        assert_eq!(ro.runs[0].status, "running");
+
+        // Finalize scan against mock root
+        let scanned = execute_and_finalize_cleanup_run(
+            &journal_path,
+            "action-101",
+            &ctx.policy,
+            Some(&root),
+            now_epoch,
+        )
+        .unwrap();
+        assert_eq!(scanned.status, "scanned");
+        assert_eq!(scanned.items.len(), 1);
+        assert_eq!(scanned.items[0].candidate_files, 1);
+        assert!(pkg.exists());
+
+        // Execute confirmed cleanup and mark delivered
+        let exec_action = r#"{"id":102,"action_type":"disk_cleanup_execute","params":{"expected_node_id":"node-1","confirmed":true,"plan_id":"action-101"}}"#;
+        let exec_stage = execute_disk_cleanup_action(exec_action, &ctx);
+        assert!(exec_stage.ok);
+        let cleaned = execute_and_finalize_cleanup_run(
+            &journal_path,
+            "action-102",
+            &ctx.policy,
+            Some(&root),
+            now_epoch,
+        )
+        .unwrap();
+        assert_eq!(cleaned.status, "succeeded");
+        assert_eq!(cleaned.items[0].deleted_files, 1);
+        assert!(!pkg.exists());
+
+        mark_cleanup_run_delivered(&journal_path, "action-102").unwrap();
+        let after = read_cleanup_journal_readonly(&journal_path).unwrap();
+        assert!(after.runs.iter().find(|r| r.run_id == "action-102").unwrap().delivered);
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -2101,7 +2101,7 @@ pub fn verify_container_namespace<R: TcRunner>(
     let mut target_found = false;
     for peer in peers {
         let is_target = peer.runtime == item.runtime
-            && peer.project == item.project
+            && project_matches(&peer.runtime, &peer.project, &item.project)
             && if peer.runtime == "incus" || peer.runtime == "runman" {
                 peer.container_id == item.container_id
             } else {
@@ -2203,6 +2203,18 @@ fn parse_link_indices(json_str: &str) -> Option<(u32, u32)> {
     Some((ifindex, peer_index))
 }
 
+fn canonical_project<'a>(runtime: &str, project: &'a str) -> &'a str {
+    if runtime == "podman" && project.is_empty() {
+        "default"
+    } else {
+        project
+    }
+}
+
+fn project_matches(runtime: &str, left: &str, right: &str) -> bool {
+    canonical_project(runtime, left) == canonical_project(runtime, right)
+}
+
 pub fn resolve_entry<R: TcRunner>(
     host_id: &str,
     item: &NormalizedLimit,
@@ -2243,7 +2255,7 @@ pub fn resolve_entry<R: TcRunner>(
                 c.id.as_str()
             };
             c.runtime == item.runtime
-                && c.project == item.project
+                && project_matches(&c.runtime, &c.project, &item.project)
                 && c.name == item.container_name
                 && cid == item.container_id
         })
@@ -3651,7 +3663,7 @@ pub fn merge_automatic_limits(
             by_identity.insert(
                 (
                     item.runtime.clone(),
-                    item.project.clone(),
+                    canonical_project(&item.runtime, &item.project).to_string(),
                     item.container_name.clone(),
                     item.container_id.clone(),
                 ),
@@ -3662,7 +3674,7 @@ pub fn merge_automatic_limits(
     for automatic in automatic_limits {
         let id = (
             automatic.runtime.clone(),
-            automatic.project.clone(),
+            canonical_project(&automatic.runtime, &automatic.project).to_string(),
             automatic.container_name.clone(),
             automatic.container_id.clone(),
         );
@@ -6956,6 +6968,137 @@ filter protocol all pref 49152 matchall chain 0 handle 0x6f3bc15e \n\
         assert_eq!(res.state, "rejected");
         assert!(default_state_path().to_string_lossy().contains("manual-bandwidth-limits.json"));
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_podman_default_project_matches_empty_peer_project() {
+        let mut runner = MockRunner::new(1000);
+        let podman_id = "a".repeat(64);
+        let policy_json = format!(
+            r#"{{"schema":1,"host_id":"{HOST}","expected_node_id":"{NODE}","revision":1,"limits":[{{"scope":"container","runtime":"podman","project":"default","container_name":"web","container_id":"{podman_id}","upload_mbps":25,"download_mbps":0}}]}}"#
+        );
+        let containers = vec![ContainerInput {
+            runtime: "podman".into(),
+            runtime_bin: "podman".into(),
+            project: "default".into(),
+            name: "web".into(),
+            id: podman_id.clone(),
+            instance_id: String::new(),
+            status: "running".into(),
+            pid: Some(200),
+        }];
+        let handle = filter_handle(
+            &format!("{HOST}:container:podman\0default\0web\0{podman_id}"),
+            Direction::Upload,
+        );
+        let cid = podman_id.clone();
+        let added = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let added_cb = added.clone();
+        runner.handler = Some(Box::new(move |args, _| {
+            if args == ["podman", "ps", "--no-trunc", "--format", "{{.ID}}"] {
+                return (0, cid.clone());
+            }
+            if args == ["podman", "inspect", "--format", "{{.Id}}|{{.State.Pid}}", &cid] {
+                return (0, format!("{cid}|200"));
+            }
+            if args
+                == [
+                    "nsenter",
+                    "--target",
+                    "200",
+                    "--net",
+                    "ip",
+                    "-j",
+                    "route",
+                    "show",
+                    "default",
+                ]
+            {
+                return (0, r#"[{"dev":"eth0"}]"#.into());
+            }
+            if args
+                == [
+                    "nsenter",
+                    "--target",
+                    "200",
+                    "--net",
+                    "ip",
+                    "-j",
+                    "link",
+                    "show",
+                    "dev",
+                    "eth0",
+                ]
+            {
+                return (0, r#"[{"ifname":"eth0","ifindex":2,"link_index":9}]"#.into());
+            }
+            if args == ["nsenter", "--target", "200", "--net", "tc", "qdisc", "show", "dev", "eth0"]
+            {
+                return (0, "qdisc clsact ffff: parent ffff:fff1".into());
+            }
+            if args
+                == [
+                    "nsenter",
+                    "--target",
+                    "200",
+                    "--net",
+                    "tc",
+                    "filter",
+                    "show",
+                    "dev",
+                    "eth0",
+                    "egress",
+                ]
+            {
+                if added_cb.load(Ordering::SeqCst) {
+                    return (
+                        0,
+                        format!(
+                            "filter protocol all pref 49151 matchall handle {handle}\n  police 0x1 rate 25Mbit burst 256Kb"
+                        ),
+                    );
+                }
+                return (0, String::new());
+            }
+            if args.starts_with(&[
+                "nsenter",
+                "--target",
+                "200",
+                "--net",
+                "tc",
+                "filter",
+                "add",
+            ]) {
+                added_cb.store(true, Ordering::SeqCst);
+                return (0, String::new());
+            }
+            (1, format!("unexpected: {args:?}"))
+        }));
+        runner.bins.insert("podman".into(), "podman".into());
+        runner.netns.insert(1, Ok(100));
+        runner.netns.insert(200, Ok(200));
+        runner
+            .proc_stats
+            .insert(200, Ok("200 (podman) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 20 0 1 0 5555 0 0".into()));
+
+        let dir = temp_dir("podman_proj_match");
+        let state_path = dir.join("state.json");
+        let status = reconcile_with_runner(
+            &ReconcileRequest {
+                policy_json: &policy_json,
+                host_id: HOST,
+                node_id: NODE,
+                containers: &containers,
+                state_path: &state_path,
+                traffic_samples: &[],
+                sample_at: 1000,
+                sample_interval_seconds: 60,
+                bridge_inventory: &[],
+            },
+            &mut runner,
+        );
+        assert_eq!(status.state, "applied", "status: {:?}", status);
         let _ = fs::remove_dir_all(&dir);
     }
 }

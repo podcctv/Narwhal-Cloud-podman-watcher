@@ -415,6 +415,14 @@ pub struct AgentState {
     access_log_states: HashMap<String, AccessLogCursor>,
     host_audit_state: host_audit::HostAuditState,
     operations_services: Vec<ServiceProbeSpec>,
+    bandwidth_state_path: PathBuf,
+    cleanup_journal_path: PathBuf,
+    cleanup_policy: app_guard::disk_cleanup::CleanupPolicy,
+    disk_cleanup_running: std::sync::Arc<AtomicBool>,
+    disk_cleanup_recovered: bool,
+    last_containers: Vec<ContainerSample>,
+    last_traffic_samples: Vec<tc_guard::TrafficSampleInput>,
+    last_sample_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +508,14 @@ impl AgentState {
             access_log_states: HashMap::new(),
             host_audit_state: host_audit::HostAuditState::default(),
             operations_services: Vec::new(),
+            bandwidth_state_path: tc_guard::default_state_path(),
+            cleanup_journal_path: PathBuf::from(app_guard::disk_cleanup::DEFAULT_STATE_PATH),
+            cleanup_policy: app_guard::disk_cleanup::CleanupPolicy::default(),
+            disk_cleanup_running: std::sync::Arc::new(AtomicBool::new(false)),
+            disk_cleanup_recovered: false,
+            last_containers: Vec::new(),
+            last_traffic_samples: Vec::new(),
+            last_sample_interval_secs: config.report_interval.max(1),
         }
     }
 
@@ -604,20 +620,40 @@ impl AgentState {
         let socket_abuse_input = aggregate_socket_abuse_from_containers(containers, timestamp);
         let socket_verdict = evaluate_socket_abuse(&socket_abuse_input);
         let socket_abuse_json = socket_verdict.to_json();
-        let security_alerts_json = build_security_alerts_json(&socket_verdict, &suspicious_findings);
+        let security_alerts_base = build_security_alerts_json(&socket_verdict, &suspicious_findings);
+        let incus_report = collect_incus_runtime_health(config, timestamp);
+        let security_alerts_json = match incus_report.as_ref() {
+            Some(incus) => merge_json_arrays(&security_alerts_base, &incus.alerts_json),
+            None => security_alerts_base,
+        };
         let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
         let ipv4_ok = host_ip_family_available(false);
         let ipv6_ok = host_ip_family_available(true);
         let (runtime_inventory_json, runtime_empty) = detect_runtime_inventory_with_empty(containers);
-        let ops_health_json = build_operations_health_json(
+        let ops_health_base = build_operations_health_json(
             config.security_monitor_enabled,
             runtime_empty,
             containers.len(),
             &access_stats,
         );
+        let (ops_health_json, ops_capabilities_json, incus_runtime_field) = match incus_report {
+            Some(incus) => (
+                append_json_object_to_array(&ops_health_base, &incus.operations_health_json),
+                "[\"operations-v1\",\"agent-rust-v2\",\"service-probes\",\"log-discovery\",\"public-tcp-v2\",\"incus-runtime-health-v1\"]",
+                format!(",\"incus_runtime\":{}", incus.snapshot_json),
+            ),
+            None => (
+                ops_health_base,
+                "[\"operations-v1\",\"agent-rust-v2\",\"service-probes\",\"log-discovery\",\"public-tcp-v2\"]",
+                String::new(),
+            ),
+        };
         let ops_arch = normalize_arch(std::env::consts::ARCH);
         let upgrade_result_json = read_managed_upgrade_result_json(Path::new(MANAGED_UPDATE_RESULT_FILE));
         let ops_services_json = probe_operations_services_json(&self.operations_services, timestamp);
+        let ops_disk_cleanup_json = self.build_disk_cleanup_summary_json(timestamp);
+        let manual_bw_json = tc_guard::last_status_json(&self.bandwidth_state_path);
+        self.last_containers = containers.to_vec();
 
         let agent_ver = resolved_agent_version();
         let host_fw_json =
@@ -634,7 +670,7 @@ impl AgentState {
         let mut out = String::with_capacity(8192);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":[\"operations-v1\",\"agent-rust-v2\",\"service-probes\",\"log-discovery\",\"public-tcp-v2\"],\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"manual_bandwidth_limits\":{}{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"disk_cleanup\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":{},\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -666,6 +702,8 @@ impl AgentState {
             rfw_service_health_json,
             host_fw_json,
             host_audit_json,
+            manual_bw_json,
+            incus_runtime_field,
             conntrack_json,
             psi_snapshot_json,
             cpu_out.multi_container_contention,
@@ -681,9 +719,11 @@ impl AgentState {
             ops_health_json,
             runtime_inventory_json,
             ops_services_json,
+            ops_disk_cleanup_json,
             json_escape(ops_arch),
             effective_interval,
             upgrade_result_json,
+            ops_capabilities_json,
             cpu_out.actions.len(),
             mem_actions.len(),
             io_actions.len(),
@@ -878,6 +918,7 @@ impl AgentState {
         let mut total_tx_pps = 0.0;
         let mut next_net: HashMap<String, (u64, u64, u64, u64)> =
             HashMap::with_capacity(containers.len());
+        let mut traffic_samples = Vec::with_capacity(containers.len());
 
         for c in containers {
             let key = container_guard_key(c);
@@ -899,18 +940,41 @@ impl AgentState {
             let rx_packets = net.get("rx_packets").and_then(|v| v.as_u64()).unwrap_or(0);
             let tx_packets = net.get("tx_packets").and_then(|v| v.as_u64()).unwrap_or(0);
 
+            let mut net_rx_bps = None;
+            let mut net_tx_bps = None;
             if let Some(dt_secs) = dt.filter(|d| *d > 0.0) {
                 if let Some(&(p_rb, p_tb, p_rp, p_tp)) = self.prev_container_net.get(&key) {
-                    total_rx_bps += rx_bytes.saturating_sub(p_rb) as f64 / dt_secs;
-                    total_tx_bps += tx_bytes.saturating_sub(p_tb) as f64 / dt_secs;
+                    let c_rx_bps = rx_bytes.saturating_sub(p_rb) as f64 / dt_secs;
+                    let c_tx_bps = tx_bytes.saturating_sub(p_tb) as f64 / dt_secs;
+                    total_rx_bps += c_rx_bps;
+                    total_tx_bps += c_tx_bps;
                     total_rx_pps += rx_packets.saturating_sub(p_rp) as f64 / dt_secs;
                     total_tx_pps += tx_packets.saturating_sub(p_tp) as f64 / dt_secs;
+                    net_rx_bps = Some(c_rx_bps);
+                    net_tx_bps = Some(c_tx_bps);
                 }
             }
+            traffic_samples.push(tc_guard::TrafficSampleInput {
+                runtime: c.runtime.clone(),
+                project: c.project.clone(),
+                container_name: c.name.clone(),
+                container_id: if c.runtime == "runman" {
+                    c.instance_id.clone()
+                } else {
+                    c.id.clone()
+                },
+                traffic_counters_available: net_rx_bps.is_some() && net_tx_bps.is_some(),
+                net_tx_bps,
+                net_rx_bps,
+            });
             next_net.insert(key, (rx_bytes, tx_bytes, rx_packets, tx_packets));
         }
 
         self.prev_container_net = next_net;
+        self.last_traffic_samples = traffic_samples;
+        if let Some(dt_secs) = dt.filter(|d| *d > 0.0) {
+            self.last_sample_interval_secs = dt_secs.round().max(1.0) as u64;
+        }
         (total_rx_bps, total_tx_bps, total_rx_pps, total_tx_pps)
     }
 }
@@ -1993,6 +2057,203 @@ impl AgentState {
         }
         self.operations_services = parsed;
     }
+
+    pub fn configure_operations_bandwidth_and_cleanup(
+        &mut self,
+        poll_body: &str,
+        config: &Config,
+    ) {
+        let Ok(root) = actions::parse_json(poll_body) else {
+            return;
+        };
+        let Some(ops) = root.get("operations").and_then(actions::JsonValue::as_object) else {
+            return;
+        };
+        if let Some(dc_val) = ops.get("disk_cleanup") {
+            if let Ok(policy) = app_guard::disk_cleanup::validate_cleanup_policy(
+                &dc_val.to_json(),
+                Some(config.node_id.as_str()),
+            ) {
+                self.cleanup_policy = policy;
+            }
+        }
+        if let Some(bw_val) = ops.get("bandwidth_limits") {
+            if bw_val.as_object().is_some() {
+                let now = current_unix_ts();
+                let bridge_inventory =
+                    collect_tc_bridge_inventory(now, &self.last_containers);
+                let _ = tc_guard::reconcile_live_samples(
+                    &bw_val.to_json(),
+                    &config.host_id,
+                    &config.node_id,
+                    &self.last_containers,
+                    &self.bandwidth_state_path,
+                    &self.last_traffic_samples,
+                    now,
+                    self.last_sample_interval_secs.max(1),
+                    &bridge_inventory,
+                );
+            }
+        }
+    }
+
+    fn build_disk_cleanup_summary_json(&self, _timestamp: u64) -> String {
+        let available = app_guard::disk_cleanup::live_disk_cleanup_available();
+        let disk_json = if available {
+            app_guard::disk_cleanup::host_disk_usage_json(Path::new("/"))
+        } else {
+            "{}".to_string()
+        };
+        let running = self.disk_cleanup_running.load(Ordering::SeqCst);
+        let runs_json = if available || self.cleanup_journal_path != Path::new(app_guard::disk_cleanup::DEFAULT_STATE_PATH) {
+            match app_guard::disk_cleanup::read_cleanup_journal_readonly(&self.cleanup_journal_path)
+            {
+                Ok(journal) => {
+                    let start = journal.runs.len().saturating_sub(10);
+                    let encoded: Vec<String> = journal.runs[start..]
+                        .iter()
+                        .map(app_guard::disk_cleanup::CleanupRunRecord::to_json)
+                        .collect();
+                    format!("[{}]", encoded.join(","))
+                }
+                Err(_) => "[]".to_string(),
+            }
+        } else {
+            "[]".to_string()
+        };
+        format!(
+            "{{\"available\":{},\"policy\":{},\"disk\":{},\"running\":{},\"runs\":{}}}",
+            available,
+            self.cleanup_policy.to_json(),
+            disk_json,
+            running,
+            runs_json
+        )
+    }
+}
+
+fn collect_tc_bridge_inventory(
+    timestamp: u64,
+    containers: &[ContainerSample],
+) -> Vec<tc_guard::BridgeInterfaceInput> {
+    let raw = host_audit::collect_interface_inventory_json(timestamp, containers);
+    let Ok(val) = actions::parse_json(&raw) else {
+        return Vec::new();
+    };
+    let Some(ifaces) = val.get("interfaces").and_then(actions::JsonValue::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(ifaces.len());
+    for item in ifaces {
+        let Some(name) = item.get("name").and_then(actions::JsonValue::as_str) else {
+            continue;
+        };
+        let kind = item
+            .get("kind")
+            .and_then(actions::JsonValue::as_str)
+            .unwrap_or("")
+            .to_string();
+        let runtimes = item
+            .get("runtimes")
+            .and_then(actions::JsonValue::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(tc_guard::BridgeInterfaceInput {
+            name: name.to_string(),
+            kind,
+            runtimes,
+        });
+    }
+    out
+}
+
+fn collect_incus_runtime_health(
+    config: &Config,
+    timestamp: u64,
+) -> Option<app_guard::incus_health::IncusSnapshotReport> {
+    let runtimes_lower = config.container_runtimes.trim().to_ascii_lowercase();
+    let requested: BTreeSet<&str> = runtimes_lower
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let incus_enabled = requested.is_empty()
+        || requested.contains("auto")
+        || requested.contains("incus");
+    if !incus_enabled {
+        return None;
+    }
+    let auto_only = requested.is_empty() || requested.contains("auto");
+    if auto_only && !binary_exists_in_path("incus") {
+        return None;
+    }
+    let proj = if config.incus_project.trim().is_empty() {
+        "all"
+    } else {
+        config.incus_project.trim()
+    };
+    let all_projects = matches!(proj.to_ascii_lowercase().as_str(), "all" | "*");
+    let inst_args: &[&str] = if all_projects {
+        &["list", "--all-projects", "type=container", "--format=json"]
+    } else {
+        &["list", "type=container", "--format=json"]
+    };
+    let op_args: &[&str] = if all_projects {
+        &["operation", "list", "--all-projects", "--format=json"]
+    } else {
+        &["operation", "list", "--format=json"]
+    };
+    let cfg = app_guard::incus_health::IncusHealthConfig::from_env();
+    let inst_scan = actions::run_incus_cli_scan(proj, inst_args, cfg.command_timeout_seconds);
+    let op_scan = actions::run_incus_cli_scan(proj, op_args, cfg.command_timeout_seconds);
+    Some(app_guard::incus_health::build_incus_snapshot(
+        &inst_scan,
+        &op_scan,
+        proj,
+        timestamp as f64,
+        &cfg,
+    ))
+}
+
+fn strip_json_array_inner(arr_json: &str) -> &str {
+    let trimmed = arr_json.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() >= 2 {
+        trimmed[1..trimmed.len() - 1].trim()
+    } else {
+        ""
+    }
+}
+
+fn merge_json_arrays(first: &str, second: &str) -> String {
+    let a = strip_json_array_inner(first);
+    let b = strip_json_array_inner(second);
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => "[]".to_string(),
+        (false, true) => format!("[{a}]"),
+        (true, false) => format!("[{b}]"),
+        (false, false) => format!("[{a},{b}]"),
+    }
+}
+
+fn append_json_object_to_array(arr_json: &str, obj_json: &str) -> String {
+    let inner = strip_json_array_inner(arr_json);
+    let item = obj_json.trim();
+    if item.is_empty() {
+        return if inner.is_empty() {
+            "[]".to_string()
+        } else {
+            format!("[{inner}]")
+        };
+    }
+    if inner.is_empty() {
+        format!("[{item}]")
+    } else {
+        format!("[{inner},{item}]")
+    }
 }
 
 pub fn extract_proc_infos_from_snapshot(proc_snapshot_json: &str) -> Vec<ProcInfo> {
@@ -2370,11 +2631,31 @@ pub fn poll_actions_with_state(
     let resp = client.post_json_signed_verified("/api/v1/actions/poll", poll_body.as_bytes())?;
     let body_str = String::from_utf8_lossy(&resp.body);
     state.configure_operations_services(&body_str);
+    state.configure_operations_bandwidth_and_cleanup(&body_str, config);
     gfw_probe::handle_poll_gfw_probe(&body_str, &config.host_id, &config.node_id, client);
+
+    if !state.disk_cleanup_recovered
+        && app_guard::disk_cleanup::live_disk_cleanup_available()
+        && !state.disk_cleanup_running.load(Ordering::SeqCst)
+    {
+        state.disk_cleanup_recovered = true;
+        if let Ok(mut recovered) = app_guard::disk_cleanup::load_cleanup_journal(
+            &state.cleanup_journal_path,
+            current_unix_ts() as i64,
+        ) {
+            let _ = app_guard::disk_cleanup::save_cleanup_journal(
+                &state.cleanup_journal_path,
+                &mut recovered,
+            );
+        }
+    }
 
     let requests = match actions::parse_poll_actions(&body_str) {
         Ok(reqs) => reqs,
-        Err(_) => return Ok((0, false, false)),
+        Err(_) => {
+            deliver_finished_cleanup_runs(client, config, state)?;
+            return Ok((0, false, false));
+        }
     };
     let count = requests.len();
     let env_path = std::env::var("NARWHAL_CLIENT_ENV_FILE")
@@ -2382,22 +2663,149 @@ pub fn poll_actions_with_state(
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_ENV_FILE));
+    let cleanup_containers: Vec<app_guard::disk_cleanup::CleanupContainerCandidate> = state
+        .last_containers
+        .iter()
+        .map(|c| {
+            let pid_start_ticks = c
+                .pid
+                .filter(|&p| p > 1)
+                .and_then(|p| read_proc_start_ticks(&state.proc_root, p))
+                .unwrap_or_default();
+            app_guard::disk_cleanup::CleanupContainerCandidate {
+                runtime: c.runtime.clone(),
+                runtime_bin: c.runtime_bin.clone(),
+                project: c.project.clone(),
+                name: c.name.clone(),
+                id: c.id.clone(),
+                stable_id: c.stable_id.clone(),
+                instance_id: c.instance_id.clone(),
+                pid: c.pid.map(|p| p.to_string()).unwrap_or_default(),
+                pid_start_ticks,
+            }
+        })
+        .collect();
     let mut ctx = actions::ActionContext {
         node_id: config.node_id.clone(),
         env_file: env_path,
         configured_access_logs: config.security_access_log_paths.clone(),
         rescan_requested: false,
         restart_required: false,
+        cleanup_journal_path: state.cleanup_journal_path.clone(),
+        cleanup_policy: state.cleanup_policy,
+        cleanup_containers,
+        disk_cleanup_running: state.disk_cleanup_running.clone(),
+        ..Default::default()
     };
 
     for req in &requests {
         let receipt = actions::execute_action_with_context(req, &mut ctx);
         let _ = actions::submit_action_receipt(client, &config.host_id, &config.node_id, &receipt)?;
     }
+    deliver_finished_cleanup_runs(client, config, state)?;
+    maybe_schedule_automatic_disk_cleanup(config, state, &ctx.cleanup_containers);
     if ctx.rescan_requested {
         state.host_audit_state.rescan_requested_at = current_unix_ts();
     }
     Ok((count, ctx.rescan_requested, ctx.restart_required))
+}
+
+fn maybe_schedule_automatic_disk_cleanup(
+    config: &Config,
+    state: &AgentState,
+    containers: &[app_guard::disk_cleanup::CleanupContainerCandidate],
+) {
+    if !state.cleanup_policy.enabled
+        || config.node_id.is_empty()
+        || !app_guard::disk_cleanup::live_disk_cleanup_available()
+        || state.disk_cleanup_running.load(Ordering::SeqCst)
+    {
+        return;
+    }
+    let Ok(quarantined) = actions::read_quarantined_identities(None) else {
+        return;
+    };
+    let now_epoch = current_unix_ts() as i64;
+    let Ok(Some(run_id)) = app_guard::disk_cleanup::stage_automatic_cleanup(
+        &state.cleanup_journal_path,
+        &state.cleanup_policy,
+        &config.node_id,
+        containers,
+        &quarantined,
+        now_epoch,
+    ) else {
+        return;
+    };
+    let journal_path = state.cleanup_journal_path.clone();
+    let policy = state.cleanup_policy;
+    let flag = state.disk_cleanup_running.clone();
+    flag.store(true, Ordering::SeqCst);
+    thread::spawn(move || {
+        let _ = app_guard::disk_cleanup::execute_and_finalize_cleanup_run(
+            &journal_path,
+            &run_id,
+            &policy,
+            None,
+            now_epoch,
+        );
+        flag.store(false, Ordering::SeqCst);
+    });
+}
+
+fn read_proc_start_ticks(proc_root: &Path, pid: u32) -> Option<String> {
+    let raw = fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    let (_, after) = raw.rsplit_once(')')?;
+    after.split_whitespace().nth(19).map(str::to_string)
+}
+
+fn deliver_finished_cleanup_runs(
+    client: &TransportClient,
+    config: &Config,
+    state: &AgentState,
+) -> Result<(), TransportError> {
+    let custom_journal =
+        state.cleanup_journal_path != Path::new(app_guard::disk_cleanup::DEFAULT_STATE_PATH);
+    if !app_guard::disk_cleanup::live_disk_cleanup_available() && !custom_journal {
+        return Ok(());
+    }
+    let Ok(journal) = app_guard::disk_cleanup::read_cleanup_journal_readonly(&state.cleanup_journal_path)
+    else {
+        return Ok(());
+    };
+    for run in &journal.runs {
+        if run.action_id > 0
+            && !run.delivered
+            && run.node_id == config.node_id
+            && run.status != "running"
+        {
+            let action_type = if run.mode == "clean" {
+                "disk_cleanup_execute"
+            } else {
+                "disk_cleanup_scan"
+            };
+            let deleted: usize = run.items.iter().map(|i| i.deleted_files).sum();
+            let msg = format!(
+                "{{\"run_id\":\"{}\",\"status\":\"{}\",\"targets\":{},\"deleted_files\":{}}}",
+                json_escape(&run.run_id),
+                json_escape(&run.status),
+                run.items.len(),
+                deleted
+            );
+            let mut receipt = if matches!(run.status.as_str(), "scanned" | "succeeded") {
+                actions::ActionReceipt::succeeded(run.action_id, action_type, msg)
+            } else {
+                actions::ActionReceipt::failed(run.action_id, action_type, msg)
+            };
+            receipt = receipt.with_cleanup_run(run.to_json());
+            let _ = actions::submit_action_receipt(client, &config.host_id, &config.node_id, &receipt)?;
+            let _ = app_guard::disk_cleanup::mark_cleanup_run_delivered(
+                &state.cleanup_journal_path,
+                &run.run_id,
+            );
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub fn deterministic_jitter_secs(node_id: &str, host_id: &str, max_jitter: u64) -> u64 {
@@ -2436,6 +2844,7 @@ impl AgentState {
         let host_devices = self.sample_host_disks(dt);
         let io_samples = self.extract_container_io_samples(&containers, dt);
         let _ = self.compute_container_net_rates(&containers, dt);
+        self.last_containers = containers.clone();
 
         let allow_new_limits = config.security_monitor_enabled;
         let cpu_out = self
@@ -3265,6 +3674,49 @@ SECURITY_MONITOR_ENABLED=false
         assert!(svc_out.contains("\"status\":\"healthy\""));
         assert!(svc_out.contains("\"id\":\"svc-bad\""));
         assert!(svc_out.contains("\"status\":\"failed\""));
+
+        // Verify disk_cleanup & bandwidth_limits operations integration in report + poll
+        svc_state.bandwidth_state_path = dir.join("bw-state.json");
+        let bw_poll = r#"{"actions":[],"operations":{"disk_cleanup":{"enabled":true,"include_containers":false,"retention_days":21,"interval_hours":12,"node_id":"node-bw"},"bandwidth_limits":{"schema":1,"host_id":"host-bw","expected_node_id":"node-bw","revision":3,"limits":[]}}}"#;
+        let bw_cfg = Config {
+            host_id: "host-bw".to_string(),
+            node_id: "node-bw".to_string(),
+            container_runtimes: "none".to_string(),
+            ..Config::default()
+        };
+        svc_state.configure_operations_bandwidth_and_cleanup(bw_poll, &bw_cfg);
+        assert!(svc_state.cleanup_policy.enabled);
+        assert_eq!(svc_state.cleanup_policy.retention_days, 21);
+        assert_eq!(svc_state.cleanup_policy.interval_hours, 12);
+
+        // Empty node_id must fail closed back to disabled CleanupPolicy::default()
+        let empty_node_cfg = Config {
+            host_id: "host-bw".to_string(),
+            node_id: String::new(),
+            container_runtimes: "none".to_string(),
+            ..Config::default()
+        };
+        let sneaky_poll = r#"{"actions":[],"operations":{"disk_cleanup":{"enabled":true,"include_containers":true,"retention_days":30,"interval_hours":6,"node_id":""}}}"#;
+        svc_state.configure_operations_bandwidth_and_cleanup(sneaky_poll, &empty_node_cfg);
+        assert!(!svc_state.cleanup_policy.enabled);
+
+        // Re-apply valid policy and verify summary preserves "running" entry in custom journal without mutating
+        svc_state.cleanup_journal_path = dir.join("disk-cleanup.json");
+        fs::write(
+            &svc_state.cleanup_journal_path,
+            r#"{"runs":[{"run_id":"action-90","action_id":90,"node_id":"node-bw","mode":"scan","automatic":false,"started_at":1700000005,"status":"running","targets":[],"items":[],"plan_id":""}],"attempts":{}}"#,
+        )
+        .unwrap();
+        svc_state.configure_operations_bandwidth_and_cleanup(bw_poll, &bw_cfg);
+        let bw_report = svc_state.build_report_json_with_containers(&bw_cfg, 1_700_000_010, &[]);
+        assert!(bw_report.contains("\"manual_bandwidth_limits\":{"));
+        assert!(bw_report.contains("\"disk_cleanup\":{"));
+        assert!(bw_report.contains("\"retention_days\":21"));
+        assert!(bw_report.contains("\"disk\":{"));
+        assert!(bw_report.contains("\"running\":false"));
+        assert!(bw_report.contains("\"status\":\"running\""));
+        let ro_after = app_guard::disk_cleanup::read_cleanup_journal_readonly(&svc_state.cleanup_journal_path).unwrap();
+        assert_eq!(ro_after.runs[0].status, "running");
 
         let _ = fs::remove_dir_all(&dir);
     }
