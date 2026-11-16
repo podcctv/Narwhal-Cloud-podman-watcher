@@ -1,12 +1,20 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.8.29**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.9.1**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
 Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman-rust-v2-compatibility.md)。
 
 Runman 持续 CPU/内存过载重启策略：[docs/resource-overload-restart.md](docs/resource-overload-restart.md)。
+
+RFW 宿主机服务健康告警：[docs/rfw-service-health.md](docs/rfw-service-health.md)。
+
+### v1.9.1：宿主机 RFW 停止与重启循环告警
+
+- Python 与 Rust Agent 都会只读检查 `rfw.service`；识别服务停止、systemd 自动重启状态，以及短时间内反复重启。
+- 主机网络与安全遥测界面在对应主机卡片展示 RFW 状态；停止或疑似重启循环时显示处理卡片和检查命令。
+- 过期样本不作为当前告警，容器内 Agent 对宿主机服务返回“不可检查”；检查不会停止、启动或修改 RFW，也不触发额外外部通知。
 
 ### v1.8.28：Runman 连续资源过载后自动重启
 

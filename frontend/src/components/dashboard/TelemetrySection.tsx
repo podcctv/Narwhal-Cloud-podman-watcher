@@ -149,6 +149,8 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   const visibleTelemetry = filteredTelemetry.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const alertHostCount = telemetry.filter(item => !item.stale && item.enabled !== false
     && (item.sample_alerts || []).some(alert => alert.severity === 'warning' || alert.severity === 'critical')).length;
+  const rfwAlerts = telemetry.filter(item => !item.stale
+    && ['stopped', 'restart_loop'].includes(item.rfw_service_health?.status || ''));
   const gfwBlockedCount = telemetry.filter(item => item.gfw_reachability?.status === 'blocked' && !item.gfw_reachability.stale).length;
   const auditNeedsAttention = telemetry.filter(item => ['warning', 'critical'].includes(hostAuditLevel(item))).length;
   const auditUnknown = telemetry.filter(item => hostAuditLevel(item) === 'unknown').length;
@@ -165,6 +167,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300 font-medium">主机 {telemetry.length}</span>
             <span className={`rounded-full border px-2.5 py-1 font-medium ${alertHostCount ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-emerald-800 bg-emerald-950/40 text-emerald-200'}`}>采样告警 {alertHostCount}</span>
             <span className={`rounded-full border px-2.5 py-1 font-medium ${gfwBlockedCount ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>GFW 阻断 {gfwBlockedCount}</span>
+            <span className={`rounded-full border px-2.5 py-1 font-medium ${rfwAlerts.length ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>RFW 服务告警 {rfwAlerts.length}</span>
             <span className={`rounded-full border px-2.5 py-1 font-medium ${auditNeedsAttention ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>审计待处理 {auditNeedsAttention}</span>
             {auditUnknown > 0 && <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300 font-medium">审计未评估 {auditUnknown}</span>}
           </div>
@@ -175,6 +178,30 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         {expanded ? '收起明细' : `查看主机明细（${telemetry.length}）`}
       </button>
     </header>
+    {rfwAlerts.length > 0 && <div className="space-y-2 border-b border-red-900/60 bg-red-950/20 p-3 sm:p-4" aria-label="RFW 服务告警">
+      {rfwAlerts.map(host => {
+        const health = host.rfw_service_health || {};
+        const restarting = health.status === 'restart_loop';
+        const restartEvidence = health.reason === 'systemd_auto_restart'
+          ? 'systemd 当前处于自动重启状态。'
+          : Number(health.restarts_5m || 0) >= 3
+            ? `最近 5 分钟观察到 ${health.restarts_5m} 次重启。`
+            : `systemd 累计重启 ${health.restart_count ?? '未知'} 次，当前运行时长 ${health.active_seconds ?? '未知'} 秒。`;
+        return <article key={host.host_id} role="alert" className="rounded-lg border border-red-800/80 bg-slate-950/60 p-3 text-red-100">
+          <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+            <span aria-hidden="true">⚠</span>
+            <span className="break-all">{host.host_id}</span>
+            <span>· RFW {restarting ? '疑似陷入重启循环' : '服务已停止'}</span>
+          </div>
+          <p className="mt-1 text-xs leading-5 text-red-200/90">
+            {restarting
+              ? restartEvidence
+              : `rfw.service 当前为 ${health.active_state || 'inactive'} / ${health.sub_state || 'dead'}。`}
+            {' '}请先检查 <code className="rounded bg-black/30 px-1">systemctl status rfw.service</code> 与 <code className="rounded bg-black/30 px-1">journalctl -u rfw.service --since "-10 min"</code>，确认日志和启动失败原因后再处理。
+          </p>
+        </article>;
+      })}
+    </div>}
     {expanded && <div id="host-telemetry-details" className="space-y-3 p-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <label className="relative block w-full sm:max-w-sm">
@@ -188,6 +215,20 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const thresholds = t.thresholds || {};
         const events = t.sample_alerts || [];
         const hostAudit = t.host_audit;
+        const rfwHealth = t.rfw_service_health || {};
+        const rfwStatus = rfwHealth.status || 'unknown';
+        const rfwAlert = !t.stale && ['stopped', 'restart_loop'].includes(rfwStatus);
+        const rfwLevel: Level = t.stale ? 'unknown'
+          : rfwStatus === 'stopped' || rfwStatus === 'restart_loop' ? 'critical'
+          : rfwStatus === 'healthy' ? 'normal' : 'unknown';
+        const rfwStatusLabel = t.stale ? '数据过期'
+          : rfwStatus === 'healthy' ? '运行中'
+          : rfwStatus === 'stopped' ? '已停止'
+          : rfwStatus === 'restart_loop' ? '重启循环'
+          : rfwStatus === 'not_installed' ? '未安装'
+          : rfwStatus === 'not_applicable' ? 'Agent 容器'
+          : rfwStatus === 'unavailable' ? '无法检测'
+          : 'Agent 未上报';
         const vulnerabilityScan = hostAudit?.vulnerability_scan;
         const indicatorScan = hostAudit?.security_indicator_scan;
         const sshOnlyAudit = hostAudit?.scope === 'agent_container';
@@ -362,7 +403,11 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-red-400">删除</button>
             </div>
           </div>
-            <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5" aria-label="主机状态摘要">
+            {rfwAlert && <div role="alert" className="mb-3 rounded-lg border border-red-800/80 bg-red-950/30 p-3 text-xs text-red-100">
+              <p className="font-semibold">RFW {rfwStatus === 'restart_loop' ? '疑似无限重启' : '已停止运行'}</p>
+              <p className="mt-1 leading-5">检查 <code className="rounded bg-black/30 px-1">systemctl status rfw.service</code> 和最近 10 分钟的服务日志；确认根因后再恢复服务。Watcher 仅告警，不会自动重启。</p>
+            </div>}
+            <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6" aria-label="主机状态摘要">
             <SummaryTile title="网络峰值" level={peakLevel} status={labels[peakLevel]}>
               最高连接 {fmtNumber(connPeak, 0)} · 入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}
             </SummaryTile>
@@ -377,6 +422,16 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             </SummaryTile>
             <SummaryTile title="国内连通性" level={gfwLevel} status={gfwLabels[gfwStatus] || '待评估'}>
               {gfwTileDetail}
+            </SummaryTile>
+            <SummaryTile title="主机 RFW" level={rfwLevel} status={rfwStatusLabel}>
+              {t.stale ? '上报已过期，当前状态未知'
+                : rfwStatus === 'restart_loop' ? `5 分钟内重启 ${rfwHealth.restarts_5m ?? '≥3'} 次`
+                : rfwStatus === 'stopped' ? `${rfwHealth.active_state || 'inactive'} / ${rfwHealth.sub_state || 'dead'}`
+                : rfwStatus === 'healthy' ? `最近检查 ${shortAuditTime(rfwHealth.checked_at ?? undefined)}`
+                : rfwStatus === 'not_applicable' ? 'Agent 在容器内，无法检查宿主机服务'
+                : rfwStatus === 'not_installed' ? '未发现 rfw.service'
+                : rfwStatus === 'unavailable' ? 'systemd 状态不可读'
+                : '需升级 Agent 获取检查结果'}
             </SummaryTile>
           </div>
           <details className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">

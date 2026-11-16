@@ -417,6 +417,111 @@ def _audit_scope() -> str:
     return "host"
 
 
+def collect_rfw_service_health(now: Optional[int] = None) -> Dict[str, Any]:
+    """Return a bounded, read-only health snapshot for the host RFW service."""
+    global _STATE, _STATE_PATH
+    captured_at = int(time.time() if now is None else now)
+    result: Dict[str, Any] = {"status": "unavailable", "checked_at": captured_at}
+    if os.name != "posix":
+        result.update({"status": "not_applicable", "reason": "platform_unsupported"})
+        return result
+    if _audit_scope() == "agent_container":
+        result.update({"status": "not_applicable", "reason": "agent_container"})
+        return result
+
+    return_code, output = _run(
+        [
+            "systemctl", "show", "rfw.service", "--no-pager",
+            "--property=LoadState,ActiveState,SubState,NRestarts,ActiveEnterTimestampMonotonic",
+        ],
+        timeout=3.0,
+        max_output=4096,
+    )
+    if return_code != 0:
+        result["reason"] = "systemd_unavailable"
+        return result
+
+    properties: Dict[str, str] = {}
+    expected = {"LoadState", "ActiveState", "SubState", "NRestarts", "ActiveEnterTimestampMonotonic"}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in expected:
+            properties[key] = value.strip()[:128]
+    load_state = properties.get("LoadState", "")
+    active_state = properties.get("ActiveState", "")
+    sub_state = properties.get("SubState", "")
+    if load_state == "not-found":
+        result.update({"status": "not_installed", "active_state": active_state, "sub_state": sub_state, "reason": "unit_not_found"})
+        return result
+    if not load_state or not active_state or not sub_state:
+        result["reason"] = "systemd_properties_unavailable"
+        return result
+
+    restart_count = _safe_int(properties.get("NRestarts"), -1)
+    if restart_count < 0:
+        restart_count = 0
+    restart_count = min(restart_count, 2**31 - 1)
+    active_enter_us = _safe_int(properties.get("ActiveEnterTimestampMonotonic"), 0)
+    active_seconds: Optional[int] = None
+    if active_enter_us > 0:
+        try:
+            with open("/proc/uptime", "r", encoding="ascii") as handle:
+                uptime_seconds = float(handle.read(128).split()[0])
+            active_seconds = max(0, int(uptime_seconds - (active_enter_us / 1_000_000)))
+        except (OSError, ValueError, IndexError, OverflowError):
+            active_seconds = None
+
+    if not _STATE_PATH:
+        _STATE_PATH = _state_path()
+    if not _STATE:
+        _STATE = _load_state()
+    previous = _STATE.get("rfw_service_health_observation")
+    previous = previous if isinstance(previous, dict) else {}
+    boot_id = _boot_id()
+    same_boot = bool(boot_id and previous.get("boot_id") == boot_id)
+    previous_count = _safe_int(previous.get("restart_count"), -1)
+    history = previous.get("restart_events") if same_boot and isinstance(previous.get("restart_events"), list) else []
+    restart_events = [
+        _safe_int(event, 0)
+        for event in history
+        if _safe_int(event, 0) > 0 and 0 <= captured_at - _safe_int(event, 0) <= 300
+    ]
+    should_save_observation = bool(boot_id) and (not same_boot or previous_count < 0 or restart_count < previous_count)
+    if same_boot and previous_count >= 0 and restart_count >= previous_count:
+        new_restarts = min(restart_count - previous_count, 32)
+        if new_restarts:
+            restart_events.extend([captured_at] * new_restarts)
+            should_save_observation = True
+    restart_events = restart_events[-32:]
+    if should_save_observation:
+        _STATE["rfw_service_health_observation"] = {
+            "boot_id": boot_id[:64],
+            "restart_count": restart_count,
+            "restart_events": restart_events,
+        }
+        _save_state()
+
+    result.update({
+        "active_state": active_state,
+        "sub_state": sub_state,
+        "restart_count": restart_count,
+        "restarts_5m": len(restart_events),
+        "active_seconds": active_seconds,
+    })
+    if active_state in {"inactive", "failed", "deactivating"}:
+        result.update({"status": "stopped", "reason": "service_not_active"})
+    elif active_state == "activating" and sub_state == "auto-restart":
+        result.update({"status": "restart_loop", "reason": "systemd_auto_restart"})
+    elif active_state == "active":
+        if len(restart_events) >= 3 or (restart_count >= 3 and active_seconds is not None and active_seconds <= 180):
+            result.update({"status": "restart_loop", "reason": "repeated_restarts"})
+        else:
+            result.update({"status": "healthy", "reason": "service_active"})
+    else:
+        result.update({"status": "unknown", "reason": "transitional_service_state"})
+    return result
+
+
 def collect_snapshot(now: Optional[int] = None, ssh_only: bool = False) -> Dict[str, Any]:
     """Collect a change-detection baseline without reading secrets or key bodies."""
     captured_at = int(time.time() if now is None else now)

@@ -7032,6 +7032,8 @@ def _security_collection_capabilities(payload: Dict[str, Any]) -> List[str]:
         capabilities.append("RFW 规则读回")
     if firewall.get("events_api") == "ready":
         capabilities.append("RFW 事件")
+    if isinstance(payload.get("rfw_service_health"), dict):
+        capabilities.append("RFW 服务状态")
     sources = payload.get("access_sources") if isinstance(payload.get("access_sources"), list) else []
     if any(isinstance(source, dict) and source.get("enabled") is not False for source in sources):
         capabilities.append("访问日志")
@@ -7040,6 +7042,36 @@ def _security_collection_capabilities(payload: Dict[str, Any]) -> List[str]:
     if all(isinstance(psi.get(name), dict) and psi[name].get("status") == "ready" for name in ("cpu", "memory", "io")):
         capabilities.append("宿主机 PSI")
     return capabilities
+
+
+def _security_rfw_service_health(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose only the small, bounded RFW service-health contract."""
+    raw = payload.get("rfw_service_health")
+    if not isinstance(raw, dict):
+        return {}
+    allowed_statuses = {"healthy", "stopped", "restart_loop", "not_installed", "not_applicable", "unavailable", "unknown"}
+    status = str(raw.get("status") or "unknown")[:32]
+    if status not in allowed_statuses:
+        status = "unknown"
+
+    def bounded_int(value: Any, maximum: int) -> int | None:
+        if type(value) is not int or value < 0:
+            return None
+        return min(value, maximum)
+
+    active_state = str(raw.get("active_state") or "")[:32]
+    sub_state = str(raw.get("sub_state") or "")[:32]
+    reason = str(raw.get("reason") or "")[:48]
+    return {
+        "status": status,
+        "checked_at": bounded_int(raw.get("checked_at"), 2**63 - 1),
+        "active_state": active_state,
+        "sub_state": sub_state,
+        "restart_count": bounded_int(raw.get("restart_count"), 2**31 - 1),
+        "restarts_5m": bounded_int(raw.get("restarts_5m"), 32),
+        "active_seconds": bounded_int(raw.get("active_seconds"), 2**31 - 1),
+        "reason": reason,
+    }
 
 
 def _security_collection_health(
@@ -7372,6 +7404,7 @@ def security_status() -> JSONResponse:
                 "thresholds": payload.get("thresholds") or {},
                 "sample_alerts": payload.get("alerts") or [],
                 "host_audit": payload.get("host_audit") if isinstance(payload.get("host_audit"), dict) else {},
+                "rfw_service_health": _security_rfw_service_health(payload),
                 "access_sources": payload.get("access_sources") or [],
                 "total_rx_bps": cur_rx,
                 "total_tx_bps": cur_tx,

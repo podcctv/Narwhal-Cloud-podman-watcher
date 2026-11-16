@@ -727,6 +727,16 @@ export interface SecurityStatusItem {
       instance_count?: number;
     }>;
   };
+  rfw_service_health?: {
+    status?: 'healthy' | 'stopped' | 'restart_loop' | 'not_installed' | 'not_applicable' | 'unavailable' | 'unknown' | string;
+    checked_at?: number | null;
+    active_state?: string;
+    sub_state?: string;
+    restart_count?: number | null;
+    restarts_5m?: number | null;
+    active_seconds?: number | null;
+    reason?: string;
+  };
   access_sources?: AccessSource[];
   today_peak_container_conn_count?: number;
   host_id: string;

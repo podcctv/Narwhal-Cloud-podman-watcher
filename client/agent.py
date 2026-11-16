@@ -1895,6 +1895,15 @@ def collect_security_summary(containers: List[Dict[str, object]], interval_secon
         },
         "manual_bandwidth_limits": manual_bandwidth.last_status(),
     }
+    try:
+        summary["rfw_service_health"] = host_security_audit.collect_rfw_service_health()
+    except Exception as rfw_health_error:
+        summary["rfw_service_health"] = {
+            "status": "unavailable",
+            "checked_at": int(time.time()),
+            "reason": "collector_error",
+        }
+        print(f"RFW service health collection failed: {rfw_health_error}")
     if isinstance(summary.get("host_firewall"), dict):
         summary["host_firewall"] = {
             **summary["host_firewall"],

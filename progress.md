@@ -2,6 +2,13 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 7：跨 Python/Rust Agent 的宿主机 RFW 服务告警（v1.9.1）
+
+- Python 与 Rust Agent 只读读取 `rfw.service` 的 systemd 状态；识别停止、systemd 自动重启及短时间反复重启。
+- Server 只筛选并返回状态字段；不把该状态送入外部通知或处置管道。
+- 主机遥测卡片展示健康状态；新鲜报告发现服务停止或重启循环时，在主机列表直接显示带检查命令的告警卡片。过期样本抑制实时告警，容器内 Agent 明确报告不可检查宿主机。
+- 检查不操作 RFW。生产覆盖率需要确认 Server 发布完成、对应节点 Agent 升级并上报新字段后才能计算。
+
 ## Phase 6 大版本性能里程碑：并行容器采样、跨 Tick 增量速率引擎与零告警 Rust Workspace（v1.9.0）
 
 - **`rust/crates/runtime-drivers/src/lib.rs`**：

@@ -7,6 +7,7 @@ use std::fmt::{self, Write as _};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,7 +41,7 @@ pub const MIN_ACTION_POLL_INTERVAL: u64 = 5;
 pub const DEFAULT_CONTAINER_RUNTIMES: &str = "auto";
 pub const DEFAULT_DOCKER_MONITOR_MODE: &str = "notice";
 pub const DEFAULT_INCUS_PROJECT: &str = "all";
-pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const AGENT_VERSION: &str = include_str!("../../../../VERSION").trim();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
@@ -364,6 +365,13 @@ pub struct AgentState {
     proc_root: PathBuf,
     conntrack_path: PathBuf,
     geoip_db_path: Option<PathBuf>,
+    rfw_restart_observation: Option<RfwRestartObservation>,
+}
+
+struct RfwRestartObservation {
+    boot_id: String,
+    restart_count: u64,
+    restart_events: Vec<u64>,
 }
 
 impl AgentState {
@@ -402,6 +410,7 @@ impl AgentState {
             proc_root,
             conntrack_path,
             geoip_db_path: None,
+            rfw_restart_observation: None,
         }
     }
 
@@ -495,11 +504,12 @@ impl AgentState {
         let suspicious_json = serialize_suspicious_findings_json(&suspicious_findings);
         let socket_abuse_input = aggregate_socket_abuse_from_containers(containers, timestamp);
         let socket_abuse_json = evaluate_socket_abuse(&socket_abuse_input).to_json();
+        let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
 
         let mut out = String::with_capacity(4096);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"podman_network\":{{\"ipv4_ok\":true,\"ipv6_ok\":false}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":[],\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{{\"available\":false}},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":[],\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -521,6 +531,7 @@ impl AgentState {
             socket_abuse_input.tcp_syn_recv,
             suspicious_json,
             socket_abuse_json,
+            rfw_service_health_json,
             conntrack_json,
             psi_snapshot_json,
             cpu_out.multi_container_contention,
@@ -538,6 +549,14 @@ impl AgentState {
             io_actions.len(),
         );
         out
+    }
+
+    fn collect_rfw_service_health_json(&mut self, timestamp: u64) -> String {
+        collect_rfw_service_health_json(
+            &self.proc_root,
+            timestamp,
+            &mut self.rfw_restart_observation,
+        )
     }
 
     fn sample_host_cpu(&mut self) -> HostCpuSample {
@@ -753,6 +772,214 @@ impl AgentState {
 
         self.prev_container_net = next_net;
         (total_rx_bps, total_tx_bps, total_rx_pps, total_tx_pps)
+    }
+}
+
+fn agent_container_scope(proc_root: &Path) -> bool {
+    if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
+        return true;
+    }
+    if fs::read_to_string("/run/systemd/container")
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "docker" | "podman" | "lxc" | "incus" | "systemd-nspawn" | "openvz"
+            )
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    for path in [proc_root.join("self/cgroup"), proc_root.join("1/cgroup")] {
+        if let Ok(raw) = fs::read_to_string(path) {
+            let lower = raw.to_ascii_lowercase();
+            if ["/docker-", "/libpod-", "/kubepods", "/lxc/", "/incus/"]
+                .iter()
+                .any(|marker| lower.contains(marker))
+            {
+                return true;
+            }
+        }
+    }
+    for path in [proc_root.join("self/mountinfo"), proc_root.join("1/mountinfo")] {
+        if let Ok(raw) = fs::read_to_string(path) {
+            let lower = raw.to_ascii_lowercase();
+            if lower.contains("/var/lib/incus/containers/")
+                || lower.contains("/var/lib/lxc/containers/")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn systemd_rfw_properties() -> Result<String, &'static str> {
+    let mut child = Command::new("systemctl")
+        .args([
+            "show",
+            "rfw.service",
+            "--no-pager",
+            "--property=LoadState,ActiveState,SubState,NRestarts,ActiveEnterTimestampMonotonic",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "systemd_unavailable")?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Err("systemd_unavailable");
+                }
+                let output = child
+                    .wait_with_output()
+                    .map_err(|_| "systemd_unavailable")?;
+                return String::from_utf8(output.stdout).map_err(|_| "systemd_output_invalid");
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("systemd_timeout");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("systemd_unavailable");
+            }
+        }
+    }
+}
+
+fn collect_rfw_service_health_json(
+    proc_root: &Path,
+    timestamp: u64,
+    observation: &mut Option<RfwRestartObservation>,
+) -> String {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (proc_root, observation);
+        format!(
+            "{{\"status\":\"not_applicable\",\"checked_at\":{},\"reason\":\"platform_unsupported\"}}",
+            timestamp
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let base = |status: &str, reason: &str| {
+            format!(
+                "{{\"status\":\"{}\",\"checked_at\":{},\"reason\":\"{}\"}}",
+                status, timestamp, reason
+            )
+        };
+        if agent_container_scope(proc_root) {
+            return base("not_applicable", "agent_container");
+        }
+        let raw = match systemd_rfw_properties() {
+            Ok(value) => value,
+            Err(reason) => return base("unavailable", reason),
+        };
+        let mut load_state = "";
+        let mut active_state = "";
+        let mut sub_state = "";
+        let mut restart_count = 0u64;
+        let mut active_enter_us = 0u64;
+        for line in raw.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                match key {
+                    "LoadState" => load_state = value.trim(),
+                    "ActiveState" => active_state = value.trim(),
+                    "SubState" => sub_state = value.trim(),
+                    "NRestarts" => restart_count = value.trim().parse().unwrap_or(0),
+                    "ActiveEnterTimestampMonotonic" => {
+                        active_enter_us = value.trim().parse().unwrap_or(0)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if load_state == "not-found" {
+            return base("not_installed", "unit_not_found");
+        }
+        if load_state.is_empty() || active_state.is_empty() || sub_state.is_empty() {
+            return base("unavailable", "systemd_properties_unavailable");
+        }
+
+        let boot_id = fs::read_to_string(proc_root.join("sys/kernel/random/boot_id"))
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let same_boot = !boot_id.is_empty()
+            && observation
+                .as_ref()
+                .map(|previous| previous.boot_id == boot_id)
+                .unwrap_or(false);
+        let mut restart_events = observation
+            .as_ref()
+            .filter(|previous| same_boot)
+            .map(|previous| previous.restart_events.clone())
+            .unwrap_or_default();
+        restart_events.retain(|event| timestamp.saturating_sub(*event) <= 300);
+        if let Some(previous) = observation.as_ref().filter(|_| same_boot) {
+            if restart_count >= previous.restart_count {
+                let new_restarts = restart_count.saturating_sub(previous.restart_count).min(32);
+                restart_events.extend(std::iter::repeat(timestamp).take(new_restarts as usize));
+            } else {
+                restart_events.clear();
+            }
+        } else {
+            restart_events.clear();
+        }
+        if restart_events.len() > 32 {
+            let excess = restart_events.len() - 32;
+            restart_events.drain(..excess);
+        }
+        *observation = Some(RfwRestartObservation {
+            boot_id,
+            restart_count,
+            restart_events: restart_events.clone(),
+        });
+
+        let active_seconds = if active_enter_us > 0 {
+            fs::read_to_string(proc_root.join("uptime"))
+                .ok()
+                .and_then(|raw| raw.split_whitespace().next()?.parse::<f64>().ok())
+                .map(|uptime| uptime.max(0.0) as u64)
+                .map(|uptime| uptime.saturating_sub(active_enter_us / 1_000_000))
+        } else {
+            None
+        };
+        let (status, reason) = if matches!(active_state, "inactive" | "failed" | "deactivating") {
+            ("stopped", "service_not_active")
+        } else if active_state == "activating" && sub_state == "auto-restart" {
+            ("restart_loop", "systemd_auto_restart")
+        } else if active_state == "active" {
+            if restart_events.len() >= 3
+                || (restart_count >= 3 && active_seconds.map(|age| age <= 180).unwrap_or(false))
+            {
+                ("restart_loop", "repeated_restarts")
+            } else {
+                ("healthy", "service_active")
+            }
+        } else {
+            ("unknown", "transitional_service_state")
+        };
+        let active_seconds_json = active_seconds
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        format!(
+            "{{\"status\":\"{}\",\"checked_at\":{},\"active_state\":\"{}\",\"sub_state\":\"{}\",\"restart_count\":{},\"restarts_5m\":{},\"active_seconds\":{},\"reason\":\"{}\"}}",
+            status,
+            timestamp,
+            json_escape(active_state),
+            json_escape(sub_state),
+            restart_count,
+            restart_events.len(),
+            active_seconds_json,
+            reason
+        )
     }
 }
 
