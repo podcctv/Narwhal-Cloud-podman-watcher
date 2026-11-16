@@ -2371,7 +2371,7 @@ impl AgentState {
                     let agent_ver = resolved_agent_version();
                     let _ = engine.schedule(
                         &targets,
-                        |t| {
+                        move |t| {
                             let pid = t.pid.filter(|&p| p > 1).ok_or_else(|| {
                                 "container kernel process is unavailable".to_string()
                             })?;
