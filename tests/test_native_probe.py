@@ -821,6 +821,38 @@ class PidMetricsBridgeTests(unittest.TestCase):
             self.assertEqual(runtime_drivers._read_process_count_from_pid(555), 0)
         pm_mock.assert_not_called()
 
+    def test_socket_collector_reuses_tick_cached_socket_sec(self):
+        from client import proc_scanner, socket_collector
+
+        payload = {
+            "available": True,
+            "read_files": 2,
+            "total_lines": 4,
+            "malformed": False,
+            "tcp_entries": [
+                {"proto": "tcp", "state_hex": "01", "local_ip": "10.0.0.2", "local_port": 40000, "remote_ip": "1.1.1.1", "remote_port": 443},
+                {"proto": "tcp", "state_hex": "06", "local_ip": "10.0.0.2", "local_port": 40001, "remote_ip": "8.8.8.8", "remote_port": 443},
+                {"proto": "tcp", "state_hex": "01", "local_ip": "10.0.0.2", "local_port": 40002, "remote_ip": "127.0.0.1", "remote_port": 80},
+            ],
+            "udp_entries": [
+                {"proto": "udp", "state_hex": "07", "local_ip": "10.0.0.2", "local_port": 50000, "remote_ip": "9.9.9.9", "remote_port": 53},
+            ],
+        }
+        with mock.patch.object(native_probe, "is_available", return_value=True), mock.patch.object(
+            native_probe, "socket_sec", return_value=payload
+        ) as sec_mock:
+            with proc_scanner._collection_tick_scope():
+                cnt = socket_collector._count_connections_from_pid(777)
+                tcp_ips = socket_collector._collect_tcp_remote_ips(777)
+                udp_ips = socket_collector._collect_udp_remote_ips(777)
+                sec_res = socket_collector._collect_socket_security(777)
+
+        sec_mock.assert_called_once_with(777)
+        self.assertEqual(cnt, 4)
+        self.assertEqual(tcp_ips, {"1.1.1.1": 1})
+        self.assertEqual(udp_ips, {"9.9.9.9": 1})
+        self.assertEqual(sec_res["connection_metrics"]["tcp_established"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

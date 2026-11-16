@@ -12,9 +12,10 @@ import time
 from typing import Any, Dict, List, Tuple
 
 try:
-    from client import native_probe
+    from client import native_probe, proc_scanner
 except ImportError:
     import native_probe
+    import proc_scanner
 
 _ORIG_OPEN = builtins.open
 
@@ -68,6 +69,9 @@ def _count_proc_net_lines(path: str) -> int:
 def _count_connections_from_pid(pid: int) -> int:
     if pid <= 0:
         return 0
+    payload = _native_socket_sec_payload(pid)
+    if isinstance(payload, dict) and isinstance(payload.get("total_lines"), int):
+        return int(payload["total_lines"])
     base = f"/proc/{pid}/net"
     files = ("tcp", "tcp6", "udp", "udp6")
     total = 0
@@ -171,6 +175,24 @@ def _collect_remote_ips_from_exec(runtime: str, name: str, proto: str, project: 
 def _collect_remote_ips_by_proto(pid: int, proto: str) -> Dict[str, int]:
     if pid <= 0:
         return {}
+    payload = _native_socket_sec_payload(pid)
+    if isinstance(payload, dict):
+        key = "udp_entries" if proto == "udp" else "tcp_entries"
+        raw_entries = payload.get(key)
+        if isinstance(raw_entries, list):
+            ip_counter: Dict[str, int] = {}
+            for item in raw_entries:
+                if not isinstance(item, dict):
+                    continue
+                if proto != "udp" and str(item.get("state_hex") or "").upper() != "01":
+                    continue
+                ip = str(item.get("remote_ip") or "")
+                if not ip or ip in ("0.0.0.0", "::"):
+                    continue
+                if not _is_trackable_ip(ip):
+                    continue
+                ip_counter[ip] = ip_counter.get(ip, 0) + 1
+            return ip_counter
     ip_counter: Dict[str, int] = {}
     if proto == "udp":
         files = (("udp", False), ("udp6", True))
@@ -630,9 +652,9 @@ def _parse_port(hex_port: str) -> int:
         return 0
 
 
-def _native_read_proc_net_tables(pid: int) -> Tuple[List[Dict[str, object]], int, bool] | None:
-    """Read `/proc/<pid>/net/{tcp,tcp6,udp,udp6}` via `narwhal-probe` when unmocked."""
-    if builtins.open is not _ORIG_OPEN:
+def _native_socket_sec_payload(pid: int) -> Dict[str, Any] | None:
+    """Fetch `/proc/<pid>/net/{tcp,tcp6,udp,udp6}` via `narwhal-probe` with tick caching."""
+    if pid <= 0 or builtins.open is not _ORIG_OPEN:
         return None
     if _agent_attr("_decode_proc_addr", _decode_proc_addr) is not _decode_proc_addr:
         return None
@@ -640,8 +662,23 @@ def _native_read_proc_net_tables(pid: int) -> Tuple[List[Dict[str, object]], int
         return None
     if not native_probe.is_available():
         return None
+    tick_cache = getattr(proc_scanner, "_collection_tick_cache", None)
+    cache_key = ("socket_sec", int(pid))
+    if isinstance(tick_cache, dict) and cache_key in tick_cache:
+        cached = tick_cache[cache_key]
+        return cached if isinstance(cached, dict) else None
     payload = native_probe.socket_sec(pid)
     if not isinstance(payload, dict) or not payload.get("available"):
+        return None
+    if isinstance(tick_cache, dict):
+        tick_cache[cache_key] = payload
+    return payload
+
+
+def _native_read_proc_net_tables(pid: int) -> Tuple[List[Dict[str, object]], int, bool] | None:
+    """Read `/proc/<pid>/net/{tcp,tcp6,udp,udp6}` via `narwhal-probe` when unmocked."""
+    payload = _native_socket_sec_payload(pid)
+    if not isinstance(payload, dict):
         return None
     tcp_raw = payload.get("tcp_entries")
     udp_raw = payload.get("udp_entries")

@@ -120,7 +120,7 @@ pub fn collect_socket_tables(pid: u32) -> String {
 
 pub fn collect_socket_tables_from_root(proc_root: &Path, pid: u32) -> String {
     if pid == 0 {
-        return "{\"available\":false,\"read_files\":0,\"malformed\":false,\"tcp_established\":0,\"tcp_time_wait\":0,\"syn_sent_count\":0,\"syn_recv_count\":0,\"udp_sockets\":0,\"listening_ports\":[],\"udp_listening_ports\":[],\"tcp_entries\":[],\"udp_entries\":[]}".to_string();
+        return "{\"available\":false,\"read_files\":0,\"total_lines\":0,\"malformed\":false,\"tcp_established\":0,\"tcp_time_wait\":0,\"syn_sent_count\":0,\"syn_recv_count\":0,\"udp_sockets\":0,\"listening_ports\":[],\"udp_listening_ports\":[],\"tcp_entries\":[],\"udp_entries\":[]}".to_string();
     }
 
     let net_dir = proc_root.join(pid.to_string()).join("net");
@@ -132,6 +132,7 @@ pub fn collect_socket_tables_from_root(proc_root: &Path, pid: u32) -> String {
     ];
 
     let mut read_files: usize = 0;
+    let mut total_lines: usize = 0;
     let mut malformed = false;
     let mut tcp_established: usize = 0;
     let mut tcp_time_wait: usize = 0;
@@ -149,6 +150,7 @@ pub fn collect_socket_tables_from_root(proc_root: &Path, pid: u32) -> String {
         };
         read_files += 1;
         for line in content.lines().skip(1) {
+            total_lines += 1;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -214,9 +216,10 @@ pub fn collect_socket_tables_from_root(proc_root: &Path, pid: u32) -> String {
     let mut out = String::with_capacity(512 + (tcp_entries.len() + udp_entries.len()) * 140);
     let _ = write!(
         out,
-        "{{\"available\":{},\"read_files\":{},\"malformed\":{},\"tcp_established\":{},\"tcp_time_wait\":{},\"syn_sent_count\":{},\"syn_recv_count\":{},\"udp_sockets\":{},\"listening_ports\":",
+        "{{\"available\":{},\"read_files\":{},\"total_lines\":{},\"malformed\":{},\"tcp_established\":{},\"tcp_time_wait\":{},\"syn_sent_count\":{},\"syn_recv_count\":{},\"udp_sockets\":{},\"listening_ports\":",
         available,
         read_files,
+        total_lines,
         malformed,
         tcp_established,
         tcp_time_wait,
@@ -453,6 +456,7 @@ mod tests {
         assert!(json.contains("\"available\":true"));
         assert!(json.contains("\"read_files\":4"));
         assert!(json.contains("\"malformed\":false"));
+        assert!(json.contains("\"total_lines\":6"));
         assert!(json.contains("\"tcp_established\":1"));
         assert!(json.contains("\"tcp_time_wait\":1"));
         assert!(json.contains("\"syn_sent_count\":1"));

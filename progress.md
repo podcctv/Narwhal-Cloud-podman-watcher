@@ -1,6 +1,12 @@
 # 当前进展与待办
 
-更新时间：2026-11-14（Asia/Shanghai）
+更新时间：2026-11-16（Asia/Shanghai）
+
+## Phase 4 扩展：`socket-sec` 全量连接计数/远端 IP 提取与 Tick 缓存复用（v1.8.41）
+
+- 在 `rust/crates/socket-sec/src/lib.rs` 新增 `total_lines` 统计字段并补充单测断言，使单次 `socket-sec` 调用同时满足连接数统计、TCP/UDP 远端 IP 汇总与连接安全分析。
+- 在 `client/socket_collector.py` 新增 `_native_socket_sec_payload(pid)`（接入 `proc_scanner._collection_tick_cache`），将 `_count_connections_from_pid`、`_collect_tcp_remote_ips`、`_collect_udp_remote_ips` 与 `_collect_socket_security` 统一复用同一次 Rust 探针结果（单容器单轮采集仅需 1 次 `socket-sec` 调用），保留 `builtins.open` / 解码函数 mock 感知与纯 Python 回退。
+- 补充 `tests/test_native_probe.py` Tick 缓存复用单元测试。
 
 ## Phase 4 扩展：`pid-metrics` 容器 PID cgroup/网络/协议计数器统一探针（v1.8.40）
 
