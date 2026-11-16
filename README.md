@@ -1,6 +1,6 @@
 # Narwhal Cloud Container Watcher (CS)
 
-当前版本：**v1.9.2**（Server 与 Client 共用仓库根目录的 `VERSION`）。
+当前版本：**v1.9.5**（Server 与 Client 共用仓库根目录的 `VERSION`）。
 
 Agent 接手资料：[project.md](project.md)（架构）、[progress.md](progress.md)（当前状态）、[agent.md](agent.md)（开发约定）、[AGENTS.md](AGENTS.md)（自动加载入口）。
 
@@ -9,6 +9,19 @@ Runman Rust v2 兼容清单：[docs/runman-rust-v2-compatibility.md](docs/runman
 Runman 持续 CPU/内存过载重启策略：[docs/resource-overload-restart.md](docs/resource-overload-restart.md)。
 
 RFW 宿主机服务健康告警：[docs/rfw-service-health.md](docs/rfw-service-health.md)。
+
+### v1.9.5：修复托管 Agent 升级的 Git 锁与定时器状态
+
+- 托管升级期间，Client 安装器保持 15 分钟自动更新定时器关闭，避免回到无条件更新路径。
+- 仅在托管升级时检查配置仓库的 `.git/index.lock`；文件超过 5 分钟且确认没有该仓库的 Git 进程后，才清除该锁。近期锁、非普通文件或运行中的 Git 操作均保留并安全失败。
+
+### v1.9.4：Rust Agent 无漂移调度器
+
+- Rust Agent 使用独立报告、动作轮询和守卫采样截止期，并为守卫提供快速采样 tick。
+
+### v1.9.3：统一探针版本并补齐宿主机防火墙检测
+
+- `narwhal-probe --version` 使用仓库根目录的版本号；Rust Agent 增加零子进程宿主机防火墙检测。
 
 ### v1.9.2：Rust Agent 版本与仓库发布版本保持一致
 

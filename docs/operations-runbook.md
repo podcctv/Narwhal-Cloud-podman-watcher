@@ -38,7 +38,7 @@ general/web/socks/hy2 是可调起步值，不存在适用于所有机器的统�
 
 仅主机部署且支持 systemd 的新版 Client 可托管升级。目标固定为该 fork 的 `origin/main` SHA；版本必须等于 Server 已部署版本。节点复验 origin URL、SHA、VERSION 与本地工作区，任何不符均不执行。第一个节点为灰度，上报目标版本后才能推广。main 变化后未升级节点拒绝旧任务，需新建发布。
 
-首次管理升级会停用节点原来 15 分钟无条件升级定时器，避免越过灰度；保留 `/opt/narwhal-monitor/client-previous`，权限 0700，里面的 env 为 0600。升级由独立 systemd 服务执行，安装失败恢复上一版。面板的「回滚」只恢复本地保留版本，不接受任意命令/下载地址。回滚后依然保持托管模式；若退出托管，人工重新运行 `scripts/setup-auto-update.sh client /absolute/repository`。
+首次管理升级会停用节点原来 15 分钟无条件升级定时器，避免越过灰度；托管安装阶段也会保持该定时器关闭。保留 `/opt/narwhal-monitor/client-previous`，权限 0700，里面的 env 为 0600。升级由独立 systemd 服务执行，安装失败恢复上一版。托管升级只会清除配置仓库中超过 5 分钟且确认没有对应 Git 进程使用的普通 `.git/index.lock`；近期锁、非普通文件或运行中的 Git 操作都会保留并安全失败。面板的「回滚」只恢复本地保留版本，不接受任意命令/下载地址。回滚后依然保持托管模式；若退出托管，人工重新运行 `scripts/setup-auto-update.sh client /absolute/repository`。
 
 失败排查：`journalctl -u 'narwhal-managed-*' --no-pager` 和 Client 日志；执行 running 不等于升级通过，须查看签名版本报告。自动失败恢复后的文件/依赖和真实业务探测必须在灰度 Linux 主机核验。构建/模拟测试不能替代生产验证。
 

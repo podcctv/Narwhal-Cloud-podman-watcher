@@ -922,7 +922,66 @@ if [[ "${NARWHAL_MANAGED_UPDATE:-0}" != "1" ]]; then
 fi
 CLIENT_AUTO_UPDATE_ENV_FILE="/opt/narwhal-monitor/client-auto-update.env"
 CLIENT_AUTO_UPDATE_TIMER="/etc/systemd/system/narwhal-monitor-client-update.timer"
-if [[ -f "$CLIENT_AUTO_UPDATE_ENV_FILE" ]] \
+clear_stale_managed_git_index_lock() {
+  [[ "${NARWHAL_MANAGED_UPDATE:-0}" == "1" ]] || return 0
+  [[ -r "$CLIENT_AUTO_UPDATE_ENV_FILE" ]] || {
+    echo "managed rollout update configuration is unavailable; preserving checkout state" >&2
+    exit 1
+  }
+  local AUTO_UPDATE_MODE="" AUTO_UPDATE_REPO_DIR=""
+  # This file is locally installed and root-owned; the managed updater uses the same configuration.
+  # shellcheck disable=SC1090
+  source "$CLIENT_AUTO_UPDATE_ENV_FILE"
+  [[ "$AUTO_UPDATE_MODE" == "git" ]] || return 0
+  [[ "$AUTO_UPDATE_REPO_DIR" == /* && -d "$AUTO_UPDATE_REPO_DIR/.git" ]] || {
+    echo "managed rollout Git checkout is unavailable; preserving update state" >&2
+    exit 1
+  }
+
+  local update_repo git_dir lock lock_mtime now age proc pid comm command_line process_cwd
+  update_repo="$(realpath -e -- "$AUTO_UPDATE_REPO_DIR")" || exit 1
+  git_dir="$(realpath -e -- "$update_repo/.git")" || exit 1
+  [[ -d "$git_dir" && "$git_dir" == "$update_repo/.git" ]] || {
+    echo "managed rollout Git directory is not the configured checkout; preserving it" >&2
+    exit 1
+  }
+  lock="$git_dir/index.lock"
+  [[ -e "$lock" ]] || return 0
+  [[ -f "$lock" && ! -L "$lock" ]] || {
+    echo "managed rollout found a non-regular Git index lock; preserving it" >&2
+    exit 1
+  }
+
+  lock_mtime="$(stat -c '%Y' -- "$lock")" || exit 1
+  now="$(date +%s)" || exit 1
+  age=$((now - lock_mtime))
+  if (( age < 300 )); then
+    echo "managed rollout found a recent Git index lock; preserving it" >&2
+    exit 1
+  fi
+  for proc in /proc/[0-9]*; do
+    pid="${proc##*/}"
+    [[ "$pid" != "$$" ]] || continue
+    comm="$(cat "$proc/comm" 2>/dev/null || true)"
+    [[ "$comm" == "git" ]] || continue
+    command_line="$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)"
+    process_cwd="$(readlink -e -- "$proc/cwd" 2>/dev/null || true)"
+    if [[ "$process_cwd" == "$update_repo" || "$process_cwd" == "$update_repo/"* || "$command_line" == *"$update_repo"* ]]; then
+      echo "managed rollout found active Git work in the configured checkout; preserving index lock" >&2
+      exit 1
+    fi
+  done
+  rm -f -- "$lock" || {
+    echo "managed rollout could not remove the verified stale Git index lock" >&2
+    exit 1
+  }
+  echo "[INFO] Removed stale Git index lock after age and process checks."
+}
+
+if [[ "${NARWHAL_MANAGED_UPDATE:-0}" == "1" ]]; then
+  systemctl disable --now narwhal-monitor-client-update.timer >/dev/null 2>&1 || true
+  clear_stale_managed_git_index_lock
+elif [[ -f "$CLIENT_AUTO_UPDATE_ENV_FILE" ]] \
   && is_truthy "$(load_kv_from_file "$CLIENT_AUTO_UPDATE_ENV_FILE" AUTO_UPDATE_ENABLED || true)"; then
   if [[ ! -f "$CLIENT_AUTO_UPDATE_TIMER" ]]; then
     bash "$ROOT_DIR/scripts/setup-auto-update.sh" client "$ROOT_DIR"
