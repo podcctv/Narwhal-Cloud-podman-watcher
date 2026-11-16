@@ -41,7 +41,7 @@ pub const MIN_ACTION_POLL_INTERVAL: u64 = 5;
 pub const DEFAULT_CONTAINER_RUNTIMES: &str = "auto";
 pub const DEFAULT_DOCKER_MONITOR_MODE: &str = "notice";
 pub const DEFAULT_INCUS_PROJECT: &str = "all";
-pub const AGENT_VERSION: &str = include_str!("../../../../VERSION").trim();
+pub const AGENT_VERSION: &str = env!("NARWHAL_AGENT_VERSION");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
