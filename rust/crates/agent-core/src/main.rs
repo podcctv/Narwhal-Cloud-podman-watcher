@@ -8,7 +8,7 @@ use agent_core::{run_with_config, AgentState, Config, ConfigError};
 
 fn print_usage() {
     println!(
-        "narwhal-agent [--server URL] [--secret SECRET] [--interval SECS] [--host-id ID] [--node-id ID] [--once] [--dry-run] [--check-config]"
+        "narwhal-agent [--server URL] [--secret SECRET] [--interval SECS] [--host-id ID] [--node-id ID] [--once] [--dry-run] [--check-config] [--release-admission]"
     );
 }
 
@@ -24,6 +24,16 @@ fn main() {
             process::exit(2);
         }
     };
+
+    if config.release_admission {
+        match admission_guard::release_owned_default() {
+            Ok(()) => process::exit(0),
+            Err(err) => {
+                eprintln!("narwhal-agent: {err}");
+                process::exit(1);
+            }
+        }
+    }
 
     let mut state = AgentState::new(&config);
     let stop = AtomicBool::new(false);

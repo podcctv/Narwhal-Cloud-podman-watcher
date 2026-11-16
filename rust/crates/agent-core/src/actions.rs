@@ -695,7 +695,7 @@ pub fn is_valid_systemd_unit(unit: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'@' | b'-'))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ActionContext {
     pub node_id: String,
     pub env_file: PathBuf,
@@ -706,12 +706,25 @@ pub struct ActionContext {
     pub panel_auto_remediate_path: PathBuf,
     pub cleanup_journal_path: PathBuf,
     pub quarantine_journal_path: Option<PathBuf>,
+    pub speedtest_policy_path: Option<PathBuf>,
+    pub abuse_engine: Option<Arc<abuse_guard::SharedAbuseEngine>>,
     pub cleanup_host_available: Option<bool>,
     pub cleanup_policy: app_guard::disk_cleanup::CleanupPolicy,
     pub cleanup_containers: Vec<app_guard::disk_cleanup::CleanupContainerCandidate>,
     pub disk_cleanup_host_root: Option<PathBuf>,
     pub cleanup_now_epoch: Option<i64>,
     pub disk_cleanup_running: Arc<AtomicBool>,
+}
+
+impl fmt::Debug for ActionContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActionContext")
+            .field("node_id", &self.node_id)
+            .field("env_file", &self.env_file)
+            .field("rescan_requested", &self.rescan_requested)
+            .field("restart_required", &self.restart_required)
+            .finish()
+    }
 }
 
 impl Default for ActionContext {
@@ -728,6 +741,8 @@ impl Default for ActionContext {
             ),
             cleanup_journal_path: PathBuf::from(app_guard::disk_cleanup::DEFAULT_STATE_PATH),
             quarantine_journal_path: None,
+            speedtest_policy_path: None,
+            abuse_engine: None,
             cleanup_host_available: None,
             cleanup_policy: app_guard::disk_cleanup::CleanupPolicy::default(),
             cleanup_containers: Vec::new(),
@@ -1925,85 +1940,152 @@ fn execute_apply_host_firewall_policy(
         return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy belongs to another Watcher node");
     }
     let Some(policy_val) = req.params.get("policy") else {
-        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy data is invalid");
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy revision is missing or invalid");
     };
     let Some(revision) = policy_val.get("revision").and_then(JsonValue::as_i64).filter(|&r| r >= 1) else {
         return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy revision is missing or invalid");
     };
-    if policy_val.get("rules").and_then(JsonValue::as_array).is_none()
-        || policy_val.get("abuse").and_then(JsonValue::as_object).is_none()
-    {
+    let Some(rules_arr) = policy_val.get("rules").and_then(JsonValue::as_array) else {
         return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy data is invalid");
+    };
+    let Some(abuse_obj) = policy_val.get("abuse").and_then(JsonValue::as_object) else {
+        return ActionReceipt::failed(req.id, &req.action_type, "host firewall policy data is invalid");
+    };
+
+    let requires_rfw = req.params.get("requires_rfw") != Some(&JsonValue::Bool(false));
+    let mut rfw_message = String::new();
+    if requires_rfw {
+        if !Path::new(RUNMAN_FIREWALL_SOCK_PATH).exists() {
+            return ActionReceipt::failed(
+                req.id,
+                &req.action_type,
+                "Runman firewall socket unavailable; no host firewall change was confirmed",
+            );
+        }
+
+        let mining = abuse_obj.get("mining").and_then(JsonValue::as_bool) == Some(true);
+        let bt = abuse_obj.get("bt").and_then(JsonValue::as_bool) == Some(true);
+        let interfaces = abuse_obj
+            .get("interfaces")
+            .and_then(JsonValue::as_array)
+            .map(<[JsonValue]>::to_vec)
+            .unwrap_or_default();
+        let mut rfw_abuse = BTreeMap::new();
+        rfw_abuse.insert("speedtest".to_string(), JsonValue::Bool(false));
+        rfw_abuse.insert("mining".to_string(), JsonValue::Bool(mining));
+        rfw_abuse.insert("bt".to_string(), JsonValue::Bool(bt));
+        rfw_abuse.insert("interfaces".to_string(), JsonValue::Array(interfaces));
+        let mut rfw_policy = BTreeMap::new();
+        rfw_policy.insert("revision".to_string(), JsonValue::Number(revision.to_string()));
+        rfw_policy.insert("rules".to_string(), JsonValue::Array(rules_arr.to_vec()));
+        rfw_policy.insert("abuse".to_string(), JsonValue::Object(rfw_abuse));
+        let body = JsonValue::Object(rfw_policy).to_json();
+
+        match runtime_drivers::runman_request(
+            RUNMAN_FIREWALL_SOCK_PATH,
+            "POST",
+            "/v1/firewall/policy",
+            Some(body.as_bytes()),
+        ) {
+            Ok((200, resp_body)) => {
+                let text = String::from_utf8_lossy(&resp_body);
+                let msg = parse_json(&text)
+                    .ok()
+                    .and_then(|v| v.get("message").and_then(JsonValue::as_str).map(|s| s.to_string()))
+                    .unwrap_or_else(|| "Runman host firewall policy updated".to_string());
+                // Read back revision and sync status to verify persistence.
+                match runtime_drivers::runman_request(RUNMAN_FIREWALL_SOCK_PATH, "GET", "/v1/firewall/policy", None) {
+                    Ok((200, rb_body)) => {
+                        let rb_text = String::from_utf8_lossy(&rb_body);
+                        let parsed = parse_json(&rb_text).ok();
+                        let snap = parsed.as_ref().and_then(|v| v.get("snapshot")).or(parsed.as_ref());
+                        let rb_rev = snap
+                            .and_then(|s| s.get("policy_revision").or_else(|| s.get("revision")))
+                            .and_then(JsonValue::as_i64);
+                        let rb_sync = snap.and_then(|s| s.get("status")).and_then(JsonValue::as_str);
+                        let rb_drift = snap.and_then(|s| s.get("drift_count")).and_then(JsonValue::as_i64).unwrap_or(0);
+                        let rb_missing = snap.and_then(|s| s.get("missing_count")).and_then(JsonValue::as_i64).unwrap_or(0);
+                        if rb_rev == Some(revision)
+                            && rb_sync.map(|s| s == "in_sync").unwrap_or(true)
+                            && rb_drift == 0
+                            && rb_missing == 0
+                        {
+                            rfw_message = format!("{msg}; readback verified revision {revision}");
+                        } else {
+                            return ActionReceipt::failed(
+                                req.id,
+                                &req.action_type,
+                                format!("host firewall readback mismatch or drift: expected revision {revision}"),
+                            );
+                        }
+                    }
+                    _ => {
+                        return ActionReceipt::failed(
+                            req.id,
+                            &req.action_type,
+                            "host firewall applied but readback verification failed",
+                        );
+                    }
+                }
+            }
+            Ok((status, resp_body)) => {
+                return ActionReceipt::failed(
+                    req.id,
+                    &req.action_type,
+                    format!(
+                        "Runman rejected host firewall policy (HTTP {status}): {}",
+                        String::from_utf8_lossy(&resp_body).trim()
+                    ),
+                );
+            }
+            Err(err) => {
+                return ActionReceipt::failed(
+                    req.id,
+                    &req.action_type,
+                    format!("Runman firewall socket error: {err}"),
+                );
+            }
+        }
     }
 
-    if !Path::new(RUNMAN_FIREWALL_SOCK_PATH).exists() {
+    let services_json = abuse_obj
+        .get("services")
+        .map(JsonValue::to_json)
+        .unwrap_or_else(|| "[]".to_string());
+    let runtimes_json = abuse_obj
+        .get("service_runtimes")
+        .map(JsonValue::to_json)
+        .unwrap_or_else(|| "[]".to_string());
+    let speedtest_raw = format!(
+        "{{\"revision\":{revision},\"services\":{services_json},\"runtimes\":{runtimes_json}}}"
+    );
+    let Ok(speedtest_val) = runtime_drivers::JsonVal::parse(&speedtest_raw) else {
         return ActionReceipt::failed(
             req.id,
             &req.action_type,
-            "Runman firewall socket unavailable; no host firewall change was confirmed",
+            "speed-test service or runtime selection is invalid",
         );
+    };
+    let (policy_ok, policy_message) = protocol_guard::speedtest::save_policy(
+        &speedtest_val,
+        ctx.speedtest_policy_path.as_deref(),
+    );
+    if !policy_ok {
+        return ActionReceipt::failed(req.id, &req.action_type, policy_message);
     }
-
-    let body = policy_val.to_json();
-    match runtime_drivers::runman_request(
-        RUNMAN_FIREWALL_SOCK_PATH,
-        "POST",
-        "/v1/firewall/policy",
-        Some(body.as_bytes()),
-    ) {
-        Ok((200, resp_body)) => {
-            let text = String::from_utf8_lossy(&resp_body);
-            let msg = parse_json(&text)
-                .ok()
-                .and_then(|v| v.get("message").and_then(JsonValue::as_str).map(|s| s.to_string()))
-                .unwrap_or_else(|| "Runman host firewall policy updated".to_string());
-            // Read back revision and sync status to verify persistence.
-            match runtime_drivers::runman_request(RUNMAN_FIREWALL_SOCK_PATH, "GET", "/v1/firewall/policy", None) {
-                Ok((200, rb_body)) => {
-                    let rb_text = String::from_utf8_lossy(&rb_body);
-                    let parsed = parse_json(&rb_text).ok();
-                    let snap = parsed.as_ref().and_then(|v| v.get("snapshot")).or(parsed.as_ref());
-                    let rb_rev = snap
-                        .and_then(|s| s.get("policy_revision").or_else(|| s.get("revision")))
-                        .and_then(JsonValue::as_i64);
-                    let rb_sync = snap.and_then(|s| s.get("status")).and_then(JsonValue::as_str);
-                    let rb_drift = snap.and_then(|s| s.get("drift_count")).and_then(JsonValue::as_i64).unwrap_or(0);
-                    let rb_missing = snap.and_then(|s| s.get("missing_count")).and_then(JsonValue::as_i64).unwrap_or(0);
-                    if rb_rev == Some(revision)
-                        && rb_sync.map(|s| s == "in_sync").unwrap_or(true)
-                        && rb_drift == 0
-                        && rb_missing == 0
-                    {
-                        ActionReceipt::succeeded(
-                            req.id,
-                            &req.action_type,
-                            format!("{msg}; readback verified revision {revision}"),
-                        )
-                    } else {
-                        ActionReceipt::failed(
-                            req.id,
-                            &req.action_type,
-                            format!("host firewall readback mismatch or drift: expected revision {revision}"),
-                        )
-                    }
-                }
-                _ => ActionReceipt::failed(
-                    req.id,
-                    &req.action_type,
-                    "host firewall applied but readback verification failed",
-                ),
-            }
-        }
-        Ok((status, resp_body)) => ActionReceipt::failed(
+    if requires_rfw {
+        let combined = if rfw_message.is_empty() {
+            policy_message
+        } else {
+            format!("{rfw_message}; {policy_message}")
+        };
+        ActionReceipt::succeeded(req.id, &req.action_type, combined)
+    } else {
+        ActionReceipt::succeeded(
             req.id,
             &req.action_type,
-            format!("Runman rejected host firewall policy (HTTP {status}): {}", String::from_utf8_lossy(&resp_body).trim()),
-        ),
-        Err(err) => ActionReceipt::failed(
-            req.id,
-            &req.action_type,
-            format!("Runman firewall socket error: {err}"),
-        ),
+            "service policy saved for the selected Incus/Podman runtimes",
+        )
     }
 }
 
@@ -2555,6 +2637,21 @@ fn execute_release_network_quarantine(
         req.container_name.trim(),
         instance_id,
     );
+    if out.ok {
+        if let Some(ref engine) = ctx.abuse_engine {
+            let target = abuse_guard::ContainerTarget {
+                runtime: runtime.clone(),
+                runtime_bin: runtime,
+                project: req.project.trim().to_string(),
+                name: req.container_name.trim().to_string(),
+                id: instance_id.to_string(),
+                pid: None,
+                stable_id: instance_id.to_string(),
+                instance_id: instance_id.to_string(),
+            };
+            engine.forget(&target, instance_id);
+        }
+    }
     outcome_to_receipt(req, out)
 }
 
@@ -2578,6 +2675,21 @@ fn execute_confirm_replaced_network_quarantine(
         req.container_name.trim(),
         instance_id,
     );
+    if out.ok {
+        if let Some(ref engine) = ctx.abuse_engine {
+            let target = abuse_guard::ContainerTarget {
+                runtime: runtime.clone(),
+                runtime_bin: runtime,
+                project: req.project.trim().to_string(),
+                name: req.container_name.trim().to_string(),
+                id: instance_id.to_string(),
+                pid: None,
+                stable_id: instance_id.to_string(),
+                instance_id: instance_id.to_string(),
+            };
+            engine.forget_replaced(&target, instance_id);
+        }
+    }
     outcome_to_receipt(req, out)
 }
 
@@ -3326,6 +3438,88 @@ mod tests {
         let r_stop = execute_action_with_context(&stop_incus, &mut ctx);
         assert!(!r_stop.ok);
         assert!(r_stop.message.contains("Incus stop skipped"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_apply_host_firewall_policy_requires_rfw_false_saves_speedtest_policy() {
+        let dir = std::env::temp_dir().join(format!(
+            "narwhal-actions-speedtest-pol-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let policy_file = dir.join("speedtest-policy.json");
+
+        let mut ctx = ActionContext {
+            node_id: "node-xyz".to_string(),
+            speedtest_policy_path: Some(policy_file.clone()),
+            ..ActionContext::default()
+        };
+
+        let req = ActionRequest::from_json(
+            r#"{
+                "id": 91,
+                "action_type": "apply_host_firewall_policy",
+                "runtime": "host",
+                "container_name": "__host__",
+                "params": {
+                    "expected_node_id": "node-xyz",
+                    "requires_rfw": false,
+                    "policy": {
+                        "revision": 7,
+                        "rules": [],
+                        "abuse": {
+                            "speedtest": false,
+                            "mining": false,
+                            "bt": false,
+                            "services": ["ookla", "fast"],
+                            "service_runtimes": ["incus", "podman"]
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let receipt = execute_action_with_context(&req, &mut ctx);
+        assert!(receipt.ok, "expected ok receipt, got: {}", receipt.message);
+        assert_eq!(
+            receipt.message,
+            "service policy saved for the selected Incus/Podman runtimes"
+        );
+        let saved = protocol_guard::speedtest::load_policy(Some(&policy_file))
+            .expect("speedtest policy saved");
+        assert!(!saved.invalid);
+        assert_eq!(saved.revision, 7);
+        assert_eq!(saved.services, vec!["fast", "ookla"]);
+        assert_eq!(saved.runtimes, vec!["incus", "podman"]);
+
+        // Invalid runtime in service_runtimes must fail
+        let bad_req = ActionRequest::from_json(
+            r#"{
+                "id": 92,
+                "action_type": "apply_host_firewall_policy",
+                "runtime": "host",
+                "container_name": "__host__",
+                "params": {
+                    "expected_node_id": "node-xyz",
+                    "requires_rfw": false,
+                    "policy": {
+                        "revision": 8,
+                        "rules": [],
+                        "abuse": {
+                            "services": ["ookla"],
+                            "service_runtimes": ["docker"]
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let bad_receipt = execute_action_with_context(&bad_req, &mut ctx);
+        assert!(!bad_receipt.ok);
 
         let _ = fs::remove_dir_all(&dir);
     }

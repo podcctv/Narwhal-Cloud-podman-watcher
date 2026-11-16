@@ -14,6 +14,9 @@ members = [
     "crates/net-guard",
     "crates/tc-guard",
     "crates/app-guard",
+    "crates/abuse-guard",
+    "crates/admission-guard",
+    "crates/protocol-guard",
     "crates/agent-core",
 ]
 

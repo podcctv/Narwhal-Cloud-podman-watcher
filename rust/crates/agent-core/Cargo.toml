@@ -20,3 +20,6 @@ runtime-drivers = { path = "../runtime-drivers" }
 net-guard = { path = "../net-guard" }
 tc-guard = { path = "../tc-guard" }
 app-guard = { path = "../app-guard" }
+abuse-guard = { path = "../abuse-guard" }
+admission-guard = { path = "../admission-guard" }
+protocol-guard = { path = "../protocol-guard" }

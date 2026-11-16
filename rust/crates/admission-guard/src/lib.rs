@@ -65,6 +65,11 @@ pub use guard::{
     release_owned, release_owned_with, AdmissionController, AdmissionJournal, Guard, GuardRecord,
     DEFAULT_ADMISSION_JOURNAL,
 };
+
+/// Convenience alias for `release_owned()` using default journal and nft runner.
+pub fn release_owned_default() -> Result<(), AdmissionError> {
+    release_owned()
+}
 pub use linux::{
     is_valid_table_name, packet, rules, LiveNftRunner, Nft, NftRunner, NoopQueueBackend,
     QueueBackend,

@@ -12,6 +12,7 @@ use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -106,6 +107,7 @@ pub struct Config {
     pub once: bool,
     pub dry_run: bool,
     pub check_config: bool,
+    pub release_admission: bool,
 }
 
 impl Default for Config {
@@ -129,6 +131,7 @@ impl Default for Config {
             once: false,
             dry_run: false,
             check_config: false,
+            release_admission: false,
         }
     }
 }
@@ -265,6 +268,9 @@ impl Config {
                 }
                 "--check-config" => {
                     cfg.check_config = true;
+                }
+                "--release-admission" => {
+                    cfg.release_admission = true;
                 }
                 "-h" | "--help" => {
                     return Err(ConfigError::HelpRequested);
@@ -418,11 +424,18 @@ pub struct AgentState {
     bandwidth_state_path: PathBuf,
     cleanup_journal_path: PathBuf,
     cleanup_policy: app_guard::disk_cleanup::CleanupPolicy,
-    disk_cleanup_running: std::sync::Arc<AtomicBool>,
+    disk_cleanup_running: Arc<AtomicBool>,
     disk_cleanup_recovered: bool,
     last_containers: Vec<ContainerSample>,
     last_traffic_samples: Vec<tc_guard::TrafficSampleInput>,
     last_sample_interval_secs: u64,
+    abuse_engine: Option<Arc<abuse_guard::SharedAbuseEngine>>,
+    admission_controller: Option<Arc<admission_guard::AdmissionController>>,
+    pasarguard: protocol_guard::pasarguard::PasarGuardMonitor,
+    microburst: protocol_guard::microburst::MicroburstDetector,
+    udp_blackhole_auto_states: HashMap<String, (u32, u64)>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    speedtest_caches: protocol_guard::speedtest::SpeedtestReconcileCaches,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,6 +529,16 @@ impl AgentState {
             last_containers: Vec::new(),
             last_traffic_samples: Vec::new(),
             last_sample_interval_secs: config.report_interval.max(1),
+            abuse_engine: abuse_guard::AbuseEngine::with_defaults()
+                .ok()
+                .map(|e| Arc::new(abuse_guard::SharedAbuseEngine::new(e))),
+            admission_controller: admission_guard::Guard::open_default()
+                .ok()
+                .map(|g| Arc::new(admission_guard::AdmissionController::new(Arc::new(g)))),
+            pasarguard: protocol_guard::pasarguard::PasarGuardMonitor::new(),
+            microburst: protocol_guard::microburst::MicroburstDetector::new(),
+            udp_blackhole_auto_states: HashMap::new(),
+            speedtest_caches: protocol_guard::speedtest::SpeedtestReconcileCaches::default(),
         }
     }
 
@@ -570,7 +593,8 @@ impl AgentState {
             .effective_avg();
         let host_devices = self.sample_host_disks(dt);
 
-        let containers_json = serialize_containers_json(containers);
+        let (containers_json, container_alerts_json) =
+            self.build_container_telemetry_and_alerts(config, containers, timestamp);
         let (mem_samples, cpu_samples) = extract_container_guard_samples_with_cpu_delta(
             &mut self.prev_container_cpu,
             containers,
@@ -621,10 +645,12 @@ impl AgentState {
         let socket_verdict = evaluate_socket_abuse(&socket_abuse_input);
         let socket_abuse_json = socket_verdict.to_json();
         let security_alerts_base = build_security_alerts_json(&socket_verdict, &suspicious_findings);
+        let security_alerts_with_containers =
+            merge_json_arrays(&security_alerts_base, &container_alerts_json);
         let incus_report = collect_incus_runtime_health(config, timestamp);
         let security_alerts_json = match incus_report.as_ref() {
-            Some(incus) => merge_json_arrays(&security_alerts_base, &incus.alerts_json),
-            None => security_alerts_base,
+            Some(incus) => merge_json_arrays(&security_alerts_with_containers, &incus.alerts_json),
+            None => security_alerts_with_containers,
         };
         let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
         let ipv4_ok = host_ip_family_available(false);
@@ -1189,7 +1215,10 @@ fn collect_rfw_service_health_json(
     }
 }
 
-fn serialize_containers_json(containers: &[ContainerSample]) -> String {
+fn serialize_containers_with_security_json(
+    containers: &[ContainerSample],
+    security_jsons: &[String],
+) -> String {
     if containers.is_empty() {
         return "[]".to_string();
     }
@@ -1235,10 +1264,701 @@ fn serialize_containers_json(containers: &[ContainerSample]) -> String {
         if let Some(ref cgroup_metrics) = c.cgroup_metrics_json {
             let _ = write!(out, ",\"cgroup_metrics\":{cgroup_metrics}");
         }
+        if let Some(sec_json) = security_jsons.get(idx) {
+            if !sec_json.is_empty() {
+                let _ = write!(out, ",\"security\":{sec_json}");
+            }
+        }
         out.push('}');
     }
     out.push(']');
     out
+}
+
+pub fn evaluate_udp_flood_candidate(
+    mb: &protocol_guard::microburst::MicroburstResult,
+    udp_tx_bps: f64,
+    udp_concurrency: usize,
+) -> Option<String> {
+    let is_small_pkt_flood =
+        mb.flood_type == "outbound_small_packet_flood" && mb.tx_pps >= 3000.0;
+    let is_massive_burst = mb.tx_pps >= 6000.0;
+    let udp_heavy_flood = udp_tx_bps >= 40_000_000.0 && udp_concurrency >= 300;
+    if is_small_pkt_flood {
+        Some(format!(
+            "检测到高危出站小包泛洪 (发包率 {} PPS，平均包长 {}B)",
+            mb.tx_pps, mb.avg_tx_packet_size
+        ))
+    } else if is_massive_burst {
+        Some(format!("检测到超高频出站发包泛洪 ({} PPS)", mb.tx_pps))
+    } else if udp_heavy_flood {
+        Some(format!(
+            "检测到大流量高并发 UDP 异常打流 ({:.1} Mbps, 并发 {})",
+            udp_tx_bps / (1024.0 * 1024.0),
+            udp_concurrency
+        ))
+    } else {
+        None
+    }
+}
+
+fn extract_net_counters(c: &ContainerSample) -> (u64, u64, u64, u64) {
+    let Some(pm_val) = c
+        .pid_metrics_json
+        .as_deref()
+        .and_then(|s| actions::parse_json(s).ok())
+    else {
+        return (0, 0, 0, 0);
+    };
+    let Some(net) = pm_val.get("net") else {
+        return (0, 0, 0, 0);
+    };
+    let rx_bytes = net.get("rx_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tx_bytes = net.get("tx_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    let rx_packets = net.get("rx_packets").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tx_packets = net.get("tx_packets").and_then(|v| v.as_u64()).unwrap_or(0);
+    (rx_bytes, tx_bytes, rx_packets, tx_packets)
+}
+
+fn build_udp_flood_blackhole_alert_json(
+    c: &ContainerSample,
+    trigger_reason: &str,
+    tx_pps: f64,
+    duration: u64,
+) -> String {
+    let inst_id = if !c.instance_id.is_empty() {
+        &c.instance_id
+    } else {
+        &c.id
+    };
+    let msg = format!(
+        "{trigger_reason}；已自动注入黑洞规则（放行 53 端口 DNS 与已建 TCP 连接），计划保护 {} 分钟。",
+        duration / 60
+    );
+    format!(
+        "{{\"type\":\"udp_flood_blackhole\",\"severity\":\"critical\",\"title\":\"已自动实施出站 UDP 专项阻断\",\"message\":\"{}\",\"value\":{},\"threshold\":3000,\"runtime\":\"{}\",\"project\":\"{}\",\"container_name\":\"{}\",\"instance_id\":\"{}\"}}",
+        json_escape(&msg),
+        tx_pps.round() as u64,
+        json_escape(&c.runtime),
+        json_escape(&c.project),
+        json_escape(&c.name),
+        json_escape(inst_id),
+    )
+}
+
+impl AgentState {
+    pub fn build_container_telemetry_and_alerts(
+        &mut self,
+        config: &Config,
+        containers: &[ContainerSample],
+        timestamp: u64,
+    ) -> (String, String) {
+        if containers.is_empty() {
+            return ("[]".to_string(), "[]".to_string());
+        }
+        let speedtest_policy = protocol_guard::speedtest::load_policy(None);
+        let auto_bh_enabled = std::env::var("SECURITY_UDP_BLACKHOLE_AUTO")
+            .map(|v| parse_bool_flag(&v))
+            .unwrap_or(true);
+        let bh_duration: u64 = std::env::var("SECURITY_UDP_BLACKHOLE_DURATION")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|&d| d >= 60)
+            .unwrap_or(1800);
+
+        let mut security_jsons = Vec::with_capacity(containers.len());
+        let mut alert_jsons: Vec<String> = Vec::new();
+
+        for c in containers {
+            let rt = c.runtime.trim().to_ascii_lowercase();
+            let supported_rt = matches!(rt.as_str(), "incus" | "podman" | "runman");
+            let inst_id = if !c.instance_id.is_empty() {
+                c.instance_id.clone()
+            } else {
+                c.id.clone()
+            };
+
+            // 1. abuse_guard
+            let abuse_res = if supported_rt {
+                let target = abuse_guard::ContainerTarget {
+                    runtime: rt.clone(),
+                    runtime_bin: c.runtime_bin.clone(),
+                    project: c.project.clone(),
+                    name: c.name.clone(),
+                    id: c.id.clone(),
+                    pid: c.pid,
+                    stable_id: c.stable_id.clone(),
+                    instance_id: c.instance_id.clone(),
+                };
+                self.abuse_engine
+                    .as_ref()
+                    .map(|eng| eng.status(&target, Some(timestamp as f64)))
+                    .unwrap_or_else(abuse_guard::AbuseCheckResult::pending_not_sampled)
+            } else {
+                abuse_guard::AbuseCheckResult::unsupported()
+            };
+            if let Some(ref alert) = abuse_res.alert {
+                alert_jsons.push(alert.to_json());
+            }
+            let abuse_json = abuse_res.to_json();
+
+            // 2. vmess_guard & trojan_guard
+            let mut vmess_status = protocol_guard::vmess::plan(
+                &rt,
+                &[],
+                &[],
+                &[],
+                "partial",
+                Some(&[]),
+                Some(false),
+                "vmess",
+            );
+            protocol_guard::vmess::finalize_protocol_guard_evidence(&mut vmess_status);
+            let mut trojan_status = protocol_guard::vmess::plan(
+                &rt,
+                &[],
+                &[],
+                &[],
+                "partial",
+                Some(&[]),
+                Some(false),
+                "trojan",
+            );
+            protocol_guard::vmess::finalize_protocol_guard_evidence(&mut trojan_status);
+
+            let alert_ctx = protocol_guard::vmess::AlertContainerContext {
+                runtime: rt.clone(),
+                project: c.project.clone(),
+                name: c.name.clone(),
+                instance_id: inst_id.clone(),
+                ..Default::default()
+            };
+            if let Some(alert) = protocol_guard::vmess::build_vmess_alert(&vmess_status, &[], &alert_ctx) {
+                alert_jsons.push(alert.to_json());
+            }
+            if let Some(alert) = protocol_guard::vmess::build_trojan_alert(&trojan_status, &[], &alert_ctx) {
+                alert_jsons.push(alert.to_json());
+            }
+
+            // 3. speedtest_guard (only when policy present and runtime supported)
+            let speedtest_field = if let Some(ref pol) = speedtest_policy {
+                if supported_rt {
+                    let identity = format!("{rt}\0{}\0{}\0{inst_id}", c.project, c.name);
+                    let st_input = protocol_guard::speedtest::SpeedtestContainerInput {
+                        runtime: &rt,
+                        name: &c.name,
+                        project: &c.project,
+                        identity: &identity,
+                        pid: c.pid.unwrap_or(0),
+                        namespace_epoch: "",
+                        network_shared: false,
+                        image: &c.image,
+                        listeners: &[],
+                        listener_inventory_complete: false,
+                        policy: pol,
+                        observed_at: Some(timestamp as i64),
+                    };
+                    #[cfg(unix)]
+                    let st_status = {
+                        let tools = net_guard::NetToolPaths::discover();
+                        let mut host_runner = net_guard::LiveCommandRunner;
+                        let mut epoch_fn = protocol_guard::vmess::pid_epoch;
+                        protocol_guard::speedtest::reconcile_container_with(
+                            &st_input,
+                            None,
+                            None,
+                            &mut self.speedtest_caches,
+                            &tools,
+                            &mut host_runner,
+                            &self.proc_root,
+                            &mut epoch_fn,
+                        )
+                    };
+                    #[cfg(not(unix))]
+                    let st_status = {
+                        let _ = st_input;
+                        protocol_guard::speedtest::SpeedtestGuardStatus {
+                            state: if pol.invalid { "unverified" } else { "not_detected" }.to_string(),
+                            reason: if pol.invalid { "policy_invalid" } else { "" }.to_string(),
+                            observed_at: timestamp as i64,
+                            policy_revision: pol.revision,
+                            services: pol.services.clone(),
+                            ..Default::default()
+                        }
+                    };
+                    if let Some(alert) = protocol_guard::speedtest::build_speedtest_attempt_blocked_alert(&st_status, &alert_ctx) {
+                        alert_jsons.push(alert.to_json());
+                    }
+                    format!(",\"speedtest_guard\":{}", st_status.to_json())
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            // 4. sensitive_file_events
+            let drops = if let Some(pid) = c.pid.filter(|&p| p > 1) {
+                protocol_guard::file_drop::scan_container_sensitive_drops_from(
+                    pid,
+                    &rt,
+                    &c.name,
+                    &self.proc_root,
+                )
+            } else {
+                Vec::new()
+            };
+            let drops_json = protocol_guard::file_drop::sensitive_file_events_to_json(&drops);
+
+            // 5. microburst
+            let (rx_bytes, tx_bytes, rx_packets, tx_packets) = extract_net_counters(c);
+            let mb = self.microburst.detect_microburst(
+                &rt,
+                &c.name,
+                rx_packets,
+                tx_packets,
+                rx_bytes,
+                tx_bytes,
+                timestamp as f64,
+            );
+            let mb_json = mb.to_json();
+
+            // 6. udp_blackhole + auto-trigger / auto-release
+            let pid = c.pid.unwrap_or(0);
+            let mut bh_status = if supported_rt {
+                net_guard::get_udp_blackhole_status(&rt, &c.name, pid).unwrap_or(
+                    net_guard::UdpBlackholeStatus {
+                        active: false,
+                        allow_dns: true,
+                        applied_at: None,
+                        auto_triggered: false,
+                        expires_at: None,
+                        remaining_seconds: None,
+                        reason: String::new(),
+                    },
+                )
+            } else {
+                net_guard::UdpBlackholeStatus {
+                    active: false,
+                    allow_dns: true,
+                    applied_at: None,
+                    auto_triggered: false,
+                    expires_at: None,
+                    remaining_seconds: None,
+                    reason: String::new(),
+                }
+            };
+            if supported_rt && pid > 1 && config.security_monitor_enabled {
+                let bh_key = format!("{rt}:{}:{}", c.project, c.name);
+                if bh_status.active {
+                    if let Some(exp) = bh_status.expires_at.filter(|&e| e > 0 && timestamp >= e) {
+                        let _ = exp;
+                        let rel = net_guard::release_udp_blackhole(
+                            &rt,
+                            &c.name,
+                            pid,
+                            &inst_id,
+                            &c.project,
+                        );
+                        if rel.ok {
+                            self.udp_blackhole_auto_states.insert(bh_key.clone(), (0, 0));
+                            if let Ok(refreshed) = net_guard::get_udp_blackhole_status(&rt, &c.name, pid) {
+                                bh_status = refreshed;
+                            }
+                        }
+                    }
+                } else if auto_bh_enabled {
+                    let udp_conns = c
+                        .socket_tables_json
+                        .as_deref()
+                        .and_then(|s| actions::parse_json(s).ok())
+                        .and_then(|v| v.get("udp_sockets").and_then(|u| u.as_u64()))
+                        .unwrap_or(0) as usize;
+                    if let Some(reason) = evaluate_udp_flood_candidate(&mb, 0.0, udp_conns) {
+                        let entry = self
+                            .udp_blackhole_auto_states
+                            .entry(bh_key)
+                            .or_insert((0, 0));
+                        if entry.1 == 0 {
+                            entry.1 = timestamp;
+                        }
+                        entry.0 = entry.0.saturating_add(1);
+                        if mb.tx_pps >= 8000.0 || entry.0 >= 2 {
+                            let mut req = net_guard::UdpBlackholeApply::new(&rt, &c.name, pid);
+                            req.instance_id = inst_id.clone();
+                            req.allow_dns = true;
+                            req.project = if c.project.is_empty() {
+                                "default".to_string()
+                            } else {
+                                c.project.clone()
+                            };
+                            req.auto_triggered = true;
+                            req.duration = bh_duration;
+                            req.reason = reason.clone();
+                            let applied = net_guard::apply_udp_blackhole(&req);
+                            if applied.ok {
+                                if let Ok(refreshed) =
+                                    net_guard::get_udp_blackhole_status(&rt, &c.name, pid)
+                                {
+                                    bh_status = refreshed;
+                                }
+                                alert_jsons.push(build_udp_flood_blackhole_alert_json(
+                                    c,
+                                    &reason,
+                                    mb.tx_pps,
+                                    bh_duration,
+                                ));
+                            }
+                        }
+                    } else {
+                        self.udp_blackhole_auto_states.insert(bh_key, (0, 0));
+                    }
+                }
+            }
+            let bh_json = bh_status.to_json();
+
+            // 7. anti_spoof
+            let anti_spoof_json = if supported_rt {
+                net_guard::get_anti_spoof_status_for_container(&rt, &c.name, "")
+                    .map(|s| s.to_json())
+                    .unwrap_or_else(|_| {
+                        "{\"active\":false,\"veth\":\"\",\"v4_ips\":[],\"v6_ips\":[],\"applied_at\":null}".to_string()
+                    })
+            } else {
+                "{\"active\":false,\"veth\":\"\",\"v4_ips\":[],\"v6_ips\":[],\"applied_at\":null}".to_string()
+            };
+
+            // 8. pasarguard alerts
+            for pg_alert in self.pasarguard.alerts_at(&rt, &c.project, &c.name, timestamp as i64) {
+                alert_jsons.push(pg_alert.to_json());
+            }
+
+            // 9. admission status + alerts
+            let admission_field = if supported_rt {
+                if let Some(ref ctrl) = self.admission_controller {
+                    let desc = admission_guard::ContainerDescriptor {
+                        runtime: rt.clone(),
+                        project: c.project.clone(),
+                        name: c.name.clone(),
+                        id: c.id.clone(),
+                        instance_id: c.instance_id.clone(),
+                        pid: c.pid,
+                        network_addresses: c.network_addresses.clone(),
+                    };
+                    for adm_alert in ctrl.guard.alerts_at(&desc, timestamp as i64) {
+                        alert_jsons.push(net_guard::json_val_to_string(
+                            &runtime_drivers::JsonVal::Obj(adm_alert),
+                            false,
+                        ));
+                    }
+                    let adm_status = ctrl.guard.status_at(&desc, timestamp as i64);
+                    if adm_status.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            ",\"admission\":{}",
+                            net_guard::json_val_to_string(
+                                &runtime_drivers::JsonVal::Obj(adm_status),
+                                false
+                            )
+                        )
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            let sec_json = format!(
+                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}}}",
+                abuse_json,
+                vmess_status.to_json(),
+                trojan_status.to_json(),
+                speedtest_field,
+                drops_json,
+                mb_json,
+                bh_json,
+                anti_spoof_json,
+                admission_field,
+            );
+            security_jsons.push(sec_json);
+        }
+
+        let containers_json = serialize_containers_with_security_json(containers, &security_jsons);
+        let alerts_json = format!("[{}]", alert_jsons.join(","));
+        (containers_json, alerts_json)
+    }
+
+    pub fn run_security_guard_cycles(
+        &mut self,
+        config: &Config,
+        client: &TransportClient,
+        timestamp: u64,
+    ) {
+        #[cfg(not(unix))]
+        {
+            let _ = (config, client, timestamp);
+        }
+        #[cfg(unix)]
+        {
+            if !config.security_monitor_enabled || config.node_id.is_empty() {
+                return;
+            }
+            let containers = self.last_containers.clone();
+            if containers.is_empty() {
+                return;
+            }
+
+            // 1. Bounded abuse_guard cycle
+            let abuse_enabled = std::env::var("SECURITY_ABUSE_GUARD_ENABLED")
+                .map(|v| parse_bool_flag(&v))
+                .unwrap_or(true);
+            if abuse_enabled {
+                if let Some(ref engine) = self.abuse_engine {
+                    let targets: Vec<abuse_guard::ContainerTarget> = containers
+                        .iter()
+                        .map(|c| abuse_guard::ContainerTarget {
+                            runtime: c.runtime.to_ascii_lowercase(),
+                            runtime_bin: c.runtime_bin.clone(),
+                            project: c.project.clone(),
+                            name: c.name.clone(),
+                            id: c.id.clone(),
+                            pid: c.pid,
+                            stable_id: c.stable_id.clone(),
+                            instance_id: c.instance_id.clone(),
+                        })
+                        .collect();
+                    let transport_cfg = config.to_transport_config();
+                    let host_id = config.host_id.clone();
+                    let node_id = config.node_id.clone();
+                    let agent_ver = resolved_agent_version();
+                    let _ = engine.schedule(
+                        &targets,
+                        |t| {
+                            let pid = t.pid.filter(|&p| p > 1).ok_or_else(|| {
+                                "container kernel process is unavailable".to_string()
+                            })?;
+                            let inst_id = if !t.instance_id.is_empty() {
+                                t.instance_id.clone()
+                            } else {
+                                t.id.clone()
+                            };
+                            let scoped = abuse_guard::scoped_host_processes(pid)?;
+                            let procs = abuse_guard::collect_host(
+                                &scoped,
+                                &[],
+                                t,
+                                &mut |_target, _cmd| (false, String::new()),
+                            )?;
+                            Ok((
+                                inst_id,
+                                abuse_guard::PlainIsolationDriver(NoopAbuseDriver),
+                                procs,
+                                Vec::new(),
+                            ))
+                        },
+                        move |alert| {
+                            let payload = abuse_guard::build_abuse_event_payload_json(
+                                &host_id,
+                                &node_id,
+                                &agent_ver,
+                                current_unix_ts(),
+                                alert,
+                            );
+                            let tc = TransportClient::new(transport_cfg.clone())
+                                .map_err(|e| e.to_string())?;
+                            let resp = tc
+                                .post_json_signed("/api/v1/abuse/events", payload.as_bytes())
+                                .map_err(|e| e.to_string())?;
+                            let text = String::from_utf8_lossy(&resp.body);
+                            runtime_drivers::JsonVal::parse(text.trim())
+                        },
+                        4,
+                    );
+                }
+            }
+
+            // 2. Bounded admission_guard cycle
+            if let Some(ref ctrl) = self.admission_controller {
+                let descriptors: Vec<admission_guard::ContainerDescriptor> = containers
+                    .iter()
+                    .map(|c| admission_guard::ContainerDescriptor {
+                        runtime: c.runtime.to_ascii_lowercase(),
+                        project: c.project.clone(),
+                        name: c.name.clone(),
+                        id: c.id.clone(),
+                        instance_id: c.instance_id.clone(),
+                        pid: c.pid,
+                        network_addresses: c.network_addresses.clone(),
+                    })
+                    .collect();
+                let runtime_bins = std::collections::BTreeMap::new();
+                let mut runner = net_guard::LiveCommandRunner;
+                ctrl.run_batch(
+                    &descriptors,
+                    |desc| admission_guard::snapshot(desc, &runtime_bins, &mut runner, true),
+                    timestamp as i64,
+                );
+                let items = ctrl.collect_status_items(timestamp as i64);
+                if !items.is_empty() {
+                    let payload = admission_guard::build_status_payload_json(
+                        &config.host_id,
+                        &config.node_id,
+                        timestamp as i64,
+                        &items,
+                    );
+                    let _ = client.post_json_signed("/api/v1/admission/status", payload.as_bytes());
+                }
+                for (_, alert) in ctrl.collect_due_notifications(timestamp as i64) {
+                    let payload = admission_guard::build_event_payload_json(
+                        &config.host_id,
+                        &config.node_id,
+                        timestamp as i64,
+                        &alert,
+                    );
+                    let _ = client.post_json_signed("/api/v1/admission/events", payload.as_bytes());
+                }
+            }
+
+            // 3. Bounded pasarguard cycle
+            if protocol_guard::pasarguard::PasarGuardMonitor::is_enabled_from_env() {
+                let pg_targets: Vec<protocol_guard::pasarguard::PasarContainerTarget> = containers
+                    .iter()
+                    .map(|c| protocol_guard::pasarguard::PasarContainerTarget {
+                        runtime: c.runtime.to_ascii_lowercase(),
+                        project: c.project.clone(),
+                        name: c.name.clone(),
+                    })
+                    .collect();
+                let mut backend = LivePasarBackend {
+                    client,
+                    host_id: &config.host_id,
+                    node_id: &config.node_id,
+                    timestamp,
+                };
+                self.pasarguard
+                    .scan_containers(&pg_targets, &mut backend, timestamp as i64);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct NoopAbuseDriver;
+
+#[cfg(unix)]
+impl net_guard::IsolationDriver for NoopAbuseDriver {
+    fn snapshot(&mut self) -> Result<runtime_drivers::JsonVal, String> {
+        Err("live runtime isolation driver unavailable in passive probe".to_string())
+    }
+    fn isolate(&mut self, _backup: &runtime_drivers::JsonVal) -> Result<(), String> {
+        Err("live runtime isolation driver unavailable in passive probe".to_string())
+    }
+    fn verify(&mut self, _backup: &runtime_drivers::JsonVal) -> Result<(), String> {
+        Err("live runtime isolation driver unavailable in passive probe".to_string())
+    }
+    fn release(
+        &mut self,
+        _backup: &runtime_drivers::JsonVal,
+    ) -> Result<net_guard::DriverReleaseOutcome, String> {
+        Err("live runtime isolation driver unavailable in passive probe".to_string())
+    }
+    fn prove_replaced(&mut self) -> Result<String, String> {
+        Err("live runtime isolation driver unavailable in passive probe".to_string())
+    }
+}
+
+#[cfg(unix)]
+struct LivePasarBackend<'a> {
+    client: &'a TransportClient,
+    host_id: &'a str,
+    node_id: &'a str,
+    timestamp: u64,
+}
+
+#[cfg(unix)]
+impl<'a> protocol_guard::pasarguard::PasarGuardBackend for LivePasarBackend<'a> {
+    fn snapshot(
+        &mut self,
+        container: &protocol_guard::pasarguard::PasarContainerTarget,
+    ) -> Result<protocol_guard::pasarguard::PasarContainerSnapshot, String> {
+        let desc = admission_guard::ContainerDescriptor {
+            runtime: container.runtime.clone(),
+            project: container.project.clone(),
+            name: container.name.clone(),
+            id: String::new(),
+            instance_id: String::new(),
+            pid: None,
+            network_addresses: Vec::new(),
+        };
+        let bins = std::collections::BTreeMap::new();
+        let mut runner = net_guard::LiveCommandRunner;
+        let snap = admission_guard::snapshot(&desc, &bins, &mut runner, false)
+            .map_err(|e| e.to_string())?;
+        Ok(protocol_guard::pasarguard::PasarContainerSnapshot {
+            instance_id: snap.instance_id,
+            epoch: snap.epoch,
+            pid: snap.pid.unwrap_or(0),
+        })
+    }
+
+    fn podman_bin(&self) -> Option<String> {
+        None
+    }
+
+    fn run_host(&mut self, args: &[String]) -> (bool, String) {
+        use net_guard::CommandRunner as _;
+        let mut runner = net_guard::LiveCommandRunner;
+        runner.run(args, None)
+    }
+
+    fn guest_exec(
+        &mut self,
+        container: &protocol_guard::pasarguard::PasarContainerTarget,
+        script: &str,
+    ) -> (bool, String) {
+        let mut cmd = match container.runtime.as_str() {
+            "incus" => {
+                let mut c = Command::new("incus");
+                if !container.project.is_empty() {
+                    c.arg("--project").arg(&container.project);
+                }
+                c.args(["exec", &container.name, "--", "sh", "-c", script]);
+                c
+            }
+            "podman" => {
+                let mut c = Command::new("podman");
+                c.args(["exec", &container.name, "sh", "-c", script]);
+                c
+            }
+            _ => return (false, String::new()),
+        };
+        match cmd.output() {
+            Ok(out) => (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            ),
+            Err(_) => (false, String::new()),
+        }
+    }
+
+    fn emit_event(
+        &mut self,
+        _container: &protocol_guard::pasarguard::PasarContainerTarget,
+        alert: &protocol_guard::pasarguard::PasarAlert,
+    ) {
+        let payload = format!(
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"timestamp\":{},\"alert\":{}}}",
+            json_escape(self.host_id),
+            json_escape(self.node_id),
+            self.timestamp,
+            alert.to_json()
+        );
+        let _ = self
+            .client
+            .post_json_signed("/api/v1/admission/events", payload.as_bytes());
+    }
 }
 
 fn serialize_suspicious_findings_json(
@@ -2694,6 +3414,7 @@ pub fn poll_actions_with_state(
         cleanup_journal_path: state.cleanup_journal_path.clone(),
         cleanup_policy: state.cleanup_policy,
         cleanup_containers,
+        abuse_engine: state.abuse_engine.clone(),
         disk_cleanup_running: state.disk_cleanup_running.clone(),
         ..Default::default()
     };
@@ -2911,14 +3632,18 @@ pub fn run_with_config(
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if now >= next_report {
-            let payload = state.build_report_json(config, current_unix_ts());
+            let ts = current_unix_ts();
+            let payload = state.build_report_json(config, ts);
             if let Err(err) = client.post_json_signed("/api/v1/report", payload.as_bytes()) {
                 let _ = writeln!(out, "report failed: {err}");
             }
+            state.run_security_guard_cycles(config, &client, ts);
             next_report = advance_deadline(next_report, report_delay, now);
             next_guard_tick = advance_deadline(now, guard_delay, now);
         } else if now >= next_guard_tick {
-            let _ = state.sample_guards_tick(config, current_unix_ts());
+            let ts = current_unix_ts();
+            let _ = state.sample_guards_tick(config, ts);
+            state.run_security_guard_cycles(config, &client, ts);
             next_guard_tick = advance_deadline(next_guard_tick, guard_delay, now);
         }
 
@@ -3717,6 +4442,118 @@ SECURITY_MONITOR_ENABLED=false
         assert!(bw_report.contains("\"status\":\"running\""));
         let ro_after = app_guard::disk_cleanup::read_cleanup_journal_readonly(&svc_state.cleanup_journal_path).unwrap();
         assert_eq!(ro_after.runs[0].status, "running");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_release_admission_flag_and_container_security_telemetry_and_alerts() {
+        // 1. --release-admission CLI flag parsing
+        let env = HashMap::new();
+        let cfg = Config::from_sources(None, &env, &["--release-admission".to_string()]).unwrap();
+        assert!(cfg.release_admission);
+        assert!(!Config::default().release_admission);
+
+        // 2. Per-container security telemetry + microburst + sensitive_file_events + udp_flood_blackhole alert
+        let dir = make_temp_dir("container_sec");
+        let proc_root = dir.join("proc");
+        fs::create_dir_all(proc_root.join("net")).unwrap();
+        fs::create_dir_all(proc_root.join("pressure")).unwrap();
+        fs::write(proc_root.join("uptime"), "100.00 200.00\n").unwrap();
+        fs::write(proc_root.join("loadavg"), "0.10 0.10 0.10 1/100 1\n").unwrap();
+        fs::write(proc_root.join("stat"), "cpu  100 0 10 900 0 0 0 0 0 0\n").unwrap();
+        fs::write(
+            proc_root.join("meminfo"),
+            "MemTotal:        4096000 kB\nMemAvailable:    2048000 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("net").join("dev"),
+            "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
+        )
+        .unwrap();
+        fs::write(proc_root.join("pressure/cpu"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+        fs::write(proc_root.join("pressure/memory"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+        fs::write(proc_root.join("pressure/io"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+
+        let drop_tmp = proc_root.join("4242").join("root").join("tmp");
+        fs::create_dir_all(&drop_tmp).unwrap();
+        fs::write(drop_tmp.join("payload.sh"), b"#!/bin/sh\necho hi\n").unwrap();
+
+        let conntrack = dir.join("nf_conntrack");
+        fs::write(&conntrack, "").unwrap();
+
+        let report_cfg = Config {
+            host_id: "sec-host".to_string(),
+            node_id: "sec-node".to_string(),
+            container_runtimes: "none".to_string(),
+            ..Config::default()
+        };
+        let mut state = AgentState::with_paths(&report_cfg, proc_root, conntrack);
+
+        let c_tick1 = ContainerSample {
+            id: "c1".to_string(),
+            stable_id: "incus:default:c1".to_string(),
+            name: "c1".to_string(),
+            image: "alpine".to_string(),
+            runtime: "incus".to_string(),
+            runtime_bin: "incus".to_string(),
+            project: "default".to_string(),
+            pid: Some(4242),
+            status: "running".to_string(),
+            instance_id: "inst-c1".to_string(),
+            network_addresses: vec!["10.0.0.2".to_string()],
+            pid_metrics_json: Some(
+                r#"{"available":true,"net":{"rx_bytes":1000,"tx_bytes":1000,"rx_packets":10,"tx_packets":10}}"#
+                    .to_string(),
+            ),
+            socket_tables_json: None,
+            cgroup_metrics_json: None,
+        };
+        let report1 = state.build_report_json_with_containers(&report_cfg, 1_700_000_000, &[c_tick1]);
+        assert!(report1.contains("\"abuse_guard\":{"));
+        assert!(report1.contains("\"state\":\"pending\""));
+        assert!(report1.contains("\"vmess_guard\":{"));
+        assert!(report1.contains("\"trojan_guard\":{"));
+        assert!(report1.contains("\"sensitive_file_events\":["));
+        assert!(report1.contains("/tmp/payload.sh"));
+        assert!(report1.contains("\"microburst\":{"));
+        assert!(report1.contains("\"udp_blackhole\":{"));
+        assert!(report1.contains("\"anti_spoof\":{"));
+
+        // Tick 2 with high small-packet outbound flood triggers microburst + evaluate_udp_flood_candidate
+        let c_tick2 = ContainerSample {
+            pid_metrics_json: Some(
+                r#"{"available":true,"net":{"rx_bytes":2000,"tx_bytes":161000,"rx_packets":20,"tx_packets":4010}}"#
+                    .to_string(),
+            ),
+            ..ContainerSample {
+                id: "c1".to_string(),
+                stable_id: "incus:default:c1".to_string(),
+                name: "c1".to_string(),
+                image: "alpine".to_string(),
+                runtime: "incus".to_string(),
+                runtime_bin: "incus".to_string(),
+                project: "default".to_string(),
+                pid: Some(4242),
+                status: "running".to_string(),
+                instance_id: "inst-c1".to_string(),
+                network_addresses: vec!["10.0.0.2".to_string()],
+                pid_metrics_json: None,
+                socket_tables_json: None,
+                cgroup_metrics_json: None,
+            }
+        };
+        let report2 = state.build_report_json_with_containers(&report_cfg, 1_700_000_001, &[c_tick2.clone()]);
+        assert!(report2.contains("\"flood_type\":\"outbound_small_packet_flood\""));
+
+        let mut mb_det = protocol_guard::microburst::MicroburstDetector::new();
+        mb_det.detect_microburst("incus", "c1", 10, 10, 1000, 1000, 100.0);
+        let mb_res = mb_det.detect_microburst("incus", "c1", 20, 4010, 2000, 161000, 101.0);
+        let reason = evaluate_udp_flood_candidate(&mb_res, 0.0, 0).expect("flood candidate");
+        let alert_json = build_udp_flood_blackhole_alert_json(&c_tick2, &reason, mb_res.tx_pps, 1800);
+        assert!(alert_json.contains("\"type\":\"udp_flood_blackhole\""));
+        assert!(alert_json.contains("\"severity\":\"critical\""));
 
         let _ = fs::remove_dir_all(&dir);
     }
