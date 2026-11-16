@@ -1307,6 +1307,9 @@ mod tests {
         // PasarGuard process host PID 555 -> inner PID 42
         let p_dir = proc_root.join("555");
         fs::create_dir_all(p_dir.join("ns")).unwrap();
+        #[cfg(unix)]
+        fs::hard_link(init_dir.join("ns").join("pid"), p_dir.join("ns").join("pid")).unwrap();
+        #[cfg(not(unix))]
         fs::write(p_dir.join("ns").join("pid"), "1:4026532100").unwrap();
         fs::write(
             p_dir.join("cgroup"),
