@@ -1378,7 +1378,7 @@ fn build_socket_inode_owner_map(
     proc_root: &Path,
 ) -> HashMap<u64, (u32, String)> {
     let mut owners = HashMap::new();
-    let Ok(procs) = abuse_guard::scoped_host_processes(pid) else {
+    let Ok(procs) = abuse_guard::scoped_host_processes(pid, proc_root, 20_000) else {
         return owners;
     };
     for p in procs.into_iter().take(256) {
@@ -1527,7 +1527,7 @@ fn extract_protocol_configs(
     let Some(container_pid) = c.pid.filter(|&p| p > 1) else {
         return (Vec::new(), Vec::new(), "partial");
     };
-    let Ok(procs) = abuse_guard::scoped_host_processes(container_pid) else {
+    let Ok(procs) = abuse_guard::scoped_host_processes(container_pid, proc_root, 20_000) else {
         return (Vec::new(), Vec::new(), "partial");
     };
     let mut ps_lines = String::new();
@@ -2384,7 +2384,7 @@ impl AgentState {
                                 .get(&(t.runtime.clone(), t.project.clone(), t.name.clone()))
                                 .map(|s| extract_live_listeners_and_sockets(s, &proc_root).2)
                                 .unwrap_or_default();
-                            let scoped = abuse_guard::scoped_host_processes(pid)?;
+                            let scoped = abuse_guard::scoped_host_processes(pid, &proc_root, 20_000)?;
                             let procs = abuse_guard::collect_host(
                                 &scoped,
                                 &sockets,
