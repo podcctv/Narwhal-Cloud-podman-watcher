@@ -228,7 +228,7 @@ impl Config {
     }
 
     pub fn to_transport_config(&self) -> TransportConfig {
-        TransportConfig::new(&self.server_url, &self.shared_secret)
+        TransportConfig::new(self.server_url.as_str(), self.shared_secret.as_str())
             .with_ca_cert_path(self.server_tls_ca_file.as_deref())
     }
 
@@ -946,6 +946,7 @@ SECURITY_MONITOR_ENABLED=false
         let cfg = Config {
             host_id: "test-host".to_string(),
             node_id: "node-123".to_string(),
+            container_runtimes: "none".to_string(),
             ..Config::default()
         };
         let mut state = AgentState::with_paths(&cfg, proc_root, conntrack);

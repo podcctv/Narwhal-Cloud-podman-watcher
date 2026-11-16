@@ -988,7 +988,7 @@ fn is_word_boundary_before(s: &str, idx: usize) -> bool {
     }
 }
 
-fn consume_secret_value(s: &str, start: usize) -> usize {
+fn consume_secret_value(s: &str, start: usize, stop_at_amp: bool) -> usize {
     let bytes = s.as_bytes();
     if start >= bytes.len() {
         return start;
@@ -1005,7 +1005,7 @@ fn consume_secret_value(s: &str, start: usize) -> usize {
         return bytes.len();
     }
     let mut i = start;
-    while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !(stop_at_amp && bytes[i] == b'&') {
         i += 1;
     }
     i
@@ -1062,7 +1062,9 @@ fn redact_key_value_secrets(input: &str) -> String {
 
         if matched_key_len > 0 {
             let val_start = pos + matched_key_len;
-            let val_end = consume_secret_value(input, val_start);
+            let is_url_query_param =
+                pos > 0 && matches!(input.as_bytes()[pos - 1], b'?' | b'&');
+            let val_end = consume_secret_value(input, val_start, is_url_query_param);
             out.push_str(&input[pos..val_start]);
             out.push_str("[REDACTED]");
             pos = val_end;
@@ -1126,7 +1128,7 @@ fn redact_short_password_flags(input: &str) -> String {
         }
 
         if let Some((after_flag, val_start)) = matched_flag_end {
-            let val_end = consume_secret_value(input, val_start);
+            let val_end = consume_secret_value(input, val_start, false);
             out.push_str(&input[pos..after_flag]);
             out.push_str(" [REDACTED]");
             pos = val_end;

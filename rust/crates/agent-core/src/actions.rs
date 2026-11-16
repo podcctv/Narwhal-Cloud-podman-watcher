@@ -319,7 +319,8 @@ impl<'a> JsonParser<'a> {
         if self.pos + 4 > self.bytes.len() {
             return Err(ActionParseError::UnexpectedEof);
         }
-        let hex = &self.src[self.pos..self.pos + 4];
+        let hex = std::str::from_utf8(&self.bytes[self.pos..self.pos + 4])
+            .map_err(|_| ActionParseError::InvalidUnicode { pos: self.pos })?;
         let val = u16::from_str_radix(hex, 16)
             .map_err(|_| ActionParseError::InvalidUnicode { pos: self.pos })?;
         self.pos += 4;
