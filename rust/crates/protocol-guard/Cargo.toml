@@ -1,0 +1,11 @@
+[package]
+name = "protocol-guard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+transport = { path = "../transport" }
+proc-probe = { path = "../proc-probe" }
+runtime-drivers = { path = "../runtime-drivers" }
+net-guard = { path = "../net-guard" }
+app-guard = { path = "../app-guard" }
