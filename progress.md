@@ -2,7 +2,7 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
-## Phase 12：Swarm 全量迁移 `abuse-guard` / `admission-guard` / `protocol-guard` 并接入 `agent-core`（v1.9.12）
+## Phase 12：Swarm 全量迁移 `abuse-guard` / `admission-guard` / `protocol-guard` 并接入 `agent-core`（v1.9.13）
 
 - **新增纯 `std`、`#![forbid(unsafe_code)]` Rust crates（零新增外部 Cargo 依赖，纳入 `rust/Cargo.toml` workspace）**：
   - **`rust/crates/abuse-guard`**：迁移 `abuse_collection.py`、`abuse_detection.py`、`abuse_guard.py`（含纯 Rust Python 入口静态结构与可达性分析器 `py_ast`/`source_evidence`、`/proc` 进程作用域与 symlink-safe 入口读取、`network_evidence` SYN-fanout 归属、>=20s 多样本核实与 `net-guard` 隔离触发/降级状态机）。
