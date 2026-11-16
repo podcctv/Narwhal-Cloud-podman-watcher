@@ -4,8 +4,8 @@ pub mod actions;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,6 +45,10 @@ pub const MIN_GUARD_INTERVAL: u64 = 15;
 pub const DEFAULT_CONTAINER_RUNTIMES: &str = "auto";
 pub const DEFAULT_DOCKER_MONITOR_MODE: &str = "notice";
 pub const DEFAULT_INCUS_PROJECT: &str = "all";
+pub const DEFAULT_ACCESS_LOG_MAX_BYTES: usize = 1_048_576;
+pub const MIN_ACCESS_LOG_MAX_BYTES: usize = 65_536;
+pub const DEFAULT_WEB_SCAN_PATTERNS: &str = ".env,.git,wp-login,wp-admin,phpmyadmin,actuator,server-status,cgi-bin,vendor/phpunit,etc/passwd,boaform,hnap1";
+pub const MANAGED_UPDATE_RESULT_FILE: &str = "/opt/narwhal-monitor/managed-update-result.json";
 pub const AGENT_VERSION: &str = env!("NARWHAL_AGENT_VERSION");
 
 pub fn resolved_agent_version() -> String {
@@ -107,6 +111,9 @@ pub struct Config {
     pub docker_monitor_mode: String,
     pub incus_project: String,
     pub security_monitor_enabled: bool,
+    pub security_access_log_paths: Vec<String>,
+    pub security_access_log_max_bytes: usize,
+    pub security_web_scan_patterns: Vec<String>,
     pub once: bool,
     pub dry_run: bool,
     pub check_config: bool,
@@ -127,6 +134,9 @@ impl Default for Config {
             docker_monitor_mode: DEFAULT_DOCKER_MONITOR_MODE.to_string(),
             incus_project: DEFAULT_INCUS_PROJECT.to_string(),
             security_monitor_enabled: true,
+            security_access_log_paths: Vec::new(),
+            security_access_log_max_bytes: DEFAULT_ACCESS_LOG_MAX_BYTES,
+            security_web_scan_patterns: parse_csv_lowercase(DEFAULT_WEB_SCAN_PATTERNS),
             once: false,
             dry_run: false,
             check_config: false,
@@ -218,6 +228,17 @@ impl Config {
         }
         if let Some(v) = non_empty_env(&merged, "SECURITY_MONITOR_ENABLED") {
             cfg.security_monitor_enabled = parse_bool_flag(&v);
+        }
+        if let Some(v) = non_empty_env(&merged, "SECURITY_ACCESS_LOG_PATHS") {
+            cfg.security_access_log_paths = parse_csv_items(&v);
+        }
+        if let Some(v) = non_empty_env(&merged, "SECURITY_ACCESS_LOG_MAX_BYTES") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                cfg.security_access_log_max_bytes = parsed.max(MIN_ACCESS_LOG_MAX_BYTES);
+            }
+        }
+        if let Some(v) = non_empty_env(&merged, "SECURITY_WEB_SCAN_PATTERNS") {
+            cfg.security_web_scan_patterns = parse_csv_lowercase(&v);
         }
 
         let mut i = 0usize;
@@ -402,6 +423,13 @@ pub struct AgentState {
     conntrack_path: PathBuf,
     geoip_db_path: Option<PathBuf>,
     rfw_restart_observation: Option<RfwRestartObservation>,
+    access_log_states: HashMap<String, AccessLogCursor>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AccessLogCursor {
+    pub inode: u64,
+    pub offset: u64,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -448,6 +476,7 @@ impl AgentState {
             conntrack_path,
             geoip_db_path: None,
             rfw_restart_observation: None,
+            access_log_states: HashMap::new(),
         }
     }
 
@@ -532,6 +561,16 @@ impl AgentState {
             allow_new_limits,
         );
 
+        let effective_interval = interval_secs.max(1.0);
+        let access_stats = collect_access_log_stats(
+            &config.security_access_log_paths,
+            config.security_access_log_max_bytes,
+            &config.security_web_scan_patterns,
+            effective_interval,
+            &mut self.access_log_states,
+        );
+        let access_log_json = access_stats.to_json();
+        let access_sources_json = access_stats.to_sources_json();
         let suspicious_findings = if config.security_monitor_enabled {
             let proc_infos = extract_proc_infos_from_snapshot(&proc_snapshot_json);
             detect_suspicious_processes(&proc_infos)
@@ -546,14 +585,22 @@ impl AgentState {
         let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
         let ipv4_ok = host_ip_family_available(false);
         let ipv6_ok = host_ip_family_available(true);
-        let runtime_inventory_json = detect_runtime_inventory_json(containers);
+        let (runtime_inventory_json, runtime_empty) = detect_runtime_inventory_with_empty(containers);
+        let ops_health_json = build_operations_health_json(
+            config.security_monitor_enabled,
+            runtime_empty,
+            containers.len(),
+            &access_stats,
+        );
+        let ops_arch = normalize_arch(std::env::consts::ARCH);
+        let upgrade_result_json = read_managed_upgrade_result_json(Path::new(MANAGED_UPDATE_RESULT_FILE));
 
         let agent_ver = resolved_agent_version();
         let host_fw_json = detect_host_firewall_json();
         let mut out = String::with_capacity(4096);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{{\"enabled\":false,\"readable_files\":0}},\"access_sources\":[],\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"runtime_inventory\":{},\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":[\"operations-v1\",\"agent-rust-v2\",\"public-tcp-v2\"],\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -571,12 +618,14 @@ impl AgentState {
             ipv6_ok,
             containers_json,
             config.security_monitor_enabled,
-            interval_secs.max(1.0),
+            effective_interval,
             total_rx_bps,
             total_tx_bps,
             total_rx_pps,
             total_tx_pps,
             socket_abuse_input.tcp_syn_recv,
+            access_log_json,
+            access_sources_json,
             security_alerts_json,
             suspicious_json,
             socket_abuse_json,
@@ -594,7 +643,11 @@ impl AgentState {
             host_metrics_json,
             psi_snapshot_json,
             proc_snapshot_json,
+            ops_health_json,
             runtime_inventory_json,
+            json_escape(ops_arch),
+            effective_interval,
+            upgrade_result_json,
             cpu_out.actions.len(),
             mem_actions.len(),
             io_actions.len(),
@@ -1136,6 +1189,10 @@ fn binary_exists_in_path(bin: &str) -> bool {
 
 /// Builds the `operations.runtime_inventory` snapshot matching the Python agent contract.
 pub fn detect_runtime_inventory_json(containers: &[ContainerSample]) -> String {
+    detect_runtime_inventory_with_empty(containers).0
+}
+
+fn detect_runtime_inventory_with_empty(containers: &[ContainerSample]) -> (String, bool) {
     let mut runtimes = BTreeSet::new();
     if Path::new("/run/narwhal-agent/connlimit.sock").exists() || binary_exists_in_path("runman") {
         runtimes.insert("runman".to_string());
@@ -1151,7 +1208,8 @@ pub fn detect_runtime_inventory_json(containers: &[ContainerSample]) -> String {
             runtimes.insert(rt);
         }
     }
-    let state = if runtimes.is_empty() {
+    let is_empty = runtimes.is_empty();
+    let state = if is_empty {
         "empty"
     } else {
         "available"
@@ -1164,11 +1222,14 @@ pub fn detect_runtime_inventory_json(containers: &[ContainerSample]) -> String {
         let _ = write!(runtimes_json, "\"{}\"", json_escape(rt));
     }
     runtimes_json.push(']');
-    format!(
-        "{{\"state\":\"{}\",\"runtimes\":{},\"container_count\":{}}}",
-        state,
-        runtimes_json,
-        containers.len()
+    (
+        format!(
+            "{{\"state\":\"{}\",\"runtimes\":{},\"container_count\":{}}}",
+            state,
+            runtimes_json,
+            containers.len()
+        ),
+        is_empty,
     )
 }
 
@@ -1234,6 +1295,504 @@ pub fn build_security_alerts_json(
         ));
     }
     format!("[{}]", items.join(","))
+}
+
+fn parse_csv_items(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn parse_csv_lowercase(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessLogEvent {
+    pub ip: String,
+    pub status: u16,
+    pub method: String,
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AccessLogSummary {
+    pub enabled: bool,
+    pub configured_files: usize,
+    pub readable_files: usize,
+    pub missing_files: usize,
+    pub unreadable_files: usize,
+    pub requests: u64,
+    pub requests_per_second: f64,
+    pub unique_ips: usize,
+    pub top_ip: String,
+    pub top_ip_requests: u64,
+    pub top_ip_requests_per_second: f64,
+    pub status_4xx: u64,
+    pub status_5xx: u64,
+    pub top_ip_4xx: String,
+    pub top_ip_4xx_requests: u64,
+    pub suspicious_requests: u64,
+    pub suspicious_unique_paths: usize,
+    pub top_scanner_ip: String,
+    pub top_scanner_requests: u64,
+    pub parse_errors: u64,
+}
+
+impl AccessLogSummary {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"enabled\":{},\"configured_files\":{},\"readable_files\":{},\"missing_files\":{},\"unreadable_files\":{},\"requests\":{},\"requests_per_second\":{:.6},\"unique_ips\":{},\"top_ip\":\"{}\",\"top_ip_requests\":{},\"top_ip_requests_per_second\":{:.6},\"status_4xx\":{},\"status_5xx\":{},\"top_ip_4xx\":\"{}\",\"top_ip_4xx_requests\":{},\"suspicious_requests\":{},\"suspicious_unique_paths\":{},\"top_scanner_ip\":\"{}\",\"top_scanner_requests\":{},\"parse_errors\":{}}}",
+            self.enabled,
+            self.configured_files,
+            self.readable_files,
+            self.missing_files,
+            self.unreadable_files,
+            self.requests,
+            self.requests_per_second,
+            self.unique_ips,
+            json_escape(&self.top_ip),
+            self.top_ip_requests,
+            self.top_ip_requests_per_second,
+            self.status_4xx,
+            self.status_5xx,
+            json_escape(&self.top_ip_4xx),
+            self.top_ip_4xx_requests,
+            self.suspicious_requests,
+            self.suspicious_unique_paths,
+            json_escape(&self.top_scanner_ip),
+            self.top_scanner_requests,
+            self.parse_errors,
+        )
+    }
+
+    pub fn to_sources_json(&self) -> String {
+        if !self.enabled {
+            return "[]".to_string();
+        }
+        format!(
+            "[{{\"label\":\"宿主机 HTTP 日志\",\"enabled\":true,\"configured_files\":{},\"readable_files\":{},\"missing_files\":{},\"unreadable_files\":{},\"requests\":{},\"requests_per_second\":{:.6},\"unique_ips\":{},\"top_ip\":\"{}\",\"top_ip_requests\":{},\"top_ip_requests_per_second\":{:.6},\"status_4xx\":{},\"status_5xx\":{},\"top_ip_4xx\":\"{}\",\"top_ip_4xx_requests\":{},\"suspicious_requests\":{},\"suspicious_unique_paths\":{},\"top_scanner_ip\":\"{}\",\"top_scanner_requests\":{},\"parse_errors\":{}}}]",
+            self.configured_files,
+            self.readable_files,
+            self.missing_files,
+            self.unreadable_files,
+            self.requests,
+            self.requests_per_second,
+            self.unique_ips,
+            json_escape(&self.top_ip),
+            self.top_ip_requests,
+            self.top_ip_requests_per_second,
+            self.status_4xx,
+            self.status_5xx,
+            json_escape(&self.top_ip_4xx),
+            self.top_ip_4xx_requests,
+            self.suspicious_requests,
+            self.suspicious_unique_paths,
+            json_escape(&self.top_scanner_ip),
+            self.top_scanner_requests,
+            self.parse_errors,
+        )
+    }
+}
+
+/// Parses either JSON (Caddy/Nginx JSON) or Combined/Common HTTP access log lines.
+pub fn parse_access_log_line(line: &str) -> Option<AccessLogEvent> {
+    let text = line.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if text.starts_with('{') {
+        if let Ok(root) = actions::parse_json(text) {
+            let req = root
+                .get("request")
+                .filter(|v| v.as_object().is_some())
+                .unwrap_or(&root);
+            let remote_ip = req
+                .get("client_ip")
+                .and_then(|v| v.as_str())
+                .or_else(|| req.get("remote_ip").and_then(|v| v.as_str()))
+                .or_else(|| req.get("remote_addr").and_then(|v| v.as_str()))
+                .or_else(|| root.get("remote_addr").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .trim();
+            let status_u64 = root
+                .get("status")
+                .and_then(|v| v.as_u64())
+                .or_else(|| req.get("status").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            if !remote_ip.is_empty() && (100..=599).contains(&status_u64) {
+                let method = req
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| root.get("request_method").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                let uri = req
+                    .get("uri")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| root.get("request_uri").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                return Some(AccessLogEvent {
+                    ip: remote_ip.to_string(),
+                    status: status_u64 as u16,
+                    method,
+                    uri,
+                });
+            }
+        }
+        return None;
+    }
+
+    let first_ws = text.find(|c: char| c.is_ascii_whitespace())?;
+    let remote_ip = &text[..first_ws];
+    if remote_ip.is_empty() {
+        return None;
+    }
+    let q1 = text[first_ws..].find('"')? + first_ws;
+    let rest_after_q1 = &text[q1 + 1..];
+    let q2_rel = rest_after_q1.find('"')?;
+    let request_line = &rest_after_q1[..q2_rel];
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?;
+    if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
+    let uri = parts.next()?;
+    let _proto = parts.next()?;
+    let after_q2 = rest_after_q1[q2_rel + 1..].trim_start();
+    let status_token = after_q2.split_whitespace().next()?;
+    if status_token.len() != 3 || !status_token.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let status: u16 = status_token.parse().ok()?;
+    if !(100..=599).contains(&status) {
+        return None;
+    }
+    Some(AccessLogEvent {
+        ip: remote_ip.to_string(),
+        status,
+        method: method.to_string(),
+        uri: uri.to_string(),
+    })
+}
+
+fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
+    let p = pattern.as_bytes();
+    let s = candidate.as_bytes();
+    let (mut pi, mut si) = (0usize, 0usize);
+    let (mut star_idx, mut match_idx) = (None, 0usize);
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star_idx = Some(pi);
+            match_idx = si;
+            pi += 1;
+        } else if let Some(star) = star_idx {
+            pi = star + 1;
+            match_idx += 1;
+            si = match_idx;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+fn expand_access_log_globs(patterns: &[String]) -> (Vec<String>, usize) {
+    let mut expanded = Vec::new();
+    let mut missing = 0usize;
+    for raw in patterns {
+        if raw.contains('*') || raw.contains('?') {
+            let p = Path::new(raw);
+            let Some(parent) = p.parent() else {
+                missing += 1;
+                continue;
+            };
+            let Some(file_pat) = p.file_name().and_then(|s| s.to_str()) else {
+                missing += 1;
+                continue;
+            };
+            let Ok(entries) = fs::read_dir(parent) else {
+                missing += 1;
+                continue;
+            };
+            let mut matched: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name();
+                    let name_str = name.to_str()?;
+                    if wildcard_matches(file_pat, name_str) && e.path().is_file() {
+                        Some(e.path().to_string_lossy().into_owned())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            matched.sort();
+            if matched.is_empty() {
+                missing += 1;
+            } else {
+                expanded.extend(matched);
+            }
+        } else {
+            expanded.push(raw.clone());
+        }
+    }
+    (expanded, missing)
+}
+
+#[cfg(unix)]
+fn file_inode(meta: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.ino()
+}
+
+#[cfg(not(unix))]
+fn file_inode(_meta: &fs::Metadata) -> u64 {
+    0
+}
+
+fn increment_count(map: &mut HashMap<String, u64>, key: &str) {
+    if let Some(v) = map.get_mut(key) {
+        *v += 1;
+    } else {
+        map.insert(key.to_string(), 1);
+    }
+}
+
+fn top_entry(map: &HashMap<String, u64>) -> (String, u64) {
+    let mut best_k = String::new();
+    let mut best_v = 0u64;
+    for (k, &v) in map {
+        if v > best_v {
+            best_k = k.clone();
+            best_v = v;
+        }
+    }
+    (best_k, best_v)
+}
+
+/// Incrementally tails configured HTTP access logs while tracking inodes and byte offsets.
+pub fn collect_access_log_stats(
+    paths: &[String],
+    max_bytes: usize,
+    scan_patterns: &[String],
+    interval_seconds: f64,
+    states: &mut HashMap<String, AccessLogCursor>,
+) -> AccessLogSummary {
+    let mut summary = AccessLogSummary {
+        enabled: !paths.is_empty(),
+        configured_files: paths.len(),
+        ..AccessLogSummary::default()
+    };
+    if paths.is_empty() {
+        return summary;
+    }
+
+    let (expanded_paths, glob_missing) = expand_access_log_globs(paths);
+    if !expanded_paths.is_empty() {
+        summary.configured_files = expanded_paths.len();
+    }
+    summary.missing_files += glob_missing;
+
+    let mut ip_counts: HashMap<String, u64> = HashMap::new();
+    let mut ip_4xx_counts: HashMap<String, u64> = HashMap::new();
+    let mut scanner_ip_counts: HashMap<String, u64> = HashMap::new();
+    let mut suspicious_paths_seen: BTreeSet<String> = BTreeSet::new();
+    let mut tail_lines: Vec<String> = Vec::new();
+    let cap_bytes = max_bytes.max(MIN_ACCESS_LOG_MAX_BYTES) as u64;
+
+    for path in expanded_paths {
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                summary.missing_files += 1;
+                continue;
+            }
+            Err(_) => {
+                summary.unreadable_files += 1;
+                continue;
+            }
+        };
+        let inode = file_inode(&meta);
+        let file_size = meta.len();
+        let Some(prev) = states.get(&path).copied() else {
+            states.insert(
+                path,
+                AccessLogCursor {
+                    inode,
+                    offset: file_size,
+                },
+            );
+            summary.readable_files += 1;
+            continue;
+        };
+
+        let mut prev_offset = prev.offset;
+        if prev.inode != inode || prev_offset > file_size {
+            prev_offset = 0;
+        }
+        let start = prev_offset.max(file_size.saturating_sub(cap_bytes));
+        let skip_partial = start > prev_offset;
+
+        let Ok(mut file) = File::open(&path) else {
+            summary.unreadable_files += 1;
+            continue;
+        };
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            summary.unreadable_files += 1;
+            continue;
+        }
+        let mut reader = BufReader::new(file);
+        if skip_partial {
+            let mut discard = String::new();
+            let _ = reader.read_line(&mut discard);
+        }
+        tail_lines.clear();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tail_lines.len() >= 20_000 {
+                        tail_lines.remove(0);
+                    }
+                    tail_lines.push(line.clone());
+                }
+                Err(_) => break,
+            }
+        }
+        let new_offset = reader.stream_position().unwrap_or(file_size);
+        states.insert(
+            path,
+            AccessLogCursor {
+                inode,
+                offset: new_offset,
+            },
+        );
+        summary.readable_files += 1;
+
+        for raw_line in &tail_lines {
+            let Some(event) = parse_access_log_line(raw_line) else {
+                summary.parse_errors += 1;
+                continue;
+            };
+            summary.requests += 1;
+            if !event.ip.is_empty() {
+                increment_count(&mut ip_counts, &event.ip);
+            }
+            if (400..500).contains(&event.status) {
+                summary.status_4xx += 1;
+                if !event.ip.is_empty() && matches!(event.status, 401 | 403 | 429) {
+                    increment_count(&mut ip_4xx_counts, &event.ip);
+                }
+            } else if event.status >= 500 {
+                summary.status_5xx += 1;
+            }
+            if !event.uri.is_empty() {
+                let uri_lower = event.uri.to_ascii_lowercase();
+                if scan_patterns.iter().any(|p| uri_lower.contains(p.as_str())) {
+                    let clean_path = event.uri.split('?').next().unwrap_or("");
+                    let truncated: String = clean_path.chars().take(500).collect();
+                    suspicious_paths_seen.insert(truncated);
+                    if !event.ip.is_empty() {
+                        increment_count(&mut scanner_ip_counts, &event.ip);
+                    }
+                }
+            }
+        }
+    }
+
+    let (top_ip, top_ip_requests) = top_entry(&ip_counts);
+    let (top_ip_4xx, top_ip_4xx_requests) = top_entry(&ip_4xx_counts);
+    let (top_scanner_ip, top_scanner_requests) = top_entry(&scanner_ip_counts);
+    let interval = interval_seconds.max(1.0);
+
+    summary.requests_per_second = summary.requests as f64 / interval;
+    summary.unique_ips = ip_counts.len();
+    summary.top_ip = top_ip;
+    summary.top_ip_requests = top_ip_requests;
+    summary.top_ip_requests_per_second = top_ip_requests as f64 / interval;
+    summary.top_ip_4xx = top_ip_4xx;
+    summary.top_ip_4xx_requests = top_ip_4xx_requests;
+    summary.suspicious_requests = scanner_ip_counts.values().copied().sum();
+    summary.suspicious_unique_paths = suspicious_paths_seen.len();
+    summary.top_scanner_ip = top_scanner_ip;
+    summary.top_scanner_requests = top_scanner_requests;
+    summary
+}
+
+fn normalize_arch(arch: &str) -> &str {
+    match arch {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        other => other,
+    }
+}
+
+fn read_managed_upgrade_result_json(path: &Path) -> String {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return "{}".to_string();
+    };
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') && actions::parse_json(trimmed).is_ok() {
+        trimmed.to_string()
+    } else {
+        "{}".to_string()
+    }
+}
+
+fn build_operations_health_json(
+    security_enabled: bool,
+    runtime_empty: bool,
+    container_count: usize,
+    access: &AccessLogSummary,
+) -> String {
+    let log_status = if access.readable_files == 0 {
+        if !access.enabled {
+            "not_configured"
+        } else {
+            "missing"
+        }
+    } else if access.parse_errors > 0 && access.requests == 0 {
+        "parse_error"
+    } else if access.requests > 0 {
+        "healthy"
+    } else {
+        "idle"
+    };
+    let net_status = if container_count > 0 { "healthy" } else { "idle" };
+    let sec_status = if security_enabled {
+        "healthy"
+    } else if runtime_empty && container_count == 0 {
+        "not_applicable"
+    } else {
+        "disabled"
+    };
+    format!(
+        "[{{\"source\":\"http_logs\",\"status\":\"{}\",\"details\":{{\"readable_files\":{},\"missing_files\":{},\"unreadable_files\":{},\"parse_errors\":{},\"requests\":{}}},\"guidance\":\"使用日志向导发现路径，确认 JSON/combined 格式和 Agent 读取权限\"}},{{\"source\":\"network_counters\",\"status\":\"{}\",\"details\":{{\"containers\":{},\"available\":{},\"notice_only\":0}},\"guidance\":\"检查运行时统计接口、/proc 网络命名空间权限；首采样不产生速率\"}},{{\"source\":\"security\",\"status\":\"{}\",\"guidance\":\"无容器运行时的探针节点不适用容器安全采样；其他节点请启用 SECURITY_MONITOR_ENABLED\"}}]",
+        log_status,
+        access.readable_files,
+        access.missing_files,
+        access.unreadable_files,
+        access.parse_errors,
+        access.requests,
+        net_status,
+        container_count,
+        container_count,
+        sec_status,
+    )
 }
 
 pub fn extract_proc_infos_from_snapshot(proc_snapshot_json: &str) -> Vec<ProcInfo> {
@@ -2366,5 +2925,92 @@ SECURITY_MONITOR_ENABLED=false
         if verdict.suspected {
             assert!(alerts.contains("\"type\":\"socket_abuse_suspected\""));
         }
+    }
+
+    #[test]
+    fn test_access_log_parsing_incremental_tailing_and_operations_health() {
+        let combined = parse_access_log_line(
+            r#"203.0.113.5 - - [16/Nov/2026:16:00:00 +0800] "GET /wp-login.php?a=1 HTTP/1.1" 403 123 "-" "curl""#,
+        )
+        .expect("combined line");
+        assert_eq!(combined.ip, "203.0.113.5");
+        assert_eq!(combined.status, 403);
+        assert_eq!(combined.method, "GET");
+        assert_eq!(combined.uri, "/wp-login.php?a=1");
+
+        let caddy = parse_access_log_line(
+            r#"{"request":{"client_ip":"198.51.100.8","method":"POST","uri":"/.env"},"status":404}"#,
+        )
+        .expect("caddy json line");
+        assert_eq!(caddy.ip, "198.51.100.8");
+        assert_eq!(caddy.status, 404);
+        assert_eq!(caddy.method, "POST");
+        assert_eq!(caddy.uri, "/.env");
+
+        assert!(parse_access_log_line(r#"{"level":"info","msg":"started"}"#).is_none());
+
+        let dir = make_temp_dir("access_log");
+        let log_path = dir.join("site-access.log");
+        fs::write(
+            &log_path,
+            "192.0.2.1 - - [16/Nov/2026:15:59:00 +0800] \"GET /old HTTP/1.1\" 200 10\n",
+        )
+        .unwrap();
+
+        let paths = vec![
+            dir.join("*.log").to_string_lossy().into_owned(),
+            dir.join("missing.log").to_string_lossy().into_owned(),
+        ];
+        let scan_patterns = parse_csv_lowercase(DEFAULT_WEB_SCAN_PATTERNS);
+        let mut states = HashMap::new();
+
+        // First tick initializes byte offset to current EOF without replaying history.
+        let s1 = collect_access_log_stats(&paths, DEFAULT_ACCESS_LOG_MAX_BYTES, &scan_patterns, 60.0, &mut states);
+        assert!(s1.enabled);
+        assert_eq!(s1.readable_files, 1);
+        assert_eq!(s1.missing_files, 1);
+        assert_eq!(s1.requests, 0);
+
+        // Append new events before tick 2.
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+            writeln!(
+                f,
+                "203.0.113.9 - - [16/Nov/2026:16:00:01 +0800] \"GET /index.html HTTP/1.1\" 200 100"
+            )
+            .unwrap();
+            writeln!(
+                f,
+                "203.0.113.10 - - [16/Nov/2026:16:00:02 +0800] \"GET /.env HTTP/1.1\" 403 10"
+            )
+            .unwrap();
+            writeln!(
+                f,
+                "{{\"request\":{{\"client_ip\":\"203.0.113.10\",\"method\":\"GET\",\"uri\":\"/wp-admin\"}},\"status\":502}}"
+            )
+            .unwrap();
+            writeln!(f, "not a valid access log line").unwrap();
+        }
+
+        let s2 = collect_access_log_stats(&paths, DEFAULT_ACCESS_LOG_MAX_BYTES, &scan_patterns, 60.0, &mut states);
+        assert_eq!(s2.requests, 3);
+        assert_eq!(s2.unique_ips, 2);
+        assert_eq!(s2.top_ip, "203.0.113.10");
+        assert_eq!(s2.top_ip_requests, 2);
+        assert_eq!(s2.status_4xx, 1);
+        assert_eq!(s2.status_5xx, 1);
+        assert_eq!(s2.top_ip_4xx, "203.0.113.10");
+        assert_eq!(s2.suspicious_requests, 2);
+        assert_eq!(s2.suspicious_unique_paths, 2);
+        assert_eq!(s2.top_scanner_ip, "203.0.113.10");
+        assert_eq!(s2.parse_errors, 1);
+
+        let health = build_operations_health_json(true, false, 2, &s2);
+        assert!(health.contains("\"source\":\"http_logs\""));
+        assert!(health.contains("\"status\":\"healthy\""));
+        assert_eq!(normalize_arch("x86_64"), "x86_64");
+        assert_eq!(normalize_arch("arm64"), "aarch64");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

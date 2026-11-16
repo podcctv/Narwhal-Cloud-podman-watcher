@@ -2,6 +2,13 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 8：`narwhal-agent` 原生访问日志增量解析、运维健康基线与升级回执（v1.9.8）
+
+- **`rust/crates/agent-core/src/lib.rs`**：
+  - 在 `Config` 接入 `SECURITY_ACCESS_LOG_PATHS`、`SECURITY_ACCESS_LOG_MAX_BYTES` 与 `SECURITY_WEB_SCAN_PATTERNS`，并在 `AgentState` 新增 `access_log_states`（inode + 字节偏移游标）。
+  - 实现零外部依赖、纯 `std` 的 `parse_access_log_line`（支持 Caddy/Nginx JSON 与 Combined/Common 文本格式）、`expand_access_log_globs`（支持 `*`/`?` 通配符）及 `collect_access_log_stats`（首次仅对齐 EOF、轮转归零、截取最近 20,000 行、统计 QPS/Top IP/4xx/5xx/Web 扫描路径），同时填充 `security.access_log` 与 `security.access_sources`。
+  - 完善 `operations` 上报结构：新增 `health`（`http_logs`、`network_counters`、`security` 三项状态）、`architecture`、`interval_seconds`、`upgrade_result`（读取 `/opt/narwhal-monitor/managed-update-result.json`）、`capabilities`（`["operations-v1","agent-rust-v2","public-tcp-v2"]`）与 `schema_version`，并补充对应单元测试。
+
 ## Phase 7 完善：`narwhal-agent` 宿主机网络可达性、运行时清单与安全告警原生生成（v1.9.7）
 
 - **`rust/crates/agent-core/src/lib.rs`**：
