@@ -180,6 +180,8 @@ _AGENT_ONLY_PATHS = {
     "/api/v1/update/probe/sha256",
     "/api/v1/update/probe/amd64",
     "/api/v1/update/probe/arm64",
+    "/api/v1/update/agent/amd64",
+    "/api/v1/update/agent/arm64",
 }
 
 # Telegram sends updates without the dashboard's Basic credentials.  The opaque
@@ -5293,6 +5295,28 @@ def agent_update_probe_sha256(
     )
 
 
+def _serve_client_binary(
+    binary_prefix: str,
+    arch: str,
+    x_timestamp: str,
+    x_signature: str,
+) -> FileResponse:
+    """Verify HMAC signature and serve a bundled static client binary for amd64/arm64."""
+    verify_signature(b"", x_timestamp, x_signature)
+    if arch not in {"amd64", "arm64"}:
+        raise HTTPException(status_code=404, detail=f"unsupported {binary_prefix} architecture")
+    filename = f"{binary_prefix}-{arch}"
+    bin_path = _resolve_client_bins_dir() / filename
+    if not bin_path.is_file():
+        raise HTTPException(status_code=404, detail=f"{binary_prefix} binary not bundled")
+    return FileResponse(
+        path=bin_path,
+        media_type="application/octet-stream",
+        filename=filename,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/v1/update/probe/{arch}")
 def agent_update_probe_binary(
     arch: str,
@@ -5300,18 +5324,17 @@ def agent_update_probe_binary(
     x_signature: str = Header(default=""),
 ) -> FileResponse:
     """Return the bundled static narwhal-probe binary for an authenticated Client updater."""
-    verify_signature(b"", x_timestamp, x_signature)
-    if arch not in {"amd64", "arm64"}:
-        raise HTTPException(status_code=404, detail="unsupported probe architecture")
-    bin_path = _resolve_client_bins_dir() / f"narwhal-probe-{arch}"
-    if not bin_path.is_file():
-        raise HTTPException(status_code=404, detail="probe binary not bundled")
-    return FileResponse(
-        path=bin_path,
-        media_type="application/octet-stream",
-        filename=f"narwhal-probe-{arch}",
-        headers={"Cache-Control": "no-store"},
-    )
+    return _serve_client_binary("narwhal-probe", arch, x_timestamp, x_signature)
+
+
+@app.get("/api/v1/update/agent/{arch}")
+def agent_update_agent_binary(
+    arch: str,
+    x_timestamp: str = Header(default=""),
+    x_signature: str = Header(default=""),
+) -> FileResponse:
+    """Return the bundled static narwhal-agent binary for an authenticated Client updater."""
+    return _serve_client_binary("narwhal-agent", arch, x_timestamp, x_signature)
 
 
 def _queue_security_action_row(

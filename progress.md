@@ -2,6 +2,19 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 5：Rust `narwhal-agent` 全功能代理骨架与双二进制分发（v1.8.43）
+
+- 新增纯 `std`、`#![forbid(unsafe_code)]` 的 Rust workspace crates：
+  - `rust/crates/transport`：HTTP/1.1 + TLS/HTTPS 客户端、HMAC-SHA256 请求签名与响应验签。
+  - `rust/crates/guard-core`：通用守卫状态机原语、限流与策略数据结构。
+  - `rust/crates/agent-core`：常驻代理主循环与 `narwhal-agent` 二进制入口（`rust/Cargo.toml` 纳入 workspace）。
+- CI 与服务端分发：
+  - `.github/workflows/build-and-push-ghcr.yml` 扩展 `rust-probe` 为双二进制静态编译（`--bin narwhal-probe --bin narwhal-agent`，覆盖 `amd64`/`arm64` musl 并写入 `SHA256SUMS`）。
+  - `server/app.py` 抽取 `_serve_client_binary` 并新增 `GET /api/v1/update/agent/{arch}` 鉴权分发端点（接入 `_AGENT_ONLY_PATHS`）。
+- 客户端安装与自更新支持 `NARWHAL_AGENT_MODE=rust`：
+  - `scripts/install-client.sh` 新增 `fetch_narwhal_agent()` 与 `NARWHAL_AGENT_MODE`（`python`/`rust`）校验及 `ExecStart` 切换。
+  - `scripts/managed-client-update.sh` 兼容无 `.venv` 的 `rust` 模式升级与回滚，并补充 `tests/test_managed_update_scripts.py` 单测。
+
 ## Phase 4 扩展：`net-probe` Rust 原生 TCP Ping 探测与 `tcp_probe` 桥接（v1.8.42）
 
 - 新增零外部依赖、`#![forbid(unsafe_code)]` 的 `rust/crates/net-probe`：

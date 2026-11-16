@@ -178,19 +178,21 @@ jobs:
       - name: Run Rust probe tests
         run: cargo test --manifest-path rust/Cargo.toml
 
-      - name: Build static narwhal-probe binaries
+      - name: Build static narwhal-probe and narwhal-agent binaries
         run: |
-          cargo build --manifest-path rust/Cargo.toml --release --target x86_64-unknown-linux-musl
+          cargo build --manifest-path rust/Cargo.toml --release --target x86_64-unknown-linux-musl --bin narwhal-probe --bin narwhal-agent
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc \
-            cargo build --manifest-path rust/Cargo.toml --release --target aarch64-unknown-linux-musl
+            cargo build --manifest-path rust/Cargo.toml --release --target aarch64-unknown-linux-musl --bin narwhal-probe --bin narwhal-agent
 
-      - name: Stage narwhal-probe binaries and SHA256SUMS
+      - name: Stage narwhal-probe and narwhal-agent binaries and SHA256SUMS
         run: |
           mkdir -p dist/client_bins
           cp rust/target/x86_64-unknown-linux-musl/release/narwhal-probe dist/client_bins/narwhal-probe-amd64
           cp rust/target/aarch64-unknown-linux-musl/release/narwhal-probe dist/client_bins/narwhal-probe-arm64
-          chmod 0755 dist/client_bins/narwhal-probe-amd64 dist/client_bins/narwhal-probe-arm64
-          (cd dist/client_bins && sha256sum narwhal-probe-amd64 narwhal-probe-arm64 > SHA256SUMS)
+          cp rust/target/x86_64-unknown-linux-musl/release/narwhal-agent dist/client_bins/narwhal-agent-amd64
+          cp rust/target/aarch64-unknown-linux-musl/release/narwhal-agent dist/client_bins/narwhal-agent-arm64
+          chmod 0755 dist/client_bins/narwhal-probe-amd64 dist/client_bins/narwhal-probe-arm64 dist/client_bins/narwhal-agent-amd64 dist/client_bins/narwhal-agent-arm64
+          (cd dist/client_bins && sha256sum narwhal-probe-amd64 narwhal-probe-arm64 narwhal-agent-amd64 narwhal-agent-arm64 > SHA256SUMS)
 
       - name: Upload narwhal-probe binaries
         uses: actions/upload-artifact@v4

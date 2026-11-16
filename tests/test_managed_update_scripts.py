@@ -256,6 +256,84 @@ class ProbeDistributionAndChecksumTests(unittest.TestCase):
 
         installer = (ROOT / "scripts" / "install-client.sh").read_text(encoding="utf-8")
         self.assertIn("fetch_narwhal_probe()", installer)
+        self.assertIn("fetch_narwhal_agent()", installer)
+
+    def test_install_and_managed_update_agent_mode_and_fetch_contract(self):
+        installer = (ROOT / "scripts" / "install-client.sh").read_text(encoding="utf-8")
+        self.assertIn("fetch_narwhal_agent()", installer)
+        self.assertIn("/api/v1/update/agent/{arch}", installer)
+        self.assertIn('fetch_narwhal_agent "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-agent"', installer)
+        self.assertIn('agent_mode="${NARWHAL_AGENT_MODE:-$(load_kv_from_file "$CLIENT_ENV_FILE" NARWHAL_AGENT_MODE || true)}"', installer)
+        self.assertIn('agent_mode="${agent_mode:-python}"', installer)
+        self.assertIn('if [[ "$agent_mode" != "rust" && "$agent_mode" != "python" ]]; then', installer)
+        self.assertIn("NARWHAL_AGENT_MODE=$agent_mode", installer)
+        self.assertIn('if [[ "$agent_mode" == "rust" && -x "$CLIENT_APP_DIR/bin/narwhal-agent" ]]; then', installer)
+        self.assertIn('agent_exec_start="$CLIENT_APP_DIR/bin/narwhal-agent"', installer)
+        self.assertIn('agent_exec_start="$CLIENT_VENV_DIR/bin/python $CLIENT_APP_DIR/agent.py"', installer)
+
+        updater = (ROOT / "scripts" / "managed-client-update.sh").read_text(encoding="utf-8")
+        self.assertIn('if [[ -f "$app_dir/admission_guard.py" && -x "$app_dir/.venv/bin/python" ]]; then', updater)
+        self.assertIn('if [[ -x "$app_dir/.venv/bin/pip" ]]; then', updater)
+        self.assertIn('python3 -m py_compile "${stage_py_files[@]}"', updater)
+
+        workflow = (ROOT / ".github" / "workflows" / "build-and-push-ghcr.yml").read_text(encoding="utf-8")
+        self.assertIn("--bin narwhal-probe --bin narwhal-agent", workflow)
+        self.assertIn("narwhal-agent-amd64", workflow)
+        self.assertIn("narwhal-agent-arm64", workflow)
+
+    def test_server_agent_endpoints_auth_invalid_arch_and_download(self):
+        from fastapi.testclient import TestClient
+        from server import app as server_app
+
+        with tempfile.TemporaryDirectory(prefix="narwhal-agent-srv-") as temp:
+            bins_dir = Path(temp)
+            secret = "test-agent-secret"
+            with (
+                patch.object(server_app, "SHARED_SECRET", secret),
+                patch.dict(os.environ, {"NARWHAL_CLIENT_BINS_DIR": str(bins_dir)}),
+            ):
+                client = TestClient(server_app.app)
+
+                # Unauthenticated requests are rejected.
+                self.assertEqual(client.get("/api/v1/update/agent/amd64").status_code, 401)
+                self.assertEqual(client.get("/api/v1/update/agent/arm64").status_code, 401)
+
+                def auth_headers() -> tuple[str, dict[str, str]]:
+                    ts = str(int(time.time()))
+                    sig = hmac.new(secret.encode(), ts.encode(), hashlib.sha256).hexdigest()
+                    return ts, {"X-Timestamp": ts, "X-Signature": sig}
+
+                # Unsupported architecture is rejected by _AGENT_ONLY_PATHS (401) and by handler (404).
+                ts, hdrs = auth_headers()
+                self.assertEqual(
+                    client.get("/api/v1/update/agent/riscv64", headers=hdrs).status_code,
+                    401,
+                )
+                with self.assertRaises(server_app.HTTPException) as exc_ctx:
+                    server_app.agent_update_agent_binary(
+                        "riscv64", x_timestamp=ts, x_signature=hdrs["X-Signature"]
+                    )
+                self.assertEqual(exc_ctx.exception.status_code, 404)
+
+                # Empty client_bins returns 404 cleanly.
+                _, hdrs = auth_headers()
+                self.assertEqual(
+                    client.get("/api/v1/update/agent/amd64", headers=hdrs).status_code,
+                    404,
+                )
+
+                # Bundled amd64 binary returns 200 with exact payload; missing arm64 returns 404.
+                payload = b"\x7fELF-mock-narwhal-agent-amd64"
+                (bins_dir / "narwhal-agent-amd64").write_bytes(payload)
+                _, hdrs = auth_headers()
+                bin_resp = client.get("/api/v1/update/agent/amd64", headers=hdrs)
+                self.assertEqual(bin_resp.status_code, 200)
+                self.assertEqual(bin_resp.content, payload)
+                _, hdrs = auth_headers()
+                self.assertEqual(
+                    client.get("/api/v1/update/agent/arm64", headers=hdrs).status_code,
+                    404,
+                )
 
     def test_server_probe_endpoints_auth_404_and_download(self):
         from fastapi.testclient import TestClient

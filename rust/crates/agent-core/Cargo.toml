@@ -1,0 +1,18 @@
+[package]
+name = "agent-core"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "narwhal-agent"
+path = "src/main.rs"
+
+[dependencies]
+transport = { path = "../transport" }
+guard-core = { path = "../guard-core" }
+proc-probe = { path = "../proc-probe" }
+socket-sec = { path = "../socket-sec" }
+cgroup-probe = { path = "../cgroup-probe" }
+host-metrics = { path = "../host-metrics" }
+geoip-probe = { path = "../geoip-probe" }
+net-probe = { path = "../net-probe" }

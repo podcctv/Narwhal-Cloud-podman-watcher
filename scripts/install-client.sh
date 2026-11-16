@@ -190,6 +190,159 @@ if __name__ == "__main__":
 PY
 }
 
+fetch_narwhal_agent() {
+  local arch="${1:-}"
+  local dest_path="${2:-}"
+  local server_url="${3:-}"
+  local secret="${4:-}"
+  local ca_file="${5:-}"
+  if [[ -z "$arch" || -z "$dest_path" || -z "$server_url" || -z "$secret" ]]; then
+    return 0
+  fi
+  if [[ "$arch" != "amd64" && "$arch" != "arm64" ]]; then
+    echo "[WARN] Skipping narwhal-agent download for unsupported arch: $arch"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest_path")"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$arch" "$dest_path" "$server_url" "$secret" "$ca_file" <<'PY' || true
+import hashlib
+import hmac
+import os
+import re
+import ssl
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from urllib.parse import urlparse
+
+
+def normalize_url(value: str) -> str:
+    cleaned = value.strip().rstrip("/")
+    if cleaned and not urlparse(cleaned).scheme:
+        cleaned = f"https://{cleaned}"
+    return cleaned
+
+
+def signed_headers(secret: str) -> tuple[str, dict[str, str]]:
+    ts = str(int(time.time()))
+    sig = hmac.new(secret.encode(), ts.encode(), hashlib.sha256).hexdigest()
+    return ts, {
+        "User-Agent": "Narwhal-Client-Updater/1.0",
+        "X-Timestamp": ts,
+        "X-Signature": sig,
+    }
+
+
+def main() -> int:
+    arch, dest_path, raw_url, secret, ca_file = sys.argv[1:6]
+    server_url = normalize_url(raw_url)
+    if not server_url:
+        return 0
+    context = ssl.create_default_context(cafile=ca_file or None)
+
+    ts, headers = signed_headers(secret)
+    sha_req = urllib.request.Request(
+        f"{server_url}/api/v1/update/probe/sha256",
+        headers=headers,
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(sha_req, context=context, timeout=12.0) as resp:
+            sha_body = resp.read(65537)
+            resp_sig = resp.headers.get("X-Narwhal-Response-Signature", "")
+    except urllib.error.HTTPError as exc:
+        print(f"[INFO] narwhal-agent checksums unavailable (HTTP {exc.code}); using Python fallback.")
+        return 0
+    except (OSError, urllib.error.URLError) as exc:
+        print(f"[INFO] Cannot reach Server for narwhal-agent ({exc}); using Python fallback.")
+        return 0
+
+    if len(sha_body) > 65536:
+        print("[WARN] narwhal-agent SHA256SUMS response too large; using Python fallback.")
+        return 0
+    expected_sig = hmac.new(secret.encode(), sha_body + ts.encode(), hashlib.sha256).hexdigest()
+    if not resp_sig or not hmac.compare_digest(expected_sig, resp_sig):
+        print("[WARN] narwhal-agent SHA256SUMS signature verification failed; using Python fallback.")
+        return 0
+
+    target_name = f"narwhal-agent-{arch}"
+    expected_sha256 = ""
+    for line in sha_body.decode("utf-8", errors="replace").splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[1].lstrip("*") == target_name:
+            candidate = parts[0].lower()
+            if re.fullmatch(r"[0-9a-f]{64}", candidate):
+                expected_sha256 = candidate
+                break
+    if not expected_sha256:
+        print(f"[INFO] {target_name} not listed in SHA256SUMS; using Python fallback.")
+        return 0
+
+    if os.path.isfile(dest_path):
+        h = hashlib.sha256()
+        with open(dest_path, "rb") as existing:
+            for chunk in iter(lambda: existing.read(65536), b""):
+                h.update(chunk)
+        if h.hexdigest().lower() == expected_sha256:
+            os.chmod(dest_path, 0o755)
+            print(f"[OK] narwhal-agent ({arch}) already matches SHA256 ({expected_sha256[:12]}...).")
+            return 0
+
+    _, bin_headers = signed_headers(secret)
+    bin_req = urllib.request.Request(
+        f"{server_url}/api/v1/update/agent/{arch}",
+        headers=bin_headers,
+        method="GET",
+    )
+    dest_dir = os.path.dirname(dest_path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".narwhal-agent-", dir=dest_dir)
+    try:
+        hasher = hashlib.sha256()
+        total = 0
+        max_bytes = 64 * 1024 * 1024
+        with os.fdopen(fd, "wb") as tmp_file:
+            with urllib.request.urlopen(bin_req, context=context, timeout=30.0) as resp:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError("binary exceeds 64 MiB limit")
+                    hasher.update(chunk)
+                    tmp_file.write(chunk)
+        actual_sha256 = hasher.hexdigest().lower()
+        if not hmac.compare_digest(actual_sha256, expected_sha256):
+            print("[WARN] narwhal-agent SHA256 mismatch; keeping Python fallback.")
+            os.unlink(tmp_path)
+            return 0
+        os.chmod(tmp_path, 0o755)
+        os.replace(tmp_path, dest_path)
+        print(f"[OK] Installed verified narwhal-agent ({arch}, sha256={actual_sha256[:12]}...) to {dest_path}")
+        return 0
+    except urllib.error.HTTPError as exc:
+        print(f"[INFO] narwhal-agent binary unavailable (HTTP {exc.code}); using Python fallback.")
+    except Exception as exc:
+        print(f"[WARN] narwhal-agent download failed ({exc}); using Python fallback.")
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+    return 0
+  fi
+  echo "[INFO] python3 unavailable; skipping narwhal-agent download."
+  return 0
+}
+
 generate_secret() {
   tr -d '-' </proc/sys/kernel/random/uuid | cut -c 1-25
 }
@@ -331,6 +484,12 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
 fi
 
 TARGET_ARCH="$(normalize_arch)"
+agent_mode="${NARWHAL_AGENT_MODE:-$(load_kv_from_file "$CLIENT_ENV_FILE" NARWHAL_AGENT_MODE || true)}"
+agent_mode="${agent_mode:-python}"
+if [[ "$agent_mode" != "rust" && "$agent_mode" != "python" ]]; then
+  echo "[WARN] Unsupported NARWHAL_AGENT_MODE=$agent_mode; falling back to python." >&2
+  agent_mode="python"
+fi
 
 has_podman=0
 has_docker=0
@@ -371,7 +530,7 @@ else
   echo "[INFO] 检测到本机容器运行时: ${detected_runtimes[*]}"
 fi
 
-if [[ "$MODE" != "update" ]]; then
+if [[ "$MODE" != "update" && "$agent_mode" != "rust" ]]; then
   if ! command -v python3 >/dev/null 2>&1; then
     echo "Installing python3..."
     apt-get update
@@ -586,6 +745,7 @@ fi
 
 cat >"$CLIENT_ENV_FILE" <<ENV
 NARWHAL_VERSION=$PROJECT_VERSION
+NARWHAL_AGENT_MODE=$agent_mode
 SERVER_URL=$server_url
 SHARED_SECRET=$secret
 SERVER_TLS_CA_FILE=$tls_ca_file
@@ -699,6 +859,7 @@ fi
 if [[ "$MODE" == "update" ]]; then
   fetch_narwhal_probe "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-probe" "${NARWHAL_SERVER_URL:-$server_url}" "${NARWHAL_SHARED_SECRET:-$secret}" "${NARWHAL_TLS_CA_FILE:-$tls_ca_file}" || true
 fi
+fetch_narwhal_agent "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-agent" "${NARWHAL_SERVER_URL:-$server_url}" "${NARWHAL_SHARED_SECRET:-$secret}" "${NARWHAL_TLS_CA_FILE:-$tls_ca_file}" || true
 install -m 0755 "$ROOT_DIR/scripts/managed-client-update.sh" /opt/narwhal-monitor/managed-client-update.sh
 if [[ -f "$ROOT_DIR/scripts/update_archive.py" ]]; then
   install -m 0755 "$ROOT_DIR/scripts/update_archive.py" /opt/narwhal-monitor/update_archive.py
@@ -707,7 +868,14 @@ cp "$ROOT_DIR/client/requirements.txt" "$CLIENT_APP_DIR/requirements.txt"
 cp "$ROOT_DIR/scripts/self-uninstall-client.sh" "$SELF_UNINSTALL_SCRIPT"
 chmod 0700 "$SELF_UNINSTALL_SCRIPT"
 
-ensure_client_venv
+use_rust_agent=0
+if [[ "$agent_mode" == "rust" && -x "$CLIENT_APP_DIR/bin/narwhal-agent" ]]; then
+  use_rust_agent=1
+fi
+
+if [[ $use_rust_agent -eq 0 ]]; then
+  ensure_client_venv
+fi
 
 if [[ "$MODE" != "update" ]]; then
   if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 || ! command -v nsenter >/dev/null 2>&1 || ! ldconfig -p 2>/dev/null | grep libnetfilter_queue >/dev/null; then
@@ -716,10 +884,15 @@ if [[ "$MODE" != "update" ]]; then
   fi
 fi
 
-if [[ "$MODE" != "update" ]]; then
-  "$CLIENT_VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+if [[ $use_rust_agent -eq 0 ]]; then
+  if [[ "$MODE" != "update" ]]; then
+    "$CLIENT_VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+  fi
+  "$CLIENT_VENV_DIR/bin/pip" install -r "$CLIENT_APP_DIR/requirements.txt"
+  agent_exec_start="$CLIENT_VENV_DIR/bin/python $CLIENT_APP_DIR/agent.py"
+else
+  agent_exec_start="$CLIENT_APP_DIR/bin/narwhal-agent"
 fi
-"$CLIENT_VENV_DIR/bin/pip" install -r "$CLIENT_APP_DIR/requirements.txt"
 
 cat >"$SYSTEMD_SERVICE_FILE" <<EOF_SERVICE
 [Unit]
@@ -733,7 +906,7 @@ User=root
 WorkingDirectory=$CLIENT_APP_DIR
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=$CLIENT_ENV_FILE
-ExecStart=$CLIENT_VENV_DIR/bin/python $CLIENT_APP_DIR/agent.py
+ExecStart=$agent_exec_start
 Restart=always
 RestartSec=5
 

@@ -8,6 +8,9 @@ members = [
     "crates/geoip-probe",
     "crates/net-probe",
     "crates/narwhal-probe",
+    "crates/transport",
+    "crates/guard-core",
+    "crates/agent-core",
 ]
 
 [profile.release]

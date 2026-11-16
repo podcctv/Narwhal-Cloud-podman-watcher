@@ -64,7 +64,7 @@ restore() {
   fi
   [[ -f "$snapshot_client_dir/agent.py" && -f "$snapshot/client.env" ]] || return 1
   systemctl stop narwhal-monitor-client.service || return 1
-  if [[ -f "$app_dir/admission_guard.py" ]]; then
+  if [[ -f "$app_dir/admission_guard.py" && -x "$app_dir/.venv/bin/python" ]]; then
     "$app_dir/.venv/bin/python" "$app_dir/admission_guard.py" --release-all || return 1
   fi
   shopt -s nullglob
@@ -107,8 +107,12 @@ restore() {
   fi
   shopt -u nullglob
   install -m 0600 "$snapshot/client.env" "$base/client.env" || return 1
-  install -m 0644 "$snapshot/requirements.txt" "$app_dir/requirements.txt" || return 1
-  "$app_dir/.venv/bin/pip" install -r "$app_dir/requirements.txt" || return 1
+  if [[ -f "$snapshot/requirements.txt" ]]; then
+    install -m 0644 "$snapshot/requirements.txt" "$app_dir/requirements.txt" || return 1
+    if [[ -x "$app_dir/.venv/bin/pip" ]]; then
+      "$app_dir/.venv/bin/pip" install -r "$app_dir/requirements.txt" || return 1
+    fi
+  fi
   if [[ -f "$snapshot/managed-client-update.sh" ]]; then
     install -m 0755 "$snapshot/managed-client-update.sh" "$base/managed-client-update.sh" || return 1
   fi
@@ -198,7 +202,11 @@ shopt -s nullglob
 stage_py_files=("$stage/client"/*.py)
 shopt -u nullglob
 [[ ${#stage_py_files[@]} -gt 0 && -f "$stage/client/agent.py" ]] || fail_preflight 'staged client bundle is missing Python modules'
-"$app_dir/.venv/bin/python" -m py_compile "${stage_py_files[@]}"
+if [[ -x "$app_dir/.venv/bin/python" ]]; then
+  "$app_dir/.venv/bin/python" -m py_compile "${stage_py_files[@]}"
+elif command -v python3 >/dev/null 2>&1; then
+  python3 -m py_compile "${stage_py_files[@]}"
+fi
 rm -rf "$snapshot"
 mkdir -p "$snapshot/client"
 chmod 0700 "$snapshot" "$snapshot/client"
@@ -230,7 +238,9 @@ if [[ -d "$app_dir/bin" ]]; then
   done
 fi
 shopt -u nullglob
-install -m 0644 "$app_dir/requirements.txt" "$snapshot/requirements.txt"
+if [[ -f "$app_dir/requirements.txt" ]]; then
+  install -m 0644 "$app_dir/requirements.txt" "$snapshot/requirements.txt"
+fi
 install -m 0600 "$base/client.env" "$snapshot/client.env"
 if [[ -f "$systemd_unit" ]]; then
   install -m 0644 "$systemd_unit" "$snapshot/narwhal-monitor-client.service"
