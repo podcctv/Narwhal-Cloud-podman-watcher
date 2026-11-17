@@ -2,6 +2,12 @@
 
 更新时间：2026-11-17（Asia/Shanghai）
 
+## Phase 16：`scripts/auto-update.sh` 客户端 RFW `wireguard CN` 阻断幂等安全钩子（v1.9.18）
+
+- **`scripts/auto-update.sh`**：新增 `ensure_rfw_cn_wireguard_rule()`（仅在 `SIDE == "client"`、`rfw.service` 运行中、支持 `wireguard` 且当前规则中尚无启用的 `in / wireguard / block / CN` 规则时执行）：
+  - 优先通过 Runman `/run/narwhal-agent/firewall.sock` (`GET /v1/firewall/readback`) 做只读幂等检查；
+  - 未命中时仅发现 `rfw.service` `MainPID` 监听在回环地址上的本地 RFW HTTP API，核验 `/api/status` 与 `/api/rules` 后调用 `POST /api/rules` 追加 `in / wireguard / block / CN` 规则，不覆盖任何已有规则且全程 fail-open（不阻塞 Agent 自动升级）。
+
 ## Phase 15：修复 Rust `agent-core` RFW 读回接口路径与 `control_api` 上报契约（v1.9.17）
 
 - **`rust/crates/agent-core/src/host_audit.rs` & `actions.rs`**：

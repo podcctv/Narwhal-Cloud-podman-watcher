@@ -26,6 +26,144 @@ log() {
   echo "$line" >>"$LOG_FILE"
 }
 
+ensure_rfw_cn_wireguard_rule() {
+  [[ "$SIDE" == "client" ]] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  systemctl is-active --quiet rfw.service 2>/dev/null || return 0
+
+  local output=""
+  output="$(python3 - <<'PY' 2>/dev/null || true
+import http.client
+import json
+import os
+import re
+import socket
+import subprocess
+import urllib.error
+import urllib.request
+
+RUNMAN_SOCK = "/run/narwhal-agent/firewall.sock"
+
+def has_cn_wg_block(rules):
+    if not isinstance(rules, list):
+        return False
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        if not r.get("enabled", True):
+            continue
+        if str(r.get("direction") or "") != "in":
+            continue
+        if str(r.get("protocol") or "") != "wireguard":
+            continue
+        if str(r.get("action") or "") != "block":
+            continue
+        ip_type = str(r.get("ip_type") or "")
+        countries = [str(c).upper() for c in (r.get("countries") or [])]
+        if ip_type == "any" or "CN" in countries:
+            return True
+    return False
+
+# 1. Fast readback check via Runman Unix socket if available
+if os.path.exists(RUNMAN_SOCK):
+    try:
+        class UnixConn(http.client.HTTPConnection):
+            def connect(self):
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect(RUNMAN_SOCK)
+                self.sock = s
+        conn = UnixConn("localhost", timeout=2)
+        conn.request("GET", "/v1/firewall/readback", headers={"Connection": "close"})
+        resp = conn.getresponse()
+        raw = resp.read(131072)
+        conn.close()
+        if resp.status == 200:
+            snap = json.loads(raw.decode("utf-8"))
+            if isinstance(snap, dict) and snap.get("capabilities_known"):
+                protos = snap.get("supported_protocols") or []
+                if "wireguard" not in protos:
+                    raise SystemExit(0)
+            if has_cn_wg_block(snap.get("rules")):
+                raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+# 2. Discover local RFW HTTP API listening on loopback from rfw.service MainPID
+try:
+    pid = subprocess.check_output(
+        ["systemctl", "show", "--property=MainPID", "--value", "rfw.service"],
+        text=True, timeout=2
+    ).strip()
+except Exception:
+    pid = ""
+
+ports = []
+if pid.isdigit() and int(pid) > 0:
+    try:
+        ss_out = subprocess.check_output(["ss", "-H", "-ltnp"], text=True, timeout=2)
+        for line in ss_out.splitlines():
+            if f"pid={pid}," not in line and f"pid={pid})" not in line:
+                continue
+            m = re.search(r"(?:127\.0\.0\.1|\[::1\]|\*|0\.0\.0\.0):(\d+)\b", line)
+            if m and m.group(1) not in ports:
+                ports.append(m.group(1))
+    except Exception:
+        pass
+
+def http_json(url, method="GET", payload=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=2) as r:
+        return r.status, json.loads(r.read(131072).decode("utf-8"))
+
+for port in ports:
+    base = f"http://127.0.0.1:{port}"
+    try:
+        st, status_data = http_json(f"{base}/api/status")
+        if st != 200 or not isinstance(status_data, dict):
+            continue
+        protos = status_data.get("supported_protocols")
+        if isinstance(protos, list) and "wireguard" not in protos:
+            break
+        st_r, rules_data = http_json(f"{base}/api/rules")
+        if st_r != 200:
+            continue
+        rules_list = rules_data.get("rules") if isinstance(rules_data, dict) else rules_data
+        if has_cn_wg_block(rules_list):
+            break
+        rule_payload = {
+            "priority": 100,
+            "direction": "in",
+            "protocol": "wireguard",
+            "action": "block",
+            "enabled": True,
+            "port_start": 0,
+            "port_end": 0,
+            "ip_type": "geoip",
+            "countries": ["CN"],
+        }
+        st_p, _ = http_json(f"{base}/api/rules", method="POST", payload=rule_payload)
+        if 200 <= st_p < 300:
+            print(f"added in/wireguard/block/CN via {base}/api/rules")
+        break
+    except urllib.error.HTTPError:
+        continue
+    except Exception:
+        continue
+PY
+)"
+  if [[ -n "$output" ]]; then
+    log "RFW hook: $output"
+  fi
+}
+
 cleanup_stage() {
   local resolved base_resolved
   [[ -n "${STAGE_DIR:-}" && -d "$STAGE_DIR" ]] || return 0
@@ -99,6 +237,7 @@ if [[ "$UPDATE_MODE" == "git" ]]; then
     && "$local_commit" == "$remote_commit" \
     && -n "$local_version" \
     && "$runtime_version" == "$local_version" ]]; then
+    ensure_rfw_cn_wireguard_rule
     exit 0
   fi
   if [[ "$remote_commit" == "$deployed_commit" ]]; then
@@ -133,6 +272,7 @@ else
   deployed_commit="$(tr -d '[:space:]' <"$STATE_FILE" 2>/dev/null || true)"
   runtime_version="$(installed_version || true)"
   if [[ "$remote_commit" == "$deployed_commit" && "$runtime_version" == "$remote_version" ]]; then
+    ensure_rfw_cn_wireguard_rule
     exit 0
   fi
   if [[ "$remote_commit" == "$deployed_commit" ]]; then
@@ -197,3 +337,4 @@ printf '%s\n' "$remote_commit" >"$STATE_FILE.tmp"
 chmod 0600 "$STATE_FILE.tmp"
 mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 log "update completed: $remote_commit (version $expected_version)"
+ensure_rfw_cn_wireguard_rule
