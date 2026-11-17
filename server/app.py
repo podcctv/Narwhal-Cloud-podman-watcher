@@ -2753,7 +2753,8 @@ def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: in
             "reason": "unknown",
             "sync_status": "unknown", "rule_count": 0, "managed_rule_count": 0,
             "drift_count": 0, "missing_count": 0, "policy_revision": None, "rfw_api_version": "",
-            "capabilities_known": False, "supported_protocols": [],
+            "capabilities_known": False, "supported_protocols": [], "supported_protocol_count": 0,
+            "active_blocked_protocols": [], "active_blocked_protocol_count": 0,
             "protocol_capabilities": {protocol: "unknown" for protocol in RFW_APPLICATION_PROTOCOLS},
             "mtproto_support": "unknown", "snapshot": None,
         }
@@ -2772,6 +2773,15 @@ def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: in
     fresh = status == "ready" and observed_at > 0 and 0 <= now - observed_at <= STALE_SECONDS
     capabilities_known = bool(snapshot and snapshot.get("capabilities_known")) and fresh
     supported_protocols = list(snapshot.get("supported_protocols") or []) if capabilities_known else []
+    raw_rules = snapshot.get("rules") if isinstance(snapshot, dict) and isinstance(snapshot.get("rules"), list) else []
+    active_blocked_protocols = sorted({
+        str(rule.get("protocol"))
+        for rule in raw_rules
+        if isinstance(rule, dict)
+        and rule.get("enabled", True) is True
+        and str(rule.get("action") or "block") == "block"
+        and str(rule.get("protocol") or "").strip()
+    }) if fresh else []
     protocol_capabilities = {
         protocol: _protocol_capability_state(
             {"status": status, "stale": not fresh, "capabilities_known": capabilities_known,
@@ -2799,6 +2809,9 @@ def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: in
         "rfw_api_version": str(snapshot.get("rfw_api_version") or "") if capabilities_known else "",
         "capabilities_known": capabilities_known,
         "supported_protocols": supported_protocols,
+        "supported_protocol_count": len(supported_protocols),
+        "active_blocked_protocols": active_blocked_protocols,
+        "active_blocked_protocol_count": len(active_blocked_protocols),
         "protocol_capabilities": protocol_capabilities,
         "mtproto_support": mtproto_support,
         "snapshot": snapshot,
@@ -7385,6 +7398,7 @@ def security_status() -> JSONResponse:
             "samples_24h": 0, "healthy_samples_24h": 0, "failed_samples_24h": 0,
             "healthy_rate_percent_24h": None, "last_sample_at": 0,
         }))
+        rfw_live = _host_firewall_live_readback(conn, host_id, int(time.time()))
         items.append(
             {
                 "host_id": host_id,
@@ -7405,6 +7419,18 @@ def security_status() -> JSONResponse:
                 "sample_alerts": payload.get("alerts") or [],
                 "host_audit": payload.get("host_audit") if isinstance(payload.get("host_audit"), dict) else {},
                 "rfw_service_health": _security_rfw_service_health(payload),
+                "rfw_readback": {
+                    "status": rfw_live["status"],
+                    "stale": rfw_live["stale"],
+                    "sync_status": rfw_live["sync_status"],
+                    "rule_count": rfw_live["rule_count"],
+                    "managed_rule_count": rfw_live["managed_rule_count"],
+                    "capabilities_known": rfw_live["capabilities_known"],
+                    "supported_protocols": rfw_live["supported_protocols"],
+                    "supported_protocol_count": rfw_live["supported_protocol_count"],
+                    "active_blocked_protocols": rfw_live["active_blocked_protocols"],
+                    "active_blocked_protocol_count": rfw_live["active_blocked_protocol_count"],
+                },
                 "access_sources": payload.get("access_sources") or [],
                 "total_rx_bps": cur_rx,
                 "total_tx_bps": cur_tx,

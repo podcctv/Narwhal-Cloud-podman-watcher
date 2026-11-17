@@ -2,6 +2,15 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 14：RFW 空规则（0 协议拦截）检测告警与主面板/防火墙页协议数量展示（v1.9.15）
+
+- **服务端读回协议统计（`server/app.py`）**：
+  - `_host_firewall_live_readback` 新增 `supported_protocol_count`、`active_blocked_protocols` 与 `active_blocked_protocol_count` 统计（按实时规则快照中的启用 `block` 规则聚合）。
+  - `/api/v1/security/status` 为每台主机附带 `rfw_readback` 摘要，使主面板可直接识别“RFW 服务在跑但规则数为 0（未拦截任何协议）”的空载状态。
+- **前端主面板与防火墙页可视化（`TelemetrySection.tsx` + `FirewallView.tsx`）**：
+  - **`TelemetrySection.tsx`**：在主机网络与安全遥测头部与主机明细“主机 RFW”卡片中，当 `rfw.service` 运行中但实时读回 `rule_count === 0` 时，自动标黄告警 `未拦截(0规则)` 并列出对应主机；有规则时展示“已拦截 X 类协议（Y 条规则）· 支持 Z 种协议”。
+  - **`FirewallView.tsx`**：在每台主机的 RFW 明细中直接列出“支持协议 X 种 · 当前拦截 Y 类协议”，0 规则时显式提示 `（未拦截任何协议）`。
+
 ## Phase 13：带宽变现 / P2P 住宅代理滥用检测、自动双向断网隔离与面板展示（v1.9.14）
 
 - **Rust 检测与自动隔离（`guard-core` + `abuse-guard`）**：

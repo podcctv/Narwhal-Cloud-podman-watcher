@@ -737,6 +737,18 @@ export interface SecurityStatusItem {
     active_seconds?: number | null;
     reason?: string;
   };
+  rfw_readback?: {
+    status?: string;
+    stale?: boolean;
+    sync_status?: string;
+    rule_count?: number;
+    managed_rule_count?: number;
+    capabilities_known?: boolean;
+    supported_protocols?: string[];
+    supported_protocol_count?: number;
+    active_blocked_protocols?: string[];
+    active_blocked_protocol_count?: number;
+  };
   access_sources?: AccessSource[];
   today_peak_container_conn_count?: number;
   host_id: string;
@@ -902,6 +914,9 @@ export interface HostFirewallLiveReadback {
   rfw_api_version?: string;
   capabilities_known?: boolean;
   supported_protocols?: string[];
+  supported_protocol_count?: number;
+  active_blocked_protocols?: string[];
+  active_blocked_protocol_count?: number;
   protocol_capabilities?: Record<string, 'supported' | 'unsupported' | 'unknown'>;
   mtproto_support?: 'supported' | 'unsupported' | 'unknown';
   snapshot: null | {

@@ -151,6 +151,11 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
     && (item.sample_alerts || []).some(alert => alert.severity === 'warning' || alert.severity === 'critical')).length;
   const rfwAlerts = telemetry.filter(item => !item.stale
     && ['stopped', 'restart_loop'].includes(item.rfw_service_health?.status || ''));
+  const rfwEmptyRuleHosts = telemetry.filter(item => !item.stale
+    && item.rfw_service_health?.status === 'healthy'
+    && item.rfw_readback?.status === 'ready'
+    && !item.rfw_readback.stale
+    && (item.rfw_readback.rule_count ?? 0) === 0);
   const gfwBlockedCount = telemetry.filter(item => item.gfw_reachability?.status === 'blocked' && !item.gfw_reachability.stale).length;
   const auditNeedsAttention = telemetry.filter(item => ['warning', 'critical'].includes(hostAuditLevel(item))).length;
   const auditUnknown = telemetry.filter(item => hostAuditLevel(item) === 'unknown').length;
@@ -168,6 +173,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
             <span className={`rounded-full border px-2.5 py-1 font-medium ${alertHostCount ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-emerald-800 bg-emerald-950/40 text-emerald-200'}`}>采样告警 {alertHostCount}</span>
             <span className={`rounded-full border px-2.5 py-1 font-medium ${gfwBlockedCount ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>GFW 阻断 {gfwBlockedCount}</span>
             <span className={`rounded-full border px-2.5 py-1 font-medium ${rfwAlerts.length ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>RFW 服务告警 {rfwAlerts.length}</span>
+            {rfwEmptyRuleHosts.length > 0 && <span className="rounded-full border border-amber-800 bg-amber-950/40 px-2.5 py-1 font-medium text-amber-200">RFW 空规则(未拦截) {rfwEmptyRuleHosts.length}</span>}
             <span className={`rounded-full border px-2.5 py-1 font-medium ${auditNeedsAttention ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>审计待处理 {auditNeedsAttention}</span>
             {auditUnknown > 0 && <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300 font-medium">审计未评估 {auditUnknown}</span>}
           </div>
@@ -202,6 +208,19 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         </article>;
       })}
     </div>}
+    {rfwEmptyRuleHosts.length > 0 && <div className="space-y-2 border-b border-amber-900/60 bg-amber-950/20 p-3 sm:p-4" aria-label="RFW 空规则告警">
+      <div className="text-xs font-semibold text-amber-200">
+        ⚠ 以下 {rfwEmptyRuleHosts.length} 台主机 RFW 服务正在运行，但实时读回规则数为 0（当前未拦截任何协议）：
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {rfwEmptyRuleHosts.map(host => {
+          const protoCount = host.rfw_readback?.supported_protocol_count ?? host.rfw_readback?.supported_protocols?.length ?? 0;
+          return <span key={host.host_id} className="rounded-md border border-amber-800/70 bg-slate-950/60 px-2 py-1 text-[11px] text-amber-100">
+            {host.host_id} · 支持 {protoCount} 种协议 · 实际拦截 0 条规则
+          </span>;
+        })}
+      </div>
+    </div>}
     {expanded && <div id="host-telemetry-details" className="space-y-3 p-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <label className="relative block w-full sm:max-w-sm">
@@ -216,13 +235,19 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
         const events = t.sample_alerts || [];
         const hostAudit = t.host_audit;
         const rfwHealth = t.rfw_service_health || {};
+        const rfwReadback = t.rfw_readback;
+        const rfwReadbackFresh = rfwReadback?.status === 'ready' && !rfwReadback.stale;
+        const rfwRuleCount = rfwReadback?.rule_count ?? 0;
+        const rfwSupportedProtoCount = rfwReadback?.supported_protocol_count ?? rfwReadback?.supported_protocols?.length ?? 0;
+        const rfwBlockedProtoCount = rfwReadback?.active_blocked_protocol_count ?? rfwReadback?.active_blocked_protocols?.length ?? 0;
+        const rfwEmptyRules = rfwReadbackFresh && rfwRuleCount === 0;
         const rfwStatus = rfwHealth.status || 'unknown';
         const rfwAlert = !t.stale && ['stopped', 'restart_loop'].includes(rfwStatus);
         const rfwLevel: Level = t.stale ? 'unknown'
           : rfwStatus === 'stopped' || rfwStatus === 'restart_loop' ? 'critical'
-          : rfwStatus === 'healthy' ? 'normal' : 'unknown';
+          : rfwStatus === 'healthy' ? (rfwEmptyRules ? 'warning' : 'normal') : 'unknown';
         const rfwStatusLabel = t.stale ? '数据过期'
-          : rfwStatus === 'healthy' ? '运行中'
+          : rfwStatus === 'healthy' ? (rfwEmptyRules ? '未拦截(0规则)' : '运行中')
           : rfwStatus === 'stopped' ? '已停止'
           : rfwStatus === 'restart_loop' ? '重启循环'
           : rfwStatus === 'not_installed' ? '未安装'
@@ -427,7 +452,12 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
               {t.stale ? '上报已过期，当前状态未知'
                 : rfwStatus === 'restart_loop' ? `5 分钟内重启 ${rfwHealth.restarts_5m ?? '≥3'} 次`
                 : rfwStatus === 'stopped' ? `${rfwHealth.active_state || 'inactive'} / ${rfwHealth.sub_state || 'dead'}`
-                : rfwStatus === 'healthy' ? `最近检查 ${shortAuditTime(rfwHealth.checked_at ?? undefined)}`
+                : rfwStatus === 'healthy'
+                  ? (rfwReadbackFresh
+                    ? (rfwEmptyRules
+                      ? `支持 ${rfwSupportedProtoCount} 种协议 · 当前 0 条规则（未拦截任何协议）`
+                      : `已拦截 ${rfwBlockedProtoCount} 类协议（${rfwRuleCount} 条规则）· 支持 ${rfwSupportedProtoCount} 种协议`)
+                    : `最近检查 ${shortAuditTime(rfwHealth.checked_at ?? undefined)}`)
                 : rfwStatus === 'not_applicable' ? 'Agent 在容器内，无法检查宿主机服务'
                 : rfwStatus === 'not_installed' ? '未发现 rfw.service'
                 : rfwStatus === 'unavailable' ? 'systemd 状态不可读'

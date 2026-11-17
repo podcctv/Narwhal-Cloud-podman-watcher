@@ -558,6 +558,39 @@ class HostFirewallPolicyTests(unittest.TestCase):
         conn.close()
         self.assertEqual(server._protocol_capability_state(live, "mtproto"), "unknown")
 
+    def test_live_readback_reports_supported_and_active_blocked_protocol_counts(self):
+        conn = server.db()
+        conn.execute(
+            "INSERT OR REPLACE INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json,readback_reason)"
+            " VALUES('host-a','ready',?,?,?, '')",
+            (
+                self.now,
+                self.now,
+                json.dumps({
+                    "status": "in_sync",
+                    "observed_at": self.now,
+                    "policy_revision": 0,
+                    "rule_count": 2,
+                    "managed_rule_count": 0,
+                    "drift_count": 0,
+                    "missing_count": 0,
+                    "capabilities_known": True,
+                    "supported_protocols": ["all", "fet", "http", "socks", "tcp"],
+                    "rules": [
+                        {"id": 1, "protocol": "http", "action": "block", "enabled": True},
+                        {"id": 2, "protocol": "socks", "action": "block", "enabled": True},
+                        {"id": 3, "protocol": "fet", "action": "block", "enabled": False},
+                    ],
+                }),
+            ),
+        )
+        conn.commit()
+        live = server._host_firewall_live_readback(conn, "host-a", self.now)
+        conn.close()
+        self.assertEqual(live["supported_protocol_count"], 5)
+        self.assertEqual(live["active_blocked_protocols"], ["http", "socks"])
+        self.assertEqual(live["active_blocked_protocol_count"], 2)
+
     def test_policy_rejects_more_rules_than_the_rfw_ebpf_table(self):
         payload = self.policy()
         payload["rules"] = [{
