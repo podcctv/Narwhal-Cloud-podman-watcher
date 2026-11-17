@@ -7316,6 +7316,7 @@ def security_status() -> JSONResponse:
                 policy_value.setdefault("revision", int(policy_row["revision"] or 0))
                 firewall_policy_by_host[str(policy_row["host_id"])] = policy_value
         reconciliation_by_host = {}
+        firewall_readback_by_host = {}
         for host_row in rows:
             host_key = str(host_row["host_id"])
             try:
@@ -7324,6 +7325,7 @@ def security_status() -> JSONResponse:
                 host_payload = {}
             firewall_readback = _host_firewall_live_readback(conn, host_key, health_now)
             firewall_readback["latest_action"] = _host_firewall_action_summary(conn, host_key)
+            firewall_readback_by_host[host_key] = firewall_readback
             reconciliation_by_host[host_key] = control_reconciliation.build_control_reconciliation(
                 {**(host_payload if isinstance(host_payload, dict) else {}), "observed_at": int(host_row["security_ts"] or 0)},
                 container_controls_by_host.get(host_key, []),
@@ -7398,7 +7400,12 @@ def security_status() -> JSONResponse:
             "samples_24h": 0, "healthy_samples_24h": 0, "failed_samples_24h": 0,
             "healthy_rate_percent_24h": None, "last_sample_at": 0,
         }))
-        rfw_live = _host_firewall_live_readback(conn, host_id, int(time.time()))
+        rfw_live = firewall_readback_by_host.get(host_id) or {
+            "status": "unknown", "stale": True, "sync_status": "unknown",
+            "rule_count": 0, "managed_rule_count": 0, "capabilities_known": False,
+            "supported_protocols": [], "supported_protocol_count": 0,
+            "active_blocked_protocols": [], "active_blocked_protocol_count": 0,
+        }
         items.append(
             {
                 "host_id": host_id,

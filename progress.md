@@ -2,7 +2,7 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
-## Phase 14：RFW 空规则（0 协议拦截）检测告警与主面板/防火墙页协议数量展示（v1.9.15）
+## Phase 14：RFW 空规则（0 协议拦截）检测告警与主面板/防火墙页协议数量展示（v1.9.16）
 
 - **服务端读回协议统计（`server/app.py`）**：
   - `_host_firewall_live_readback` 新增 `supported_protocol_count`、`active_blocked_protocols` 与 `active_blocked_protocol_count` 统计（按实时规则快照中的启用 `block` 规则聚合）。
