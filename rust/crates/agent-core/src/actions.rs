@@ -1994,7 +1994,7 @@ fn execute_apply_host_firewall_policy(
                     .and_then(|v| v.get("message").and_then(JsonValue::as_str).map(|s| s.to_string()))
                     .unwrap_or_else(|| "Runman host firewall policy updated".to_string());
                 // Read back revision and sync status to verify persistence.
-                match runtime_drivers::runman_request(RUNMAN_FIREWALL_SOCK_PATH, "GET", "/v1/firewall/policy", None) {
+                match runtime_drivers::runman_request(RUNMAN_FIREWALL_SOCK_PATH, "GET", "/v1/firewall/readback", None) {
                     Ok((200, rb_body)) => {
                         let rb_text = String::from_utf8_lossy(&rb_body);
                         let parsed = parse_json(&rb_text).ok();

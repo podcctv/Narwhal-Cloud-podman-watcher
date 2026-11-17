@@ -1,6 +1,12 @@
 # 当前进展与待办
 
-更新时间：2026-11-16（Asia/Shanghai）
+更新时间：2026-11-17（Asia/Shanghai）
+
+## Phase 15：修复 Rust `agent-core` RFW 读回接口路径与 `control_api` 上报契约（v1.9.17）
+
+- **`rust/crates/agent-core/src/host_audit.rs` & `actions.rs`**：
+  - 修复 `collect_host_firewall_full_json` 与 `execute_apply_host_firewall_policy` 误将 `POST /v1/firewall/policy` 当作 `GET` 读回路径导致的 `405 -> readback_http_error` 问题，统一改为请求 **`GET /v1/firewall/readback`**。
+  - 补齐 `host_firewall.control_api`、`control_api_reason`、`control_api_http_status` 与 `observed_at` 上报（与 Python `client/agent.py` 对齐：`GET /v1/firewall/policy` 返回 `405` 或 `200` 均判定 `control_api = "ready"`）。
 
 ## Phase 14：RFW 空规则（0 协议拦截）检测告警与主面板/防火墙页协议数量展示（v1.9.16）
 
