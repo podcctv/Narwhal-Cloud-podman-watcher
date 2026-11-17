@@ -2,7 +2,7 @@
 
 更新时间：2026-11-17（Asia/Shanghai）
 
-## Phase 18：Rust Agent 容器 SSH Pre-Auth Banner 联动落地（v1.9.20）
+## Phase 18：Rust Agent 容器 SSH Pre-Auth Banner 联动落地（v1.9.21）
 
 - **`rust/crates/agent-core/src/lib.rs`**：
   - 在 `AgentState` 中持久化 `motd_states_json` 与 `last_alerts_json`，并在 `run_loop` 解析 `POST /api/v1/report` 返回的 `motd_states` 列表。

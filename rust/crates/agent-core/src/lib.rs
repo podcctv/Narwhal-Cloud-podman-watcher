@@ -2628,7 +2628,7 @@ impl AgentState {
             }
             let rt_lower = c.runtime.to_ascii_lowercase();
             let mut entries: Vec<app_guard::security_banner::MotdEntry> = Vec::new();
-            for s in &motd_states {
+            for s in motd_states {
                 let stype = s.get("type").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
                 if stype != "user_notice" {
                     continue;
