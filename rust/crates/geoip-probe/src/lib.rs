@@ -434,6 +434,36 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+pub fn is_country_ip(db_path: &Path, ip: IpAddr, expected_country: &str) -> bool {
+    let path_str = db_path.to_string_lossy().to_string();
+    let cache = DB_CACHE.get_or_init(|| Mutex::new(None));
+    let db = {
+        let mut guard = match cache.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        let needs_load = match guard.as_ref() {
+            Some((cached_path, _)) => cached_path != &path_str,
+            None => true,
+        };
+        if needs_load {
+            let Ok(bytes) = fs::read(db_path) else {
+                return false;
+            };
+            let Ok(parsed) = MmdbDb::from_bytes(bytes) else {
+                return false;
+            };
+            *guard = Some((path_str, parsed));
+        }
+        guard.as_ref().map(|(_, db)| db.clone())
+    };
+    let Some(db) = db else {
+        return false;
+    };
+    db.lookup_country(ip)
+        .is_some_and(|c| c.eq_ignore_ascii_case(expected_country))
+}
+
 pub fn lookup_countries(db_path: &Path, ips: &[String]) -> String {
     let path_str = db_path.to_string_lossy().to_string();
     let cache = DB_CACHE.get_or_init(|| Mutex::new(None));

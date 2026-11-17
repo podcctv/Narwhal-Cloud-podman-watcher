@@ -20,6 +20,7 @@ use crate::observe::{
     parse_stat_start_ticks, ContainerDescriptor, ContainerSnapshot,
 };
 use crate::policy::{self, current_unix_ts_i64, Policy};
+use crate::sni::{evaluate_inbound_sni, extract_l4_payload, SniDecision};
 use crate::AdmissionError;
 
 pub const DEFAULT_ADMISSION_JOURNAL: &str = "/var/lib/narwhal-monitor/admission.json";
@@ -419,6 +420,21 @@ pub struct NotificationSignature {
     pub failure_stage: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SniViolationEvent {
+    pub container_key: String,
+    pub runtime: String,
+    pub project: String,
+    pub container_name: String,
+    pub instance_id: String,
+    pub src_ip: String,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub sni: Option<String>,
+    pub reason: String,
+    pub ts: i64,
+}
+
 pub struct GuardState<R: NftRunner = LiveNftRunner> {
     pub journal: AdmissionJournal,
     pub nft: Nft<R>,
@@ -428,6 +444,10 @@ pub struct GuardState<R: NftRunner = LiveNftRunner> {
     pub by_queue: BTreeMap<u16, (String, QueueDirection)>,
     pub results: BTreeMap<(String, String, String), BTreeMap<String, JsonVal>>,
     pub notifications: BTreeMap<NotificationSignature, i64>,
+    pub sni_enforcement: bool,
+    pub cn_lookup: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+    pub sni_violations: Vec<SniViolationEvent>,
+    pub sni_dedup: BTreeMap<(String, u16, String, String), i64>,
 }
 
 pub struct Guard<R: NftRunner = LiveNftRunner, Q: QueueBackend = NoopQueueBackend> {
@@ -509,6 +529,10 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
                 by_queue: BTreeMap::new(),
                 results: BTreeMap::new(),
                 notifications: BTreeMap::new(),
+                sni_enforcement: true,
+                cn_lookup: None,
+                sni_violations: Vec::new(),
+                sni_dedup: BTreeMap::new(),
             }),
             queues: Mutex::new(queues),
             ready: Mutex::new(false),
@@ -558,6 +582,21 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
         inner.journal.write(&out)
     }
 
+    pub fn set_sni_enforcement(
+        &self,
+        enabled: bool,
+        cn_lookup: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+    ) {
+        self.with_inner(|inner| {
+            inner.sni_enforcement = enabled;
+            inner.cn_lookup = cn_lookup;
+        });
+    }
+
+    pub fn drain_sni_violations(&self) -> Vec<SniViolationEvent> {
+        self.with_inner(|inner| std::mem::take(&mut inner.sni_violations))
+    }
+
     pub fn decision(&self, queue: u16, raw: &[u8]) -> Result<bool, AdmissionError> {
         self.decision_at(queue, raw, current_unix_ts_i64())
     }
@@ -585,15 +624,74 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
                 QueueDirection::In => (dst.clone(), dport, src.clone(), sport),
                 QueueDirection::Out => (src.clone(), sport, dst.clone(), dport),
             };
+            if direction == QueueDirection::Out {
+                let state = inner
+                    .states
+                    .entry(key.clone())
+                    .or_insert_with(|| Policy::new(None, inner.source_limit));
+                if proto == 6 && !state.admit_tcp(&flow, now) {
+                    return Ok(false);
+                }
+                return Ok(true);
+            }
+            if inner.sni_enforcement {
+                if let Some(l4) = extract_l4_payload(raw) {
+                    let is_cn_src = inner
+                        .cn_lookup
+                        .as_ref()
+                        .is_some_and(|f| f(l4.src_ip));
+                    if let SniDecision::Block {
+                        reason,
+                        sni,
+                        proto: vproto,
+                        dport: vdport,
+                        src_ip,
+                    } = evaluate_inbound_sni(raw, is_cn_src)
+                    {
+                        let dedup_key = (
+                            key.clone(),
+                            vdport,
+                            sni.clone().unwrap_or_default(),
+                            reason.to_string(),
+                        );
+                        let recently_logged = inner
+                            .sni_dedup
+                            .get(&dedup_key)
+                            .is_some_and(|&prev| now - prev < 60);
+                        if !recently_logged && inner.sni_violations.len() < 256 {
+                            inner.sni_dedup.insert(dedup_key, now);
+                            if inner.sni_dedup.len() > 1024 {
+                                inner.sni_dedup.retain(|_, ts| now - *ts < 60);
+                            }
+                            inner.sni_violations.push(SniViolationEvent {
+                                container_key: key.clone(),
+                                runtime: record.container.runtime.clone(),
+                                project: record.container.project.clone(),
+                                container_name: record.container.name.clone(),
+                                instance_id: record.container.instance_id.clone(),
+                                src_ip: src_ip.to_string(),
+                                dst_port: vdport,
+                                proto: vproto,
+                                sni,
+                                reason: reason.to_string(),
+                                ts: now,
+                            });
+                        }
+                        return Ok(false);
+                    }
+                    // Established TCP handshake payload packets queued for SNI inspection
+                    // must not be re-counted in SYN concurrency/source admission limits.
+                    if proto == 6 && (l4.tcp_flags & 0x02) == 0 {
+                        return Ok(true);
+                    }
+                }
+            }
             let state = inner
                 .states
                 .entry(key.clone())
                 .or_insert_with(|| Policy::new(None, inner.source_limit));
             if proto == 6 && !state.admit_tcp(&flow, now) {
                 return Ok(false);
-            }
-            if direction == QueueDirection::Out {
-                return Ok(true);
             }
             if proto == 6
                 && !record.listening_ports.is_empty()

@@ -5707,6 +5707,7 @@ pub mod security_banner {
             "trojan_block_unverified" => Some("Trojan 入站保护待核实"),
             "trojan_block_release_unverified" => Some("Trojan 端口恢复待核实"),
             "speedtest_attempt_blocked" => Some("测速连接请求已拦截"),
+            "sni_whitelist_violation" => Some("入站 SNI 不在白名单，已阻断"),
             _ => None,
         }
     }
@@ -5845,6 +5846,13 @@ pub mod security_banner {
                     "The previous network rule remains until the listener is confirmed absent and rule removal is verified."
                 } else {
                     "旧端口规则会保留，直到确认监听已消失且规则删除结果可读回验证。"
+                };
+            }
+            "sni_whitelist_violation" => {
+                advice = if english {
+                    "Inbound TLS/QUIC connections must use one of the allowed whitelist SNIs (dl-cdn.alpinelinux.org, deb.debian.org, crates.io, pypi.org, rubygems.org, addons.mozilla.org, formulae.brew.sh, static.rust-lang.org, cpan.org). Disallowed or CN missing-SNI handshakes are blocked."
+                } else {
+                    "容器入站协议伪装必须使用以下白名单 SNI 之一（dl-cdn.alpinelinux.org、deb.debian.org、crates.io、pypi.org、rubygems.org、addons.mozilla.org、formulae.brew.sh、static.rust-lang.org、cpan.org），其他 SNI 或 CN 来源无 SNI 握手已被阻断。"
                 };
             }
             "speedtest_service_blocked" => {

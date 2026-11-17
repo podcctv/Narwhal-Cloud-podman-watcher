@@ -125,6 +125,22 @@ METRICS = {
 def issue(alert, details):
     kind = alert.get("alert_type", alert.get("type", ""))
     obs = details.get("observation") or details
+    if kind == "sni_whitelist_violation":
+        sni = clean(details.get("sni") or "", 120)
+        port = details.get("dst_port")
+        proto = clean(details.get("proto") or "tls", 16).upper()
+        reason = clean(details.get("reason") or "", 64)
+        port_text = f"端口 {proto}/{int(port)}" if isinstance(port, int) and port > 0 else f"协议 {proto}"
+        if reason == "missing_or_invalid_sni_cn" or not sni:
+            facts = f"检测到来自 CN 方向的入站 {port_text} 握手未携带有效 SNI，系统已按规则直接阻断该连接。"
+        else:
+            facts = f"检测到容器入站 {port_text} 携带非白名单 SNI（{sni}），系统已直接阻断该连接。"
+        advice = (
+            "协议伪装强制使用以下 9 个白名单 SNI 之一：dl-cdn.alpinelinux.org、deb.debian.org、crates.io、"
+            "pypi.org、rubygems.org、addons.mozilla.org、formulae.brew.sh、static.rust-lang.org、cpan.org；"
+            "请尽快修改服务端伪装域名配置，避免连接持续被阻断。"
+        )
+        return "容器入站协议 SNI 不在白名单，已阻断连接", facts, advice
     if kind in {"vmess_port_blocked", "trojan_port_blocked"}:
         protocol = "vmess" if kind == "vmess_port_blocked" else "trojan"
         evidence = protocol_block_evidence(details, protocol)

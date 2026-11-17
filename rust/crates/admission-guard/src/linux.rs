@@ -242,6 +242,12 @@ pub fn rules(
             ));
         }
         lines.push(format!(
+            "add rule inet {table} incoming meta l4proto tcp ct bytes < 4096 ct state established queue num {queue} bypass"
+        ));
+        lines.push(format!(
+            "add rule inet {table} incoming meta l4proto udp ct bytes < 2048 ct state new queue num {queue} bypass"
+        ));
+        lines.push(format!(
             "add rule inet {table} incoming ct state != new return"
         ));
     }

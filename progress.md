@@ -2,6 +2,15 @@
 
 更新时间：2026-11-17（Asia/Shanghai）
 
+## Phase 17：容器入站 SNI 白名单强制（TCP TLS + QUIC Initial）、CN 无 SNI 阻断与私信/SSH Banner 联动（v1.9.19）
+
+- **`rust/crates/admission-guard`（`sni.rs`、`guard.rs`、`linux.rs`）**：
+  - 新增纯 `std`、`#![forbid(unsafe_code)]` 的 `sni` 模块，实现 TCP TLS ClientHello 与 RFC 9001 QUIC v1/v2 Initial 解包（HKDF-SHA256 + AES-128-GCM）的 SNI 提取，以及 9 域名白名单校验（`dl-cdn.alpinelinux.org`、`deb.debian.org`、`crates.io`、`pypi.org`、`rubygems.org`、`addons.mozilla.org`、`formulae.brew.sh`、`static.rust-lang.org`、`cpan.org`）。
+  - `nftables` 入站链新增握手首包轻量化引流（TCP `ct bytes < 4096` established + UDP `ct bytes < 2048` new）；`Guard::decision_at` 阻断非白名单 SNI 及来自 `CN` 且缺失/畸形 SNI 的握手并产出去重后的 `SniViolationEvent`。
+- **`rust/crates/geoip-probe`、`agent-core`、`app-guard` & `server/buyer_content.py`**：
+  - `geoip-probe` 新增 `is_country_ip`，`agent-core` 自动将 `CN` 判定注入 `admission-guard` 并将 `sni_whitelist_violation` 告警合入 `security.alerts`。
+  - `server/buyer_content.py` 与 `app-guard::security_banner` 接入 `sni_whitelist_violation` 话术，自动触发买家 Telegram 私信与容器内 SSH Banner 提醒。
+
 ## Phase 16：`scripts/auto-update.sh` 客户端 RFW `wireguard CN` 阻断幂等安全钩子（v1.9.18）
 
 - **`scripts/auto-update.sh`**：新增 `ensure_rfw_cn_wireguard_rule()`（仅在 `SIDE == "client"`、`rfw.service` 运行中、支持 `wireguard` 且当前规则中尚无启用的 `in / wireguard / block / CN` 规则时执行）：

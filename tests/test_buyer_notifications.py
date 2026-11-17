@@ -470,6 +470,33 @@ class BuyerTests(unittest.TestCase):
         buyer.work_once(server.db,self.now,mock.Mock())
         self.assertEqual(self.rows(),[])
 
+    def test_sni_whitelist_violation_queues_private_message_and_banner(self):
+        self.mapping()
+        sni_alert={
+            "type":"sni_whitelist_violation",
+            "severity":"warning",
+            "runtime":"incus",
+            "project":"default",
+            "container_name":"c1",
+            "instance_id":"container-id-1",
+            "title":"容器入站 SNI 不在白名单，已阻断",
+            "message":"检测到容器入站 TLS/443 携带非白名单 SNI（www.microsoft.com），已阻断连接。",
+            "sni":"www.microsoft.com",
+            "dst_port":443,
+            "proto":"tls",
+            "reason":"disallowed_sni",
+            "action":"blocked",
+        }
+        self.ingest(alerts=[sni_alert])
+        with server.db() as conn:
+            outbox=conn.execute("SELECT subject,message,status,user_id FROM buyer_outbox WHERE status='queued'").fetchall()
+            self.assertEqual(len(outbox),1)
+            self.assertEqual(outbox[0]["user_id"],"user-1")
+            self.assertIn("www.microsoft.com",outbox[0]["message"])
+            self.assertIn("dl-cdn.alpinelinux.org",outbox[0]["message"])
+            banners=buyer.banner_states(conn,"host")
+            self.assertTrue(any(b["type"]=="sni_whitelist_violation" and b["name"]=="c1" for b in banners))
+
 
 class BannerTests(unittest.TestCase):
     def setUp(self):

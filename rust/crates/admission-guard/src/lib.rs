@@ -14,6 +14,7 @@ pub mod guard;
 pub mod linux;
 pub mod observe;
 pub mod policy;
+pub mod sni;
 
 use observe::UnsupportedNetwork;
 
@@ -63,7 +64,10 @@ pub use guard::{
     build_event_payload_json, build_status_payload_json, compute_desired_config_hash,
     deterministic_queue_base, failure_details, handle_cli_args, normalized_alert,
     release_owned, release_owned_with, AdmissionController, AdmissionJournal, Guard, GuardRecord,
-    DEFAULT_ADMISSION_JOURNAL,
+    SniViolationEvent, DEFAULT_ADMISSION_JOURNAL,
+};
+pub use sni::{
+    evaluate_inbound_sni, is_allowed_sni, normalize_sni, SniDecision, SniParse, SNI_WHITELIST,
 };
 
 /// Convenience alias for `release_owned()` using default journal and nft runner.

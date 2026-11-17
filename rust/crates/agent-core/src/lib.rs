@@ -516,15 +516,37 @@ impl AgentState {
             interval_seconds: interval,
             ..IoGuardConfig::default()
         };
+        let geoip_db_path = resolve_default_geoip_db_path();
+        let sni_enabled = std::env::var("NARWHAL_SNI_WHITELIST_ENABLED")
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
         #[cfg(unix)]
         let (admission_controller, admission_init_error) =
             match admission_guard::Guard::open_live_unix() {
-                Ok(g) => (
-                    Some(Arc::new(admission_guard::AdmissionController::new(g))),
-                    None,
-                ),
+                Ok(g) => {
+                    let cn_lookup = geoip_db_path.clone().map(|p| {
+                        let cb: Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync> =
+                            Arc::new(move |ip| geoip_probe::is_country_ip(&p, ip, "CN"));
+                        cb
+                    });
+                    g.set_sni_enforcement(sni_enabled, cn_lookup);
+                    (
+                        Some(Arc::new(admission_guard::AdmissionController::new(g))),
+                        None,
+                    )
+                }
                 Err(e) => (None, Some(e.to_string())),
             };
+        #[cfg(not(unix))]
+        let admission_controller = admission_guard::Guard::open_default().ok().map(|g| {
+            let cn_lookup = geoip_db_path.clone().map(|p| {
+                let cb: Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync> =
+                    Arc::new(move |ip| geoip_probe::is_country_ip(&p, ip, "CN"));
+                cb
+            });
+            g.set_sni_enforcement(sni_enabled, cn_lookup);
+            Arc::new(admission_guard::AdmissionController::new(Arc::new(g)))
+        });
         Self {
             cpu_guard: CpuGuardTracker::new(cpu_cfg),
             memory_guard: MemoryGuardTracker::new(mem_cfg),
@@ -537,7 +559,7 @@ impl AgentState {
             last_sample_ts: None,
             proc_root,
             conntrack_path,
-            geoip_db_path: resolve_default_geoip_db_path(),
+            geoip_db_path,
             rfw_restart_observation: None,
             access_log_states: HashMap::new(),
             host_audit_state: host_audit::HostAuditState::default(),
@@ -558,9 +580,7 @@ impl AgentState {
             #[cfg(unix)]
             admission_init_error,
             #[cfg(not(unix))]
-            admission_controller: admission_guard::Guard::open_default()
-                .ok()
-                .map(|g| Arc::new(admission_guard::AdmissionController::new(Arc::new(g)))),
+            admission_controller,
             pasarguard: protocol_guard::pasarguard::PasarGuardMonitor::new(),
             microburst: protocol_guard::microburst::MicroburstDetector::new(),
             udp_blackhole_auto_states: HashMap::new(),
@@ -569,7 +589,18 @@ impl AgentState {
     }
 
     pub fn with_geoip_db(mut self, db_path: Option<PathBuf>) -> Self {
-        self.geoip_db_path = db_path;
+        self.geoip_db_path = db_path.clone();
+        if let Some(ref ctrl) = self.admission_controller {
+            let sni_enabled = std::env::var("NARWHAL_SNI_WHITELIST_ENABLED")
+                .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+                .unwrap_or(true);
+            let cn_lookup = db_path.map(|p| {
+                let cb: Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync> =
+                    Arc::new(move |ip| geoip_probe::is_country_ip(&p, ip, "CN"));
+                cb
+            });
+            ctrl.guard.set_sni_enforcement(sni_enabled, cn_lookup);
+        }
         self
     }
 
@@ -674,9 +705,58 @@ impl AgentState {
         let security_alerts_with_containers =
             merge_json_arrays(&security_alerts_base, &container_alerts_json);
         let incus_report = collect_incus_runtime_health(config, timestamp);
+        let sni_alerts_json = if let Some(ref ctrl) = self.admission_controller {
+            let violations = ctrl.guard.drain_sni_violations();
+            if violations.is_empty() {
+                "[]".to_string()
+            } else {
+                let items: Vec<String> = violations
+                    .into_iter()
+                    .map(|v| {
+                        let proto_name = if v.proto == 17 { "quic" } else { "tls" };
+                        let sni_field = v
+                            .sni
+                            .as_deref()
+                            .map(|s| format!(",\"sni\":\"{}\"", json_escape(s)))
+                            .unwrap_or_default();
+                        let msg = if v.reason == "missing_or_invalid_sni_cn" || v.sni.is_none() {
+                            format!(
+                                "检测到来自 CN 方向的入站 {}/{} 握手未携带有效 SNI，已阻断连接。请使用平台允许的 9 个白名单 SNI 之一。",
+                                proto_name.to_ascii_uppercase(),
+                                v.dst_port
+                            )
+                        } else {
+                            format!(
+                                "检测到容器入站 {}/{} 携带非白名单 SNI（{}），已阻断连接。请改用平台允许的 9 个白名单 SNI 之一。",
+                                proto_name.to_ascii_uppercase(),
+                                v.dst_port,
+                                v.sni.as_deref().unwrap_or("")
+                            )
+                        };
+                        format!(
+                            "{{\"type\":\"sni_whitelist_violation\",\"runtime\":\"{}\",\"project\":\"{}\",\"container_name\":\"{}\",\"instance_id\":\"{}\",\"severity\":\"warning\",\"title\":\"容器入站 SNI 不在白名单，已阻断\",\"message\":\"{}\",\"dst_port\":{},\"proto\":\"{}\",\"reason\":\"{}\",\"action\":\"blocked\"{}}}",
+                            json_escape(&v.runtime),
+                            json_escape(&v.project),
+                            json_escape(&v.container_name),
+                            json_escape(&v.instance_id),
+                            json_escape(&msg),
+                            v.dst_port,
+                            proto_name,
+                            json_escape(&v.reason),
+                            sni_field
+                        )
+                    })
+                    .collect();
+                format!("[{}]", items.join(","))
+            }
+        } else {
+            "[]".to_string()
+        };
+        let security_alerts_with_sni =
+            merge_json_arrays(&security_alerts_with_containers, &sni_alerts_json);
         let security_alerts_json = match incus_report.as_ref() {
-            Some(incus) => merge_json_arrays(&security_alerts_with_containers, &incus.alerts_json),
-            None => security_alerts_with_containers,
+            Some(incus) => merge_json_arrays(&security_alerts_with_sni, &incus.alerts_json),
+            None => security_alerts_with_sni,
         };
         let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
         let ipv4_ok = host_ip_family_available(false);
