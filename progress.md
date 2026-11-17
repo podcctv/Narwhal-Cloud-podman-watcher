@@ -2,6 +2,11 @@
 
 更新时间：2026-11-17（Asia/Shanghai）
 
+## Phase 19：修复 NFQUEUE 抓包截断导致 SNI 无法解析的问题（v1.9.22）
+
+- **`rust/crates/admission-guard/src/linux.rs`**：
+  - 将 `SubprocessNfqBackend` 中 `nfq_set_mode(qh, 2, ...)` 与 `C.string_at(ptr, min(length, ...))` 的拷贝上限由 `256` 字节提升至 `2048` 字节，避免现代 TLS ClientHello（含 X25519/ML-KEM `key_share`）及 RFC 9000 QUIC Initial（>=1200 字节）在到达 SNI 扩展前被截断。
+
 ## Phase 18：Rust Agent 容器 SSH Pre-Auth Banner 联动落地（v1.9.21）
 
 - **`rust/crates/agent-core/src/lib.rs`**：

@@ -645,7 +645,7 @@ def callback(qh, msg, data, ctx):
     qnum = int(ctx or 0)
     accepted = 0
     if length > 0:
-        raw_hex = C.string_at(ptr, min(length, 256)).hex()
+        raw_hex = C.string_at(ptr, min(length, 2048)).hex()
         sys.stdout.write(f'P {qnum} {pkt_id} {raw_hex}\n')
         sys.stdout.flush()
         while True:
@@ -681,7 +681,7 @@ def run_cmd(parts):
             sys.stdout.write('ERR admission queue number already in use\n')
             sys.stdout.flush()
             return
-        if lib.nfq_set_mode(qh, 2, 256) < 0 or lib.nfq_set_queue_maxlen(qh, 1024) < 0:
+        if lib.nfq_set_mode(qh, 2, 2048) < 0 or lib.nfq_set_queue_maxlen(qh, 1024) < 0:
             lib.nfq_destroy_queue(qh)
             sys.stdout.write('ERR admission queue configuration unavailable\n')
             sys.stdout.flush()
