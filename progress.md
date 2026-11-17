@@ -2,6 +2,13 @@
 
 更新时间：2026-11-17（Asia/Shanghai）
 
+## Phase 18：Rust Agent 容器 SSH Pre-Auth Banner 联动落地（v1.9.20）
+
+- **`rust/crates/agent-core/src/lib.rs`**：
+  - 在 `AgentState` 中持久化 `motd_states_json` 与 `last_alerts_json`，并在 `run_loop` 解析 `POST /api/v1/report` 返回的 `motd_states` 列表。
+  - 在 `run_security_guard_cycles` 末尾接入 `sync_container_security_banners`（`#[cfg(unix)]`）及跨平台脚本构造器 `build_ssh_banner_install_script`，通过 `app_guard::security_banner::{select_motd_entries, render_motd_banner_entries}` 结合活动告警与未过期 `user_notice` 渲染文本，并通过 `run_container_guest_script` 为 `runman` 容器写入 `/etc/ssh/narwhal-banner` 与 `/etc/ssh/sshd_config.d/90-narwhal-banner.conf`（校验 `sshd -t` 并重载 `ssh`/`sshd`）。
+  - 新增单元测试 `test_build_ssh_banner_install_script_and_motd_render`。
+
 ## Phase 17：容器入站 SNI 白名单强制（TCP TLS + QUIC Initial）、CN 无 SNI 阻断与私信/SSH Banner 联动（v1.9.19）
 
 - **`rust/crates/admission-guard`（`sni.rs`、`guard.rs`、`linux.rs`）**：

@@ -448,6 +448,10 @@ pub struct AgentState {
     udp_blackhole_auto_states: HashMap<String, (u32, u64)>,
     #[cfg_attr(not(unix), allow(dead_code))]
     speedtest_caches: protocol_guard::speedtest::SpeedtestReconcileCaches,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    motd_states: Vec<runtime_drivers::JsonVal>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    last_alerts_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,6 +589,8 @@ impl AgentState {
             microburst: protocol_guard::microburst::MicroburstDetector::new(),
             udp_blackhole_auto_states: HashMap::new(),
             speedtest_caches: protocol_guard::speedtest::SpeedtestReconcileCaches::default(),
+            motd_states: Vec::new(),
+            last_alerts_json: "[]".to_string(),
         }
     }
 
@@ -758,6 +764,7 @@ impl AgentState {
             Some(incus) => merge_json_arrays(&security_alerts_with_sni, &incus.alerts_json),
             None => security_alerts_with_sni,
         };
+        self.last_alerts_json = security_alerts_json.clone();
         let rfw_service_health_json = self.collect_rfw_service_health_json(timestamp);
         let ipv4_ok = host_ip_family_available(false);
         let ipv6_ok = host_ip_family_available(true);
@@ -2584,8 +2591,160 @@ impl AgentState {
                 self.pasarguard
                     .scan_containers(&pg_targets, &mut backend, timestamp as i64);
             }
+
+            // 4. Sync SSH pre-auth banner for runman containers
+            self.sync_container_security_banners(config, &containers, timestamp);
         }
     }
+
+    #[cfg(unix)]
+    fn sync_container_security_banners(
+        &self,
+        config: &Config,
+        containers: &[ContainerSample],
+        timestamp: u64,
+    ) {
+        if !config.security_monitor_enabled {
+            return;
+        }
+        let disabled = std::env::var("SECURITY_INJECT_MOTD_ALERT")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .unwrap_or(false);
+        if disabled {
+            return;
+        }
+        let motd_states = &self.motd_states;
+        let alerts = runtime_drivers::JsonVal::parse(self.last_alerts_json.trim())
+            .ok()
+            .and_then(|v| v.as_arr().map(|a| a.to_vec()))
+            .unwrap_or_default();
+        let mut opts = app_guard::security_banner::MotdRenderOptions::from_env();
+        opts.color = false;
+        opts.sampled_at = Some(timestamp as f64);
+
+        for c in containers {
+            if !c.runtime.eq_ignore_ascii_case("runman") || c.name.is_empty() {
+                continue;
+            }
+            let rt_lower = c.runtime.to_ascii_lowercase();
+            let mut entries: Vec<app_guard::security_banner::MotdEntry> = Vec::new();
+            for s in &motd_states {
+                let stype = s.get("type").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
+                if stype != "user_notice" {
+                    continue;
+                }
+                let s_rt = s.get("runtime").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
+                let s_proj = s.get("project").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
+                let s_name = s.get("name").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
+                if s_rt != rt_lower || s_proj != c.project || s_name != c.name {
+                    continue;
+                }
+                let exp = s.get("expires_at").and_then(runtime_drivers::JsonVal::as_i64).unwrap_or(0);
+                if exp <= timestamp as i64 {
+                    continue;
+                }
+                if let Some(entry) = app_guard::security_banner::MotdEntry::from_json(s) {
+                    entries.push(entry);
+                }
+            }
+            for a in &alerts {
+                let a_rt = a.get("runtime").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
+                let a_proj = a.get("project").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
+                let a_name = a.get("container_name").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
+                if a_rt != rt_lower || a_proj != c.project || a_name != c.name {
+                    continue;
+                }
+                if let Some(entry) = app_guard::security_banner::MotdEntry::from_json(a) {
+                    entries.push(entry);
+                }
+            }
+            let selected = app_guard::security_banner::select_motd_entries(&entries);
+            let banner_text = app_guard::security_banner::render_motd_banner_entries(
+                &selected,
+                &opts,
+            );
+            let Some(script) = build_ssh_banner_install_script(&banner_text) else {
+                continue;
+            };
+            let podman_bin = (!c.runtime_bin.is_empty()).then_some(c.runtime_bin.as_str());
+            let _ = run_container_guest_script(
+                &rt_lower,
+                &c.project,
+                &c.name,
+                &c.instance_id,
+                podman_bin,
+                &script,
+            );
+        }
+    }
+}
+
+pub fn build_ssh_banner_install_script(content: &str) -> Option<String> {
+    if content.is_empty() || content.len() > 32 * 1024 || content.contains('\0') {
+        return None;
+    }
+    let marker = "# NARWHAL MANAGED PREAUTH BANNER v1";
+    let banner_content = format!("{marker}\n{}\n", content.trim_end());
+    let dropin_content = format!("{marker}\nBanner /etc/ssh/narwhal-banner\n");
+    let q_banner = abuse_guard::shlex_quote(&banner_content);
+    let q_dropin = abuse_guard::shlex_quote(&dropin_content);
+    Some(format!(
+        r#"set -eu
+cfg=/etc/ssh/sshd_config
+dropdir=/etc/ssh/sshd_config.d
+drop=/etc/ssh/sshd_config.d/90-narwhal-banner.conf
+banner=/etc/ssh/narwhal-banner
+sshd=$(command -v sshd 2>/dev/null || true)
+[ -n "$sshd" ] || [ ! -x /usr/sbin/sshd ] || sshd=/usr/sbin/sshd
+if [ -z "$sshd" ] || [ ! -f "$cfg" ] || [ ! -d "$dropdir" ]; then
+  echo NARWHAL_SSH_BANNER_STATE=unsupported
+  exit 0
+fi
+if ! awk '/^[[:space:]]*#/ {{next}} tolower($1)=="match" {{exit}} tolower($1)=="include" && $2 ~ /^\/etc\/ssh\/sshd_config\.d\/.*\.conf$/ {{found=1}} END {{exit !found}}' "$cfg"; then
+  echo NARWHAL_SSH_BANNER_STATE=include_unavailable
+  exit 0
+fi
+if grep -Eiq '^[[:space:]]*Banner[[:space:]]+' "$cfg"; then
+  echo NARWHAL_SSH_BANNER_STATE=preserved_operator_config
+  exit 0
+fi
+for f in "$dropdir"/*.conf; do
+  [ -f "$f" ] || continue
+  [ "$f" = "$drop" ] && continue
+  if grep -Eiq '^[[:space:]]*Banner[[:space:]]+' "$f"; then
+    echo NARWHAL_SSH_BANNER_STATE=preserved_operator_config
+    exit 0
+  fi
+done
+if [ -e "$drop" ] && {{ [ ! -f "$drop" ] || ! grep -Fqx '{marker}' "$drop"; }}; then
+  echo NARWHAL_SSH_BANNER_STATE=dropin_conflict
+  exit 0
+fi
+if [ -e "$banner" ] && {{ [ ! -f "$banner" ] || ! grep -Fqx '{marker}' "$banner"; }}; then
+  echo NARWHAL_SSH_BANNER_STATE=banner_file_conflict
+  exit 0
+fi
+tmp_banner=$(mktemp /etc/ssh/.narwhal-banner.XXXXXX)
+tmp_drop=$(mktemp "$dropdir/.narwhal-banner.XXXXXX")
+printf '%s' {q_banner} > "$tmp_banner"
+printf '%s' {q_dropin} > "$tmp_drop"
+chmod 644 "$tmp_banner" "$tmp_drop"
+if cmp -s "$tmp_banner" "$banner" 2>/dev/null && cmp -s "$tmp_drop" "$drop" 2>/dev/null; then
+  rm -f "$tmp_banner" "$tmp_drop"
+  echo NARWHAL_SSH_BANNER_STATE=active
+  exit 0
+fi
+mv -f "$tmp_banner" "$banner"
+mv -f "$tmp_drop" "$drop"
+if ! "$sshd" -t -f "$cfg"; then rm -f "$drop" "$banner"; echo NARWHAL_SSH_BANNER_STATE=config_invalid; exit 1; fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+elif command -v service >/dev/null 2>&1; then
+  service ssh reload >/dev/null 2>&1 || service sshd reload >/dev/null 2>&1 || true
+fi
+echo NARWHAL_SSH_BANNER_STATE=active
+"#
+    ))
 }
 
 #[cfg(unix)]
@@ -4353,8 +4512,18 @@ pub fn run_with_config(
         if now >= next_report {
             let ts = current_unix_ts();
             let payload = state.build_report_json(config, ts);
-            if let Err(err) = client.post_json_signed("/api/v1/report", payload.as_bytes()) {
-                let _ = writeln!(out, "report failed: {err}");
+            match client.post_json_signed("/api/v1/report", payload.as_bytes()) {
+                Ok(resp) => {
+                    let body_str = String::from_utf8_lossy(&resp.body);
+                    if let Ok(parsed) = runtime_drivers::JsonVal::parse(body_str.trim()) {
+                        if let Some(arr) = parsed.get("motd_states").and_then(|v| v.as_arr()) {
+                            state.motd_states = arr.to_vec();
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = writeln!(out, "report failed: {err}");
+                }
             }
             state.run_security_guard_cycles(config, &client, ts);
             next_report = advance_deadline(next_report, report_delay, now);
@@ -5314,5 +5483,35 @@ SECURITY_MONITOR_ENABLED=false
         assert_eq!(sockets[0].remote, "1.1.1.1:22");
         assert_eq!(sockets[0].state, "syn_sent");
         assert_eq!(sockets[0].direction, "outbound");
+    }
+
+    #[test]
+    fn test_build_ssh_banner_install_script_and_motd_render() {
+        assert!(build_ssh_banner_install_script("").is_none());
+        assert!(build_ssh_banner_install_script("bad\0banner").is_none());
+        let oversized = "x".repeat(32 * 1024 + 1);
+        assert!(build_ssh_banner_install_script(&oversized).is_none());
+
+        let mut opts = app_guard::security_banner::MotdRenderOptions::from_env();
+        opts.color = false;
+        opts.sampled_at = Some(1_700_000_000.0);
+        let entry = app_guard::security_banner::MotdEntry {
+            entry_type: "user_notice".to_string(),
+            title: "SNI Notice".to_string(),
+            detail: "Use allowed SNI 'crates.io'".to_string(),
+            severity: "warning".to_string(),
+            ..Default::default()
+        };
+        let selected = app_guard::security_banner::select_motd_entries(&[entry]);
+        let rendered = app_guard::security_banner::render_motd_banner_entries(
+            &selected,
+            &opts,
+        );
+        let script = build_ssh_banner_install_script(&rendered).expect("valid banner script");
+        assert!(script.contains("/etc/ssh/narwhal-banner"));
+        assert!(script.contains("/etc/ssh/sshd_config.d/90-narwhal-banner.conf"));
+        assert!(script.contains("# NARWHAL MANAGED PREAUTH BANNER v1"));
+        assert!(script.contains("crates.io"));
+        assert!(script.contains("\"$sshd\" -t -f \"$cfg\""));
     }
 }
