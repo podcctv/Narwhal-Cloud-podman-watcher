@@ -240,6 +240,20 @@ class AbuseAPITests(unittest.TestCase):
                 asyncio.run(server.set_security_alert_disposition(row['id'], request({'decision': decision})))
             self.assertEqual(caught.exception.status_code, 409)
 
+    def test_bandwidth_monetization_event_accepted_and_labeled(self):
+        value = alert()
+        value['abuse_evidence'][0].update(
+            kind='bandwidth_monetization',
+            tool='traffmonetizer',
+            basis='active_bandwidth_monetization',
+        )
+        normalized = abuse_api.normalized_alert(value)
+        self.assertEqual(normalized['title'], '违规活动：挂机卖带宽 / P2P 代理节点')
+        self.assertIn('已验证并隔离全部受管入站和出站网络', normalized['message'])
+        self.emit(value)
+        q_row = self.conn.execute('SELECT status FROM network_quarantines').fetchone()
+        self.assertEqual(q_row[0], 'isolated')
+
 
 if __name__ == '__main__':
     unittest.main()

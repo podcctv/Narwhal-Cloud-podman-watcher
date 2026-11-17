@@ -7,8 +7,12 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::MetadataExt;
 
 use proc_probe::parse_proc_stat;
+use transport::sha256_hex;
 
-use crate::detection::{public_ip, source_evidence, ProcessRecord, SocketRecord};
+use crate::detection::{
+    bandwidth_monetization_tool_for_name, detect_bandwidth_monetization_markers, public_ip,
+    source_evidence, ProcessRecord, SocketRecord,
+};
 
 pub const PROCESS_SCRIPT: &str = r#"
 command -v base64 >/dev/null 2>&1 || exit 2
@@ -20,7 +24,7 @@ for d in /proc/[0-9]*; do
     p=${d##*/}; [ "$p" -ge 1 ] 2>/dev/null || continue
     [ -r "$d/stat" ] && [ -r "$d/cmdline" ] || continue
     comm=$(cat "$d/comm" 2>/dev/null)
-    case "$comm" in python*|node|nmap|masscan|zmap|rustscan|hydra|medusa|ncrack|patator) ;; *) continue;; esac
+    case "$comm" in python*|node|nmap|masscan|zmap|rustscan|hydra|medusa|ncrack|patator|traffmonetizer*|tmclient|bitping*|antgain|Proxybase*|proxybase*|mysterium|myst|honeygain|earnapp|pawns*|iproyal|packetstream|psclient|peer2profit|p2pclient|repocket|proxyrack|grass|gaganode|titan-edge|castarsdk) ;; *) continue;; esac
     raw=$(cat "$d/stat" 2>/dev/null); rest=${raw##*) }
     ticks=$(printf '%s\n' "$rest" | awk '{print $20}')
     state=$(printf '%s\n' "$rest" | awk '{print $1}')
@@ -159,6 +163,8 @@ pub fn parse_processes(output: &str) -> Result<Vec<ProcessRecord>, String> {
             target_ips: BTreeMap::new(),
             host_pid: None,
             source_coverage: None,
+            exe_sha256: None,
+            binary_fingerprint: None,
         });
         if processes.len() >= 64 {
             break;
@@ -281,7 +287,7 @@ pub fn process_script(sockets: &[SocketRecord]) -> String {
         "for d in /proc/[0-9]*;",
         &format!("for d in {paths} /proc/[0-9]*;"),
     );
-    let old = "case \"$comm\" in python*|node|nmap|masscan|zmap|rustscan|hydra|medusa|ncrack|patator) ;; *) continue;; esac";
+    let old = "case \"$comm\" in python*|node|nmap|masscan|zmap|rustscan|hydra|medusa|ncrack|patator|traffmonetizer*|tmclient|bitping*|antgain|Proxybase*|proxybase*|mysterium|myst|honeygain|earnapp|pawns*|iproyal|packetstream|psclient|peer2profit|p2pclient|repocket|proxyrack|grass|gaganode|titan-edge|castarsdk) ;; *) continue;; esac";
     script.replace(old, &format!("case \"$p\" in {pid_list}) ;; *) {old};; esac"))
 }
 
@@ -485,7 +491,25 @@ pub fn host_metadata_from(proc_root: &Path, host_pid: u32) -> Result<ProcessReco
         target_ips: BTreeMap::new(),
         host_pid: Some(host_pid),
         source_coverage: None,
+        exe_sha256: None,
+        binary_fingerprint: None,
     })
+}
+
+pub fn inspect_host_executable_under(
+    proc_root: &Path,
+    host_pid: u32,
+) -> (Option<String>, Option<String>) {
+    let exe_path = proc_root.join(host_pid.to_string()).join("exe");
+    let Ok(bytes) = read_bounded_bytes(&exe_path, 8 * 1024 * 1024) else {
+        return (None, None);
+    };
+    if bytes.is_empty() {
+        return (None, None);
+    }
+    let sha = sha256_hex(&bytes);
+    let marker = detect_bandwidth_monetization_markers(&bytes).map(str::to_string);
+    (Some(sha), marker)
 }
 
 /// Select by kernel PID namespace, not ancestry (`podman exec` has another parent).
@@ -747,7 +771,14 @@ where
         if process.pid < 1 || process.pid != observed.pid {
             continue;
         }
-        if owners.get(&process.pid).copied().unwrap_or(0) > 0 && read_sources < 4 {
+        let is_bm_name = bandwidth_monetization_tool_for_name(&process.executable).is_some()
+            || process
+                .argv
+                .first()
+                .and_then(|arg| bandwidth_monetization_tool_for_name(arg))
+                .is_some();
+        let has_outbound = owners.get(&process.pid).copied().unwrap_or(0) > 0;
+        if has_outbound && read_sources < 4 {
             read_sources += 1;
             match read_entrypoint(&process) {
                 Ok(Some(src)) => {
@@ -758,6 +789,18 @@ where
                 Err(_) => {
                     process.source_coverage = Some("unavailable".to_string());
                 }
+            }
+        }
+        if process.source.is_none()
+            && process.exe_sha256.is_none()
+            && (is_bm_name || (has_outbound && read_sources <= 4))
+        {
+            let (sha, marker) = inspect_host_executable_under(Path::new("/proc"), observed.host_pid);
+            if sha.is_some() {
+                process.exe_sha256 = sha;
+            }
+            if process.binary_fingerprint.is_none() && marker.is_some() {
+                process.binary_fingerprint = marker;
             }
         }
         if let Ok(fresh) = read_metadata(observed.host_pid) {

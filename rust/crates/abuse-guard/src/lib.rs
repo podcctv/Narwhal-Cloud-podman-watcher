@@ -13,17 +13,19 @@ pub mod engine;
 mod py_ast;
 
 pub use collection::{
-    collect, collect_host, collect_host_with, host_metadata, host_metadata_from, parse_processes,
-    posix_normpath, process_script, python_entrypoint, read_host_entrypoint,
-    read_host_entrypoint_under, resolve_targets, scoped_host_processes, shlex_quote,
-    verify_host_processes, verify_host_processes_with, verify_live_processes, ScopedHostProcess,
-    PROCESS_SCRIPT,
+    collect, collect_host, collect_host_with, host_metadata, host_metadata_from,
+    inspect_host_executable_under, parse_processes, posix_normpath, process_script,
+    python_entrypoint, read_host_entrypoint, read_host_entrypoint_under, resolve_targets,
+    scoped_host_processes, shlex_quote, verify_host_processes, verify_host_processes_with,
+    verify_live_processes, ScopedHostProcess, PROCESS_SCRIPT,
 };
 pub use detection::{
-    evaluate_process, network_evidence, public_ip, source_evidence, target_ip, tool_evidence,
-    url_host, Finding, ProcessRecord, SocketRecord, SourceEvidence, SourceFeatures, AUTH_TOOLS,
-    IDENTITY_KEYS, NODE_LIMIT, PASSWORD_KEYS, SCANNERS, SENSITIVE_PORTS, SOURCE_LIMIT,
-    USERNAME_KEYS,
+    bandwidth_monetization_evidence, bandwidth_monetization_tool_for_name,
+    detect_bandwidth_monetization_markers, evaluate_process, network_evidence,
+    normalize_binary_token, public_ip, source_evidence, target_ip, tool_evidence, url_host,
+    Finding, ProcessRecord, SocketRecord, SourceEvidence, SourceFeatures, AUTH_TOOLS,
+    BANDWIDTH_MONETIZATION_MARKERS, BANDWIDTH_MONETIZATION_TOOLS, IDENTITY_KEYS, NODE_LIMIT,
+    PASSWORD_KEYS, SCANNERS, SENSITIVE_PORTS, SOURCE_LIMIT, USERNAME_KEYS,
 };
 pub use engine::{
     build_abuse_event_payload, build_abuse_event_payload_json, kind_title, now_unix_secs_f64,
@@ -188,6 +190,7 @@ for user, pwd in itertools.product(users, passwords):
             target_ips,
             host_pid: None,
             source_coverage: None,
+            ..Default::default()
         };
         assert_eq!(
             source_evidence(Some(IDENTITY_SRC)).kinds,
@@ -1188,6 +1191,114 @@ run()
             ..Default::default()
         };
         assert!(read_host_entrypoint_under(&dir, &proc_rec).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_bandwidth_monetization_detection_and_quarantine_payload() {
+        let dir = temp_dir("bm_quarantine");
+        let mock_proc = dir.join("proc");
+        fs::create_dir_all(mock_proc.join("555")).unwrap();
+        fs::write(
+            mock_proc.join("555").join("exe"),
+            b"\x7fELF...https://api.traffmonetizer.com/v1/peer...",
+        )
+        .unwrap();
+
+        let (sha, marker) = inspect_host_executable_under(&mock_proc, 555);
+        assert!(sha.as_ref().is_some_and(|s| s.len() == 64));
+        assert_eq!(marker.as_deref(), Some("traffmonetizer"));
+
+        // 1. Renamed binary caught via ELF marker fingerprint + outbound socket
+        let renamed = ProcessRecord {
+            pid: 42,
+            start_ticks: "8888".to_string(),
+            executable: "/tmp/svchost (deleted)".to_string(),
+            argv: vec!["./svchost".to_string()],
+            exe_sha256: sha.clone(),
+            binary_fingerprint: marker,
+            ..Default::default()
+        };
+        let sockets = vec![SocketRecord {
+            pid: 42,
+            remote_ip: "1.2.3.4".to_string(),
+            remote: "1.2.3.4:443".to_string(),
+            state: "ESTABLISHED".to_string(),
+            proto: "tcp".to_string(),
+            direction: "outbound".to_string(),
+        }];
+        let findings = evaluate_process(&renamed, &sockets);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "bandwidth_monetization");
+        assert_eq!(findings[0].confidence, "high");
+        assert_eq!(findings[0].basis, "bandwidth_monetization_binary_fingerprint");
+        assert_eq!(findings[0].tool.as_deref(), Some("traffmonetizer"));
+        assert_eq!(findings[0].source_sha256, sha);
+        assert_eq!(findings[0].owned_http_connections, Some(1));
+
+        // 2. Direct binary name matches for screenshot tools
+        for (exe, argv0, expected_tool) in [
+            ("/app/traffmonetizer-cli", "./traffmonetizer-cli", "traffmonetizer"),
+            ("/root/bitpingd", "/root/bitpingd", "bitping"),
+            ("/usr/local/bin/antgain", "antgain", "antgain"),
+            ("/opt/Proxybase-Peer", "./Proxybase-Peer", "proxybase"),
+            ("/usr/bin/myst", "myst", "mysterium"),
+        ] {
+            let proc_rec = ProcessRecord {
+                pid: 77,
+                start_ticks: "9999".to_string(),
+                executable: exe.to_string(),
+                argv: vec![argv0.to_string(), "start".to_string()],
+                ..Default::default()
+            };
+            let fs_out = evaluate_process(&proc_rec, &[]);
+            assert_eq!(fs_out.len(), 1);
+            assert_eq!(fs_out[0].kind, "bandwidth_monetization");
+            assert_eq!(fs_out[0].tool.as_deref(), Some(expected_tool));
+            assert_eq!(fs_out[0].basis, "active_bandwidth_monetization");
+        }
+
+        // 3. Corroborated >= 20s -> triggers net-guard quarantine + event payload
+        let journal = QuarantineJournal::new(Some(&dir.join("journal.json"))).unwrap();
+        let mut driver = MockDriver::new();
+        let mut engine = AbuseEngine::new(journal, 20.0, 180.0);
+        let id = "a".repeat(64);
+        let container = podman_container("8169ccab", &id);
+        let proc_tm = ProcessRecord {
+            pid: 91,
+            start_ticks: "7777".to_string(),
+            executable: "/app/Proxybase-Peer".to_string(),
+            argv: vec!["./Proxybase-Peer".to_string()],
+            exe_sha256: sha,
+            ..Default::default()
+        };
+        let tm_sockets = vec![SocketRecord {
+            pid: 91,
+            remote_ip: "1.2.3.4".to_string(),
+            remote: "1.2.3.4:443".to_string(),
+            state: "ESTABLISHED".to_string(),
+            proto: "tcp".to_string(),
+            direction: "outbound".to_string(),
+        }];
+
+        let r1 = engine
+            .check(&container, &id, &mut driver, &[proc_tm.clone()], &tm_sockets, Some(1000.0))
+            .unwrap();
+        assert_eq!(r1.state, "suspected");
+        assert_eq!(driver.changed, 0);
+
+        let r2 = engine
+            .check(&container, &id, &mut driver, &[proc_tm], &tm_sockets, Some(1025.0))
+            .unwrap();
+        assert_eq!(r2.state, "isolated");
+        assert_eq!(driver.changed, 1);
+        let alert = r2.alert.expect("alert");
+        assert!(alert.title.contains("挂机卖带宽 / P2P 代理节点"));
+        let payload = build_abuse_event_payload("host-1", "node-1", "1.9.14", 1025, &alert);
+        let payload_str = json_val_to_string(&payload, false);
+        assert!(payload_str.contains("\"kind\":\"bandwidth_monetization\""));
+        assert!(payload_str.contains("\"tool\":\"proxybase\""));
 
         let _ = fs::remove_dir_all(&dir);
     }

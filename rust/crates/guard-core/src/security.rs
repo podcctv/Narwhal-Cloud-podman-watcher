@@ -60,6 +60,34 @@ const MINER_CMD_PATTERNS: &[&str] = &[
     "teamtnt",
 ];
 
+const BANDWIDTH_MONETIZATION_BINARIES: &[&str] = &[
+    "traffmonetizer-cli",
+    "traffmonetizer",
+    "tmclient",
+    "bitpingd",
+    "bitping",
+    "antgain",
+    "proxybase-peer",
+    "proxybase",
+    "mysterium",
+    "myst",
+    "honeygain",
+    "earnapp",
+    "pawns-cli",
+    "pawns",
+    "iproyal",
+    "packetstream",
+    "psclient",
+    "peer2profit",
+    "p2pclient",
+    "repocket",
+    "proxyrack",
+    "grass",
+    "gaganode",
+    "titan-edge",
+    "castarsdk",
+];
+
 const REVERSE_SHELL_PATTERNS: &[&str] = &[
     "/dev/tcp/",
     "nc -e",
@@ -923,7 +951,17 @@ pub fn detect_suspicious_processes(procs: &[ProcInfo]) -> Vec<SuspiciousProcFind
             }
         }
 
-        // 4. Proxy binary match (process name or argv[0])
+        // 4. Bandwidth monetization / residential P2P proxy pool binary match
+        if matched.is_none() {
+            for &bm in BANDWIDTH_MONETIZATION_BINARIES {
+                if proc_base == bm || argv0 == bm {
+                    matched = Some(("bandwidth_monetization", bm.to_string(), "critical"));
+                    break;
+                }
+            }
+        }
+
+        // 5. Proxy binary match (process name or argv[0])
         if matched.is_none() {
             for &proxy in PROXY_BINARIES {
                 if proc_base == proxy || argv0 == proxy {
@@ -1408,5 +1446,75 @@ mod tests {
         let cmd3 = "curl https://example.com/api?token=xyz987&page=1";
         let red3 = redact_process_command(cmd3);
         assert_eq!(red3, "curl https://example.com/api?token=[REDACTED]&page=1");
+    }
+
+    #[test]
+    fn detects_bandwidth_monetization_processes_and_redacts_secrets() {
+        let procs = vec![
+            ProcInfo {
+                pid: 201,
+                ppid: 1,
+                cpu_percent: 2.0,
+                rss_bytes: 20 * 1024 * 1024,
+                process: "traffmonetizer-cli".to_string(),
+                command: "./traffmonetizer-cli start accept --token secret_tm_token_123".to_string(),
+            },
+            ProcInfo {
+                pid: 202,
+                ppid: 1,
+                cpu_percent: 1.5,
+                rss_bytes: 18 * 1024 * 1024,
+                process: "bitpingd".to_string(),
+                command: "/root/bitpingd --email user@example.com".to_string(),
+            },
+            ProcInfo {
+                pid: 203,
+                ppid: 1,
+                cpu_percent: 1.0,
+                rss_bytes: 15 * 1024 * 1024,
+                process: "antgain".to_string(),
+                command: "antgain start --secret super_secret_key".to_string(),
+            },
+            ProcInfo {
+                pid: 204,
+                ppid: 1,
+                cpu_percent: 3.0,
+                rss_bytes: 24 * 1024 * 1024,
+                process: "Proxybase-Peer".to_string(),
+                command: "./Proxybase-Peer --node-id 123".to_string(),
+            },
+            ProcInfo {
+                pid: 205,
+                ppid: 1,
+                cpu_percent: 2.5,
+                rss_bytes: 30 * 1024 * 1024,
+                process: "myst".to_string(),
+                command: "/usr/bin/myst service --agreed-terms-and-conditions".to_string(),
+            },
+            ProcInfo {
+                pid: 206,
+                ppid: 1,
+                cpu_percent: 1.0,
+                rss_bytes: 12 * 1024 * 1024,
+                process: "honeygain".to_string(),
+                command: "/opt/hg/honeygain -tou-accept -email a@b.com -pass hunter2".to_string(),
+            },
+        ];
+
+        let findings = detect_suspicious_processes(&procs);
+        assert_eq!(findings.len(), 6);
+        for f in &findings {
+            assert_eq!(f.category, "bandwidth_monetization");
+            assert_eq!(f.severity, "critical");
+        }
+        assert_eq!(findings[0].pattern, "traffmonetizer-cli");
+        assert!(!findings[0].redacted_command.contains("secret_tm_token_123"));
+        assert!(findings[0].redacted_command.contains("--token [REDACTED]"));
+        assert_eq!(findings[1].pattern, "bitpingd");
+        assert_eq!(findings[2].pattern, "antgain");
+        assert!(!findings[2].redacted_command.contains("super_secret_key"));
+        assert_eq!(findings[3].pattern, "proxybase-peer");
+        assert_eq!(findings[4].pattern, "myst");
+        assert_eq!(findings[5].pattern, "honeygain");
     }
 }

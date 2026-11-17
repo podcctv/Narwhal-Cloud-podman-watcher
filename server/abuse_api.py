@@ -6,7 +6,7 @@ from fastapi import Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 
-KINDS = {'outbound_scan', 'authentication_bruteforce', 'credential_stuffing', 'identity_enumeration'}
+KINDS = {'outbound_scan', 'authentication_bruteforce', 'credential_stuffing', 'identity_enumeration', 'bandwidth_monetization'}
 REPLACEMENT_REVIEW_VERSION = (1, 7, 188)
 RUNMAN_VM_ID_RE = re.compile(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}')
 RUNMAN_GENERATION_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
@@ -69,7 +69,7 @@ def normalized_alert(value):
         raise HTTPException(400, 'invalid isolation outcome')
     if state == 'isolated' and (network.get('ingress_blocked') is not True or network.get('egress_blocked') is not True):
         raise HTTPException(400, 'both directions must be verified')
-    labels = {'outbound_scan':'对外扫描','authentication_bruteforce':'认证爆破','credential_stuffing':'撞库','identity_enumeration':'身份信息枚举'}
+    labels = {'outbound_scan':'对外扫描','authentication_bruteforce':'认证爆破','credential_stuffing':'撞库','identity_enumeration':'身份信息枚举','bandwidth_monetization':'挂机卖带宽 / P2P 代理节点'}
     return {'type': 'prohibited_activity', 'severity': 'critical', 'runtime': runtime, 'project': project,
             'container_name': name, 'instance_id': identity,
             'title': '违规活动：'+'、'.join(dict.fromkeys(labels[e['kind']] for e in evidence)),

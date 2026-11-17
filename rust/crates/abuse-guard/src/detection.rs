@@ -11,6 +11,49 @@ pub const NODE_LIMIT: usize = crate::py_ast::NODE_LIMIT;
 
 pub const SCANNERS: &[&str] = &["masscan", "zmap", "nmap", "rustscan"];
 pub const AUTH_TOOLS: &[&str] = &["hydra", "medusa", "ncrack", "patator"];
+pub const BANDWIDTH_MONETIZATION_TOOLS: &[(&str, &str)] = &[
+    ("traffmonetizer-cli", "traffmonetizer"),
+    ("traffmonetizer", "traffmonetizer"),
+    ("tmclient", "traffmonetizer"),
+    ("bitpingd", "bitping"),
+    ("bitping", "bitping"),
+    ("antgain", "antgain"),
+    ("proxybase-peer", "proxybase"),
+    ("proxybase", "proxybase"),
+    ("mysterium", "mysterium"),
+    ("myst", "mysterium"),
+    ("honeygain", "honeygain"),
+    ("earnapp", "earnapp"),
+    ("pawns-cli", "pawns"),
+    ("pawns", "pawns"),
+    ("iproyal", "iproyal"),
+    ("packetstream", "packetstream"),
+    ("psclient", "packetstream"),
+    ("peer2profit", "peer2profit"),
+    ("p2pclient", "peer2profit"),
+    ("repocket", "repocket"),
+    ("proxyrack", "proxyrack"),
+    ("grass", "grass"),
+    ("gaganode", "gaganode"),
+    ("titan-edge", "titan-edge"),
+    ("castarsdk", "castarsdk"),
+];
+pub const BANDWIDTH_MONETIZATION_MARKERS: &[(&[u8], &str)] = &[
+    (b"traffmonetizer.com", "traffmonetizer"),
+    (b"bitping.com", "bitping"),
+    (b"antgain", "antgain"),
+    (b"proxybase", "proxybase"),
+    (b"mysteriumnetwork", "mysterium"),
+    (b"honeygain.com", "honeygain"),
+    (b"earnapp.com", "earnapp"),
+    (b"packetstream.io", "packetstream"),
+    (b"peer2profit", "peer2profit"),
+    (b"iproyal.com", "iproyal"),
+    (b"pawns.app", "pawns"),
+    (b"gaganode.com", "gaganode"),
+    (b"repocket.co", "repocket"),
+    (b"titan-edge", "titan-edge"),
+];
 pub const SENSITIVE_PORTS: &[u16] = &[
     21, 22, 23, 25, 110, 139, 143, 445, 1433, 3306, 3389, 5432, 5900, 6379, 11211, 27017,
 ];
@@ -170,9 +213,11 @@ pub struct ProcessRecord {
     pub target_ips: BTreeMap<String, Vec<String>>,
     pub host_pid: Option<u32>,
     pub source_coverage: Option<String>,
+    pub exe_sha256: Option<String>,
+    pub binary_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Finding {
     pub kind: String,
     pub confidence: String,
@@ -1341,26 +1386,96 @@ pub fn network_evidence(sockets: &[SocketRecord]) -> Vec<Finding> {
 }
 
 /// No raw argv/source in results. Source features need live process-owned egress.
+pub fn normalize_binary_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_deleted = trimmed.strip_suffix(" (deleted)").unwrap_or(trimmed);
+    let base = without_deleted.rsplit('/').next().unwrap_or("");
+    let lower = base.to_ascii_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+pub fn bandwidth_monetization_tool_for_name(name: &str) -> Option<&'static str> {
+    let normalized = normalize_binary_token(name);
+    for &(pattern, canonical) in BANDWIDTH_MONETIZATION_TOOLS {
+        if normalized == pattern {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle_lower: &[u8]) -> bool {
+    if needle_lower.is_empty() || haystack.len() < needle_lower.len() {
+        return false;
+    }
+    haystack
+        .windows(needle_lower.len())
+        .any(|win| win.iter().zip(needle_lower).all(|(a, b)| a.to_ascii_lowercase() == *b))
+}
+
+pub fn detect_bandwidth_monetization_markers(bytes: &[u8]) -> Option<&'static str> {
+    for &(marker, canonical) in BANDWIDTH_MONETIZATION_MARKERS {
+        if contains_ascii_case_insensitive(bytes, marker) {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
+pub fn bandwidth_monetization_evidence(
+    process: &ProcessRecord,
+    sockets: &[SocketRecord],
+) -> Option<Finding> {
+    let exe_tool = bandwidth_monetization_tool_for_name(&process.executable);
+    let argv0_tool = process
+        .argv
+        .first()
+        .and_then(|arg| bandwidth_monetization_tool_for_name(arg));
+    let (tool, basis) = if let Some(canonical) = exe_tool.or(argv0_tool) {
+        (canonical.to_string(), "active_bandwidth_monetization")
+    } else if let Some(ref fp) = process.binary_fingerprint {
+        (fp.clone(), "bandwidth_monetization_binary_fingerprint")
+    } else {
+        return None;
+    };
+
+    let owned_outbound = sockets
+        .iter()
+        .filter(|s| s.pid == process.pid && s.direction == "outbound")
+        .count();
+
+    let mut finding = Finding {
+        kind: "bandwidth_monetization".to_string(),
+        confidence: "high".to_string(),
+        basis: basis.to_string(),
+        ..Default::default()
+    };
+    finding.tool = Some(tool);
+    finding.source_sha256 = process.exe_sha256.clone();
+    if owned_outbound > 0 {
+        finding.owned_http_connections = Some(owned_outbound);
+    }
+    Some(finding)
+}
+
 pub fn evaluate_process(process: &ProcessRecord, sockets: &[SocketRecord]) -> Vec<Finding> {
     if process.pid < 1 || process.start_ticks.is_empty() {
         return Vec::new();
     }
-    let exe_name = process
-        .executable
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let exe_name = normalize_binary_token(&process.executable);
     let argv0_name = process
         .argv
         .first()
-        .map(|s| s.rsplit('/').next().unwrap_or("").to_ascii_lowercase())
+        .map(|s| normalize_binary_token(s))
         .unwrap_or_default();
     let mut result = if !process.argv.is_empty() && exe_name == argv0_name {
         tool_evidence(&process.argv)
     } else {
         Vec::new()
     };
+    if let Some(bm_finding) = bandwidth_monetization_evidence(process, sockets) {
+        result.push(bm_finding);
+    }
 
     if let Some(ref src) = process.source {
         let source = source_evidence(Some(src));

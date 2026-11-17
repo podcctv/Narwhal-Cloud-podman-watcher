@@ -2,6 +2,15 @@
 
 更新时间：2026-11-16（Asia/Shanghai）
 
+## Phase 13：带宽变现 / P2P 住宅代理滥用检测、自动双向断网隔离与面板展示（v1.9.14）
+
+- **Rust 检测与自动隔离（`guard-core` + `abuse-guard`）**：
+  - **`rust/crates/guard-core/src/security.rs`**：新增 `BANDWIDTH_MONETIZATION_BINARIES` 识别 `traffmonetizer-cli`/`traffmonetizer`/`tmclient`、`bitpingd`/`bitping`、`antgain`、`proxybase-peer`/`proxybase`、`mysterium`/`myst`、`honeygain`、`earnapp`、`pawns-cli`/`pawns`、`iproyal`、`packetstream`/`psclient`、`peer2profit`/`p2pclient`、`repocket`、`proxyrack`、`grass`、`gaganode`、`titan-edge`、`castarsdk`，输出 `category="bandwidth_monetization"`、`severity="critical"` 可疑进程告警并对命令行敏感参数脱敏。
+  - **`rust/crates/abuse-guard`（`detection.rs`、`collection.rs`、`engine.rs`）**：新增 `bandwidth_monetization` 高置信度检测，同时支持进程名/`argv[0]` 匹配（含 `(deleted)` 与 `.exe` 规范化）与宿主 `/proc/<host_pid>/exe` 有界（<=8MB）二进制指纹+SHA-256 采集（防御改名绕过）；经 >=20s 连续两个新鲜内核 `(pid, start_ticks)` 样本核实后自动触发 `net-guard` 双向断网隔离并保留容器现场等待管理员复核。
+- **服务端、Telegram 与前端展示（`server/abuse_api.py` + `frontend/src/components/dashboard/QuarantinePanel.tsx`）**：
+  - `server/abuse_api.py` 的 `KINDS` 与 `labels` 接入 `bandwidth_monetization`（中文标题“挂机卖带宽 / P2P 代理节点”），Telegram 告警卡与 `/api/v1/abuse/events` 完整保留工具名、PID、连续佐证次数与 SHA-256 摘要且过滤凭据敏感字段。
+  - `QuarantinePanel.tsx` 新增 `bandwidth_monetization` 标签并重建 `server/static/` 静态资源。
+
 ## Phase 12：Swarm 全量迁移 `abuse-guard` / `admission-guard` / `protocol-guard` 并接入 `agent-core`（v1.9.13）
 
 - **新增纯 `std`、`#![forbid(unsafe_code)]` Rust crates（零新增外部 Cargo 依赖，纳入 `rust/Cargo.toml` workspace）**：

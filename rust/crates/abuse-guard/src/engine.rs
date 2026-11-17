@@ -20,6 +20,7 @@ pub fn kind_title(kind: &str) -> &str {
         "authentication_bruteforce" => "认证爆破",
         "credential_stuffing" => "撞库",
         "identity_enumeration" => "身份信息枚举",
+        "bandwidth_monetization" => "挂机卖带宽 / P2P 代理节点",
         _ => kind,
     }
 }
