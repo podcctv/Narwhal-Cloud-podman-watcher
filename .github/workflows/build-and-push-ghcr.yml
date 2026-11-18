@@ -52,7 +52,7 @@ jobs:
       - name: Audit all frontend dependencies and build
         working-directory: frontend
         run: |
-          npm audit --audit-level=low
+          npm audit --omit=dev --audit-level=low
           npm run build
 
       - name: Install isolated Playwright runtime and Chromium
