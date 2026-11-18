@@ -140,12 +140,13 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, resource_overload_policy, ip_reputation, inbound_assessment, database_telemetry, control_reconciliation
+    from server import operations, operations_api, security_routes, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, resource_overload_policy, ip_reputation, inbound_assessment, database_telemetry, control_reconciliation
 except ImportError:
     import operations
     import connection_policy
     import resource_overload_policy
     import operations_api
+    import security_routes
     import disk_cleanup
     import investigation
     import buyer_notifications
@@ -6923,117 +6924,16 @@ def security_alerts(active_only: bool = True, limit: int = 200) -> JSONResponse:
 
 @app.get("/api/v1/security/sni-and-node-health")
 def sni_and_node_health(limit: int = 100) -> JSONResponse:
-    limit = max(1, min(limit, 500))
-    now = int(time.time())
     conn = db()
     try:
-        sni_rows = conn.execute(
-            """
-            SELECT id, host_id, runtime, project, container_name, severity, status, last_seen, details_json
-            FROM security_alerts
-            WHERE alert_type='sni_whitelist_violation'
-            ORDER BY last_seen DESC, id DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        sni_items: List[Dict[str, Any]] = []
-        disallowed_counts: Dict[str, int] = {}
-        cn_missing_count = 0
-        for row in sni_rows:
-            try:
-                details = json.loads(row["details_json"] or "{}")
-            except Exception:
-                details = {}
-            sni = str(details.get("sni") or "").strip()
-            reason = str(details.get("reason") or "").strip()
-            if reason == "missing_or_invalid_sni_cn" or not sni:
-                cn_missing_count += 1
-            else:
-                disallowed_counts[sni] = disallowed_counts.get(sni, 0) + 1
-            sni_items.append(
-                {
-                    "id": row["id"],
-                    "host_id": row["host_id"],
-                    "runtime": row["runtime"],
-                    "project": row["project"],
-                    "container_name": row["container_name"],
-                    "severity": row["severity"],
-                    "status": row["status"],
-                    "last_seen": row["last_seen"],
-                    "sni": sni,
-                    "dst_port": details.get("dst_port"),
-                    "proto": details.get("proto") or "tls",
-                    "reason": reason,
-                }
-            )
-        top_disallowed = [
-            {"sni": k, "count": v}
-            for k, v in sorted(disallowed_counts.items(), key=lambda x: (-x[1], x[0]))[:20]
-        ]
-
-        host_rows = conn.execute(
-            "SELECT host_id, agent_version, last_seen FROM hosts WHERE last_seen >= ? ORDER BY host_id",
-            (now - STALE_SECONDS,),
-        ).fetchall()
-        rfw_unhealthy: List[Dict[str, Any]] = []
-        auto_update_issues: List[Dict[str, Any]] = []
-        for h in host_rows:
-            hid = h["host_id"]
-            aver = str(h["agent_version"] or "")
-            hs = conn.execute(
-                "SELECT payload_json FROM host_security WHERE host_id=? ORDER BY id DESC LIMIT 1",
-                (hid,),
-            ).fetchone()
-            rfw = {}
-            if hs and hs["payload_json"]:
-                try:
-                    sec = json.loads(hs["payload_json"])
-                    rfw = sec.get("rfw_service_health") or sec.get("rfw") or {}
-                except Exception:
-                    rfw = {}
-            if isinstance(rfw, dict) and rfw.get("status") in {"not_installed", "stopped", "restart_loop"}:
-                rfw_unhealthy.append(
-                    {
-                        "host_id": hid,
-                        "status": rfw.get("status"),
-                        "reason": rfw.get("reason") or "",
-                        "remediation": "请检查并安装/启用 rfw.service，并执行 /opt/narwhal-monitor/auto-update.sh client",
-                    }
-                )
-            rep = conn.execute(
-                "SELECT payload_json FROM reports WHERE host_id=? ORDER BY id DESC LIMIT 1",
-                (hid,),
-            ).fetchone()
-            auto_upd = {}
-            if rep and rep["payload_json"]:
-                try:
-                    rp = json.loads(rep["payload_json"])
-                    auto_upd = (rp.get("operations") or {}).get("auto_update") or {}
-                except Exception:
-                    auto_upd = {}
-            has_err = bool(isinstance(auto_upd, dict) and auto_upd.get("has_error"))
-            if has_err or (APP_VERSION != "dev" and aver and aver != APP_VERSION):
-                auto_update_issues.append(
-                    {
-                        "host_id": hid,
-                        "agent_version": aver,
-                        "expected_version": APP_VERSION,
-                        "last_seen": h["last_seen"],
-                        "auto_update": auto_upd,
-                    }
-                )
         return JSONResponse(
-            content={
-                "server_version": APP_VERSION,
-                "sni_violations": {
-                    "total": len(sni_items),
-                    "cn_missing_sni_count": cn_missing_count,
-                    "top_disallowed_snis": top_disallowed,
-                    "items": sni_items,
-                },
-                "rfw_unhealthy_hosts": rfw_unhealthy,
-                "auto_update_issues": auto_update_issues,
-            }
+            content=security_routes.collect_sni_and_node_health(
+                conn,
+                now=int(time.time()),
+                stale_seconds=STALE_SECONDS,
+                app_version=APP_VERSION,
+                limit=limit,
+            )
         )
     finally:
         conn.close()

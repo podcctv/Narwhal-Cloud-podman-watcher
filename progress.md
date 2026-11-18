@@ -2,6 +2,12 @@
 
 更新时间：2026-11-18（Asia/Shanghai）
 
+## Phase 22：超大历史单文件模块化拆分与工程规范化（v1.9.26）
+
+- **`rust/crates/app-guard/src/`**：将原 7,478 行单文件 `lib.rs` 拆分为 `util.rs`、`incus_health.rs`、`socks_detector.rs`、`disk_cleanup.rs`、`security_banner.rs` 与 `tests.rs`（`lib.rs` 仅保留 ~25 行模块导出与 `#![forbid(unsafe_code)]` 声明），100% 保持原有公共接口与单测。
+- **`rust/crates/agent-core/src/`**：将 `banner.rs`（`MotdDeliveryState`、`fnv1a_hex`、`build_shell_banner_install_script`、`build_ssh_banner_install_script`）与 `tests.rs` 从 `lib.rs` 拆出。
+- **`server/security_routes.py` & `server/app.py`**：将 `collect_sni_and_node_health` 拆入独立模块 `server/security_routes.py`，`app.py` 保持薄路由委托与兼容导出。
+
 ## Phase 21：纯 Rust Netlink NFQUEUE、前端 SNI/节点健康条、镜像自动清理与细化失败回执（v1.9.25）
 
 - **1. 纯 Rust `NETLINK_NETFILTER` NFQUEUE 后端（`rust/crates/nfq-netlink`、`rust/crates/admission-guard`）**：
