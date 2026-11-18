@@ -575,21 +575,24 @@ where
                 }
             }
         }
-        for a in &addresses {
-            actual_addresses.insert(a.clone());
+        let info_kind = dev
+            .get("linkinfo")
+            .and_then(|li| li.get_str("info_kind"))
+            .unwrap_or("");
+        let is_internal_kind = matches!(
+            info_kind,
+            "bridge" | "dummy" | "tun" | "wireguard" | "vxlan" | "ifb"
+        );
+        if !is_internal_kind {
+            for a in &addresses {
+                actual_addresses.insert(a.clone());
+            }
         }
         let overlap: Vec<String> = addresses.intersection(&ips_set).cloned().collect();
         if overlap.is_empty() {
             continue;
         }
-        let info_kind = dev
-            .get("linkinfo")
-            .and_then(|li| li.get_str("info_kind"))
-            .unwrap_or("");
-        if matches!(
-            info_kind,
-            "bridge" | "dummy" | "tun" | "wireguard" | "vxlan" | "ifb"
-        ) {
+        if is_internal_kind {
             for a in overlap {
                 internal.insert(a);
             }

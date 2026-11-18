@@ -220,7 +220,29 @@ if [[ "${NARWHAL_UPDATE_LOCKED:-0}" != "1" ]]; then
   exit "$lock_result"
 fi
 
+cleanup_stale_git_locks() {
+  local repo_dir="$1"
+  local git_dir="$repo_dir/.git"
+  [[ -d "$git_dir" ]] || return 0
+  if command -v pgrep >/dev/null 2>&1 && pgrep -x git >/dev/null 2>&1; then
+    return 0
+  fi
+  local now lockf mtime age
+  now="$(date +%s)"
+  for lockf in "$git_dir/HEAD.lock" "$git_dir/index.lock"; do
+    if [[ -f "$lockf" && ! -L "$lockf" ]]; then
+      mtime="$(stat -c %Y "$lockf" 2>/dev/null || echo "$now")"
+      age=$((now - mtime))
+      if (( age >= 300 )); then
+        rm -f -- "$lockf"
+        log "removed stale git lock (${age}s old): $lockf"
+      fi
+    fi
+  done
+}
+
 if [[ "$UPDATE_MODE" == "git" ]]; then
+  cleanup_stale_git_locks "$REPO_DIR"
   remote_commit="$(git -C "$REPO_DIR" ls-remote origin "refs/heads/$BRANCH" | awk 'NR==1{print $1}')"
   if [[ ! "$remote_commit" =~ ^[0-9a-f]{40}$ ]]; then
     log "ERROR cannot resolve origin/$BRANCH"

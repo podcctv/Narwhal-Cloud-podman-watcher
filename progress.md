@@ -2,6 +2,18 @@
 
 更新时间：2026-11-17（Asia/Shanghai）
 
+## Phase 20：全链路治理迭代落地（v1.9.23）
+
+- **1. Runman 容器内部隧道网卡误判 `unsupported_network` 修复（`rust/crates/admission-guard/src/observe.rs`）**：
+  - 排查发现容器内创建 `tun`/`wireguard`/`bridge`/`dummy`/`vxlan`/`ifb` 等内部接口并分配全局 IP 时会触发 `actual_addresses != ips_set` 从而被判定为 `unsupported_network`、绕过准入与 SNI 阻断。已调整为仅校验非内部接口的全局地址，保留反伪造校验的同时消除误判豁免。
+- **2. Rust Agent 全运行时 Banner 覆盖与 `motd_delivery` 回执（`rust/crates/agent-core/src/lib.rs`）**：
+  - `sync_container_security_banners` 扩展支持 `runman`、`incus` 与 `podman` 容器，除 pre-auth SSH Banner 外同步写入交互式 Shell MOTD（`/etc/narwhal-banner.txt` + `/etc/profile.d/90-narwhal-banner.sh`），增加内容哈希节流缓存，并在容器上报 `security.motd_delivery` 联动服务端 `buyer_notifications.observe` 回执状态。
+- **3. 客户端 `auto-update` 残留锁自愈与状态上报（`scripts/auto-update.sh`、`rust/crates/agent-core/src/lib.rs`）**：
+  - 在 `scripts/auto-update.sh` 增加 `cleanup_stale_git_locks`：无活跃 `git` 进程且 `.git/HEAD.lock` / `.git/index.lock` 超过 300 秒时自动清理陈旧锁。
+  - 在 `agent-core` 增加 `collect_auto_update_status_json` 随 `operations.auto_update` 上报升级状态与最近错误。
+- **4. SNI 阻断/RFW/自动更新异常观测接口（`server/app.py`）**：
+  - 新增 `GET /api/v1/security/sni-and-node-health`，聚合展示 `sni_whitelist_violation` 阻断明细与高频非白名单 SNI、CN 无 SNI 计数、RFW 未安装/异常节点（含修复指引）以及未升级/更新报错节点。
+
 ## Phase 19：修复 NFQUEUE 抓包截断导致 SNI 无法解析的问题（v1.9.22）
 
 - **`rust/crates/admission-guard/src/linux.rs`**：

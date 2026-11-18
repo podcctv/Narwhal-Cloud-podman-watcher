@@ -452,6 +452,40 @@ pub struct AgentState {
     motd_states: Vec<runtime_drivers::JsonVal>,
     #[cfg_attr(not(unix), allow(dead_code))]
     last_alerts_json: String,
+    motd_deliveries: HashMap<(String, String, String), MotdDeliveryState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MotdDeliveryState {
+    banner_hash: String,
+    status: String,
+    shell_delivery: String,
+    ssh_banner_state: String,
+    notice_ids: Vec<String>,
+    error: String,
+    updated_at: u64,
+}
+
+impl MotdDeliveryState {
+    fn to_json(&self) -> String {
+        let mut ids_json = String::from("[");
+        for (i, id) in self.notice_ids.iter().enumerate() {
+            if i > 0 {
+                ids_json.push(',');
+            }
+            let _ = write!(ids_json, "\"{}\"", json_escape(id));
+        }
+        ids_json.push(']');
+        format!(
+            "{{\"status\":\"{}\",\"shell_delivery\":\"{}\",\"ssh_banner_state\":\"{}\",\"notice_ids\":{},\"updated_at\":{},\"error\":\"{}\"}}",
+            json_escape(&self.status),
+            json_escape(&self.shell_delivery),
+            json_escape(&self.ssh_banner_state),
+            ids_json,
+            self.updated_at,
+            json_escape(&self.error),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -591,6 +625,7 @@ impl AgentState {
             speedtest_caches: protocol_guard::speedtest::SpeedtestReconcileCaches::default(),
             motd_states: Vec::new(),
             last_alerts_json: "[]".to_string(),
+            motd_deliveries: HashMap::new(),
         }
     }
 
@@ -789,6 +824,7 @@ impl AgentState {
         };
         let ops_arch = normalize_arch(std::env::consts::ARCH);
         let upgrade_result_json = read_managed_upgrade_result_json(Path::new(MANAGED_UPDATE_RESULT_FILE));
+        let auto_update_json = collect_auto_update_status_json(Path::new("/opt/narwhal-monitor"));
         let ops_services_json = probe_operations_services_json(&self.operations_services, timestamp);
         let ops_disk_cleanup_json = self.build_disk_cleanup_summary_json(timestamp);
         let manual_bw_json = tc_guard::last_status_json(&self.bandwidth_state_path);
@@ -809,7 +845,7 @@ impl AgentState {
         let mut out = String::with_capacity(8192);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"manual_bandwidth_limits\":{}{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"disk_cleanup\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"capabilities\":{},\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"manual_bandwidth_limits\":{}{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"disk_cleanup\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"auto_update\":{},\"capabilities\":{},\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -862,6 +898,7 @@ impl AgentState {
             json_escape(ops_arch),
             effective_interval,
             upgrade_result_json,
+            auto_update_json,
             ops_capabilities_json,
             cpu_out.actions.len(),
             mem_actions.len(),
@@ -1326,6 +1363,50 @@ fn collect_rfw_service_health_json(
             reason
         )
     }
+}
+
+pub fn collect_auto_update_status_json(base_dir: &Path) -> String {
+    let mut enabled = true;
+    let mut mode = String::new();
+    if let Ok(raw_env) = fs::read_to_string(base_dir.join("client-auto-update.env")) {
+        for line in raw_env.lines() {
+            let trimmed = line.trim();
+            if let Some(v) = trimmed.strip_prefix("AUTO_UPDATE_ENABLED=") {
+                enabled = v.trim().trim_matches('"') == "true";
+            } else if let Some(v) = trimmed.strip_prefix("AUTO_UPDATE_MODE=") {
+                mode = v.trim().trim_matches('"').to_string();
+            }
+        }
+    }
+    let deployed_commit = fs::read_to_string(base_dir.join("client-auto-update.version"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let mut last_line = String::new();
+    let mut last_error = String::new();
+    if let Ok(raw_log) = fs::read_to_string(base_dir.join("client-auto-update.log")) {
+        let tail: Vec<&str> = raw_log
+            .lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(10)
+            .collect();
+        if let Some(first) = tail.first() {
+            last_line = first.chars().take(240).collect();
+        }
+        if let Some(err) = tail.into_iter().find(|l| l.contains("ERROR ")) {
+            last_error = err.chars().take(240).collect();
+        }
+    }
+    let has_error = !last_error.is_empty() && last_line.contains("ERROR ");
+    format!(
+        "{{\"enabled\":{},\"mode\":\"{}\",\"deployed_commit\":\"{}\",\"has_error\":{},\"last_line\":\"{}\",\"last_error\":\"{}\"}}",
+        enabled,
+        json_escape(&mode),
+        json_escape(&deployed_commit),
+        has_error,
+        json_escape(&last_line),
+        json_escape(&last_error),
+    )
 }
 
 fn serialize_containers_with_security_json(
@@ -2379,8 +2460,14 @@ impl AgentState {
                 String::new()
             };
 
+            let motd_delivery_field = self
+                .motd_deliveries
+                .get(&(c.runtime.to_ascii_lowercase(), c.project.clone(), c.name.clone()))
+                .map(|m| format!(",\"motd_delivery\":{}", m.to_json()))
+                .unwrap_or_default();
+
             let sec_json = format!(
-                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}}}",
+                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}{}}}",
                 abuse_json,
                 vmess_status.to_json(),
                 trojan_status.to_json(),
@@ -2390,6 +2477,7 @@ impl AgentState {
                 bh_json,
                 anti_spoof_json,
                 admission_field,
+                motd_delivery_field,
             );
             security_jsons.push(sec_json);
         }
@@ -2599,7 +2687,7 @@ impl AgentState {
 
     #[cfg(unix)]
     fn sync_container_security_banners(
-        &self,
+        &mut self,
         config: &Config,
         containers: &[ContainerSample],
         timestamp: u64,
@@ -2613,7 +2701,7 @@ impl AgentState {
         if disabled {
             return;
         }
-        let motd_states = &self.motd_states;
+        let motd_states = self.motd_states.clone();
         let alerts = runtime_drivers::JsonVal::parse(self.last_alerts_json.trim())
             .ok()
             .and_then(|v| v.as_arr().map(|a| a.to_vec()))
@@ -2623,12 +2711,13 @@ impl AgentState {
         opts.sampled_at = Some(timestamp as f64);
 
         for c in containers {
-            if !c.runtime.eq_ignore_ascii_case("runman") || c.name.is_empty() {
+            let rt_lower = c.runtime.to_ascii_lowercase();
+            if !matches!(rt_lower.as_str(), "runman" | "incus" | "podman") || c.name.is_empty() {
                 continue;
             }
-            let rt_lower = c.runtime.to_ascii_lowercase();
             let mut entries: Vec<app_guard::security_banner::MotdEntry> = Vec::new();
-            for s in motd_states {
+            let mut notice_ids: Vec<String> = Vec::new();
+            for s in &motd_states {
                 let stype = s.get("type").and_then(runtime_drivers::JsonVal::as_str).unwrap_or("");
                 if stype != "user_notice" {
                     continue;
@@ -2642,6 +2731,11 @@ impl AgentState {
                 let exp = s.get("expires_at").and_then(runtime_drivers::JsonVal::as_i64).unwrap_or(0);
                 if exp <= timestamp as i64 {
                     continue;
+                }
+                if let Some(eid) = s.get("event_id").and_then(runtime_drivers::JsonVal::as_str) {
+                    if !eid.is_empty() {
+                        notice_ids.push(eid.to_string());
+                    }
                 }
                 if let Some(entry) = app_guard::security_banner::MotdEntry::from_json(s) {
                     entries.push(entry);
@@ -2663,20 +2757,127 @@ impl AgentState {
                 &selected,
                 &opts,
             );
-            let Some(script) = build_ssh_banner_install_script(&banner_text) else {
-                continue;
-            };
+            let banner_hash = fnv1a_hex(&banner_text, &notice_ids);
+            let delivery_key = (rt_lower.clone(), c.project.clone(), c.name.clone());
+            if let Some(prev) = self.motd_deliveries.get(&delivery_key) {
+                if prev.banner_hash == banner_hash
+                    && prev.status == "written"
+                    && timestamp.saturating_sub(prev.updated_at) < 300
+                {
+                    continue;
+                }
+            }
+
             let podman_bin = (!c.runtime_bin.is_empty()).then_some(c.runtime_bin.as_str());
-            let _ = run_container_guest_script(
-                &rt_lower,
-                &c.project,
-                &c.name,
-                &c.instance_id,
-                podman_bin,
-                &script,
+            let mut shell_delivery = "failed".to_string();
+            let mut err_msg = String::new();
+            if let Some(shell_script) = build_shell_banner_install_script(&banner_text) {
+                let (ok, out) = run_container_guest_script(
+                    &rt_lower,
+                    &c.project,
+                    &c.name,
+                    &c.instance_id,
+                    podman_bin,
+                    &shell_script,
+                );
+                if ok && out.contains("NARWHAL_SHELL_OK:") {
+                    shell_delivery = "installed".to_string();
+                } else {
+                    err_msg = "shell_banner_exec_failed".to_string();
+                }
+            }
+
+            let mut ssh_banner_state = "not_applicable".to_string();
+            if matches!(rt_lower.as_str(), "runman" | "incus") {
+                if let Some(ssh_script) = build_ssh_banner_install_script(&banner_text) {
+                    let (ok, out) = run_container_guest_script(
+                        &rt_lower,
+                        &c.project,
+                        &c.name,
+                        &c.instance_id,
+                        podman_bin,
+                        &ssh_script,
+                    );
+                    if let Some(parsed_state) = out
+                        .lines()
+                        .find_map(|l| l.trim().strip_prefix("NARWHAL_SSH_BANNER_STATE="))
+                    {
+                        ssh_banner_state = parsed_state.to_string();
+                    } else if !ok {
+                        ssh_banner_state = "failed".to_string();
+                    }
+                }
+            }
+
+            let status = if shell_delivery == "installed" || ssh_banner_state == "active" {
+                "written".to_string()
+            } else {
+                "failed".to_string()
+            };
+            self.motd_deliveries.insert(
+                delivery_key,
+                MotdDeliveryState {
+                    banner_hash,
+                    status,
+                    shell_delivery,
+                    ssh_banner_state,
+                    notice_ids,
+                    error: err_msg,
+                    updated_at: timestamp,
+                },
             );
         }
     }
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn fnv1a_hex(content: &str, notice_ids: &[String]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in content.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    for id in notice_ids {
+        h ^= 0xff;
+        for b in id.as_bytes() {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{h:016x}")
+}
+
+pub fn build_shell_banner_install_script(content: &str) -> Option<String> {
+    if content.is_empty() || content.len() > 32 * 1024 || content.contains('\0') {
+        return None;
+    }
+    let marker = "# NARWHAL MANAGED INTERACTIVE BANNER v1";
+    let hook = format!(
+        "{marker}\n[ -t 0 ] && [ -r /etc/narwhal-banner.txt ] && cat /etc/narwhal-banner.txt 2>/dev/null || true\n"
+    );
+    let q_banner = abuse_guard::shlex_quote(&format!("{}\n", content.trim_end()));
+    let q_hook = abuse_guard::shlex_quote(&hook);
+    Some(format!(
+        r#"set -eu
+[ ! -L /etc/profile.d ]
+mkdir -p /etc/profile.d
+banner=/etc/narwhal-banner.txt
+hook=/etc/profile.d/90-narwhal-banner.sh
+if [ -e "$hook" ] && {{ [ ! -f "$hook" ] || ! grep -Fqx '{marker}' "$hook"; }}; then
+  echo NARWHAL_SHELL_CONFLICT
+  exit 1
+fi
+tmp_b=$(mktemp /etc/.narwhal-banner.XXXXXX)
+tmp_h=$(mktemp /etc/profile.d/.narwhal-banner.XXXXXX)
+printf '%s' {q_banner} > "$tmp_b"
+printf '%s' {q_hook} > "$tmp_h"
+chmod 644 "$tmp_b" "$tmp_h"
+changed=0
+if ! cmp -s "$tmp_b" "$banner" 2>/dev/null; then mv -f "$tmp_b" "$banner"; changed=1; else rm -f "$tmp_b"; fi
+if ! cmp -s "$tmp_h" "$hook" 2>/dev/null; then mv -f "$tmp_h" "$hook"; changed=1; else rm -f "$tmp_h"; fi
+echo "NARWHAL_SHELL_OK:$changed"
+"#
+    ))
 }
 
 pub fn build_ssh_banner_install_script(content: &str) -> Option<String> {
@@ -5513,5 +5714,37 @@ SECURITY_MONITOR_ENABLED=false
         assert!(script.contains("# NARWHAL MANAGED PREAUTH BANNER v1"));
         assert!(script.contains("crates.io"));
         assert!(script.contains("\"$sshd\" -t -f \"$cfg\""));
+
+        let shell_script = build_shell_banner_install_script(&rendered).expect("valid shell script");
+        assert!(shell_script.contains("/etc/narwhal-banner.txt"));
+        assert!(shell_script.contains("/etc/profile.d/90-narwhal-banner.sh"));
+        assert!(shell_script.contains("NARWHAL_SHELL_OK:"));
+
+        let h1 = fnv1a_hex(&rendered, &["NOTICE-1".to_string()]);
+        let h2 = fnv1a_hex(&rendered, &["NOTICE-2".to_string()]);
+        assert_ne!(h1, h2);
+        let delivery = MotdDeliveryState {
+            banner_hash: h1,
+            status: "written".to_string(),
+            shell_delivery: "installed".to_string(),
+            ssh_banner_state: "active".to_string(),
+            notice_ids: vec!["NOTICE-1".to_string()],
+            error: String::new(),
+            updated_at: 1_700_000_000,
+        };
+        let dj = delivery.to_json();
+        assert!(dj.contains("\"status\":\"written\""));
+        assert!(dj.contains("\"shell_delivery\":\"installed\""));
+        assert!(dj.contains("NOTICE-1"));
+
+        let upd_dir = std::env::temp_dir().join(format!("narwhal_auto_upd_{}", std::process::id()));
+        fs::create_dir_all(&upd_dir).unwrap();
+        fs::write(upd_dir.join("client-auto-update.env"), "AUTO_UPDATE_ENABLED=true\nAUTO_UPDATE_MODE=git\n").unwrap();
+        fs::write(upd_dir.join("client-auto-update.version"), "abc123\n").unwrap();
+        fs::write(upd_dir.join("client-auto-update.log"), "2026-11-18T01:02:14Z [client] ERROR tracked local changes\n").unwrap();
+        let upd_json = collect_auto_update_status_json(&upd_dir);
+        assert!(upd_json.contains("\"has_error\":true"));
+        assert!(upd_json.contains("\"deployed_commit\":\"abc123\""));
+        let _ = fs::remove_dir_all(&upd_dir);
     }
 }
