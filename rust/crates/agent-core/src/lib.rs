@@ -2031,6 +2031,7 @@ impl AgentState {
 
         let mut security_jsons = Vec::with_capacity(containers.len());
         let mut alert_jsons: Vec<String> = Vec::new();
+        let pid_ns_map = service_audit::collect_pid_ns_map(&self.proc_root);
 
         for c in containers {
             let rt = c.runtime.trim().to_ascii_lowercase();
@@ -2438,8 +2439,24 @@ impl AgentState {
                 .map(|m| format!(",\"motd_delivery\":{}", m.to_json()))
                 .unwrap_or_default();
 
+            // 10. service config audit (sanitized metadata only, never secrets/raw config)
+            let service_audit_field = if supported_rt && c.status.eq_ignore_ascii_case("running") {
+                let svc_audit =
+                    service_audit::audit_container_with_pid_ns(&self.proc_root, &pid_ns_map, c.pid);
+                for item in svc_audit.alerts_to_json_items(&rt, &c.project, &c.name, &inst_id) {
+                    alert_jsons.push(item);
+                }
+                if svc_audit.services.is_empty() {
+                    String::new()
+                } else {
+                    format!(",\"service_audit\":{}", svc_audit.to_json())
+                }
+            } else {
+                String::new()
+            };
+
             let sec_json = format!(
-                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}{}}}",
+                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}{}{}}}",
                 abuse_json,
                 vmess_status.to_json(),
                 trojan_status.to_json(),
@@ -2450,6 +2467,7 @@ impl AgentState {
                 anti_spoof_json,
                 admission_field,
                 motd_delivery_field,
+                service_audit_field,
             );
             security_jsons.push(sec_json);
         }

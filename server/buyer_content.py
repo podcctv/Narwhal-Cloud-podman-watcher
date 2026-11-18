@@ -141,6 +141,42 @@ def issue(alert, details):
             "请尽快修改服务端伪装域名配置，避免连接持续被阻断。"
         )
         return "容器入站协议 SNI 不在白名单，已阻断连接", facts, advice
+    if kind == "service_disallowed_sni":
+        sni = clean(details.get("sni") or "", 120)
+        engine = clean(details.get("engine") or "proxy", 32)
+        proto = clean(details.get("protocol") or "tls", 32)
+        port = details.get("dst_port")
+        port_text = f"端口 {int(port)}" if isinstance(port, int) and port > 0 else "入站"
+        return (
+            "容器服务配置了非白名单 SNI",
+            f"检测到容器内 {engine} 服务（{proto} / {port_text}）配置的伪装域名 SNI（{sni}）不在平台白名单内。",
+            "请尽快将服务端伪装域名修改为以下 9 个白名单之一：dl-cdn.alpinelinux.org、deb.debian.org、crates.io、pypi.org、rubygems.org、addons.mozilla.org、formulae.brew.sh、static.rust-lang.org、cpan.org。",
+        )
+    if kind == "service_disallowed_protocol":
+        engine = clean(details.get("engine") or "proxy", 32)
+        proto = clean(details.get("protocol") or "", 32)
+        port = details.get("dst_port")
+        return (
+            "容器服务配置了受限协议",
+            f"检测到容器内 {engine} 服务配置了受限入站协议 {proto}（端口 {int(port) if isinstance(port, int) else 0}）。",
+            "请停止使用受限协议并更换为平台允许的合规协议与白名单 SNI。",
+        )
+    if kind == "service_open_proxy":
+        engine = clean(details.get("engine") or "proxy", 32)
+        proto = clean(details.get("protocol") or "socks", 32)
+        port = details.get("dst_port")
+        return (
+            "容器存在无认证开放代理风险",
+            f"检测到容器内 {engine} 在端口 {int(port) if isinstance(port, int) else 0} 配置了未启用认证的 {proto} 代理。",
+            "请立即为代理服务配置强密码认证或关闭不需要的开放代理端口。",
+        )
+    if kind == "service_tunnel_relay":
+        engine = clean(details.get("engine") or "frp", 32)
+        return (
+            "容器运行了内网穿透服务",
+            f"检测到容器内运行 {engine} 穿透/转发服务，可能不符合平台服务规范。",
+            "请确认业务合规性，如非授权用途请及时停止相关进程。",
+        )
     if kind in {"vmess_port_blocked", "trojan_port_blocked"}:
         protocol = "vmess" if kind == "vmess_port_blocked" else "trojan"
         evidence = protocol_block_evidence(details, protocol)

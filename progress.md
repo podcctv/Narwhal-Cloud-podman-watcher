@@ -2,6 +2,15 @@
 
 更新时间：2026-11-18（Asia/Shanghai）
 
+## Phase 23：容器服务配置安全审计与合规判定（`service-audit`，v1.9.28）
+
+- **新增独立 crate `rust/crates/service-audit`（`#![forbid(unsafe_code)]`）**：
+  - 仅针对容器内正在运行的代理/隧道进程（`sing-box`、`xray`、`v2ray`、`hysteria2`、`tuic`、`gost`、`mihomo`、`frps`/`frpc`），经 `/proc/<pid>/root` 路径逃逸校验与 256 KiB 有界读取配置文件；
+  - 严格脱敏提取 `{engine, protocol, port, tls_enabled, sni_list, auth_configured}`，不导出任何 UUID、密码、私钥或原文配置；
+  - 内置 4 类违规判定：`service_disallowed_sni`（非白名单 SNI 配置前置预警）、`service_disallowed_protocol`（`vmess`/`trojan`）、`service_open_proxy`（无认证开放代理）与 `service_tunnel_relay`（`frps`/`frpc`）。
+- **联动 `agent-core` 与 `server/buyer_content.py`**：
+  - 在 `agent-core` 采样周期中一次性构建 PID namespace 映射并执行 `audit_container_with_pid_ns`，上报脱敏 `security.service_audit` 摘要并产生对应告警（同步触发 TG 私信与容器 SSH/Shell Banner 提醒）。
+
 ## Phase 22：超大历史单文件模块化拆分与工程规范化（v1.9.26）
 
 - **`rust/crates/app-guard/src/`**：将原 7,478 行单文件 `lib.rs` 拆分为 `util.rs`、`incus_health.rs`、`socks_detector.rs`、`disk_cleanup.rs`、`security_banner.rs` 与 `tests.rs`（`lib.rs` 仅保留 ~25 行模块导出与 `#![forbid(unsafe_code)]` 声明），100% 保持原有公共接口与单测。

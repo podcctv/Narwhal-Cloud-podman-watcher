@@ -1,0 +1,9 @@
+[package]
+name = "service-audit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+proc-probe = { path = "../proc-probe" }
+runtime-drivers = { path = "../runtime-drivers" }
+admission-guard = { path = "../admission-guard" }

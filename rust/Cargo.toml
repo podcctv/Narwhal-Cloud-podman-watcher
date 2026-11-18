@@ -18,6 +18,7 @@ members = [
     "crates/nfq-netlink",
     "crates/admission-guard",
     "crates/protocol-guard",
+    "crates/service-audit",
     "crates/agent-core",
 ]
 
