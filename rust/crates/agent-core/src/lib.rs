@@ -435,7 +435,7 @@ pub struct AgentState {
         Arc<
             admission_guard::AdmissionController<
                 admission_guard::LiveNftRunner,
-                admission_guard::SubprocessNfqBackend,
+                admission_guard::NativeNfqBackend,
             >,
         >,
     >,

@@ -363,6 +363,16 @@ export const api = {
   saveReachabilitySettings: (settings: { globalping_api_key?: string }) => request<{ ok: boolean; message: string; quota: ReachabilityQuotaInfo }>('/api/v1/reachability/settings', { method: 'POST', body: JSON.stringify(settings) }),
   getReachabilityHost: (hostId: string) => request<{ item: ReachabilitySummaryItem }>('/api/v1/reachability/host/' + encodeURIComponent(hostId)),
   triggerReachabilityCheck: (hostId?: string) => request<{ ok: boolean; message: string }>('/api/v1/reachability/trigger', { method: 'POST', body: JSON.stringify({ host_id: hostId }) }),
+  getSniAndNodeHealth: () => request<{
+    server_version: string;
+    sni_violations: {
+      total: number;
+      cn_missing_sni_count: number;
+      top_disallowed_snis: { sni: string; count: number }[];
+    };
+    rfw_unhealthy_hosts: { host_id: string; status: string; reason: string; remediation: string }[];
+    auto_update_issues: { host_id: string; agent_version: string; expected_version: string; auto_update?: { has_error?: boolean; last_error?: string } }[];
+  }>('/api/v1/security/sni-and-node-health'),
 };
 
 // Utilities for visual formatting

@@ -1,6 +1,18 @@
 # 当前进展与待办
 
-更新时间：2026-11-17（Asia/Shanghai）
+更新时间：2026-11-18（Asia/Shanghai）
+
+## Phase 21：纯 Rust Netlink NFQUEUE、前端 SNI/节点健康条、镜像自动清理与细化失败回执（v1.9.25）
+
+- **1. 纯 Rust `NETLINK_NETFILTER` NFQUEUE 后端（`rust/crates/nfq-netlink`、`rust/crates/admission-guard`）**：
+  - 新增零外部依赖的 `nfq-netlink` crate，直接通过 `AF_NETLINK` / `NETLINK_NETFILTER` 协议绑定 NFQUEUE（`copy_range=2048`、`maxlen=1024`）并下发 `NF_ACCEPT` / `NF_DROP` 判决；
+  - `Guard::open_live_unix()` 切换至 `NativeNfqBackend`，彻底移除节点运行时的 `python3` NFQUEUE 子进程与 hex IPC 开销，同时保持 `admission-guard` crate `#![forbid(unsafe_code)]`。
+- **2. 前端安全告警中心接入 SNI 阻断与节点健康条（`frontend/src/api/client.ts`、`SecurityAlertSection.tsx`）**：
+  - 接入 `GET /api/v1/security/sni-and-node-health`，在安全告警中心顶部展示 SNI 拦截总数、CN 无 SNI 数量、高频非白名单 SNI、RFW 异常节点及待更新/更新异常节点。
+- **3. 服务端自动更新后清理旧镜像（`scripts/auto-update.sh`）**：
+  - `server` 端更新完成后自动执行 `podman image prune -f`，防止 20G 系统盘因悬空旧镜像堆满。
+- **4. `admission-guard` 失败细节上报（`rust/crates/admission-guard/src/guard.rs`）**：
+  - 在 `Guard::failed` 状态快照中附带截断后的 `failure_detail`（最多 200 字符），便于直接从服务端排查 `firewall_apply_failed` / `sample_failed` 具体报错。
 
 ## Phase 20：全链路治理迭代落地（v1.9.23）
 

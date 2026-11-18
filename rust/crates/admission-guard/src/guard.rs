@@ -468,14 +468,14 @@ impl Guard<LiveNftRunner, NoopQueueBackend> {
 }
 
 #[cfg(unix)]
-impl Guard<LiveNftRunner, crate::linux::SubprocessNfqBackend> {
-    /// Opens a live Unix `Guard` backed by `SubprocessNfqBackend` (`libnetfilter_queue`).
+impl Guard<LiveNftRunner, crate::linux::NativeNfqBackend> {
+    /// Opens a live Unix `Guard` backed by `NativeNfqBackend` (pure-Rust `NETLINK_NETFILTER`).
     pub fn open_live_unix() -> Result<Arc<Self>, AdmissionError> {
         let guard_slot: Arc<
-            Mutex<Option<std::sync::Weak<Guard<LiveNftRunner, crate::linux::SubprocessNfqBackend>>>>,
+            Mutex<Option<std::sync::Weak<Guard<LiveNftRunner, crate::linux::NativeNfqBackend>>>>,
         > = Arc::new(Mutex::new(None));
         let slot_for_cb = Arc::clone(&guard_slot);
-        let backend = crate::linux::SubprocessNfqBackend::new(move |queue, raw| {
+        let backend = crate::linux::NativeNfqBackend::new(move |queue, raw| {
             let weak = slot_for_cb.lock().ok().and_then(|g| g.clone());
             if let Some(w) = weak {
                 if let Some(g) = w.upgrade() {
@@ -1137,6 +1137,10 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
                 "failure_stage".to_string(),
                 JsonVal::Str(norm_stage.to_string()),
             );
+            if let Some(err) = reason {
+                let detail: String = err.to_string().chars().take(200).collect();
+                updated.insert("failure_detail".to_string(), JsonVal::Str(detail));
+            }
             updated.insert("observed_at".to_string(), JsonVal::Num(now as f64));
             inner.results.insert(key_tuple.clone(), updated);
 

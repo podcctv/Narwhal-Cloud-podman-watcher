@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ShieldAlert,
   Ban,
@@ -38,6 +38,17 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   onSelectContainer,
 }) => {
   const [submittingId, setSubmittingId] = useState<number | null>(null);
+  const [nodeHealth, setNodeHealth] = useState<{
+    sni_violations?: { total: number; cn_missing_sni_count: number; top_disallowed_snis: { sni: string; count: number }[] };
+    rfw_unhealthy_hosts?: { host_id: string; status: string; reason: string }[];
+    auto_update_issues?: { host_id: string; agent_version: string; expected_version: string; auto_update?: { has_error?: boolean; last_error?: string } }[];
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    api.getSniAndNodeHealth().then((d) => { if (active) setNodeHealth(d); }).catch(() => {});
+    return () => { active = false; };
+  }, [alerts.length]);
   const protectionOnlyCount = alerts.filter(isProtectionOnlySignal).length;
   const [pendingDecision, setPendingDecision] = useState<{
     id: number;
@@ -157,6 +168,28 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           <ExternalLink className="h-3.5 w-3.5" />
         </button>
       </div>
+
+      {/* SNI Whitelist & Node Health Strip */}
+      {nodeHealth && ((nodeHealth.sni_violations?.total || 0) > 0 || (nodeHealth.rfw_unhealthy_hosts?.length || 0) > 0 || (nodeHealth.auto_update_issues?.length || 0) > 0) && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950/55 px-4 py-2.5 text-xs text-slate-300 sm:px-5">
+          {(nodeHealth.sni_violations?.total || 0) > 0 && (
+            <span className="rounded-md border border-amber-500/35 bg-amber-950/50 px-2 py-0.5 text-amber-200 tabular-nums">
+              SNI 拦截 {nodeHealth.sni_violations?.total}（CN 无 SNI {nodeHealth.sni_violations?.cn_missing_sni_count || 0}）
+              {nodeHealth.sni_violations?.top_disallowed_snis?.slice(0, 3).map((x) => `${x.sni}:${x.count}`).join(', ')}
+            </span>
+          )}
+          {(nodeHealth.rfw_unhealthy_hosts?.length || 0) > 0 && (
+            <span className="rounded-md border border-rose-500/35 bg-rose-950/50 px-2 py-0.5 text-rose-200">
+              RFW 异常：{nodeHealth.rfw_unhealthy_hosts?.map((h) => `${h.host_id}(${h.status})`).join('、')}
+            </span>
+          )}
+          {(nodeHealth.auto_update_issues?.length || 0) > 0 && (
+            <span className="rounded-md border border-sky-500/35 bg-sky-950/50 px-2 py-0.5 text-sky-200 tabular-nums">
+              待更新/更新异常节点：{nodeHealth.auto_update_issues?.length} 台
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Alert List */}
       <div className="divide-y divide-slate-800/80">

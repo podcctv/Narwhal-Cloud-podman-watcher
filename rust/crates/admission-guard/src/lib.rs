@@ -79,7 +79,7 @@ pub use linux::{
     QueueBackend,
 };
 #[cfg(unix)]
-pub use linux::SubprocessNfqBackend;
+pub use linux::{NativeNfqBackend, SubprocessNfqBackend};
 pub use observe::{
     decode, incarnation, incarnation_from_root, snapshot, snapshot_with_transports, sockets,
     sockets_from_dir, ContainerDescriptor, ContainerSnapshot, SocketObservation,

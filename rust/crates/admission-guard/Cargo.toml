@@ -9,3 +9,6 @@ proc-probe = { path = "../proc-probe" }
 socket-sec = { path = "../socket-sec" }
 runtime-drivers = { path = "../runtime-drivers" }
 net-guard = { path = "../net-guard" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nfq-netlink = { path = "../nfq-netlink" }

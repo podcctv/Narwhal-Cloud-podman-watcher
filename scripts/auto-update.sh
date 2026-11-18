@@ -359,4 +359,7 @@ printf '%s\n' "$remote_commit" >"$STATE_FILE.tmp"
 chmod 0600 "$STATE_FILE.tmp"
 mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 log "update completed: $remote_commit (version $expected_version)"
+if [[ "$SIDE" == "server" ]] && command -v podman >/dev/null 2>&1; then
+  podman image prune -f >/dev/null 2>&1 || true
+fi
 ensure_rfw_cn_wireguard_rule

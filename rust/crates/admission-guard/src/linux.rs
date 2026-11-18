@@ -938,6 +938,53 @@ impl Drop for SubprocessNfqBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub struct NativeNfqBackend {
+    handle: Option<nfq_netlink::NativeNfqHandle>,
+}
+
+#[cfg(target_os = "linux")]
+impl NativeNfqBackend {
+    pub fn new<F>(decide: F) -> Result<Self, AdmissionError>
+    where
+        F: Fn(u16, &[u8]) -> bool + Send + Sync + 'static,
+    {
+        let handle = nfq_netlink::NativeNfqHandle::new(decide)
+            .map_err(AdmissionError::Runtime)?;
+        Ok(Self {
+            handle: Some(handle),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl QueueBackend for NativeNfqBackend {
+    fn add(&mut self, number: u16) -> Result<(), AdmissionError> {
+        let Some(ref h) = self.handle else {
+            return Err(AdmissionError::Runtime("NFQUEUE netlink handle closed".to_string()));
+        };
+        h.add_queue(number).map_err(AdmissionError::Runtime)
+    }
+
+    fn remove(&mut self, number: u16) -> Result<(), AdmissionError> {
+        if let Some(ref h) = self.handle {
+            let _ = h.remove_queue(number);
+        }
+        Ok(())
+    }
+
+    fn healthy(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.is_healthy())
+    }
+
+    fn close(&mut self) {
+        self.handle.take();
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub type NativeNfqBackend = SubprocessNfqBackend;
+
 #[cfg(unix)]
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
     if hex.len() % 2 != 0 {
