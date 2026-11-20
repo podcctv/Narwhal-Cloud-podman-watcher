@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Activity, ChevronDown, ChevronUp, Search } from 'lucide-react';
 import { AccessSource, SecurityStatusItem } from '../../api/types';
 import { api, fmtNetSpeed, fmtNumber } from '../../api/client';
@@ -7,17 +7,27 @@ interface TelemetrySectionProps {
   telemetry: SecurityStatusItem[];
   onToast: (type: 'success' | 'error' | 'info', message: string) => void;
   onRefresh: () => void;
+  focusedHostId?: string;
+  focusNonce?: number;
 }
 
 type Level = 'normal' | 'warning' | 'critical' | 'unknown';
 type GfwFamilyCoverage = NonNullable<NonNullable<SecurityStatusItem['gfw_reachability']>['probe_family_coverage']>;
+
 const tones: Record<Level, string> = {
-  normal: 'border-emerald-700 bg-emerald-950/30 text-emerald-300',
-  warning: 'border-amber-700 bg-amber-950/30 text-amber-300',
-  critical: 'border-red-700 bg-red-950/30 text-red-300',
-  unknown: 'border-slate-700 bg-slate-950/30 text-slate-300',
+  normal: 'border-[#9de2d8] bg-[#e6f7f4]/55 text-[#0b1636]',
+  warning: 'border-[#f7d58b] bg-[#fef6e4]/75 text-[#0b1636]',
+  critical: 'border-[#f9b8c4] bg-[#ffeef1]/80 text-[#0b1636]',
+  unknown: 'border-[#cedae7] bg-[#f4f8fd] text-[#31485e]',
+};
+const levelBadgeTones: Record<Level, string> = {
+  normal: 'text-[#147468]',
+  warning: 'text-[#9a5b00]',
+  critical: 'text-[#b41835]',
+  unknown: 'text-[#4a607a]',
 };
 const labels: Record<Level, string> = { normal: '正常', warning: '警告', critical: '危险', unknown: '未评估' };
+
 const controlRetryLabel = (retry?: { state?: string; attempts?: number | null; after_seconds?: number | null; pending?: number }) => {
   if (!retry?.state || retry.state === 'not_scheduled') return '未安排自动重试';
   if (retry.state === 'waiting') return `等待冷却 · ${fmtNumber(retry.after_seconds || 0, 0)} 秒后复查${retry.pending ? ` · ${retry.pending} 项` : ''}`;
@@ -96,42 +106,61 @@ const vulnerabilityRepair = (finding: { package?: string; source?: string }, osI
   if (['rhel', 'rocky', 'almalinux', 'fedora', 'centos'].includes(id)) return { command: `核对发行版公告后执行：sudo dnf upgrade <包名>（包名：${pkg}）。`, impact: '可能更新依赖包或重启服务；内核更新通常需要计划重启。' };
   return { command: '先根据当前发行版的安全公告确认修复版本，再使用该发行版的包管理器更新对应软件包。', impact: '影响取决于软件包；更新可能重启相关服务。' };
 };
-const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode }> = ({ title, level, children }) =>
-  <div className={`w-full min-w-0 rounded-xl border p-3 ${tones[level]}`}>
-    <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-semibold">
-      <h4>{title}</h4><span className="text-[11px]">{labels[level]}</span>
-    </div><div className="space-y-1.5 wrap-break-word text-xs leading-5 tabular-nums">{children}</div>
-  </div>;
 
-const SummaryTile: React.FC<{ title: string; level: Level; status: string; children: React.ReactNode }> = ({ title, level, status, children }) =>
+const Signal: React.FC<{ title: string; level: Level; children: React.ReactNode }> = ({ title, level, children }) => (
+  <div className={`w-full min-w-0 rounded-xl border p-3 ${tones[level]}`}>
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-bold">
+      <h4 className="text-[#0b1636]">{title}</h4>
+      <span className={`text-[11px] ${levelBadgeTones[level]}`}>{labels[level]}</span>
+    </div>
+    <div className="space-y-1.5 wrap-break-word text-xs leading-5 text-[#31485e] tabular-nums">{children}</div>
+  </div>
+);
+
+const SummaryTile: React.FC<{ title: string; level: Level; status: string; children: React.ReactNode }> = ({ title, level, status, children }) => (
   <div className={`flex min-h-[76px] min-w-0 flex-col justify-between rounded-xl border px-3 py-2.5 ${tones[level]}`}>
     <div className="flex min-w-0 items-center justify-between gap-2 text-[10px]">
-      <span className="truncate opacity-80">{title}</span>
-      <span className="max-w-[62%] shrink-0 truncate text-right font-semibold" title={status}>{status}</span>
+      <span className="truncate font-medium text-[#4a607a]">{title}</span>
+      <span className={`max-w-[62%] shrink-0 truncate text-right font-bold ${levelBadgeTones[level]}`} title={status}>{status}</span>
     </div>
-    <div className="mt-1 min-w-0 break-words text-xs font-semibold leading-5 tabular-nums">{children}</div>
-  </div>;
+    <div className="mt-1 min-w-0 break-words text-xs font-bold leading-5 text-[#0b1636] tabular-nums">{children}</div>
+  </div>
+);
 
 const HttpSource: React.FC<{ source: AccessSource }> = ({ source: s }) => {
   const requests = Number(s.requests || 0);
   const readable = Number(s.readable_files || 0) > 0;
   const issue = Number(s.parse_errors || 0) > 0;
-  return <div className="min-w-0 rounded-lg border border-slate-700/70 p-2">
-    <p className="break-all font-semibold">{s.label || '访问日志'}</p>
-    {!readable ? <p className="text-slate-300">{s.unreadable_files ? '日志不可读：检查读取权限'
-      : s.missing_files ? '日志文件不存在：检查 access log 路径'
-      : s.container_readable_files ? '旧版仅上报容器日志状态，请更新采集客户端'
-      : '未接入访问日志：请配置宿主机或容器日志路径'}</p> : <>
-      <p>总 {fmtNumber(s.requests_per_second || 0, 1)} · 单 IP {fmtNumber(s.top_ip_requests_per_second || 0, 1)} rps</p>
-      <p>4xx {requests ? ((s.status_4xx || 0) / requests * 100).toFixed(1) + '%' : '—'} · 5xx {requests ? ((s.status_5xx || 0) / requests * 100).toFixed(1) + '%' : '—'}</p>
-      <p>本周期请求 {fmtNumber(requests, 0)} · 去重 IP {fmtNumber(s.unique_ips || 0, 0)}</p>
-      {!requests && <p className="text-slate-300">本周期无新增请求，首次采样需等待下一周期。</p>}
-    </>}
-    {issue && <p className="text-amber-300">解析失败 {s.parse_errors} 行；统计可能不完整，请检查日志格式。</p>}
-  </div>;
+  return (
+    <div className="min-w-0 rounded-lg border border-[#cedae7] bg-white p-2 text-[#31485e]">
+      <p className="break-all font-bold text-[#0b1636]">{s.label || '访问日志'}</p>
+      {!readable ? (
+        <p className="text-[#4a607a]">
+          {s.unreadable_files ? '日志不可读：检查读取权限'
+            : s.missing_files ? '日志文件不存在：检查 access log 路径'
+            : s.container_readable_files ? '旧版仅上报容器日志状态，请更新采集客户端'
+            : '未接入访问日志：请配置宿主机或容器日志路径'}
+        </p>
+      ) : (
+        <>
+          <p>总 {fmtNumber(s.requests_per_second || 0, 1)} · 单 IP {fmtNumber(s.top_ip_requests_per_second || 0, 1)} rps</p>
+          <p>4xx {requests ? ((s.status_4xx || 0) / requests * 100).toFixed(1) + '%' : '—'} · 5xx {requests ? ((s.status_5xx || 0) / requests * 100).toFixed(1) + '%' : '—'}</p>
+          <p>本周期请求 {fmtNumber(requests, 0)} · 去重 IP {fmtNumber(s.unique_ips || 0, 0)}</p>
+          {!requests && <p className="text-[#697b9c]">本周期无新增请求，首次采样需等待下一周期。</p>}
+        </>
+      )}
+      {issue && <p className="font-semibold text-[#9a5b00]">解析失败 {s.parse_errors} 行；统计可能不完整，请检查日志格式。</p>}
+    </div>
+  );
 };
 
-export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, onToast, onRefresh }) => {
+export const TelemetrySection: React.FC<TelemetrySectionProps> = ({
+  telemetry,
+  onToast,
+  onRefresh,
+  focusedHostId,
+  focusNonce,
+}) => {
   const [editing, setEditing] = useState<SecurityStatusItem | null>(null);
   const [deleting, setDeleting] = useState<SecurityStatusItem | null>(null);
   const [busy, setBusy] = useState(false);
@@ -139,6 +168,14 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const pageSize = 4;
+
+  useEffect(() => {
+    if (!focusedHostId || !focusNonce) return;
+    setExpanded(true);
+    setSearch(focusedHostId);
+    setPage(0);
+  }, [focusedHostId, focusNonce]);
+
   if (!telemetry?.length) return null;
   const query = search.trim().toLocaleLowerCase();
   const filteredTelemetry = query
@@ -159,605 +196,822 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   const gfwBlockedCount = telemetry.filter(item => item.gfw_reachability?.status === 'blocked' && !item.gfw_reachability.stale).length;
   const auditNeedsAttention = telemetry.filter(item => ['warning', 'critical'].includes(hostAuditLevel(item))).length;
   const auditUnknown = telemetry.filter(item => hostAuditLevel(item) === 'unknown').length;
-  return <section className="ui-surface-card mb-6 min-w-0 overflow-hidden rounded-xl border border-sky-400/20 bg-[#041e3c]/95 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)]">
-    <header className="flex flex-col gap-3 border-b border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647] px-4 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:px-5">
-      <div className="flex min-w-0 items-start gap-3">
-        <div className="mt-0.5 rounded-lg border border-[#087bff]/40 bg-[#087bff]/15 p-2 text-[#00b6ec] shrink-0">
-          <Activity className="h-4 w-4" />
+
+  return (
+    <section id="host-telemetry-section" className="rn2-card mb-6 min-w-0 overflow-hidden">
+      <header className="rn2-card-head">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <div className="mt-0.5 shrink-0 rounded-lg border border-[#54c7ff]/40 bg-[#087bff]/20 p-2 text-[#54c7ff]">
+            <Activity className="h-4 w-4" aria-hidden="true" />
+          </div>
+          <div className="min-w-0">
+            <span className="rn2-eyebrow block">HOST TELEMETRY</span>
+            <h2 className="mt-0.5 text-sm font-bold text-white sm:text-base">主机网络与安全遥测</h2>
+            <p className="mt-0.5 text-xs leading-5 text-[#cde8ff]">
+              主机状态摘要；展开后按名称筛选，每页查看 {pageSize} 台的网络证据与修复建议。
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+              <span className="rounded-full border border-[#54c7ff]/30 bg-[#02182f]/75 px-2.5 py-1 font-semibold text-[#e6f4ff]">
+                主机 {telemetry.length}
+              </span>
+              <span className={`rounded-full border px-2.5 py-1 font-semibold ${alertHostCount ? 'border-amber-400/50 bg-amber-500/20 text-amber-100' : 'border-emerald-400/50 bg-emerald-500/20 text-emerald-100'}`}>
+                采样告警 {alertHostCount}
+              </span>
+              <span className={`rounded-full border px-2.5 py-1 font-semibold ${gfwBlockedCount ? 'border-rose-400/50 bg-rose-500/20 text-rose-100' : 'border-[#54c7ff]/30 bg-[#02182f]/75 text-[#cde8ff]'}`}>
+                GFW 阻断 {gfwBlockedCount}
+              </span>
+              <span className={`rounded-full border px-2.5 py-1 font-semibold ${rfwAlerts.length ? 'border-rose-400/50 bg-rose-500/20 text-rose-100' : 'border-[#54c7ff]/30 bg-[#02182f]/75 text-[#cde8ff]'}`}>
+                RFW 服务告警 {rfwAlerts.length}
+              </span>
+              {rfwEmptyRuleHosts.length > 0 && (
+                <span className="rounded-full border border-amber-400/50 bg-amber-500/20 px-2.5 py-1 font-semibold text-amber-100">
+                  RFW 空规则(未拦截) {rfwEmptyRuleHosts.length}
+                </span>
+              )}
+              <span className={`rounded-full border px-2.5 py-1 font-semibold ${auditNeedsAttention ? 'border-amber-400/50 bg-amber-500/20 text-amber-100' : 'border-[#54c7ff]/30 bg-[#02182f]/75 text-[#cde8ff]'}`}>
+                审计待处理 {auditNeedsAttention}
+              </span>
+              {auditUnknown > 0 && (
+                <span className="rounded-full border border-[#54c7ff]/30 bg-[#02182f]/75 px-2.5 py-1 font-semibold text-[#cde8ff]">
+                  审计未评估 {auditUnknown}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
-        <div className="min-w-0">
-          <span className="block text-[10px] font-bold uppercase tracking-wider text-[#00b6ec]">HOST TELEMETRY</span>
-          <h2 className="text-sm font-bold text-slate-100">主机网络与安全遥测</h2>
-          <p className="mt-1 text-xs leading-5 text-slate-300">主机状态摘要；展开后按名称筛选，每页查看 {pageSize} 台的网络证据与修复建议。</p>
-          <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
-            <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300 font-medium">主机 {telemetry.length}</span>
-            <span className={`rounded-full border px-2.5 py-1 font-medium ${alertHostCount ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-emerald-800 bg-emerald-950/40 text-emerald-200'}`}>采样告警 {alertHostCount}</span>
-            <span className={`rounded-full border px-2.5 py-1 font-medium ${gfwBlockedCount ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>GFW 阻断 {gfwBlockedCount}</span>
-            <span className={`rounded-full border px-2.5 py-1 font-medium ${rfwAlerts.length ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>RFW 服务告警 {rfwAlerts.length}</span>
-            {rfwEmptyRuleHosts.length > 0 && <span className="rounded-full border border-amber-800 bg-amber-950/40 px-2.5 py-1 font-medium text-amber-200">RFW 空规则(未拦截) {rfwEmptyRuleHosts.length}</span>}
-            <span className={`rounded-full border px-2.5 py-1 font-medium ${auditNeedsAttention ? 'border-amber-800 bg-amber-950/40 text-amber-200' : 'border-slate-700 bg-slate-950/60 text-slate-300'}`}>审计待处理 {auditNeedsAttention}</span>
-            {auditUnknown > 0 && <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300 font-medium">审计未评估 {auditUnknown}</span>}
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls="host-telemetry-details"
+          onClick={() => setExpanded(value => !value)}
+          className="rn2-btn rn2-btn-ghost rn2-btn-sm min-h-10 shrink-0"
+        >
+          {expanded ? <ChevronUp className="h-4 w-4" aria-hidden="true" /> : <ChevronDown className="h-4 w-4" aria-hidden="true" />}
+          <span>{expanded ? '收起明细' : `查看主机明细（${telemetry.length}）`}</span>
+        </button>
+      </header>
+
+      {rfwAlerts.length > 0 && (
+        <div className="space-y-2 border-b border-[#f9b8c4] bg-[#ffeef1] p-3 sm:p-4" aria-label="RFW 服务告警">
+          {rfwAlerts.map(host => {
+            const health = host.rfw_service_health || {};
+            const restarting = health.status === 'restart_loop';
+            const restartEvidence = health.reason === 'systemd_auto_restart'
+              ? 'systemd 当前处于自动重启状态。'
+              : Number(health.restarts_5m || 0) >= 3
+                ? `最近 5 分钟观察到 ${health.restarts_5m} 次重启。`
+                : `systemd 累计重启 ${health.restart_count ?? '未知'} 次，当前运行时长 ${health.active_seconds ?? '未知'} 秒。`;
+            return (
+              <article key={host.host_id} role="alert" className="rounded-xl border border-[#f5a3b3] bg-white p-3 text-[#9f1239]">
+                <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-[#b41835]">
+                  <span aria-hidden="true">⚠</span>
+                  <span className="break-all font-mono">{host.host_id}</span>
+                  <span>· RFW {restarting ? '疑似陷入重启循环' : '服务已停止'}</span>
+                </div>
+                <p className="mt-1 text-xs leading-5 text-[#31485e]">
+                  {restarting
+                    ? restartEvidence
+                    : `rfw.service 当前为 ${health.active_state || 'inactive'} / ${health.sub_state || 'dead'}。`}
+                  {' '}请先检查 <code className="rounded bg-[#f4f8fd] px-1 font-mono text-[#0b1636]">systemctl status rfw.service</code> 与 <code className="rounded bg-[#f4f8fd] px-1 font-mono text-[#0b1636]">journalctl -u rfw.service --since "-10 min"</code>，确认日志和启动失败原因后再处理。
+                </p>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
+      {rfwEmptyRuleHosts.length > 0 && (
+        <div className="space-y-2 border-b border-[#f7d58b] bg-[#fef6e4] p-3 sm:p-4" aria-label="RFW 空规则告警">
+          <div className="text-xs font-bold text-[#9a5b00]">
+            ⚠ 以下 {rfwEmptyRuleHosts.length} 台主机 RFW 服务正在运行，但实时读回规则数为 0（当前未拦截任何协议）：
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {rfwEmptyRuleHosts.map(host => {
+              const protoCount = host.rfw_readback?.supported_protocol_count ?? host.rfw_readback?.supported_protocols?.length ?? 0;
+              return (
+                <span key={host.host_id} className="rounded-md border border-[#f7d58b] bg-white px-2 py-1 text-[11px] font-semibold text-[#9a5b00]">
+                  {host.host_id} · 支持 {protoCount} 种协议 · 实际拦截 0 条规则
+                </span>
+              );
+            })}
           </div>
         </div>
-      </div>
-      <button type="button" aria-expanded={expanded} aria-controls="host-telemetry-details" onClick={() => setExpanded(value => !value)} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-sky-800/80 bg-sky-950/50 px-3.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-sky-900/60 focus:outline-hidden focus:ring-2 focus:ring-sky-400">
-        {expanded ? <ChevronUp className="h-4 w-4" aria-hidden="true" /> : <ChevronDown className="h-4 w-4" aria-hidden="true" />}
-        {expanded ? '收起明细' : `查看主机明细（${telemetry.length}）`}
-      </button>
-    </header>
-    {rfwAlerts.length > 0 && <div className="space-y-2 border-b border-red-900/60 bg-red-950/20 p-3 sm:p-4" aria-label="RFW 服务告警">
-      {rfwAlerts.map(host => {
-        const health = host.rfw_service_health || {};
-        const restarting = health.status === 'restart_loop';
-        const restartEvidence = health.reason === 'systemd_auto_restart'
-          ? 'systemd 当前处于自动重启状态。'
-          : Number(health.restarts_5m || 0) >= 3
-            ? `最近 5 分钟观察到 ${health.restarts_5m} 次重启。`
-            : `systemd 累计重启 ${health.restart_count ?? '未知'} 次，当前运行时长 ${health.active_seconds ?? '未知'} 秒。`;
-        return <article key={host.host_id} role="alert" className="rounded-lg border border-red-800/80 bg-slate-950/60 p-3 text-red-100">
-          <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
-            <span aria-hidden="true">⚠</span>
-            <span className="break-all">{host.host_id}</span>
-            <span>· RFW {restarting ? '疑似陷入重启循环' : '服务已停止'}</span>
+      )}
+
+      {expanded && (
+        <div id="host-telemetry-details" className="space-y-3 bg-[#f4f8fd] p-3.5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <label className="relative block w-full sm:max-w-sm">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#087bff]" aria-hidden="true" />
+              <input
+                type="search"
+                value={search}
+                onChange={event => { setSearch(event.target.value); setPage(0); }}
+                placeholder="按主机名称筛选…"
+                aria-label="按名称筛选主机遥测"
+                className="rn2-input-sm w-full bg-white py-2 pl-9 pr-3 text-xs text-[#0b1636]"
+              />
+            </label>
+            <span className="font-mono text-[11px] font-semibold text-[#4a607a]">
+              {filteredTelemetry.length ? `${currentPage * pageSize + 1}–${Math.min((currentPage + 1) * pageSize, filteredTelemetry.length)} / ${filteredTelemetry.length} 台` : '没有匹配的主机'}
+            </span>
           </div>
-          <p className="mt-1 text-xs leading-5 text-red-200/90">
-            {restarting
-              ? restartEvidence
-              : `rfw.service 当前为 ${health.active_state || 'inactive'} / ${health.sub_state || 'dead'}。`}
-            {' '}请先检查 <code className="rounded bg-black/30 px-1">systemctl status rfw.service</code> 与 <code className="rounded bg-black/30 px-1">journalctl -u rfw.service --since "-10 min"</code>，确认日志和启动失败原因后再处理。
-          </p>
-        </article>;
-      })}
-    </div>}
-    {rfwEmptyRuleHosts.length > 0 && <div className="space-y-2 border-b border-amber-900/60 bg-amber-950/20 p-3 sm:p-4" aria-label="RFW 空规则告警">
-      <div className="text-xs font-semibold text-amber-200">
-        ⚠ 以下 {rfwEmptyRuleHosts.length} 台主机 RFW 服务正在运行，但实时读回规则数为 0（当前未拦截任何协议）：
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {rfwEmptyRuleHosts.map(host => {
-          const protoCount = host.rfw_readback?.supported_protocol_count ?? host.rfw_readback?.supported_protocols?.length ?? 0;
-          return <span key={host.host_id} className="rounded-md border border-amber-800/70 bg-slate-950/60 px-2 py-1 text-[11px] text-amber-100">
-            {host.host_id} · 支持 {protoCount} 种协议 · 实际拦截 0 条规则
-          </span>;
-        })}
-      </div>
-    </div>}
-    {expanded && <div id="host-telemetry-details" className="space-y-3 p-3">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <label className="relative block w-full sm:max-w-sm">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-          <input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0); }} placeholder="按主机名称筛选…" aria-label="按名称筛选主机遥测" className="min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-hidden focus:ring-2 focus:ring-sky-400" />
-        </label>
-        <span className="text-[11px] text-slate-400">{filteredTelemetry.length ? `${currentPage * pageSize + 1}–${Math.min((currentPage + 1) * pageSize, filteredTelemetry.length)} / ${filteredTelemetry.length} 台` : '没有匹配的主机'}</span>
-      </div>
-      <div className="space-y-4">
-      {visibleTelemetry.map(t => {
-        const thresholds = t.thresholds || {};
-        const events = t.sample_alerts || [];
-        const hostAudit = t.host_audit;
-        const rfwHealth = t.rfw_service_health || {};
-        const rfwReadback = t.rfw_readback;
-        const rfwReadbackFresh = rfwReadback?.status === 'ready' && !rfwReadback.stale;
-        const rfwRuleCount = rfwReadback?.rule_count ?? 0;
-        const rfwSupportedProtoCount = rfwReadback?.supported_protocol_count ?? rfwReadback?.supported_protocols?.length ?? 0;
-        const rfwBlockedProtoCount = rfwReadback?.active_blocked_protocol_count ?? rfwReadback?.active_blocked_protocols?.length ?? 0;
-        const rfwEmptyRules = rfwReadbackFresh && rfwRuleCount === 0;
-        const rfwStatus = rfwHealth.status || 'unknown';
-        const rfwAlert = !t.stale && ['stopped', 'restart_loop'].includes(rfwStatus);
-        const rfwLevel: Level = t.stale ? 'unknown'
-          : rfwStatus === 'stopped' || rfwStatus === 'restart_loop' ? 'critical'
-          : rfwStatus === 'healthy' ? (rfwEmptyRules ? 'warning' : 'normal') : 'unknown';
-        const rfwStatusLabel = t.stale ? '数据过期'
-          : rfwStatus === 'healthy' ? (rfwEmptyRules ? '未拦截(0规则)' : '运行中')
-          : rfwStatus === 'stopped' ? '已停止'
-          : rfwStatus === 'restart_loop' ? '重启循环'
-          : rfwStatus === 'not_installed' ? '未安装'
-          : rfwStatus === 'not_applicable' ? 'Agent 容器'
-          : rfwStatus === 'unavailable' ? '无法检测'
-          : 'Agent 未上报';
-        const vulnerabilityScan = hostAudit?.vulnerability_scan;
-        const indicatorScan = hostAudit?.security_indicator_scan;
-        const sshOnlyAudit = hostAudit?.scope === 'agent_container';
-        const hostAuditEvents = hostAudit?.recent_events || [];
-        const hostFindings = hostAudit?.recent_findings || [];
-        const securityIndicators = hostAudit?.recent_indicators || [];
-        const hostOsId = hostAudit?.os?.id || '';
-        const vulnerabilityCount = Number(vulnerabilityScan?.finding_count || 0);
-        const vulnerabilityCriticalCount = Number(vulnerabilityScan?.critical_count || 0);
-        const indicatorCount = Number(indicatorScan?.finding_count || 0);
-        const indicatorCriticalCount = Number(indicatorScan?.critical_count || 0);
-        const auditAdvice: string[] = [];
-        if (!hostAudit?.enabled) {
-          auditAdvice.push(t.stale
-            ? '样本已过期：先恢复 Agent 上报，再依据新样本判断。'
-            : !t.enabled
-              ? '主机安全采集未启用：启用安全采集并等待下一次上报。'
-              : '缺少审计数据：升级 Agent、确认主机审计已启用，然后等待下一次上报。');
-        } else {
-          if (hostAudit.snapshot_status === 'partial' || hostAudit.snapshot_status === 'unavailable') {
-            auditAdvice.push('基线采集不完整：检查 Agent 是否以 root 运行及扫描错误，修复后等待新采样。');
-          }
-          if (hostAudit.ssh_log_status === 'unavailable' || hostAudit.ssh_log_status === 'partial') {
-            auditAdvice.push('SSH 日志不可完整读取：检查 journald/auth.log 的存在与 Agent 读取权限。');
-          }
-          if (!sshOnlyAudit && vulnerabilityCount > 0) {
-            auditAdvice.push(`漏洞匹配 ${fmtNumber(vulnerabilityCount, 0)} 项（严重 ${fmtNumber(vulnerabilityCriticalCount, 0)}）：先核对实际安装版本与发行版公告；确认受影响后更新系统包/应用依赖并复扫。Debian/Ubuntu 可用 sudo apt update && sudo apt install --only-upgrade <包名>；Python 依赖应更新项目锁文件后部署。`);
-          }
-          if (!sshOnlyAudit && indicatorCount > 0) {
-            auditAdvice.push(securityIndicators.find(finding => finding.guidance)?.guidance
-              || `配置/供应链检查有 ${fmtNumber(indicatorCount, 0)} 项线索：按证据路径与预期配置核对；确认未经授权后先备份再修复，不要仅凭 IOC 名称直接删除服务。`);
-          }
-          if (hostAuditEvents.length > 0) {
-            auditAdvice.push('核对账户、SSH 公钥及登录来源是否对应你的近期操作；不认识的变更先查明来源，再撤销授权或恢复配置。');
-          }
-          if (!auditAdvice.length) {
-            const coverageComplete = hostAudit.snapshot_status === 'ready'
-              && hostAudit.ssh_log_status === 'available'
-              && (sshOnlyAudit || (vulnerabilityScan?.coverage === 'complete' && indicatorScan?.coverage === 'complete'));
-            auditAdvice.push(coverageComplete
-              ? '本次完整覆盖未报告待处理项；保持系统与依赖更新，继续按计划复查。'
-              : '当前没有明确修复项，但扫描覆盖不完整；先按下方提示补齐采集，不能据此判断无风险。');
-          }
-        }
-        const networkEvents = events.filter(a => /^ddos_/.test(a.type || ''));
-        const httpEvents = events.filter(a => /^(cc_|http_|web_scan)/.test(a.type || ''));
-        const sources = t.access_sources || [];
-        const readable = sources.some(s => Number(s.readable_files || 0) > 0);
-        const connWarning = thresholds.connections_warning ?? 500;
-        const connCritical = thresholds.connections_critical ?? 1000;
-        const ipWarning = thresholds.inbound_ips_warning ?? 10;
-        const ipCritical = thresholds.inbound_ips_critical ?? 20;
-        const connPeak = t.today_peak_container_conn_count ?? 0;
-        const detectedHttpLevel = signalLevel(t, /^(cc_|http_|web_scan)/);
-        const httpLevel = !readable ? 'unknown' : detectedHttpLevel === 'normal' && sources.some(s => Number(s.parse_errors || 0) > 0) ? 'warning' : detectedHttpLevel;
-        const visibleSources = readable ? sources.filter(s => Number(s.readable_files || 0) > 0) : sources.slice(0, 1);
-        const peakTone = (value: number, warning: number, critical: number) =>
-          t.stale || !t.enabled ? 'text-slate-300' : thresholdLevel(value, warning, critical) === 'critical' ? 'text-red-300'
-            : thresholdLevel(value, warning, critical) === 'warning' ? 'text-amber-300' : 'text-emerald-300';
-        const connLvl = thresholdLevel(connPeak, connWarning, connCritical);
-        const ipLvl = thresholdLevel(t.today_peak_inbound_ips, ipWarning, ipCritical);
-        const peakLevel: Level =
-          t.stale || !t.enabled
-            ? 'unknown'
-            : (connLvl === 'critical' || ipLvl === 'critical')
-            ? 'critical'
-            : (connLvl === 'warning' || ipLvl === 'warning')
-            ? 'warning'
-            : 'normal';
-        const auditLevel = hostAuditLevel(t);
-        const auditLabel = labels[auditLevel];
-        const gfw = t.gfw_reachability || {};
-        const reconciliation = t.control_reconciliation || {};
-        const reconciliationControls = reconciliation.controls || [];
-        const reconciliationLevel: Level = reconciliation.status === 'verified' ? 'normal'
-          : reconciliation.status === 'attention' ? 'warning' : 'unknown';
-        const controlLabels: Record<string, string> = { tc: 'tc 网卡限速', cgroup_cpu: 'cgroup CPU', cgroup_memory: 'cgroup 内存', cgroup_io: 'cgroup 磁盘 I/O', nftables_admission: 'nftables 容器准入', rfw: 'RFW 防火墙' };
-        const controlStatusLabels: Record<string, string> = { verified: '读回一致', attention: '需核查', applying: '等待执行', failed: '失败', stale: '样本过期', unverified: '未核实', drift: '规则有差异', unconfigured: '未配置' };
-        const collectionHealth = t.collection_health || {};
-        const collectionStatus = String(collectionHealth.status || 'unavailable');
-        const collectionLevel: Level = collectionStatus === 'healthy' ? 'normal'
-          : collectionStatus === 'partial' ? 'warning'
-          : collectionStatus === 'unavailable' && !t.stale ? 'warning' : 'unknown';
-        const collectionStatusLabel = collectionStatus === 'healthy' ? '完整'
-          : collectionStatus === 'stale' || t.stale ? '上报过期'
-          : collectionStatus === 'unavailable' ? '无数据'
-          : `${fmtNumber(collectionHealth.missing_count || 0, 0)} 项待补齐`;
-        const gfwStatus = gfw.status || 'unassessed';
-        const gfwSample = gfw.sample || {};
-        const targetReadiness = gfw.target_readiness || {};
-        const hasDailyGfwSample = gfwSample.policy === 'daily_container_rotation';
-        const gfwLevel: Level = gfwStatus === 'blocked' ? 'critical'
-          : gfwStatus === 'investigating' ? 'warning'
-          : gfwStatus === 'normal' || gfwStatus === 'recovered' ? 'normal' : 'unknown';
-        const gfwLabels: Record<string, string> = {
-          blocked: hasDailyGfwSample ? '疑似 GFW Blocked · 抽测端点国内异常' : '疑似 GFW Blocked · 国内探测异常',
-          investigating: gfw.last_known_state === 'blocked' ? '状态待复核' : '疑似受阻 · 连续确认中',
-          normal: hasDailyGfwSample ? '抽测端点国内外可达' : '国内外可达',
-          recovered: hasDailyGfwSample ? '抽测端点已恢复' : '已恢复', stale: '数据过期',
-          unassessed: targetReadiness.status === 'host_offline' ? '母鸡离线'
-            : targetReadiness.status === 'probe_coverage_missing' ? '探针覆盖不足'
-            : targetReadiness.status === 'ready_partial' ? '部分探针已采样'
-            : targetReadiness.status === 'interface_inventory_unavailable' ? '网卡清单不可用'
-            : targetReadiness.status === 'public_address_missing' ? '未发现公网地址'
-            : targetReadiness.status === 'ambiguous_container_mapping' ? '端口归属不唯一'
-            : targetReadiness.status === 'public_tcp_endpoint_missing' ? '缺少可测端口'
-            : targetReadiness.status === 'probe_family_coverage_missing' ? '探针 IP 版本覆盖不足'
-            : targetReadiness.status === 'awaiting_scheduler' ? '等待自动调度'
-            : targetReadiness.status === 'ready' ? '等待首轮探测' : '等待诊断原因',
-        };
-        const gfwLastState = gfw.last_known_state === 'blocked' ? '疑似 GFW Blocked' : gfw.last_known_state === 'recovered' ? '已恢复' : gfw.last_known_state === 'normal' ? '国内外可达' : '未评估';
-        const gfwDuration = gfwStatus === 'blocked' ? `持续 ${durationDays(gfw.duration_seconds)}`
-          : gfwStatus === 'recovered' ? `恢复 ${durationDays(gfw.duration_seconds)}`
-          : gfwStatus === 'normal' ? `${hasDailyGfwSample ? '抽样正常' : '正常'} ${durationDays(gfw.duration_seconds)}`
-          : gfwStatus === 'investigating' && gfw.last_known_state === 'blocked' ? `最近确认阻断：${auditTime(gfw.last_sample_at)} · 当前证据待复核`
-          : gfwStatus === 'investigating' && gfw.pending_block_rounds ? `失败迹象 ${gfw.pending_block_rounds}/3 轮`
-          : gfwStatus === 'investigating' ? '连通性证据待复核'
-          : gfwStatus === 'stale' ? `上次状态：${gfwLastState}`
-          : gfw.reason || targetReadiness.reason || '探针会自动采集可验证的公网容器 TCP 端口';
-        const gfwHistory = [...(gfw.history || [])].filter(event => Number(event.at || 0) > 0).sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
-        const gfwLatestEvent = gfwHistory[gfwHistory.length - 1];
-        const gfwHistory30d = gfw.history_30d || {};
-        const gfwTileDetail = ['investigating', 'stale', 'unassessed'].includes(gfwStatus) && gfwLatestEvent
-          ? `${gfwLatestEvent.event_type === 'recovered' ? '上次连通恢复' : '上次疑似阻断'} ${shortAuditTime(gfwLatestEvent.at)}`
-          : gfwDuration;
-        const gfwCurrentNeedsReview = ['investigating', 'stale', 'unassessed'].includes(gfwStatus);
-        const gfwPendingRounds = Number(gfw.pending_block_rounds || 0);
-        const gfwCurrentStatusDetail = gfwStatus === 'investigating' && gfwPendingRounds > 0
-          ? `阻断迹象确认中 ${gfwPendingRounds}/3`
-          : gfwCurrentNeedsReview ? '证据不足，保持未知' : gfwDuration;
-        const gfwCurrentTimelineLabel = gfwStatus === 'blocked' ? '当前疑似阻断'
-          : gfwStatus === 'recovered' ? '当前已恢复'
-          : gfwStatus === 'normal' ? '当前国内外可达'
-          : gfwStatus === 'stale' ? '数据过期 · 当前未知'
-          : gfwStatus === 'unassessed' ? `${gfwLabels[gfwStatus] || '尚未评估'} · 当前未知`
-          : Number(gfw.pending_block_rounds || 0) > 0 ? `阻断迹象确认中 ${gfw.pending_block_rounds}/3`
-          : '当前待复核';
-        const gfwCurrentTimelineReason = gfwStatus === 'blocked' ? '连续多点探测符合疑似阻断判定；TCP 连通性差异不能单独证明具体封锁机制。'
-          : gfwStatus === 'recovered' ? '连续复测符合连通恢复判定。'
-          : gfwStatus === 'normal' ? '最近一次同端点探测符合正常判定；未抽测的端点仍未验证。'
-          : gfw.reason || targetReadiness.reason || (gfwStatus === 'stale'
-            ? '探测数据已过期；不据此推断仍阻断或已经恢复。'
-            : gfwStatus === 'unassessed' ? '等待可验证的公网 TCP 端点和独立探针样本。'
-            : '本轮证据不足；不确认阻断或恢复。');
-        const gfwRecentTransitions = gfwHistory.slice(-4);
-        const gfwNeedsCurrentTimelineItem = gfwCurrentNeedsReview || !gfwLatestEvent
-          || (gfwStatus === 'blocked' && gfwLatestEvent.event_type !== 'blocked')
-          || (gfwStatus === 'recovered' && gfwLatestEvent.event_type !== 'recovered')
-          || (gfwStatus === 'normal' && gfwLatestEvent.event_type === 'blocked');
-        const gfwEvidence = gfw.evidence || [];
-        const comparedEndpoint = gfwEvidence.find(item => item.status === 'blocked') || gfwEvidence.find(item => item.status === 'normal') || gfwEvidence[0];
-        const familyCoverage: Partial<GfwFamilyCoverage> = gfw.probe_family_coverage || targetReadiness.family_coverage || gfwSample.probe_family_coverage || {};
-        const familyCoverageText = (family: 'ipv4' | 'ipv6') => {
-          const coverage = familyCoverage[family];
-          if (!coverage) return '';
-          const label = family === 'ipv4' ? 'IPv4' : 'IPv6';
-          const mainland = coverage.mainland || {};
-          const overseas = coverage.overseas || {};
-          const describeRole = (role: typeof mainland, required: number) => `${role.verified_networks || 0}/${role.required_networks || required} 个独立网段 · 默认路由存在 ${role.route_present_sources || 0} / 未发现 ${role.route_missing_sources || 0} / 未上报 ${role.route_unknown_sources || 0}`;
-          return `${label}：国内 ${describeRole(mainland, 2)} · 海外 ${describeRole(overseas, 1)}（路由状态仅是内核提示，最终以实际 TCP 探测回执为准）`;
-        };
 
-        return <article key={t.host_id} className="min-w-0 rounded-xl border border-slate-700 bg-slate-900/60 p-3 sm:p-4">
-          <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0 flex-1 basis-56">
-              <h3 className="break-all text-sm font-semibold text-slate-100">{t.host_id}</h3>
-              <p className="mt-1 wrap-break-word text-xs text-slate-300">采样：{t.timestamp_iso_utc8 || '—'} · Agent {t.agent_version || '未知'} · 最近上报 {t.last_seen_utc8 || '—'} · 窗口 {t.interval_seconds || '—'} 秒
-                {t.stale ? ' · 数据已过期' : !t.enabled ? ' · 安全采集未启用' : ''}</p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={() => setEditing(t)} className="rounded-lg border border-sky-700 bg-sky-950/60 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400">配置</button>
-              <button type="button" onClick={() => setDeleting(t)} className="rounded-lg border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/60 transition-colors focus:outline-hidden focus:ring-2 focus:ring-red-400">删除</button>
-            </div>
-          </div>
-            {rfwAlert && <div role="alert" className="mb-3 rounded-lg border border-red-800/80 bg-red-950/30 p-3 text-xs text-red-100">
-              <p className="font-semibold">RFW {rfwStatus === 'restart_loop' ? '疑似无限重启' : '已停止运行'}</p>
-              <p className="mt-1 leading-5">检查 <code className="rounded bg-black/30 px-1">systemctl status rfw.service</code> 和最近 10 分钟的服务日志；确认根因后再恢复服务。Watcher 仅告警，不会自动重启。</p>
-            </div>}
-            <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6" aria-label="主机状态摘要">
-            <SummaryTile title="网络峰值" level={peakLevel} status={labels[peakLevel]}>
-              最高连接 {fmtNumber(connPeak, 0)} · 入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}
-            </SummaryTile>
-            <SummaryTile title="CC / HTTP" level={httpLevel} status={labels[httpLevel]}>
-              {httpEvents.length ? `本次 ${httpEvents.length} 项事件` : readable ? '访问日志已接入' : '等待访问日志'}
-            </SummaryTile>
-            <SummaryTile title="主机审计" level={auditLevel} status={auditLabel}>
-              {sshOnlyAudit ? 'SSH 与主机基线' : '完整性、漏洞与威胁指标'}
-            </SummaryTile>
-            <SummaryTile title="采样事件" level={events.some(event => event.severity === 'critical') ? 'critical' : events.some(event => event.severity === 'warning') ? 'warning' : 'normal'} status={events.length ? `${events.length} 项` : '无事件'}>
-              {events.length ? '展开查看本周期详情' : '本周期采样正常'}
-            </SummaryTile>
-            <SummaryTile title="国内连通性" level={gfwLevel} status={gfwLabels[gfwStatus] || '待评估'}>
-              {gfwTileDetail}
-            </SummaryTile>
-            <SummaryTile title="主机 RFW" level={rfwLevel} status={rfwStatusLabel}>
-              {t.stale ? '上报已过期，当前状态未知'
-                : rfwStatus === 'restart_loop' ? `5 分钟内重启 ${rfwHealth.restarts_5m ?? '≥3'} 次`
-                : rfwStatus === 'stopped' ? `${rfwHealth.active_state || 'inactive'} / ${rfwHealth.sub_state || 'dead'}`
-                : rfwStatus === 'healthy'
-                  ? (rfwReadbackFresh
-                    ? (rfwEmptyRules
-                      ? `支持 ${rfwSupportedProtoCount} 种协议 · 当前 0 条规则（未拦截任何协议）`
-                      : `已拦截 ${rfwBlockedProtoCount} 类协议（${rfwRuleCount} 条规则）· 支持 ${rfwSupportedProtoCount} 种协议`)
-                    : `最近检查 ${shortAuditTime(rfwHealth.checked_at ?? undefined)}`)
-                : rfwStatus === 'not_applicable' ? 'Agent 在容器内，无法检查宿主机服务'
-                : rfwStatus === 'not_installed' ? '未发现 rfw.service'
-                : rfwStatus === 'unavailable' ? 'systemd 状态不可读'
-                : '需升级 Agent 获取检查结果'}
-            </SummaryTile>
-          </div>
-          <details className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-            <summary className="cursor-pointer text-xs font-semibold text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-sky-400">展开网络信号、主机安全证据与修复建议</summary>
-            <div className="mt-3 space-y-3">
-          <section className="min-w-0 rounded-xl border border-slate-800 bg-slate-950/30 p-3" aria-label="GFW 状态历史">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h4 className="font-semibold text-slate-100">GFW 状态历史</h4>
-                <p className="mt-0.5 text-[11px] text-slate-400">按同一公网 TCP 端点、多地独立探针的连续结果综合判断</p>
-              </div>
-              <a href="/tcping/manage" className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-700 bg-sky-950/50 px-3 py-1.5 text-xs font-medium text-sky-200 transition-colors hover:bg-sky-900/60 focus:outline-hidden focus:ring-2 focus:ring-sky-400">
-                <Activity aria-hidden="true" size={14} />查看探针覆盖
-              </a>
-            </div>
+          <div className="space-y-4">
+            {visibleTelemetry.map(t => {
+              const thresholds = t.thresholds || {};
+              const events = t.sample_alerts || [];
+              const hostAudit = t.host_audit;
+              const rfwHealth = t.rfw_service_health || {};
+              const rfwReadback = t.rfw_readback;
+              const rfwReadbackFresh = rfwReadback?.status === 'ready' && !rfwReadback.stale;
+              const rfwRuleCount = rfwReadback?.rule_count ?? 0;
+              const rfwSupportedProtoCount = rfwReadback?.supported_protocol_count ?? rfwReadback?.supported_protocols?.length ?? 0;
+              const rfwBlockedProtoCount = rfwReadback?.active_blocked_protocol_count ?? rfwReadback?.active_blocked_protocols?.length ?? 0;
+              const rfwEmptyRules = rfwReadbackFresh && rfwRuleCount === 0;
+              const rfwStatus = rfwHealth.status || 'unknown';
+              const rfwAlert = !t.stale && ['stopped', 'restart_loop'].includes(rfwStatus);
+              const rfwLevel: Level = t.stale ? 'unknown'
+                : rfwStatus === 'stopped' || rfwStatus === 'restart_loop' ? 'critical'
+                : rfwStatus === 'healthy' ? (rfwEmptyRules ? 'warning' : 'normal') : 'unknown';
+              const rfwStatusLabel = t.stale ? '数据过期'
+                : rfwStatus === 'healthy' ? (rfwEmptyRules ? '未拦截(0规则)' : '运行中')
+                : rfwStatus === 'stopped' ? '已停止'
+                : rfwStatus === 'restart_loop' ? '重启循环'
+                : rfwStatus === 'not_installed' ? '未安装'
+                : rfwStatus === 'not_applicable' ? 'Agent 容器'
+                : rfwStatus === 'unavailable' ? '无法检测'
+                : 'Agent 未上报';
+              const vulnerabilityScan = hostAudit?.vulnerability_scan;
+              const indicatorScan = hostAudit?.security_indicator_scan;
+              const sshOnlyAudit = hostAudit?.scope === 'agent_container';
+              const hostAuditEvents = hostAudit?.recent_events || [];
+              const hostFindings = hostAudit?.recent_findings || [];
+              const securityIndicators = hostAudit?.recent_indicators || [];
+              const hostOsId = hostAudit?.os?.id || '';
+              const vulnerabilityCount = Number(vulnerabilityScan?.finding_count || 0);
+              const vulnerabilityCriticalCount = Number(vulnerabilityScan?.critical_count || 0);
+              const indicatorCount = Number(indicatorScan?.finding_count || 0);
+              const indicatorCriticalCount = Number(indicatorScan?.critical_count || 0);
+              const auditAdvice: string[] = [];
+              if (!hostAudit?.enabled) {
+                auditAdvice.push(t.stale
+                  ? '样本已过期：先恢复 Agent 上报，再依据新样本判断。'
+                  : !t.enabled
+                    ? '主机安全采集未启用：启用安全采集并等待下一次上报。'
+                    : '缺少审计数据：升级 Agent、确认主机审计已启用，然后等待下一次上报。');
+              } else {
+                if (hostAudit.snapshot_status === 'partial' || hostAudit.snapshot_status === 'unavailable') {
+                  auditAdvice.push('基线采集不完整：检查 Agent 是否以 root 运行及扫描错误，修复后等待新采样。');
+                }
+                if (hostAudit.ssh_log_status === 'unavailable' || hostAudit.ssh_log_status === 'partial') {
+                  auditAdvice.push('SSH 日志不可完整读取：检查 journald/auth.log 的存在与 Agent 读取权限。');
+                }
+                if (!sshOnlyAudit && vulnerabilityCount > 0) {
+                  auditAdvice.push(`漏洞匹配 ${fmtNumber(vulnerabilityCount, 0)} 项（严重 ${fmtNumber(vulnerabilityCriticalCount, 0)}）：先核对实际安装版本与发行版公告；确认受影响后更新系统包/应用依赖并复扫。Debian/Ubuntu 可用 sudo apt update && sudo apt install --only-upgrade <包名>；Python 依赖应更新项目锁文件后部署。`);
+                }
+                if (!sshOnlyAudit && indicatorCount > 0) {
+                  auditAdvice.push(securityIndicators.find(finding => finding.guidance)?.guidance
+                    || `配置/供应链检查有 ${fmtNumber(indicatorCount, 0)} 项线索：按证据路径与预期配置核对；确认未经授权后先备份再修复，不要仅凭 IOC 名称直接删除服务。`);
+                }
+                if (hostAuditEvents.length > 0) {
+                  auditAdvice.push('核对账户、SSH 公钥及登录来源是否对应你的近期操作；不认识的变更先查明来源，再撤销授权或恢复配置。');
+                }
+                if (!auditAdvice.length) {
+                  const coverageComplete = hostAudit.snapshot_status === 'ready'
+                    && hostAudit.ssh_log_status === 'available'
+                    && (sshOnlyAudit || (vulnerabilityScan?.coverage === 'complete' && indicatorScan?.coverage === 'complete'));
+                  auditAdvice.push(coverageComplete
+                    ? '本次完整覆盖未报告待处理项；保持系统与依赖更新，继续按计划复查。'
+                    : '当前没有明确修复项，但扫描覆盖不完整；先按下方提示补齐采集，不能据此判断无风险。');
+                }
+              }
+              const networkEvents = events.filter(a => /^ddos_/.test(a.type || ''));
+              const httpEvents = events.filter(a => /^(cc_|http_|web_scan)/.test(a.type || ''));
+              const sources = t.access_sources || [];
+              const readable = sources.some(s => Number(s.readable_files || 0) > 0);
+              const connWarning = thresholds.connections_warning ?? 500;
+              const connCritical = thresholds.connections_critical ?? 1000;
+              const ipWarning = thresholds.inbound_ips_warning ?? 10;
+              const ipCritical = thresholds.inbound_ips_critical ?? 20;
+              const connPeak = t.today_peak_container_conn_count ?? 0;
+              const detectedHttpLevel = signalLevel(t, /^(cc_|http_|web_scan)/);
+              const httpLevel = !readable ? 'unknown' : detectedHttpLevel === 'normal' && sources.some(s => Number(s.parse_errors || 0) > 0) ? 'warning' : detectedHttpLevel;
+              const visibleSources = readable ? sources.filter(s => Number(s.readable_files || 0) > 0) : sources.slice(0, 1);
+              const peakTone = (value: number, warning: number, critical: number) =>
+                t.stale || !t.enabled ? 'text-[#4a607a]' : thresholdLevel(value, warning, critical) === 'critical' ? 'font-bold text-[#b41835]'
+                  : thresholdLevel(value, warning, critical) === 'warning' ? 'font-bold text-[#9a5b00]' : 'font-bold text-[#147468]';
+              const connLvl = thresholdLevel(connPeak, connWarning, connCritical);
+              const ipLvl = thresholdLevel(t.today_peak_inbound_ips, ipWarning, ipCritical);
+              const peakLevel: Level =
+                t.stale || !t.enabled
+                  ? 'unknown'
+                  : (connLvl === 'critical' || ipLvl === 'critical')
+                  ? 'critical'
+                  : (connLvl === 'warning' || ipLvl === 'warning')
+                  ? 'warning'
+                  : 'normal';
+              const auditLevel = hostAuditLevel(t);
+              const auditLabel = labels[auditLevel];
+              const gfw = t.gfw_reachability || {};
+              const reconciliation = t.control_reconciliation || {};
+              const reconciliationControls = reconciliation.controls || [];
+              const reconciliationLevel: Level = reconciliation.status === 'verified' ? 'normal'
+                : reconciliation.status === 'attention' ? 'warning' : 'unknown';
+              const controlLabels: Record<string, string> = { tc: 'tc 网卡限速', cgroup_cpu: 'cgroup CPU', cgroup_memory: 'cgroup 内存', cgroup_io: 'cgroup 磁盘 I/O', nftables_admission: 'nftables 容器准入', rfw: 'RFW 防火墙' };
+              const controlStatusLabels: Record<string, string> = { verified: '读回一致', attention: '需核查', applying: '等待执行', failed: '失败', stale: '样本过期', unverified: '未核实', drift: '规则有差异', unconfigured: '未配置' };
+              const collectionHealth = t.collection_health || {};
+              const collectionStatus = String(collectionHealth.status || 'unavailable');
+              const collectionLevel: Level = collectionStatus === 'healthy' ? 'normal'
+                : collectionStatus === 'partial' ? 'warning'
+                : collectionStatus === 'unavailable' && !t.stale ? 'warning' : 'unknown';
+              const collectionStatusLabel = collectionStatus === 'healthy' ? '完整'
+                : collectionStatus === 'stale' || t.stale ? '上报过期'
+                : collectionStatus === 'unavailable' ? '无数据'
+                : `${fmtNumber(collectionHealth.missing_count || 0, 0)} 项待补齐`;
+              const gfwStatus = gfw.status || 'unassessed';
+              const gfwSample = gfw.sample || {};
+              const targetReadiness = gfw.target_readiness || {};
+              const hasDailyGfwSample = gfwSample.policy === 'daily_container_rotation';
+              const gfwLevel: Level = gfwStatus === 'blocked' ? 'critical'
+                : gfwStatus === 'investigating' ? 'warning'
+                : gfwStatus === 'normal' || gfwStatus === 'recovered' ? 'normal' : 'unknown';
+              const gfwLabels: Record<string, string> = {
+                blocked: hasDailyGfwSample ? '疑似 GFW Blocked · 抽测端点国内异常' : '疑似 GFW Blocked · 国内探测异常',
+                investigating: gfw.last_known_state === 'blocked' ? '状态待复核' : '疑似受阻 · 连续确认中',
+                normal: hasDailyGfwSample ? '抽测端点国内外可达' : '国内外可达',
+                recovered: hasDailyGfwSample ? '抽测端点已恢复' : '已恢复', stale: '数据过期',
+                unassessed: targetReadiness.status === 'host_offline' ? '母鸡离线'
+                  : targetReadiness.status === 'probe_coverage_missing' ? '探针覆盖不足'
+                  : targetReadiness.status === 'ready_partial' ? '部分探针已采样'
+                  : targetReadiness.status === 'interface_inventory_unavailable' ? '网卡清单不可用'
+                  : targetReadiness.status === 'public_address_missing' ? '未发现公网地址'
+                  : targetReadiness.status === 'ambiguous_container_mapping' ? '端口归属不唯一'
+                  : targetReadiness.status === 'public_tcp_endpoint_missing' ? '缺少可测端口'
+                  : targetReadiness.status === 'probe_family_coverage_missing' ? '探针 IP 版本覆盖不足'
+                  : targetReadiness.status === 'awaiting_scheduler' ? '等待自动调度'
+                  : targetReadiness.status === 'ready' ? '等待首轮探测' : '等待诊断原因',
+              };
+              const gfwLastState = gfw.last_known_state === 'blocked' ? '疑似 GFW Blocked' : gfw.last_known_state === 'recovered' ? '已恢复' : gfw.last_known_state === 'normal' ? '国内外可达' : '未评估';
+              const gfwDuration = gfwStatus === 'blocked' ? `持续 ${durationDays(gfw.duration_seconds)}`
+                : gfwStatus === 'recovered' ? `恢复 ${durationDays(gfw.duration_seconds)}`
+                : gfwStatus === 'normal' ? `${hasDailyGfwSample ? '抽样正常' : '正常'} ${durationDays(gfw.duration_seconds)}`
+                : gfwStatus === 'investigating' && gfw.last_known_state === 'blocked' ? `最近确认阻断：${auditTime(gfw.last_sample_at)} · 当前证据待复核`
+                : gfwStatus === 'investigating' && gfw.pending_block_rounds ? `失败迹象 ${gfw.pending_block_rounds}/3 轮`
+                : gfwStatus === 'investigating' ? '连通性证据待复核'
+                : gfwStatus === 'stale' ? `上次状态：${gfwLastState}`
+                : gfw.reason || targetReadiness.reason || '探针会自动采集可验证的公网容器 TCP 端口';
+              const gfwHistory = [...(gfw.history || [])].filter(event => Number(event.at || 0) > 0).sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
+              const gfwLatestEvent = gfwHistory[gfwHistory.length - 1];
+              const gfwHistory30d = gfw.history_30d || {};
+              const gfwTileDetail = ['investigating', 'stale', 'unassessed'].includes(gfwStatus) && gfwLatestEvent
+                ? `${gfwLatestEvent.event_type === 'recovered' ? '上次连通恢复' : '上次疑似阻断'} ${shortAuditTime(gfwLatestEvent.at)}`
+                : gfwDuration;
+              const gfwCurrentNeedsReview = ['investigating', 'stale', 'unassessed'].includes(gfwStatus);
+              const gfwPendingRounds = Number(gfw.pending_block_rounds || 0);
+              const gfwCurrentStatusDetail = gfwStatus === 'investigating' && gfwPendingRounds > 0
+                ? `阻断迹象确认中 ${gfwPendingRounds}/3`
+                : gfwCurrentNeedsReview ? '证据不足，保持未知' : gfwDuration;
+              const gfwCurrentTimelineLabel = gfwStatus === 'blocked' ? '当前疑似阻断'
+                : gfwStatus === 'recovered' ? '当前已恢复'
+                : gfwStatus === 'normal' ? '当前国内外可达'
+                : gfwStatus === 'stale' ? '数据过期 · 当前未知'
+                : gfwStatus === 'unassessed' ? `${gfwLabels[gfwStatus] || '尚未评估'} · 当前未知`
+                : Number(gfw.pending_block_rounds || 0) > 0 ? `阻断迹象确认中 ${gfw.pending_block_rounds}/3`
+                : '当前待复核';
+              const gfwCurrentTimelineReason = gfwStatus === 'blocked' ? '连续多点探测符合疑似阻断判定；TCP 连通性差异不能单独证明具体封锁机制。'
+                : gfwStatus === 'recovered' ? '连续复测符合连通恢复判定。'
+                : gfwStatus === 'normal' ? '最近一次同端点探测符合正常判定；未抽测的端点仍未验证。'
+                : gfw.reason || targetReadiness.reason || (gfwStatus === 'stale'
+                  ? '探测数据已过期；不据此推断仍阻断或已经恢复。'
+                  : gfwStatus === 'unassessed' ? '等待可验证的公网 TCP 端点和独立探针样本。'
+                  : '本轮证据不足；不确认阻断或恢复。');
+              const gfwRecentTransitions = gfwHistory.slice(-4);
+              const gfwNeedsCurrentTimelineItem = gfwCurrentNeedsReview || !gfwLatestEvent
+                || (gfwStatus === 'blocked' && gfwLatestEvent.event_type !== 'blocked')
+                || (gfwStatus === 'recovered' && gfwLatestEvent.event_type !== 'recovered')
+                || (gfwStatus === 'normal' && gfwLatestEvent.event_type === 'blocked');
+              const gfwEvidence = gfw.evidence || [];
+              const comparedEndpoint = gfwEvidence.find(item => item.status === 'blocked') || gfwEvidence.find(item => item.status === 'normal') || gfwEvidence[0];
+              const familyCoverage: Partial<GfwFamilyCoverage> = gfw.probe_family_coverage || targetReadiness.family_coverage || gfwSample.probe_family_coverage || {};
+              const familyCoverageText = (family: 'ipv4' | 'ipv6') => {
+                const coverage = familyCoverage[family];
+                if (!coverage) return '';
+                const label = family === 'ipv4' ? 'IPv4' : 'IPv6';
+                const mainland = coverage.mainland || {};
+                const overseas = coverage.overseas || {};
+                const describeRole = (role: typeof mainland, required: number) => `${role.verified_networks || 0}/${role.required_networks || required} 个独立网段 · 默认路由存在 ${role.route_present_sources || 0} / 未发现 ${role.route_missing_sources || 0} / 未上报 ${role.route_unknown_sources || 0}`;
+                return `${label}：国内 ${describeRole(mainland, 2)} · 海外 ${describeRole(overseas, 1)}（路由状态仅是内核提示，最终以实际 TCP 探测回执为准）`;
+              };
 
-            <div className="grid min-w-0 gap-2 lg:grid-cols-[minmax(190px,0.9fr)_minmax(0,1.8fr)_minmax(210px,1fr)]">
-              <div className={`min-w-0 rounded-lg border p-3 ${tones[gfwLevel]}`}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[11px] font-medium">当前状态</p>
-                  <span className="rounded-full border border-current/30 px-2 py-0.5 text-[10px] font-semibold">{gfwLabels[gfwStatus] || '待评估'}</span>
-                </div>
-                <p className="mt-2 break-words text-sm font-semibold">{gfwCurrentStatusDetail}</p>
-                <p className="mt-1 text-[11px] leading-5 opacity-90">{gfw.last_sample_at ? `最近采样 ${shortAuditTime(gfw.last_sample_at)}` : '尚无有效探测样本'}</p>
-                {gfwCurrentNeedsReview && <p className="mt-1 text-[11px] leading-5">待复核时不累计阻断或恢复时长。</p>}
-              </div>
-
-              <div className="min-w-0 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[11px] font-semibold text-slate-200">当前证据（最近一次探测）</p>
-                  {comparedEndpoint && <span className="font-mono text-[11px] text-sky-200">TCP {comparedEndpoint.ip || '未知 IP'}:{comparedEndpoint.port || '—'}</span>}
-                </div>
-                {comparedEndpoint ? <>
-                  <p className="mt-1 break-all text-[11px] text-slate-400">
-                    {comparedEndpoint.runtime || '容器'}{comparedEndpoint.project ? `/${comparedEndpoint.project}` : ''}/{comparedEndpoint.container_name || '未知容器'}
-                    {comparedEndpoint.mapping_sources?.length ? ` · ${comparedEndpoint.mapping_sources.map(source => source === 'direct-public-listener' ? '容器公网直连' : source === 'podman-publish' ? 'Podman 发布' : source === 'incus-proxy' ? 'Incus Proxy' : source === 'incus-forward' ? 'Incus Forward' : source === 'host-dnat' ? '宿主机 DNAT' : source).join(' / ')}` : ''}
-                  </p>
-                  <div className="mt-2 grid min-w-0 gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
-                    {(comparedEndpoint.probes || []).map((probe, index) => {
-                      const succeeded = probe.success === true;
-                      const failed = probe.success === false;
-                      const probeTone = succeeded ? 'border-emerald-800/70 bg-emerald-950/20 text-emerald-300'
-                        : failed && probe.error === 'timeout' ? 'border-amber-800/70 bg-amber-950/20 text-amber-300'
-                        : 'border-slate-800 bg-slate-950/30 text-slate-300';
-                      const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}`
-                        : failed && probe.error === 'timeout' ? '连接超时 · 单点结果不单独证明阻断'
-                        : failed && probe.error === 'refused' ? '端口拒绝连接 · 不计为 GFW 阻断'
-                        : failed ? `探针路径异常 · 不计为 GFW 阻断${probe.error ? ` · ${{ family_unsupported: '系统不支持该 IP 版本', no_route: '缺少到目标的路由', host_unreachable: '网络报告目标不可达', local_policy_block: '本机策略拒绝连接', network_error: '未分类网络错误' }[probe.error] || probe.error}` : ''}`
-                        : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
-                      return <div key={`${probe.role}-${probe.source_host_id}-${index}`} className={`min-w-0 rounded-md border px-2 py-1.5 ${probeTone}`}>
-                        <p className="break-all text-[10px] text-slate-300">{probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}{probe.source_region ? ` · ${probe.source_region}` : ''}{probe.source_carrier ? ` · ${probe.source_carrier}` : ''}</p>
-                        <p className="mt-0.5 break-words text-[11px] font-semibold">{stateText}</p>
-                      </div>;
-                    })}
-                    {(!comparedEndpoint.probes || comparedEndpoint.probes.length === 0) && <p className="text-[11px] text-slate-400">此端点尚无探针回报。</p>}
-                  </div>
-                  <p className="mt-2 text-[10px] text-slate-400">同端点国内成功 {fmtNumber(comparedEndpoint.mainland?.success || 0, 0)}/{fmtNumber(comparedEndpoint.mainland?.total || 0, 0)} · 海外成功 {fmtNumber(comparedEndpoint.overseas?.success || 0, 0)}/{fmtNumber(comparedEndpoint.overseas?.total || 0, 0)}</p>
-                </> : <p className="mt-2 text-xs leading-5 text-slate-400">{targetReadiness.reason || '尚无可对照的公网 TCP 端点样本。'}</p>}
-              </div>
-
-              <div className="min-w-0 rounded-lg border border-sky-900/70 bg-sky-950/20 p-3">
-                <p className="text-[11px] font-semibold text-sky-200">判定说明</p>
-                <p className="mt-2 text-[11px] leading-5 text-slate-200">{gfwCurrentTimelineReason}</p>
-                <p className="mt-2 border-t border-sky-900/60 pt-2 text-[10px] leading-5 text-slate-400">ICMP 失败、端口拒绝、单个探针超时或探针网段未核验，都不会单独认定为 GFW 阻断。</p>
-              </div>
-            </div>
-
-            <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/25 p-3">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                  <h5 className="text-xs font-semibold text-slate-100">状态时间线</h5>
-                  <span className="text-[10px] text-slate-400">证据不足时保持未知，不累计阻断天数</span>
-                </div>
-                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400" aria-label="时间线图例">
-                  <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-emerald-400" />可达 / 恢复</span>
-                  <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-amber-400" />疑似阻断</span>
-                  <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full border border-slate-400 bg-slate-900" />未知 / 待复核</span>
-                </div>
-              </div>
-              <div className="relative grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                <div className="pointer-events-none absolute left-[8%] right-[8%] top-[18px] hidden h-px bg-slate-700 xl:block" />
-                {gfwRecentTransitions.map((event, index) => {
-                  const blockedEvent = event.event_type === 'blocked';
-                  const eventTone = blockedEvent ? 'border-amber-800/70 bg-amber-950/15' : 'border-emerald-800/70 bg-emerald-950/15';
-                  const dotTone = blockedEvent ? 'border-amber-300 bg-amber-400' : 'border-emerald-300 bg-emerald-400';
-                  const eventTitle = blockedEvent ? '疑似阻断' : '国内连通恢复';
-                  return <div key={`${event.event_type}-${event.at}-${index}`} className={`relative min-w-0 rounded-lg border p-2.5 ${eventTone}`}>
-                    <div className="relative z-10 mb-1.5 flex items-center gap-2">
-                      <span className={`h-3 w-3 shrink-0 rounded-full border-2 ${dotTone}`} />
-                      <span className="text-[10px] tabular-nums text-slate-300">{shortAuditTime(event.at)}</span>
+              return (
+                <article key={t.host_id} className="rn2-card min-w-0 p-3.5 sm:p-4">
+                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1 basis-56">
+                      <h3 className="break-all font-mono text-sm font-bold text-[#0b1636]">{t.host_id}</h3>
+                      <p className="mt-1 wrap-break-word text-xs text-[#4a607a]">
+                        采样：{t.timestamp_iso_utc8 || '—'} · Agent {t.agent_version || '未知'} · 最近上报 {t.last_seen_utc8 || '—'} · 窗口 {t.interval_seconds || '—'} 秒
+                        {t.stale ? ' · 数据已过期' : !t.enabled ? ' · 安全采集未启用' : ''}
+                      </p>
                     </div>
-                    <p className={`text-xs font-semibold ${blockedEvent ? 'text-amber-300' : 'text-emerald-300'}`}>{eventTitle}</p>
-                    <p className="mt-1 text-[10px] leading-4 text-slate-400">{blockedEvent ? '连续多点探测出现国内异常；记录不单独证明封锁机制。' : '连续复测符合连通恢复判定。'}</p>
-                  </div>;
-                })}
-                {gfwNeedsCurrentTimelineItem && <div className={`relative min-w-0 rounded-lg border p-2.5 ${gfwCurrentNeedsReview ? 'border-slate-700 bg-slate-900/60' : `border-slate-700 ${tones[gfwLevel].split(' ').find(value => value.startsWith('bg-')) || 'bg-slate-900/60'}`}`}>
-                  <div className="relative z-10 mb-1.5 flex items-center gap-2">
-                    <span className={`h-3 w-3 shrink-0 rounded-full border-2 ${gfwCurrentNeedsReview ? 'border-slate-300 bg-slate-900' : gfwLevel === 'normal' ? 'border-emerald-300 bg-emerald-400' : gfwLevel === 'critical' ? 'border-red-300 bg-red-400' : 'border-amber-300 bg-amber-400'}`} />
-                    <span className="text-[10px] tabular-nums text-slate-300">{gfw.last_sample_at ? shortAuditTime(gfw.last_sample_at) : '尚无有效采样'}</span>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditing(t)}
+                        className="rounded-lg border border-[#a9d1ff] bg-[#e8f3ff] px-3 py-1.5 text-xs font-semibold text-[#0657b8] transition-colors hover:border-[#087bff] hover:bg-[#d7eaff]"
+                      >
+                        配置
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleting(t)}
+                        className="rounded-lg border border-[#f9b8c4] bg-[#ffeef1] px-3 py-1.5 text-xs font-semibold text-[#b41835] transition-colors hover:border-[#fb7185] hover:bg-[#ffe4e6]"
+                      >
+                        删除
+                      </button>
+                    </div>
                   </div>
-                  <p className={`text-xs font-semibold ${gfwCurrentNeedsReview ? 'text-slate-200' : tones[gfwLevel].split(' ').find(value => value.startsWith('text-')) || 'text-slate-200'}`}>{gfwCurrentTimelineLabel}</p>
-                  <p className="mt-1 text-[10px] leading-4 text-slate-400">{gfwCurrentTimelineReason}</p>
-                </div>}
-                {gfwRecentTransitions.length === 0 && !gfwNeedsCurrentTimelineItem && <div className="col-span-full rounded-lg border border-dashed border-slate-700 p-3 text-xs text-slate-400">暂无可展示的状态变化记录。</div>}
-              </div>
-            </div>
 
-            <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2.5 text-xs">
-              <span className="font-semibold text-slate-200">近 {gfwHistory30d.window_days || 30} 天</span>
-              <span className="text-amber-300"><b className="tabular-nums">{gfw.history_30d ? fmtNumber(gfwHistory30d.blocked_count || 0, 0) : '—'}</b> 次疑似阻断</span>
-              <span className="text-emerald-300"><b className="tabular-nums">{gfw.history_30d ? fmtNumber(gfwHistory30d.recovered_count || 0, 0) : '—'}</b> 次连通恢复</span>
-              <span className="ml-auto text-[10px] text-slate-400">统计状态变化记录；未知样本不计作阻断或恢复。</span>
-            </div>
+                  {rfwAlert && (
+                    <div role="alert" className="mb-3 rounded-xl border border-[#f9b8c4] bg-[#ffeef1] p-3 text-xs text-[#9f1239]">
+                      <p className="font-bold text-[#b41835]">RFW {rfwStatus === 'restart_loop' ? '疑似无限重启' : '已停止运行'}</p>
+                      <p className="mt-1 leading-5">
+                        检查 <code className="rounded bg-white px-1 font-mono text-[#0b1636]">systemctl status rfw.service</code> 和最近 10 分钟的服务日志；确认根因后再恢复服务。Watcher 仅告警，不会自动重启。
+                      </p>
+                    </div>
+                  )}
 
-            <details className="mt-2 rounded-lg border border-slate-800 bg-slate-950/20 px-3 py-2">
-              <summary className="cursor-pointer text-[11px] font-semibold text-slate-300">探测覆盖与端点发现细节</summary>
-              <div className="mt-2 space-y-1.5 text-[11px] leading-5 text-slate-400">
-                <p>已识别独立探测网段：国内 {fmtNumber(gfw.verified_mainland_networks || 0, 0)}/2 · 海外 {fmtNumber(gfw.verified_overseas_networks || 0, 0)}/1{gfw.last_sample_at ? ` · 最近采样 ${auditTime(gfw.last_sample_at)}` : ''}</p>
-                {familyCoverage.ipv4 && <p>{familyCoverageText('ipv4')}</p>}
-                {familyCoverage.ipv6 && <p>{familyCoverageText('ipv6')}</p>}
-                {hasDailyGfwSample && <p>UTC {gfwSample.date_utc || '—'}：今日抽测 {fmtNumber(gfwSample.sampled_containers, 0)}/{fmtNumber(gfwSample.eligible_containers, 0)} 个容器、{fmtNumber(gfwSample.sampled_endpoints, 0)} 个现有 TCP 端点；未抽中的对象未验证。</p>}
-                {hasDailyGfwSample && (Number(gfwSample.unprobeable_endpoints_by_family?.ipv4 || 0) + Number(gfwSample.unprobeable_endpoints_by_family?.ipv6 || 0) > 0) && <p>另有 IPv4/IPv6 端点因对应探针覆盖不足而未抽测；这些端点状态保持未知。</p>}
-                {targetReadiness.status && <>
-                  <p>自动探测条件：{targetReadiness.reason || gfwLabels[gfwStatus] || '等待自动发现与调度'}{targetReadiness.next_step ? ` · 下一步：${targetReadiness.next_step}` : ''}</p>
-                  {Number(targetReadiness.eligible_endpoints || 0) > 0 && <p>可确认端点 {fmtNumber(targetReadiness.eligible_endpoints, 0)} 个 · 今日抽测 {fmtNumber(targetReadiness.sampled_containers, 0)}/{fmtNumber(targetReadiness.eligible_containers, 0)} 个容器</p>}
-                  {Number(targetReadiness.ambiguous_endpoints || 0) > 0 && <p>映射不唯一 {fmtNumber(targetReadiness.ambiguous_endpoints, 0)} 个；这些端点不会用于判定。</p>}
-                  {targetReadiness.discovery && <p>发现来源：直连 {fmtNumber(targetReadiness.discovery.direct_public_listener || 0, 0)} · Podman {fmtNumber(targetReadiness.discovery.podman_publish || 0, 0)} · Incus {fmtNumber((targetReadiness.discovery.incus_proxy || 0) + (targetReadiness.discovery.incus_forward || 0), 0)} · DNAT {fmtNumber(targetReadiness.discovery.host_dnat || 0, 0)}；目标无监听 {fmtNumber(targetReadiness.discovery.mapping_target_not_listening || 0, 0)} · 监听地址待核实 {fmtNumber((targetReadiness.discovery.direct_listener_address_unverified || 0) + (targetReadiness.discovery.mapping_listener_address_unverified || 0), 0)} · 未匹配公网地址 {fmtNumber(targetReadiness.discovery.mapping_without_host_public_ip || 0, 0)}</p>}
-                </>}
-                {gfwSample.containers?.length ? <p>今日抽测容器：{gfwSample.containers.map(container => `${container.runtime || '容器'}${container.project ? `/${container.project}` : ''}/${container.name || '未知'}${container.endpoints?.length ? ` (${container.endpoints.map(endpoint => `${endpoint.ip}:${endpoint.port}`).join(', ')})` : ''}`).join(' · ')}</p> : null}
-                <p>TCP 探测只说明不同网络来源的连通性差异；ICMP 失败、端口拒绝连接或探针网络错误均不能单独证明 GFW 封锁。</p>
-              </div>
-            </details>
-          </section>
-          <div className="grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
-            <Signal title="采集完整性与修复提示" level={collectionLevel}>
-              <p>Agent {collectionHealth.agent_version || t.agent_version || '未知'} · 最后心跳 {t.last_seen_utc8 || '—'} · 采集状态 {collectionStatusLabel}</p>
-              <p>最后安全采样 {collectionHealth.last_report_at ? auditTime(collectionHealth.last_report_at) : '暂无安全采样'}</p>
-              {Number(collectionHealth.samples_24h || 0) > 0 && <p className="tabular-nums">近24小时采集完整率 {collectionHealth.healthy_rate_percent_24h ?? 0}% · 完整 {fmtNumber(collectionHealth.healthy_samples_24h || 0, 0)} / {fmtNumber(collectionHealth.samples_24h || 0, 0)} 次 · 缺项 {fmtNumber(collectionHealth.failed_samples_24h || 0, 0)} 次</p>}
-              {collectionHealth.capabilities?.length ? <div className="flex flex-wrap gap-1">{collectionHealth.capabilities.map(capability => <span key={capability} className="rounded border border-slate-700 px-1.5 py-0.5 text-[11px] text-slate-300">{capability}</span>)}</div> : <p>Agent 能力清单尚未上报。</p>}
-              {collectionHealth.issues?.length ? collectionHealth.issues.map((item, index) => <div key={`${item.component || 'component'}-${index}`} className="rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
-                <p className="font-semibold">{item.component || '数据项'} · {item.state || '待核实'}</p>
-                <p>{item.reason || '采样不完整'}</p>
-                <p className="text-slate-300">处理：{item.guidance || '检查 Agent 采集状态后等待新样本。'}</p>
-              </div>) : <p>当前没有已知采集缺口。</p>}
-            </Signal>
-            <Signal title="规则执行与内核读回" level={reconciliationLevel}>
-              <p>{reconciliation.status === 'verified' ? '已有活动规则均有读回证据' : reconciliation.status === 'attention' ? `发现 ${fmtNumber(reconciliation.issue_count || 0, 0)} 项状态需核查` : '尚无已配置的托管规则'}</p>
-              {reconciliationControls.map((control, index) => <div key={`${control.control}-${index}`} className="rounded border border-slate-700/70 bg-slate-950/30 p-2">
-                <p className="font-semibold text-slate-200">{controlLabels[control.control || ''] || control.control || '规则'} · {controlStatusLabels[control.status || ''] || control.status || '未知'}</p>
-                {control.control === 'tc' && <p>期望版本 {control.expected?.revision ?? '—'} · 当前已读回 {control.actual?.active_limits ?? 0} 条限额</p>}
-                {control.control === 'rfw' && <p>期望版本 {control.expected?.revision ?? '—'} · 运行规则 {control.actual?.rule_count ?? '—'} · 差异 {control.actual?.drift_count ?? 0} / 缺失 {control.actual?.missing_count ?? 0}</p>}
-                {['cgroup_cpu', 'cgroup_memory', 'cgroup_io', 'nftables_admission'].includes(control.control || '') && <p>已核实活动 {control.actual?.verified_active ?? 0} 个 · 未核实 {control.actual?.unverified ?? 0} 个 · 人工改动 {control.actual?.manual_override ?? 0} 个 · 恢复失败 {control.actual?.restore_failed ?? 0} 个</p>}
-                {control.retry && <p className="mt-1 text-xs text-slate-400">重试：{controlRetryLabel(control.retry)}</p>}
-                {control.rollback && <p className="text-xs text-slate-400">恢复/回滚：{controlRollbackLabel(control.rollback)}</p>}
-                {control.samples?.map((sample, sampleIndex) => <div key={`${sample.container}-${sampleIndex}`} className="mt-1 break-all text-xs text-slate-400">
-                  <p>{sample.container} · {sample.state}{sample.expected ? ` · 目标 ${typeof sample.expected === 'string' ? sample.expected : JSON.stringify(sample.expected)}` : ''}{sample.actual ? ` · 当前 ${typeof sample.actual === 'string' ? sample.actual : JSON.stringify(sample.actual)}` : ''}{sample.reason ? ` · ${sample.reason}` : ''}</p>
-                  {sample.retry && <p>重试：{controlRetryLabel(sample.retry)}</p>}
-                  {sample.rollback && <p>恢复：{controlRollbackLabel(sample.rollback)}</p>}
-                </div>)}
-                {control.reason && <p className="mt-1 text-slate-400">{control.reason}</p>}
-                {control.last_confirmed_at ? <p className="mt-1 text-[10px] text-slate-500">最近成功读回 {auditTime(control.last_confirmed_at)}</p> : null}
-              </div>)}
-            </Signal>
-            <Signal title="实时速率 / 今日峰值" level={signalLevel(t, /^ddos_(host_)?bandwidth$/)}>
-              <p>↓ {fmtNetSpeed(t.rx_bps).mbps} · ↑ {fmtNetSpeed(t.tx_bps).mbps}</p>
-              <p>今日峰值 ↓ {fmtNetSpeed(t.today_peak_rx_bps).mbps}</p>
-              <p>今日峰值 ↑ {fmtNetSpeed(t.today_peak_tx_bps).mbps}</p>
-              <p className="text-slate-300">受监控容器合计，非物理网卡总流量。</p>
-            </Signal>
-            <Signal title="DDoS 网络信号" level={signalLevel(t, /^ddos_/)}>
-              <p>↓ {fmtNumber(t.rx_pps, 0)} pps · ↑ {fmtNumber(t.tx_pps, 0)} pps</p>
-              <p>SYN_RECV {fmtNumber(t.syn_recv, 0)}</p>
-              <p>本次 DDoS 事件 {networkEvents.length} 项</p>
-              <p className="text-slate-300">包速率 ≥ {fmtNumber(thresholds.rx_pps_warning ?? 50000, 0)} pps 单独告警。SYN_RECV ≥ {thresholds.syn_recv_warning ?? 200} 先观察；连续 {Math.min(5, Math.max(2, Number(thresholds.syn_recv_confirm_samples ?? 3)))} 次、至少 {Math.round(Number(thresholds.syn_recv_confirm_duration_seconds ?? 300) / 60)} 分钟，并有持续 TCP 入站段速率或 SYN cookies、监听队列丢弃/溢出等内核信号佐证后，才升级为持续握手压力；危险级别还要求内核队列信号连续佐证。</p>
-              <p className="text-slate-300">握手数不能证明客户行为；本信号不会自动封锁或归因用户。</p>
-            </Signal>
-            <Signal title="CC / HTTP 信号" level={httpLevel}>
-              <p>本次 HTTP 事件 {httpEvents.length} 项</p>
-              {visibleSources.length ? visibleSources.map((s, i) => <HttpSource key={i} source={s} />) : <p>尚未收到日志采集状态</p>}
-              {sources.length > visibleSources.length && <details><summary className="cursor-pointer text-slate-300">其余 {sources.length - visibleSources.length} 个来源未接入或不可读</summary>{sources.filter(s => !visibleSources.includes(s)).map((s, i) => <HttpSource key={i} source={s} />)}</details>}
-              <p className="text-slate-300">来源分别计数，避免反向代理与应用重复计算。没有 HTTP 访问日志时无法从 TCP 流量推算请求数。</p>
-            </Signal>
-            <Signal title="今日单容器峰值" level={peakLevel}>
-              <p><span className={peakTone(connPeak, connWarning, connCritical)}>最高连接 {fmtNumber(connPeak, 0)}</span> · <span className="text-slate-300">全容器合计峰值 {fmtNumber(t.today_peak_conn_count, 0)}</span></p>
-              <p><span className={peakTone(t.today_peak_inbound_ips, ipWarning, ipCritical)}>最高入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}</span> · <span className="text-slate-300">最高出站 IP {fmtNumber(t.today_peak_outbound_ips, 0)}</span></p>
-              <p className="text-slate-300">连接 ≥ {connWarning} / {connCritical}、入站 IP ≥ {ipWarning} / {ipCritical}：警告 / 危险。</p>
-              <p className="text-slate-300">UTC+8 当日采样最大值；各项可能来自不同容器。推送使用触发当时的单容器值，峰值不代表当前仍异常。</p>
-            </Signal>
-          </div>
-          <div className="mt-3 grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
-          <div className="col-span-full min-w-0">
-            <Signal title={sshOnlyAudit ? '小鸡 SSH 安全检查' : '母鸡完整性、漏洞与威胁指标'} level={auditLevel}>
-              {!hostAudit?.enabled ? <>
-                <p>{auditAdvice[0]}</p>
-                <p className="text-slate-300">修复后等待 Agent 下一次上报，再检查本卡状态。</p>
-              </> : <>
-                <p className="text-slate-300">{sshOnlyAudit ? '小鸡 SSH 登录与配置专项检查。' : '母鸡账户/SSH 基线、系统与 Python 漏洞、供应链及配置检查。'}</p>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  <div className="min-w-0 rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
-                    <p className="text-[11px] text-slate-300">主机基线</p>
-                    <p className="break-words font-semibold">{hostAudit.baseline_pending ? '建立中' : hostAudit.snapshot_status === 'ready' ? `正常 · ${fmtNumber(hostAudit.user_accounts || 0, 0)} 账户 / ${fmtNumber(hostAudit.ssh_key_count || 0, 0)} SSH Key` : '采集不完整'}</p>
+                  <div className="mb-3 grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6" aria-label="主机状态摘要">
+                    <SummaryTile title="网络峰值" level={peakLevel} status={labels[peakLevel]}>
+                      最高连接 {fmtNumber(connPeak, 0)} · 入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}
+                    </SummaryTile>
+                    <SummaryTile title="CC / HTTP" level={httpLevel} status={labels[httpLevel]}>
+                      {httpEvents.length ? `本次 ${httpEvents.length} 项事件` : readable ? '访问日志已接入' : '等待访问日志'}
+                    </SummaryTile>
+                    <SummaryTile title="主机审计" level={auditLevel} status={auditLabel}>
+                      {sshOnlyAudit ? 'SSH 与主机基线' : '完整性、漏洞与威胁指标'}
+                    </SummaryTile>
+                    <SummaryTile title="采样事件" level={events.some(event => event.severity === 'critical') ? 'critical' : events.some(event => event.severity === 'warning') ? 'warning' : 'normal'} status={events.length ? `${events.length} 项` : '无事件'}>
+                      {events.length ? '展开查看本周期详情' : '本周期采样正常'}
+                    </SummaryTile>
+                    <SummaryTile title="国内连通性" level={gfwLevel} status={gfwLabels[gfwStatus] || '待评估'}>
+                      {gfwTileDetail}
+                    </SummaryTile>
+                    <SummaryTile title="主机 RFW" level={rfwLevel} status={rfwStatusLabel}>
+                      {t.stale ? '上报已过期，当前状态未知'
+                        : rfwStatus === 'restart_loop' ? `5 分钟内重启 ${rfwHealth.restarts_5m ?? '≥3'} 次`
+                        : rfwStatus === 'stopped' ? `${rfwHealth.active_state || 'inactive'} / ${rfwHealth.sub_state || 'dead'}`
+                        : rfwStatus === 'healthy'
+                          ? (rfwReadbackFresh
+                            ? (rfwEmptyRules
+                              ? `支持 ${rfwSupportedProtoCount} 种协议 · 当前 0 条规则（未拦截任何协议）`
+                              : `已拦截 ${rfwBlockedProtoCount} 类协议（${rfwRuleCount} 条规则）· 支持 ${rfwSupportedProtoCount} 种协议`)
+                            : `最近检查 ${shortAuditTime(rfwHealth.checked_at ?? undefined)}`)
+                        : rfwStatus === 'not_applicable' ? 'Agent 在容器内，无法检查宿主机服务'
+                        : rfwStatus === 'not_installed' ? '未发现 rfw.service'
+                        : rfwStatus === 'unavailable' ? 'systemd 状态不可读'
+                        : '需升级 Agent 获取检查结果'}
+                    </SummaryTile>
                   </div>
-                  {!sshOnlyAudit && <div className="min-w-0 rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
-                    <p className="text-[11px] text-slate-300">系统 / Python 漏洞</p>
-                    <p className="break-words font-semibold">{coverageLabel(vulnerabilityScan?.coverage)} · {fmtNumber(vulnerabilityCount, 0)} 项 / 严重 {fmtNumber(vulnerabilityCriticalCount, 0)}</p>
-                  </div>}
-                  <div className="min-w-0 rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
-                    <p className="text-[11px] text-slate-300">{sshOnlyAudit ? 'SSH 配置复核' : '供应链 / 配置线索'}</p>
-                    <p className="break-words font-semibold">{coverageLabel(indicatorScan?.coverage)} · {fmtNumber(indicatorCount, 0)} 项 / 严重 {fmtNumber(indicatorCriticalCount, 0)}</p>
-                  </div>
-                  <div className="min-w-0 rounded-lg border border-slate-700/70 bg-slate-950/30 p-2">
-                    <p className="text-[11px] text-slate-300">SSH 登录日志</p>
-                    <p className="break-words font-semibold">{hostAudit.ssh_log_status === 'available' ? `已接入 · 新来源 ${fmtNumber(hostAudit.new_ssh_login_events || 0, 0)}` : hostAudit.ssh_log_status === 'partial' ? '部分可读' : '不可用'}</p>
-                  </div>
-                </div>
-                <div className="rounded-lg border border-sky-700/50 bg-sky-950/20 p-2">
-                  <p className="font-semibold text-sky-200">怎么处理</p>
-                  <ul className="list-disc space-y-1 pl-4 text-slate-200">
-                    {auditAdvice.slice(0, 3).map((advice, index) => <li key={index} className="break-words">{advice}</li>)}
-                  </ul>
-                </div>
-                <details className="rounded-lg border border-slate-700/70 p-2">
-                  <summary className="cursor-pointer font-semibold">查看证据、扫描时间与修复细节</summary>
-                  <div className="mt-2 space-y-2">
-                    <p className="text-slate-300">漏洞最近完整扫描：{auditTime(vulnerabilityScan?.checked_at)} · 已检查 {fmtNumber(vulnerabilityScan?.packages_checked || 0, 0)} 个软件包。OSV 查询发送软件包名称与版本，不包含主机名、IP、账户或配置内容。</p>
-                    {hostAuditEvents.length > 0 && <div className="rounded-lg border border-slate-700/70 p-2">
-                      <p className="font-semibold">本次 SSH / 主机变化</p>
-                      {hostAuditEvents.slice(0, 4).map((event, index) => <p key={(event.type || 'event') + '-' + index} className="break-all">{event.title || event.type}：{event.message}</p>)}
-                    </div>}
-                    {!sshOnlyAudit && hostFindings.length > 0 && <div className="rounded-lg border border-slate-700/70 p-2">
-                      <p className="font-semibold">漏洞匹配（显示前 {Math.min(hostFindings.length, 12)} 条，共 {fmtNumber(vulnerabilityCount, 0)} 项）</p>
-                      <div className="mt-2 space-y-2">
-                        {hostFindings.slice(0, 12).map((finding, index) => { const repair = vulnerabilityRepair(finding, hostOsId); return <div key={(finding.ecosystem || '') + '-' + (finding.package || '') + '-' + (finding.version || '') + '-' + (finding.id || index)} className="border-t border-slate-700/70 pt-2">
-                          <p className="break-all font-semibold">{finding.severity === 'critical' ? '严重' : '待复核'} · {finding.cve || finding.id || 'OSV 公告'} · {finding.package}@{finding.version} · {finding.source === 'system' ? '系统软件' : finding.source === 'installed' ? '已安装 Python 包' : finding.source === 'manifest' ? 'Maven 清单（非锁定）' : '依赖锁文件'}</p>
-                          {finding.summary && <p className="text-slate-300">{finding.summary}</p>}
-                          <p className="mt-1 break-words text-sky-200">建议步骤：{repair.command}</p>
-                          <p className="text-slate-400">影响：{repair.impact}</p>
-                        </div>; })}
+
+                  <details className="rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-3">
+                    <summary className="cursor-pointer text-xs font-bold text-[#0657b8] focus:outline-hidden focus:ring-2 focus:ring-[#087bff]">
+                      展开网络信号、主机安全证据与修复建议
+                    </summary>
+                    <div className="mt-3 space-y-3">
+                      <section className="min-w-0 rounded-xl border border-[#cedae7] bg-white p-3" aria-label="GFW 状态历史">
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h4 className="font-bold text-[#0b1636]">GFW 状态历史</h4>
+                            <p className="mt-0.5 text-[11px] text-[#697b9c]">按同一公网 TCP 端点、多地独立探针的连续结果综合判断</p>
+                          </div>
+                          <a href="/tcping/manage" className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[#a9d1ff] bg-[#e8f3ff] px-3 py-1.5 text-xs font-semibold text-[#0657b8] transition-colors hover:border-[#087bff] hover:bg-[#d7eaff]">
+                            <Activity aria-hidden="true" size={14} />查看探针覆盖
+                          </a>
+                        </div>
+
+                        <div className="grid min-w-0 gap-2 lg:grid-cols-[minmax(190px,0.9fr)_minmax(0,1.8fr)_minmax(210px,1fr)]">
+                          <div className={`min-w-0 rounded-xl border p-3 ${tones[gfwLevel]}`}>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-[11px] font-semibold text-[#4a607a]">当前状态</p>
+                              <span className={`rounded-full border border-current/30 bg-white px-2 py-0.5 text-[10px] font-bold ${levelBadgeTones[gfwLevel]}`}>
+                                {gfwLabels[gfwStatus] || '待评估'}
+                              </span>
+                            </div>
+                            <p className="mt-2 break-words text-sm font-bold text-[#0b1636]">{gfwCurrentStatusDetail}</p>
+                            <p className="mt-1 text-[11px] leading-5 text-[#4a607a]">
+                              {gfw.last_sample_at ? `最近采样 ${shortAuditTime(gfw.last_sample_at)}` : '尚无有效探测样本'}
+                            </p>
+                            {gfwCurrentNeedsReview && <p className="mt-1 text-[11px] leading-5 text-[#31485e]">待复核时不累计阻断或恢复时长。</p>}
+                          </div>
+
+                          <div className="min-w-0 rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-[11px] font-bold text-[#0b1636]">当前证据（最近一次探测）</p>
+                              {comparedEndpoint && <span className="font-mono text-[11px] font-semibold text-[#0657b8]">TCP {comparedEndpoint.ip || '未知 IP'}:{comparedEndpoint.port || '—'}</span>}
+                            </div>
+                            {comparedEndpoint ? (
+                              <>
+                                <p className="mt-1 break-all text-[11px] text-[#4a607a]">
+                                  {comparedEndpoint.runtime || '容器'}{comparedEndpoint.project ? `/${comparedEndpoint.project}` : ''}/{comparedEndpoint.container_name || '未知容器'}
+                                  {comparedEndpoint.mapping_sources?.length ? ` · ${comparedEndpoint.mapping_sources.map(source => source === 'direct-public-listener' ? '容器公网直连' : source === 'podman-publish' ? 'Podman 发布' : source === 'incus-proxy' ? 'Incus Proxy' : source === 'incus-forward' ? 'Incus Forward' : source === 'host-dnat' ? '宿主机 DNAT' : source).join(' / ')}` : ''}
+                                </p>
+                                <div className="mt-2 grid min-w-0 gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+                                  {(comparedEndpoint.probes || []).map((probe, index) => {
+                                    const succeeded = probe.success === true;
+                                    const failed = probe.success === false;
+                                    const probeTone = succeeded ? 'border-[#9de2d8] bg-[#e6f7f4] text-[#147468]'
+                                      : failed && probe.error === 'timeout' ? 'border-[#f7d58b] bg-[#fef6e4] text-[#9a5b00]'
+                                      : 'border-[#cedae7] bg-white text-[#31485e]';
+                                    const stateText = succeeded ? `TCP 可达${probe.latency_ms != null && Number.isFinite(Number(probe.latency_ms)) ? ` · ${fmtNumber(probe.latency_ms, 0)} ms` : ''}`
+                                      : failed && probe.error === 'timeout' ? '连接超时 · 单点结果不单独证明阻断'
+                                      : failed && probe.error === 'refused' ? '端口拒绝连接 · 不计为 GFW 阻断'
+                                      : failed ? `探针路径异常 · 不计为 GFW 阻断${probe.error ? ` · ${{ family_unsupported: '系统不支持该 IP 版本', no_route: '缺少到目标的路由', host_unreachable: '网络报告目标不可达', local_policy_block: '本机策略拒绝连接', network_error: '未分类网络错误' }[probe.error] || probe.error}` : ''}`
+                                      : `未收到结果${probe.error ? ` · ${probe.error}` : ''}`;
+                                    return (
+                                      <div key={`${probe.role}-${probe.source_host_id}-${index}`} className={`min-w-0 rounded-lg border px-2 py-1.5 ${probeTone}`}>
+                                        <p className="break-all text-[10px] opacity-85">
+                                          {probe.role === 'mainland' ? '国内探针' : probe.role === 'overseas' ? '海外探针' : '探针'} · {probe.source_host_id || '未知节点'}{probe.source_region ? ` · ${probe.source_region}` : ''}{probe.source_carrier ? ` · ${probe.source_carrier}` : ''}
+                                        </p>
+                                        <p className="mt-0.5 break-words text-[11px] font-bold">{stateText}</p>
+                                      </div>
+                                    );
+                                  })}
+                                  {(!comparedEndpoint.probes || comparedEndpoint.probes.length === 0) && (
+                                    <p className="text-[11px] text-[#697b9c]">此端点尚无探针回报。</p>
+                                  )}
+                                </div>
+                                <p className="mt-2 text-[10px] text-[#4a607a]">
+                                  同端点国内成功 {fmtNumber(comparedEndpoint.mainland?.success || 0, 0)}/{fmtNumber(comparedEndpoint.mainland?.total || 0, 0)} · 海外成功 {fmtNumber(comparedEndpoint.overseas?.success || 0, 0)}/{fmtNumber(comparedEndpoint.overseas?.total || 0, 0)}
+                                </p>
+                              </>
+                            ) : (
+                              <p className="mt-2 text-xs leading-5 text-[#697b9c]">{targetReadiness.reason || '尚无可对照的公网 TCP 端点样本。'}</p>
+                            )}
+                          </div>
+
+                          <div className="min-w-0 rounded-xl border border-[#a9d1ff] bg-[#e8f3ff]/60 p-3">
+                            <p className="text-[11px] font-bold text-[#0657b8]">判定说明</p>
+                            <p className="mt-2 text-[11px] leading-5 text-[#0b1636]">{gfwCurrentTimelineReason}</p>
+                            <p className="mt-2 border-t border-[#a9d1ff]/60 pt-2 text-[10px] leading-5 text-[#4a607a]">
+                              ICMP 失败、端口拒绝、单个探针超时或探针网段未核验，都不会单独认定为 GFW 阻断。
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-3">
+                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                              <h5 className="text-xs font-bold text-[#0b1636]">状态时间线</h5>
+                              <span className="text-[10px] text-[#697b9c]">证据不足时保持未知，不累计阻断天数</span>
+                            </div>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-[#4a607a]" aria-label="时间线图例">
+                              <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#147468]" />可达 / 恢复</span>
+                              <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#d97706]" />疑似阻断</span>
+                              <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full border border-[#697b9c] bg-white" />未知 / 待复核</span>
+                            </div>
+                          </div>
+                          <div className="relative grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                            <div className="pointer-events-none absolute left-[8%] right-[8%] top-[18px] hidden h-px bg-[#cedae7] xl:block" />
+                            {gfwRecentTransitions.map((event, index) => {
+                              const blockedEvent = event.event_type === 'blocked';
+                              const eventTone = blockedEvent ? 'border-[#f7d58b] bg-[#fef6e4]' : 'border-[#9de2d8] bg-[#e6f7f4]';
+                              const dotTone = blockedEvent ? 'border-amber-200 bg-[#d97706]' : 'border-emerald-200 bg-[#147468]';
+                              const eventTitle = blockedEvent ? '疑似阻断' : '国内连通恢复';
+                              return (
+                                <div key={`${event.event_type}-${event.at}-${index}`} className={`relative min-w-0 rounded-lg border p-2.5 ${eventTone}`}>
+                                  <div className="relative z-10 mb-1.5 flex items-center gap-2">
+                                    <span className={`h-3 w-3 shrink-0 rounded-full border-2 ${dotTone}`} />
+                                    <span className="text-[10px] text-[#4a607a] tabular-nums">{shortAuditTime(event.at)}</span>
+                                  </div>
+                                  <p className={`text-xs font-bold ${blockedEvent ? 'text-[#9a5b00]' : 'text-[#147468]'}`}>{eventTitle}</p>
+                                  <p className="mt-1 text-[10px] leading-4 text-[#31485e]">
+                                    {blockedEvent ? '连续多点探测出现国内异常；记录不单独证明封锁机制。' : '连续复测符合连通恢复判定。'}
+                                  </p>
+                                </div>
+                              );
+                            })}
+                            {gfwNeedsCurrentTimelineItem && (
+                              <div className={`relative min-w-0 rounded-lg border p-2.5 ${gfwCurrentNeedsReview ? 'border-[#cedae7] bg-white' : tones[gfwLevel]}`}>
+                                <div className="relative z-10 mb-1.5 flex items-center gap-2">
+                                  <span className={`h-3 w-3 shrink-0 rounded-full border-2 ${gfwCurrentNeedsReview ? 'border-[#697b9c] bg-white' : gfwLevel === 'normal' ? 'border-emerald-200 bg-[#147468]' : gfwLevel === 'critical' ? 'border-rose-200 bg-[#dc2626]' : 'border-amber-200 bg-[#d97706]'}`} />
+                                  <span className="text-[10px] text-[#4a607a] tabular-nums">{gfw.last_sample_at ? shortAuditTime(gfw.last_sample_at) : '尚无有效采样'}</span>
+                                </div>
+                                <p className={`text-xs font-bold ${gfwCurrentNeedsReview ? 'text-[#0b1636]' : levelBadgeTones[gfwLevel]}`}>
+                                  {gfwCurrentTimelineLabel}
+                                </p>
+                                <p className="mt-1 text-[10px] leading-4 text-[#4a607a]">{gfwCurrentTimelineReason}</p>
+                              </div>
+                            )}
+                            {gfwRecentTransitions.length === 0 && !gfwNeedsCurrentTimelineItem && (
+                              <div className="col-span-full rounded-lg border border-dashed border-[#cedae7] bg-white p-3 text-xs text-[#697b9c]">
+                                暂无可展示的状态变化记录。
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-[#dce5ef] bg-[#f4f8fd] px-3 py-2.5 text-xs">
+                          <span className="font-bold text-[#0b1636]">近 {gfwHistory30d.window_days || 30} 天</span>
+                          <span className="font-semibold text-[#9a5b00]"><b className="tabular-nums">{gfw.history_30d ? fmtNumber(gfwHistory30d.blocked_count || 0, 0) : '—'}</b> 次疑似阻断</span>
+                          <span className="font-semibold text-[#147468]"><b className="tabular-nums">{gfw.history_30d ? fmtNumber(gfwHistory30d.recovered_count || 0, 0) : '—'}</b> 次连通恢复</span>
+                          <span className="ml-auto text-[10px] text-[#697b9c]">统计状态变化记录；未知样本不计作阻断或恢复。</span>
+                        </div>
+
+                        <details className="mt-2 rounded-lg border border-[#dce5ef] bg-[#f4f8fd] px-3 py-2">
+                          <summary className="cursor-pointer text-[11px] font-bold text-[#31485e]">探测覆盖与端点发现细节</summary>
+                          <div className="mt-2 space-y-1.5 text-[11px] leading-5 text-[#4a607a]">
+                            <p>已识别独立探测网段：国内 {fmtNumber(gfw.verified_mainland_networks || 0, 0)}/2 · 海外 {fmtNumber(gfw.verified_overseas_networks || 0, 0)}/1{gfw.last_sample_at ? ` · 最近采样 ${auditTime(gfw.last_sample_at)}` : ''}</p>
+                            {familyCoverage.ipv4 && <p>{familyCoverageText('ipv4')}</p>}
+                            {familyCoverage.ipv6 && <p>{familyCoverageText('ipv6')}</p>}
+                            {hasDailyGfwSample && <p>UTC {gfwSample.date_utc || '—'}：今日抽测 {fmtNumber(gfwSample.sampled_containers, 0)}/{fmtNumber(gfwSample.eligible_containers, 0)} 个容器、{fmtNumber(gfwSample.sampled_endpoints, 0)} 个现有 TCP 端点；未抽中的对象未验证。</p>}
+                            {hasDailyGfwSample && (Number(gfwSample.unprobeable_endpoints_by_family?.ipv4 || 0) + Number(gfwSample.unprobeable_endpoints_by_family?.ipv6 || 0) > 0) && <p>另有 IPv4/IPv6 端点因对应探针覆盖不足而未抽测；这些端点状态保持未知。</p>}
+                            {targetReadiness.status && (
+                              <>
+                                <p>自动探测条件：{targetReadiness.reason || gfwLabels[gfwStatus] || '等待自动发现与调度'}{targetReadiness.next_step ? ` · 下一步：${targetReadiness.next_step}` : ''}</p>
+                                {Number(targetReadiness.eligible_endpoints || 0) > 0 && <p>可确认端点 {fmtNumber(targetReadiness.eligible_endpoints, 0)} 个 · 今日抽测 {fmtNumber(targetReadiness.sampled_containers, 0)}/{fmtNumber(targetReadiness.eligible_containers, 0)} 个容器</p>}
+                                {Number(targetReadiness.ambiguous_endpoints || 0) > 0 && <p>映射不唯一 {fmtNumber(targetReadiness.ambiguous_endpoints, 0)} 个；这些端点不会用于判定。</p>}
+                                {targetReadiness.discovery && <p>发现来源：直连 {fmtNumber(targetReadiness.discovery.direct_public_listener || 0, 0)} · Podman {fmtNumber(targetReadiness.discovery.podman_publish || 0, 0)} · Incus {fmtNumber((targetReadiness.discovery.incus_proxy || 0) + (targetReadiness.discovery.incus_forward || 0), 0)} · DNAT {fmtNumber(targetReadiness.discovery.host_dnat || 0, 0)}；目标无监听 {fmtNumber(targetReadiness.discovery.mapping_target_not_listening || 0, 0)} · 监听地址待核实 {fmtNumber((targetReadiness.discovery.direct_listener_address_unverified || 0) + (targetReadiness.discovery.mapping_listener_address_unverified || 0), 0)} · 未匹配公网地址 {fmtNumber(targetReadiness.discovery.mapping_without_host_public_ip || 0, 0)}</p>}
+                              </>
+                            )}
+                            {gfwSample.containers?.length ? <p>今日抽测容器：{gfwSample.containers.map(container => `${container.runtime || '容器'}${container.project ? `/${container.project}` : ''}/${container.name || '未知'}${container.endpoints?.length ? ` (${container.endpoints.map(endpoint => `${endpoint.ip}:${endpoint.port}`).join(', ')})` : ''}`).join(' · ')}</p> : null}
+                            <p>TCP 探测只说明不同网络来源的连通性差异；ICMP 失败、端口拒绝连接或探针网络错误均不能单独证明 GFW 封锁。</p>
+                          </div>
+                        </details>
+                      </section>
+
+                      <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))] gap-3">
+                        <Signal title="采集完整性与修复提示" level={collectionLevel}>
+                          <p>Agent {collectionHealth.agent_version || t.agent_version || '未知'} · 最后心跳 {t.last_seen_utc8 || '—'} · 采集状态 {collectionStatusLabel}</p>
+                          <p>最后安全采样 {collectionHealth.last_report_at ? auditTime(collectionHealth.last_report_at) : '暂无安全采样'}</p>
+                          {Number(collectionHealth.samples_24h || 0) > 0 && <p className="tabular-nums">近24小时采集完整率 {collectionHealth.healthy_rate_percent_24h ?? 0}% · 完整 {fmtNumber(collectionHealth.healthy_samples_24h || 0, 0)} / {fmtNumber(collectionHealth.samples_24h || 0, 0)} 次 · 缺项 {fmtNumber(collectionHealth.failed_samples_24h || 0, 0)} 次</p>}
+                          {collectionHealth.capabilities?.length ? (
+                            <div className="flex flex-wrap gap-1">
+                              {collectionHealth.capabilities.map(capability => (
+                                <span key={capability} className="rounded border border-[#cedae7] bg-white px-1.5 py-0.5 font-mono text-[11px] text-[#31485e]">
+                                  {capability}
+                                </span>
+                              ))}
+                            </div>
+                          ) : <p>Agent 能力清单尚未上报。</p>}
+                          {collectionHealth.issues?.length ? collectionHealth.issues.map((item, index) => (
+                            <div key={`${item.component || 'component'}-${index}`} className="rounded-lg border border-[#cedae7] bg-white p-2">
+                              <p className="font-bold text-[#0b1636]">{item.component || '数据项'} · {item.state || '待核实'}</p>
+                              <p>{item.reason || '采样不完整'}</p>
+                              <p className="text-[#4a607a]">处理：{item.guidance || '检查 Agent 采集状态后等待新样本。'}</p>
+                            </div>
+                          )) : <p>当前没有已知采集缺口。</p>}
+                        </Signal>
+
+                        <Signal title="规则执行与内核读回" level={reconciliationLevel}>
+                          <p>{reconciliation.status === 'verified' ? '已有活动规则均有读回证据' : reconciliation.status === 'attention' ? `发现 ${fmtNumber(reconciliation.issue_count || 0, 0)} 项状态需核查` : '尚无已配置的托管规则'}</p>
+                          {reconciliationControls.map((control, index) => (
+                            <div key={`${control.control}-${index}`} className="rounded-lg border border-[#cedae7] bg-white p-2">
+                              <p className="font-bold text-[#0b1636]">{controlLabels[control.control || ''] || control.control || '规则'} · {controlStatusLabels[control.status || ''] || control.status || '未知'}</p>
+                              {control.control === 'tc' && <p>期望版本 {control.expected?.revision ?? '—'} · 当前已读回 {control.actual?.active_limits ?? 0} 条限额</p>}
+                              {control.control === 'rfw' && <p>期望版本 {control.expected?.revision ?? '—'} · 运行规则 {control.actual?.rule_count ?? '—'} · 差异 {control.actual?.drift_count ?? 0} / 缺失 {control.actual?.missing_count ?? 0}</p>}
+                              {['cgroup_cpu', 'cgroup_memory', 'cgroup_io', 'nftables_admission'].includes(control.control || '') && <p>已核实活动 {control.actual?.verified_active ?? 0} 个 · 未核实 {control.actual?.unverified ?? 0} 个 · 人工改动 {control.actual?.manual_override ?? 0} 个 · 恢复失败 {control.actual?.restore_failed ?? 0} 个</p>}
+                              {control.retry && <p className="mt-1 text-xs text-[#4a607a]">重试：{controlRetryLabel(control.retry)}</p>}
+                              {control.rollback && <p className="text-xs text-[#4a607a]">恢复/回滚：{controlRollbackLabel(control.rollback)}</p>}
+                              {control.samples?.map((sample, sampleIndex) => (
+                                <div key={`${sample.container}-${sampleIndex}`} className="mt-1 break-all text-xs text-[#4a607a]">
+                                  <p>{sample.container} · {sample.state}{sample.expected ? ` · 目标 ${typeof sample.expected === 'string' ? sample.expected : JSON.stringify(sample.expected)}` : ''}{sample.actual ? ` · 当前 ${typeof sample.actual === 'string' ? sample.actual : JSON.stringify(sample.actual)}` : ''}{sample.reason ? ` · ${sample.reason}` : ''}</p>
+                                  {sample.retry && <p>重试：{controlRetryLabel(sample.retry)}</p>}
+                                  {sample.rollback && <p>恢复：{controlRollbackLabel(sample.rollback)}</p>}
+                                </div>
+                              ))}
+                              {control.reason && <p className="mt-1 text-[#4a607a]">{control.reason}</p>}
+                              {control.last_confirmed_at ? <p className="mt-1 text-[10px] text-[#697b9c]">最近成功读回 {auditTime(control.last_confirmed_at)}</p> : null}
+                            </div>
+                          ))}
+                        </Signal>
+
+                        <Signal title="实时速率 / 今日峰值" level={signalLevel(t, /^ddos_(host_)?bandwidth$/)}>
+                          <p>↓ {fmtNetSpeed(t.rx_bps).mbps} · ↑ {fmtNetSpeed(t.tx_bps).mbps}</p>
+                          <p>今日峰值 ↓ {fmtNetSpeed(t.today_peak_rx_bps).mbps}</p>
+                          <p>今日峰值 ↑ {fmtNetSpeed(t.today_peak_tx_bps).mbps}</p>
+                          <p className="text-[#4a607a]">受监控容器合计，非物理网卡总流量。</p>
+                        </Signal>
+
+                        <Signal title="DDoS 网络信号" level={signalLevel(t, /^ddos_/)}>
+                          <p>↓ {fmtNumber(t.rx_pps, 0)} pps · ↑ {fmtNumber(t.tx_pps, 0)} pps</p>
+                          <p>SYN_RECV {fmtNumber(t.syn_recv, 0)}</p>
+                          <p>本次 DDoS 事件 {networkEvents.length} 项</p>
+                          <p className="text-[#4a607a]">包速率 ≥ {fmtNumber(thresholds.rx_pps_warning ?? 50000, 0)} pps 单独告警。SYN_RECV ≥ {thresholds.syn_recv_warning ?? 200} 先观察；连续 {Math.min(5, Math.max(2, Number(thresholds.syn_recv_confirm_samples ?? 3)))} 次、至少 {Math.round(Number(thresholds.syn_recv_confirm_duration_seconds ?? 300) / 60)} 分钟，并有持续 TCP 入站段速率或 SYN cookies、监听队列丢弃/溢出等内核信号佐证后，才升级为持续握手压力；危险级别还要求内核队列信号连续佐证。</p>
+                          <p className="text-[#4a607a]">握手数不能证明客户行为；本信号不会自动封锁或归因用户。</p>
+                        </Signal>
+
+                        <Signal title="CC / HTTP 信号" level={httpLevel}>
+                          <p>本次 HTTP 事件 {httpEvents.length} 项</p>
+                          {visibleSources.length ? visibleSources.map((s, i) => <HttpSource key={i} source={s} />) : <p>尚未收到日志采集状态</p>}
+                          {sources.length > visibleSources.length && (
+                            <details>
+                              <summary className="cursor-pointer font-semibold text-[#31485e]">其余 {sources.length - visibleSources.length} 个来源未接入或不可读</summary>
+                              <div className="mt-1.5 space-y-1.5">
+                                {sources.filter(s => !visibleSources.includes(s)).map((s, i) => <HttpSource key={i} source={s} />)}
+                              </div>
+                            </details>
+                          )}
+                          <p className="text-[#4a607a]">来源分别计数，避免反向代理与应用重复计算。没有 HTTP 访问日志时无法从 TCP 流量推算请求数。</p>
+                        </Signal>
+
+                        <Signal title="今日单容器峰值" level={peakLevel}>
+                          <p><span className={peakTone(connPeak, connWarning, connCritical)}>最高连接 {fmtNumber(connPeak, 0)}</span> · <span className="text-[#4a607a]">全容器合计峰值 {fmtNumber(t.today_peak_conn_count, 0)}</span></p>
+                          <p><span className={peakTone(t.today_peak_inbound_ips, ipWarning, ipCritical)}>最高入站 IP {fmtNumber(t.today_peak_inbound_ips, 0)}</span> · <span className="text-[#4a607a]">最高出站 IP {fmtNumber(t.today_peak_outbound_ips, 0)}</span></p>
+                          <p className="text-[#4a607a]">连接 ≥ {connWarning} / {connCritical}、入站 IP ≥ {ipWarning} / {ipCritical}：警告 / 危险。</p>
+                          <p className="text-[#4a607a]">UTC+8 当日采样最大值；各项可能来自不同容器。推送使用触发当时的单容器值，峰值不代表当前仍异常。</p>
+                        </Signal>
                       </div>
-                      <p className="mt-2 text-slate-300">先核对实际安装版本及发行版公告；锁文件命中不代表已安装或运行，发行版也可能回移补丁。确认受影响后更新补丁，再重新扫描。</p>
-                    </div>}
-                    {!sshOnlyAudit && securityIndicators.length > 0 && <div className="rounded-lg border border-slate-700/70 p-2">
-                      <p className="font-semibold">供应链 / 配置复核（显示前 {Math.min(securityIndicators.length, 12)} 类）</p>
-                      <div className="mt-2 space-y-2">
-                        {securityIndicators.slice(0, 12).map((finding, index) => <div key={finding.id || finding.rule || index} className="border-t border-slate-700/70 pt-2">
-                          <p className={`break-all font-semibold ${finding.severity === 'critical' ? 'text-red-300' : finding.severity === 'warning' ? 'text-amber-300' : ''}`}>{finding.severity === 'critical' ? '严重' : finding.severity === 'warning' ? '待复核' : '提示'} · {finding.component || '主机安全检查'} · {finding.title} {Number(finding.instance_count || 0) > 1 ? `（${finding.instance_count} 处）` : ''}</p>
-                          {(finding.evidence || []).slice(0, 3).map((evidence, i) => <p key={i} className="break-all text-slate-300">证据位置：{evidence}</p>)}
-                          {finding.guidance && <p className="text-slate-200">处理建议：{finding.guidance}</p>}
-                          {finding.reference && <a className="text-sky-300 underline" href={finding.reference} target="_blank" rel="noreferrer">查看上游公告</a>}
-                        </div>)}
+
+                      <div className="mt-3 grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))] gap-3">
+                        <div className="col-span-full min-w-0">
+                          <Signal title={sshOnlyAudit ? '小鸡 SSH 安全检查' : '母鸡完整性、漏洞与威胁指标'} level={auditLevel}>
+                            {!hostAudit?.enabled ? (
+                              <>
+                                <p>{auditAdvice[0]}</p>
+                                <p className="text-[#4a607a]">修复后等待 Agent 下一次上报，再检查本卡状态。</p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-[#4a607a]">{sshOnlyAudit ? '小鸡 SSH 登录与配置专项检查。' : '母鸡账户/SSH 基线、系统与 Python 漏洞、供应链及配置检查。'}</p>
+                                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                                  <div className="min-w-0 rounded-lg border border-[#cedae7] bg-white p-2">
+                                    <p className="text-[11px] text-[#697b9c]">主机基线</p>
+                                    <p className="break-words font-bold text-[#0b1636]">{hostAudit.baseline_pending ? '建立中' : hostAudit.snapshot_status === 'ready' ? `正常 · ${fmtNumber(hostAudit.user_accounts || 0, 0)} 账户 / ${fmtNumber(hostAudit.ssh_key_count || 0, 0)} SSH Key` : '采集不完整'}</p>
+                                  </div>
+                                  {!sshOnlyAudit && (
+                                    <div className="min-w-0 rounded-lg border border-[#cedae7] bg-white p-2">
+                                      <p className="text-[11px] text-[#697b9c]">系统 / Python 漏洞</p>
+                                      <p className="break-words font-bold text-[#0b1636]">{coverageLabel(vulnerabilityScan?.coverage)} · {fmtNumber(vulnerabilityCount, 0)} 项 / 严重 {fmtNumber(vulnerabilityCriticalCount, 0)}</p>
+                                    </div>
+                                  )}
+                                  <div className="min-w-0 rounded-lg border border-[#cedae7] bg-white p-2">
+                                    <p className="text-[11px] text-[#697b9c]">{sshOnlyAudit ? 'SSH 配置复核' : '供应链 / 配置线索'}</p>
+                                    <p className="break-words font-bold text-[#0b1636]">{coverageLabel(indicatorScan?.coverage)} · {fmtNumber(indicatorCount, 0)} 项 / 严重 {fmtNumber(indicatorCriticalCount, 0)}</p>
+                                  </div>
+                                  <div className="min-w-0 rounded-lg border border-[#cedae7] bg-white p-2">
+                                    <p className="text-[11px] text-[#697b9c]">SSH 登录日志</p>
+                                    <p className="break-words font-bold text-[#0b1636]">{hostAudit.ssh_log_status === 'available' ? `已接入 · 新来源 ${fmtNumber(hostAudit.new_ssh_login_events || 0, 0)}` : hostAudit.ssh_log_status === 'partial' ? '部分可读' : '不可用'}</p>
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-[#a9d1ff] bg-[#e8f3ff] p-2.5">
+                                  <p className="font-bold text-[#0657b8]">怎么处理</p>
+                                  <ul className="mt-1 list-disc space-y-1 pl-4 text-[#0b1636]">
+                                    {auditAdvice.slice(0, 3).map((advice, index) => <li key={index} className="break-words">{advice}</li>)}
+                                  </ul>
+                                </div>
+                                <details className="rounded-lg border border-[#cedae7] bg-white p-2.5">
+                                  <summary className="cursor-pointer font-bold text-[#0b1636]">查看证据、扫描时间与修复细节</summary>
+                                  <div className="mt-2 space-y-2 text-[#31485e]">
+                                    <p>漏洞最近完整扫描：{auditTime(vulnerabilityScan?.checked_at)} · 已检查 {fmtNumber(vulnerabilityScan?.packages_checked || 0, 0)} 个软件包。OSV 查询发送软件包名称与版本，不包含主机名、IP、账户或配置内容。</p>
+                                    {hostAuditEvents.length > 0 && (
+                                      <div className="rounded-lg border border-[#dce5ef] bg-[#f4f8fd] p-2">
+                                        <p className="font-bold text-[#0b1636]">本次 SSH / 主机变化</p>
+                                        {hostAuditEvents.slice(0, 4).map((event, index) => <p key={(event.type || 'event') + '-' + index} className="break-all">{event.title || event.type}：{event.message}</p>)}
+                                      </div>
+                                    )}
+                                    {!sshOnlyAudit && hostFindings.length > 0 && (
+                                      <div className="rounded-lg border border-[#dce5ef] bg-[#f4f8fd] p-2">
+                                        <p className="font-bold text-[#0b1636]">漏洞匹配（显示前 {Math.min(hostFindings.length, 12)} 条，共 {fmtNumber(vulnerabilityCount, 0)} 项）</p>
+                                        <div className="mt-2 space-y-2">
+                                          {hostFindings.slice(0, 12).map((finding, index) => {
+                                            const repair = vulnerabilityRepair(finding, hostOsId);
+                                            return (
+                                              <div key={(finding.ecosystem || '') + '-' + (finding.package || '') + '-' + (finding.version || '') + '-' + (finding.id || index)} className="border-t border-[#dce5ef] pt-2">
+                                                <p className="break-all font-bold text-[#0b1636]">
+                                                  {finding.severity === 'critical' ? '严重' : '待复核'} · {finding.cve || finding.id || 'OSV 公告'} · {finding.package}@{finding.version} · {finding.source === 'system' ? '系统软件' : finding.source === 'installed' ? '已安装 Python 包' : finding.source === 'manifest' ? 'Maven 清单（非锁定）' : '依赖锁文件'}
+                                                </p>
+                                                {finding.summary && <p className="text-[#31485e]">{finding.summary}</p>}
+                                                <p className="mt-1 break-words font-medium text-[#0657b8]">建议步骤：{repair.command}</p>
+                                                <p className="text-[#697b9c]">影响：{repair.impact}</p>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                        <p className="mt-2 text-[#4a607a]">先核对实际安装版本及发行版公告；锁文件命中不代表已安装或运行，发行版也可能回移补丁。确认受影响后更新补丁，再重新扫描。</p>
+                                      </div>
+                                    )}
+                                    {!sshOnlyAudit && securityIndicators.length > 0 && (
+                                      <div className="rounded-lg border border-[#dce5ef] bg-[#f4f8fd] p-2">
+                                        <p className="font-bold text-[#0b1636]">供应链 / 配置复核（显示前 {Math.min(securityIndicators.length, 12)} 类）</p>
+                                        <div className="mt-2 space-y-2">
+                                          {securityIndicators.slice(0, 12).map((finding, index) => (
+                                            <div key={finding.id || finding.rule || index} className="border-t border-[#dce5ef] pt-2">
+                                              <p className={`break-all font-bold ${finding.severity === 'critical' ? 'text-[#b41835]' : finding.severity === 'warning' ? 'text-[#9a5b00]' : 'text-[#0b1636]'}`}>
+                                                {finding.severity === 'critical' ? '严重' : finding.severity === 'warning' ? '待复核' : '提示'} · {finding.component || '主机安全检查'} · {finding.title} {Number(finding.instance_count || 0) > 1 ? `（${finding.instance_count} 处）` : ''}
+                                              </p>
+                                              {(finding.evidence || []).slice(0, 3).map((evidence, i) => <p key={i} className="break-all text-[#31485e]">证据位置：{evidence}</p>)}
+                                              {finding.guidance && <p className="text-[#0b1636]">处理建议：{finding.guidance}</p>}
+                                              {finding.reference && <a className="font-semibold text-[#087bff] underline" href={finding.reference} target="_blank" rel="noreferrer">查看上游公告</a>}
+                                            </div>
+                                          ))}
+                                        </div>
+                                        <p className="mt-2 text-[#4a607a]">IOC 与配置文本命中是复核线索，不等同已确认入侵；先核实证据路径和预期配置，确认未经授权后备份并修复。</p>
+                                      </div>
+                                    )}
+                                    {vulnerabilityScan?.error && <p className="font-medium text-[#9a5b00]">漏洞扫描提示：{vulnerabilityScan.error}</p>}
+                                    {indicatorScan?.error && <p className="font-medium text-[#9a5b00]">补充扫描提示：{indicatorScan.error}</p>}
+                                    <p>系统：{hostOsId || '发行版未知'} {hostAudit.os?.version_id || ''} · 漏洞扫描上次尝试 {auditTime(vulnerabilityScan?.last_attempt_at)}。OSV 匹配仅是待复核项；修复后在运维中心 → 采集健康点击“请求只读复扫”。复扫不会自动安装更新。</p>
+                                    <p>SSH 日志：{hostAudit.ssh_log_status === 'available' ? `可读 · 本周期 ${fmtNumber(hostAudit.ssh_events_last_period || 0, 0)} 次成功登录` : '未完整接入，无法据此排除未知登录来源。'} 完整性问题请先确认 Agent 权限和日志可读性，再等待新一轮采样。</p>
+                                  </div>
+                                </details>
+                              </>
+                            )}
+                          </Signal>
+                        </div>
                       </div>
-                      <p className="mt-2 text-slate-300">IOC 与配置文本命中是复核线索，不等同已确认入侵；先核实证据路径和预期配置，确认未经授权后备份并修复。</p>
-                    </div>}
-                    {vulnerabilityScan?.error && <p className="text-amber-200">漏洞扫描提示：{vulnerabilityScan.error}</p>}
-                    {indicatorScan?.error && <p className="text-amber-200">补充扫描提示：{indicatorScan.error}</p>}
-                    <p className="text-slate-300">系统：{hostOsId || '发行版未知'} {hostAudit.os?.version_id || ''} · 漏洞扫描上次尝试 {auditTime(vulnerabilityScan?.last_attempt_at)}。OSV 匹配仅是待复核项；修复后在运维中心 → 采集健康点击“请求只读复扫”。复扫不会自动安装更新。</p>
-                    <p className="text-slate-300">SSH 日志：{hostAudit.ssh_log_status === 'available' ? `可读 · 本周期 ${fmtNumber(hostAudit.ssh_events_last_period || 0, 0)} 次成功登录` : '未完整接入，无法据此排除未知登录来源。'} 完整性问题请先确认 Agent 权限和日志可读性，再等待新一轮采样。</p>
-                  </div>
-                </details>
-              </>}
-            </Signal>
+
+                      <details className="rounded-xl border border-[#cedae7] bg-white p-3 text-xs text-[#31485e]">
+                        <summary className="cursor-pointer font-bold text-[#0b1636]">
+                          查看本次采样事件（{events.length} 项，含普通提示）与阈值说明
+                        </summary>
+                        <div className="mt-3 space-y-2">
+                          {events.map((event, i) => (
+                            <div key={i} className={`min-w-0 rounded-lg border p-3 wrap-break-word ${tones[event.severity === 'critical' ? 'critical' : event.severity === 'warning' ? 'warning' : 'unknown']}`}>
+                              <p className="font-bold text-[#0b1636]">{event.severity === 'critical' ? '危险' : event.severity === 'warning' ? '警告' : '提示'} · {event.title || event.type}</p>
+                              <p className="break-all text-[#31485e]">{[event.runtime, event.project, event.container_name].filter(Boolean).join('/') || '主机汇总'} · {event.message}</p>
+                              {event.threshold != null && <p className="text-[#4a607a]">触发值 {String(event.value ?? '—')} · 阈值 {String(event.threshold)}</p>}
+                            </div>
+                          ))}
+                          {!events.length && <p className="text-[#697b9c]">本次采样无事件。</p>}
+                          <p>这里展示客户端本次采样检测结果；放行、已处置状态与历史推送请查看“告警历史”。</p>
+                          <p>HTTP 默认警告线：总 {thresholds.http_rps_warning ?? 100} rps、单 IP {thresholds.ip_rps_warning ?? 30} rps，2 倍为危险；4xx ≥ {((thresholds.http_4xx_warning ?? .5) * 100).toFixed(0)}%、5xx ≥ {((thresholds.http_5xx_warning ?? .05) * 100).toFixed(0)}% 警告，2 倍为危险（4xx 最高 100%）。比例检测至少需要 {thresholds.http_min_requests ?? 50} 次请求。</p>
+                          <p>这是可调的运维起始阈值，不是通用攻击判定标准。配置节点 ALERT_* 环境变量后重启客户端即可调整；旧版客户端需升级才能上报实际阈值及分来源数据。</p>
+                        </div>
+                      </details>
+                    </div>
+                  </details>
+                </article>
+              );
+            })}
           </div>
-          </div>
-          <details className="mt-3 rounded-lg border border-slate-700 p-3 text-xs text-slate-300">
-            <summary className="cursor-pointer font-semibold text-slate-100">查看本次采样事件（{events.length} 项，含普通提示）与阈值说明</summary>
-            <div className="mt-3 space-y-2">
-              {events.map((event, i) => <div key={i} className={`min-w-0 rounded-lg border p-3 wrap-break-word ${tones[event.severity === 'critical' ? 'critical' : event.severity === 'warning' ? 'warning' : 'unknown']}`}>
-                <p className="font-semibold">{event.severity === 'critical' ? '危险' : event.severity === 'warning' ? '警告' : '提示'} · {event.title || event.type}</p>
-                <p className="break-all">{[event.runtime, event.project, event.container_name].filter(Boolean).join('/') || '主机汇总'} · {event.message}</p>
-                {event.threshold != null && <p>触发值 {String(event.value ?? '—')} · 阈值 {String(event.threshold)}</p>}
-              </div>)}
-              {!events.length && <p>本次采样无事件。</p>}
-              <p>这里展示客户端本次采样检测结果；放行、已处置状态与历史推送请查看“告警历史”。</p>
-              <p>HTTP 默认警告线：总 {thresholds.http_rps_warning ?? 100} rps、单 IP {thresholds.ip_rps_warning ?? 30} rps，2 倍为危险；4xx ≥ {((thresholds.http_4xx_warning ?? .5) * 100).toFixed(0)}%、5xx ≥ {((thresholds.http_5xx_warning ?? .05) * 100).toFixed(0)}% 警告，2 倍为危险（4xx 最高 100%）。比例检测至少需要 {thresholds.http_min_requests ?? 50} 次请求。</p>
-              <p>这是可调的运维起始阈值，不是通用攻击判定标准。配置节点 ALERT_* 环境变量后重启客户端即可调整；旧版客户端需升级才能上报实际阈值及分来源数据。</p>
-            </div>
-          </details>
-            </div>
-          </details>
-        </article>;
-      })}
-      </div>
-      {pageCount > 1 && <nav className="flex items-center justify-between gap-3 border-t border-slate-800 pt-3" aria-label="主机遥测分页">
-        <button type="button" disabled={currentPage <= 0} onClick={() => setPage(value => Math.max(0, value - 1))} className="min-h-9 rounded-lg border border-slate-700 px-3 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40">上一页</button>
-        <span className="text-xs tabular-nums text-slate-400">第 {currentPage + 1} / {pageCount} 页</span>
-        <button type="button" disabled={currentPage >= pageCount - 1} onClick={() => setPage(value => Math.min(pageCount - 1, value + 1))} className="min-h-9 rounded-lg border border-slate-700 px-3 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
-      </nav>}
-    </div>}
-    {editing && <HostConfigDialog host={editing} busy={busy} onClose={() => setEditing(null)} onSave={async config => {
-      setBusy(true); try { await api.updateHostConfig(editing.host_id, config); onToast('success', '配置已下发，将在节点下次轮询时生效。'); setEditing(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '配置下发失败'); } finally { setBusy(false); }
-    }} />}
-    {deleting && <HostDeleteDialog host={deleting} busy={busy} onClose={() => setDeleting(null)} onDelete={async mode => {
-      setBusy(true); try { await api.deleteHost(deleting.host_id, mode); onToast('success', mode === 'uninstall' ? '已下发远程自卸载，节点确认后将从面板移除。' : '主机记录已删除。'); setDeleting(null); onRefresh(); } catch (e: any) { onToast('error', e.message || '删除失败'); } finally { setBusy(false); }
-    }} />}
-  </section>;
+
+          {pageCount > 1 && (
+            <nav className="flex items-center justify-between gap-3 border-t border-[#dce5ef] pt-3" aria-label="主机遥测分页">
+              <button
+                type="button"
+                disabled={currentPage <= 0}
+                onClick={() => setPage(value => Math.max(0, value - 1))}
+                className="rn2-btn rn2-btn-ghost rn2-btn-sm min-h-9"
+              >
+                上一页
+              </button>
+              <span className="font-mono text-xs font-semibold text-[#4a607a] tabular-nums">第 {currentPage + 1} / {pageCount} 页</span>
+              <button
+                type="button"
+                disabled={currentPage >= pageCount - 1}
+                onClick={() => setPage(value => Math.min(pageCount - 1, value + 1))}
+                className="rn2-btn rn2-btn-ghost rn2-btn-sm min-h-9"
+              >
+                下一页
+              </button>
+            </nav>
+          )}
+        </div>
+      )}
+
+      {editing && (
+        <HostConfigDialog
+          host={editing}
+          busy={busy}
+          onClose={() => setEditing(null)}
+          onSave={async config => {
+            setBusy(true);
+            try {
+              await api.updateHostConfig(editing.host_id, config);
+              onToast('success', '配置已下发，将在节点下次轮询时生效。');
+              setEditing(null);
+              onRefresh();
+            } catch (e: any) {
+              onToast('error', e.message || '配置下发失败');
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+      )}
+      {deleting && (
+        <HostDeleteDialog
+          host={deleting}
+          busy={busy}
+          onClose={() => setDeleting(null)}
+          onDelete={async mode => {
+            setBusy(true);
+            try {
+              await api.deleteHost(deleting.host_id, mode);
+              onToast('success', mode === 'uninstall' ? '已下发远程自卸载，节点确认后将从面板移除。' : '主机记录已删除。');
+              setDeleting(null);
+              onRefresh();
+            } catch (e: any) {
+              onToast('error', e.message || '删除失败');
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+      )}
+    </section>
+  );
 };
 
 const HostConfigDialog: React.FC<{
@@ -772,7 +1026,7 @@ const HostConfigDialog: React.FC<{
   const [runtimes, setRuntimes] = useState(String(c.container_runtimes || 'auto'));
   const [docker, setDocker] = useState(String(c.docker_monitor_mode || 'notice'));
 
-  React.useEffect(() => {
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !busy) {
         onClose();
@@ -785,7 +1039,7 @@ const HostConfigDialog: React.FC<{
   return (
     <div
       role="presentation"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#02182f]/70 p-4 backdrop-blur-xs"
       onClick={(e) => {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
@@ -794,9 +1048,18 @@ const HostConfigDialog: React.FC<{
         role="dialog"
         aria-modal="true"
         aria-labelledby="host-config-dialog-title"
-        className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+        className="rn2-card w-full max-w-md overflow-hidden shadow-2xl"
       >
+        <div className="rn2-card-head">
+          <div className="min-w-0">
+            <span className="rn2-eyebrow block text-[10px]">HOST CONFIGURATION</span>
+            <h3 id="host-config-dialog-title" className="text-base font-bold text-white">
+              修改主机配置
+            </h3>
+          </div>
+        </div>
         <form
+          className="p-5"
           onSubmit={(e) => {
             e.preventDefault();
             onSave({
@@ -807,24 +1070,21 @@ const HostConfigDialog: React.FC<{
             });
           }}
         >
-          <h3 id="host-config-dialog-title" className="text-base font-bold text-slate-100">
-            修改主机配置
-          </h3>
-          <p className="mt-1 text-xs text-slate-400 leading-relaxed">
+          <p className="text-xs leading-relaxed text-[#4a607a]">
             改名不会产生新主机：系统以稳定 NODE_ID 合并历史数据。
           </p>
 
-          <label className="mt-4 block text-xs font-medium text-slate-300">
+          <label className="mt-4 block text-xs font-semibold text-[#0b1636]">
             显示名称
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="ui-input mt-1.5 font-mono text-xs"
+              className="rn2-input mt-1.5 font-mono text-xs"
               required
             />
           </label>
 
-          <label className="mt-3 block text-xs font-medium text-slate-300">
+          <label className="mt-3 block text-xs font-semibold text-[#0b1636]">
             上报间隔（秒）
             <input
               type="number"
@@ -832,26 +1092,26 @@ const HostConfigDialog: React.FC<{
               max="3600"
               value={interval}
               onChange={(e) => setIntervalValue(e.target.value)}
-              className="ui-input mt-1.5 font-mono text-xs"
+              className="rn2-input mt-1.5 font-mono text-xs"
               required
             />
           </label>
 
-          <label className="mt-3 block text-xs font-medium text-slate-300">
+          <label className="mt-3 block text-xs font-semibold text-[#0b1636]">
             运行时 (auto / incus / podman / docker / runman)
             <input
               value={runtimes}
               onChange={(e) => setRuntimes(e.target.value)}
-              className="ui-input mt-1.5 font-mono text-xs"
+              className="rn2-input mt-1.5 font-mono text-xs"
             />
           </label>
 
-          <label className="mt-3 block text-xs font-medium text-slate-300">
+          <label className="mt-3 block text-xs font-semibold text-[#0b1636]">
             Docker 模式
             <select
               value={docker}
               onChange={(e) => setDocker(e.target.value)}
-              className="ui-select mt-1.5 text-xs"
+              className="rn2-select mt-1.5 text-xs"
             >
               <option value="notice">仅提示 (notice)</option>
               <option value="full">完整采集 (full)</option>
@@ -859,20 +1119,11 @@ const HostConfigDialog: React.FC<{
             </select>
           </label>
 
-          <div className="mt-5 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={busy}
-              className="ui-btn ui-btn-neutral"
-            >
+          <div className="mt-5 flex justify-end gap-2 border-t border-[#dce5ef] pt-4">
+            <button type="button" onClick={onClose} disabled={busy} className="rn2-btn rn2-btn-ghost">
               取消
             </button>
-            <button
-              type="submit"
-              disabled={busy}
-              className="ui-btn ui-btn-primary"
-            >
+            <button type="submit" disabled={busy} className="rn2-btn rn2-btn-orange">
               {busy ? '下发中…' : '保存并下发'}
             </button>
           </div>
@@ -891,7 +1142,7 @@ const HostDeleteDialog: React.FC<{
   const [confirm, setConfirm] = useState('');
   const [mode, setMode] = useState<'uninstall' | 'records_only'>('uninstall');
 
-  React.useEffect(() => {
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !busy) {
         onClose();
@@ -904,7 +1155,7 @@ const HostDeleteDialog: React.FC<{
   return (
     <div
       role="presentation"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#02182f]/70 p-4 backdrop-blur-xs"
       onClick={(e) => {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
@@ -913,68 +1164,72 @@ const HostDeleteDialog: React.FC<{
         role="dialog"
         aria-modal="true"
         aria-labelledby="host-delete-dialog-title"
-        className="w-full max-w-md rounded-2xl border border-rose-900/70 bg-slate-900 p-5 shadow-2xl"
+        className="rn2-card w-full max-w-md overflow-hidden border-[#f5a3b3] shadow-2xl"
       >
-        <h3 id="host-delete-dialog-title" className="text-base font-bold text-rose-200">
-          删除主机
-        </h3>
-        <p className="mt-2 text-xs leading-5 text-slate-300">
-          “远程卸载”会让节点停止并删除 Narwhal Client、配置和自动更新单元；不会修改容器或业务服务。仅删记录会保留节点 Agent，下一次上报会重新出现。
-        </p>
-
-        <div className="mt-4 space-y-2">
-          <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
-            <input
-              type="radio"
-              name="delete_mode"
-              checked={mode === 'uninstall'}
-              onChange={() => setMode('uninstall')}
-              className="accent-rose-500"
-            />
-            <span>远程卸载 Client（推荐）</span>
-          </label>
-          <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
-            <input
-              type="radio"
-              name="delete_mode"
-              checked={mode === 'records_only'}
-              onChange={() => setMode('records_only')}
-              className="accent-rose-500"
-            />
-            <span>只删除面板记录</span>
-          </label>
+        <div
+          className="rn2-card-head"
+          style={{ background: 'linear-gradient(125deg, #3f1323, #1b1834 55%, #0e233c)' }}
+        >
+          <div className="min-w-0">
+            <span className="rn2-eyebrow block text-[10px] text-rose-200">DESTRUCTIVE ACTION</span>
+            <h3 id="host-delete-dialog-title" className="text-base font-bold text-white">
+              删除主机
+            </h3>
+          </div>
         </div>
+        <div className="p-5">
+          <p className="text-xs leading-5 text-[#31485e]">
+            “远程卸载”会让节点停止并删除 Narwhal Client、配置和自动更新单元；不会修改容器或业务服务。仅删记录会保留节点 Agent，下一次上报会重新出现。
+          </p>
 
-        <label className="mt-4 block text-xs text-slate-300">
-          输入完整主机名确认：<b className="text-rose-300 font-mono select-all">{host.host_id}</b>
-          <input
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-            placeholder={`请输入 ${host.host_id}`}
-            className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 font-mono text-xs focus:outline-hidden focus:ring-2 focus:ring-rose-500"
-          />
-        </label>
+          <div className="mt-4 space-y-2">
+            <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-[#0b1636]">
+              <input
+                type="radio"
+                name="delete_mode"
+                checked={mode === 'uninstall'}
+                onChange={() => setMode('uninstall')}
+                className="accent-[#dc2626]"
+              />
+              <span>远程卸载 Client（推荐）</span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-[#0b1636]">
+              <input
+                type="radio"
+                name="delete_mode"
+                checked={mode === 'records_only'}
+                onChange={() => setMode('records_only')}
+                className="accent-[#dc2626]"
+              />
+              <span>只删除面板记录</span>
+            </label>
+          </div>
 
-        <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            disabled={busy || confirm !== host.host_id}
-            onClick={() => onDelete(mode)}
-            className="rounded-lg bg-rose-700 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-600 transition-colors focus:outline-hidden focus:ring-2 focus:ring-rose-400 disabled:opacity-50 shadow-xs"
-          >
-            {busy ? '处理中…' : '确认删除'}
-          </button>
+          <label className="mt-4 block text-xs font-semibold text-[#0b1636]">
+            输入完整主机名确认：<b className="select-all font-mono text-[#b41835]">{host.host_id}</b>
+            <input
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              placeholder={`请输入 ${host.host_id}`}
+              className="rn2-input mt-1.5 font-mono text-xs"
+            />
+          </label>
+
+          <div className="mt-5 flex justify-end gap-2 border-t border-[#dce5ef] pt-4">
+            <button type="button" onClick={onClose} disabled={busy} className="rn2-btn rn2-btn-ghost">
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={busy || confirm !== host.host_id}
+              onClick={() => onDelete(mode)}
+              className="rn2-btn border-[#b91c1c] bg-linear-to-r from-[#dc2626] to-[#be123c] text-white hover:from-[#b91c1c] hover:to-[#9f1239]"
+            >
+              {busy ? '处理中…' : '确认删除'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 };
-

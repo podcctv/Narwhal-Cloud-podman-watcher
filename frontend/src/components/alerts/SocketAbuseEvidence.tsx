@@ -45,27 +45,27 @@ const riskBadgeMeta = (risk?: string) => {
   if (risk === 'high') {
     return {
       label: '高风险线索',
-      badge: 'border-rose-500/40 bg-rose-950/70 text-rose-200',
-      box: 'border-rose-500/30 bg-rose-950/20',
-      header: 'text-rose-300',
-      bar: 'bg-rose-500',
+      badge: 'border-[#f9b8c4] bg-[#ffeef1] text-[#b41835]',
+      box: 'border-[#f5a3b3] bg-white',
+      header: 'text-[#b41835]',
+      bar: 'bg-[#dc2626]',
     };
   }
   if (risk === 'medium') {
     return {
       label: '重点核实',
-      badge: 'border-amber-500/40 bg-amber-950/70 text-amber-200',
-      box: 'border-amber-500/30 bg-amber-950/15',
-      header: 'text-amber-300',
-      bar: 'bg-amber-400',
+      badge: 'border-[#f7d58b] bg-[#fef6e4] text-[#9a5b00]',
+      box: 'border-[#f7d58b] bg-white',
+      header: 'text-[#9a5b00]',
+      bar: 'bg-[#d97706]',
     };
   }
   return {
     label: '正常特征',
-    badge: 'border-emerald-500/35 bg-emerald-950/60 text-emerald-200',
-    box: 'border-slate-800/90 bg-slate-900/65',
-    header: 'text-emerald-300',
-    bar: 'bg-emerald-500',
+    badge: 'border-[#9de2d8] bg-[#e6f7f4] text-[#147468]',
+    box: 'border-[#cedae7] bg-white',
+    header: 'text-[#147468]',
+    bar: 'bg-[#147468]',
   };
 };
 
@@ -74,29 +74,29 @@ const scenarioMeta = (likelihood?: string) => {
     return {
       label: '高可能',
       fullLabel: '高可能性',
-      badge: 'border-amber-500/45 bg-amber-950/70 text-amber-200',
-      pill: 'border-amber-500/40 bg-amber-950/45 text-amber-100',
-      dot: 'bg-amber-400',
-      bar: 'bg-amber-400',
+      badge: 'border-[#f7d58b] bg-[#fef6e4] text-[#9a5b00]',
+      pill: 'border-[#f7d58b] bg-[#fef6e4] text-[#9a5b00]',
+      dot: 'bg-[#d97706]',
+      bar: 'bg-[#d97706]',
     };
   }
   if (likelihood === 'medium') {
     return {
       label: '中等',
       fullLabel: '中等可能',
-      badge: 'border-sky-500/40 bg-sky-950/70 text-sky-200',
-      pill: 'border-sky-500/35 bg-sky-950/40 text-sky-100',
-      dot: 'bg-sky-400',
-      bar: 'bg-sky-400',
+      badge: 'border-[#a9d1ff] bg-[#e8f3ff] text-[#0657b8]',
+      pill: 'border-[#a9d1ff] bg-[#e8f3ff] text-[#0657b8]',
+      dot: 'bg-[#087bff]',
+      bar: 'bg-[#087bff]',
     };
   }
   return {
     label: '较低',
     fullLabel: '可能性较低',
-    badge: 'border-slate-700/80 bg-slate-900/80 text-slate-400',
-    pill: 'border-slate-800 bg-slate-900/60 text-slate-400',
-    dot: 'bg-slate-600',
-    bar: 'bg-slate-600',
+    badge: 'border-[#cbd7e6] bg-[#eef3f9] text-[#4a607a]',
+    pill: 'border-[#cbd7e6] bg-[#eef3f9] text-[#4a607a]',
+    dot: 'bg-[#697b9c]',
+    bar: 'bg-[#697b9c]',
   };
 };
 
@@ -125,16 +125,16 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
   const inv: SocketAbuseInvestigation | undefined = data.investigation;
 
   const headerStyle = isSuspected
-    ? 'border-amber-500/35 bg-slate-950/75'
+    ? 'border-[#f7d58b] bg-[#f4f8fd]'
     : isBenignHigh
-    ? 'border-emerald-500/30 bg-slate-950/75'
-    : 'border-slate-800 bg-slate-950/75';
+    ? 'border-[#9de2d8] bg-[#f4f8fd]'
+    : 'border-[#cedae7] bg-[#f4f8fd]';
 
   const verdictBadgeStyle = isSuspected
-    ? 'border-rose-500/50 bg-rose-950/80 text-rose-200'
+    ? 'border-[#f9b8c4] bg-[#ffeef1] text-[#b41835]'
     : isBenignHigh
-    ? 'border-emerald-500/40 bg-emerald-950/80 text-emerald-200'
-    : 'border-cyan-500/40 bg-cyan-950/70 text-cyan-200';
+    ? 'border-[#9de2d8] bg-[#e6f7f4] text-[#147468]'
+    : 'border-[#a9d1ff] bg-[#e8f3ff] text-[#0657b8]';
 
   const dimMap: Record<string, SocketAbuseDimension> = {};
   for (const d of dimensions) {
@@ -295,45 +295,45 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
   return (
     <div
       data-testid="socket-abuse-evidence"
-      className={`mt-2.5 rounded-xl border p-3 text-xs leading-snug ${headerStyle}`}
+      className={`mt-2.5 rounded-xl border p-3.5 text-xs leading-snug text-[#0b1636] ${headerStyle}`}
     >
       {/* 1. 紧凑头部与结论条 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 font-semibold text-slate-100">
-            <Network className="h-3.5 w-3.5 shrink-0 text-sky-400" aria-hidden="true" />
+          <span className="inline-flex items-center gap-1.5 font-bold text-[#0b1636]">
+            <Network className="h-3.5 w-3.5 shrink-0 text-[#087bff]" aria-hidden="true" />
             <span>Socket / 代理连接四维判断依据</span>
           </span>
           <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${verdictBadgeStyle}`}>
             {data.verdict_label || (isSuspected ? '疑似滥用 · 待人工复核' : '倾向非滥用')}
           </span>
           {effectiveInv?.proxy_like && (
-            <span className="rounded border border-sky-500/35 bg-sky-950/60 px-1.5 py-0.5 font-mono text-[10px] text-sky-200 tabular-nums">
+            <span className="rounded border border-[#a9d1ff] bg-[#e8f3ff] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#0657b8] tabular-nums">
               TCP 代理对称度 {Math.round(Number(effectiveInv.proxy_symmetry || 0) * 100)}%
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-          <span className="rounded border border-slate-800 bg-slate-900/90 px-2 py-0.5 text-slate-300">
+        <div className="flex items-center gap-1.5 text-[10px]">
+          <span className="rounded border border-[#cedae7] bg-white px-2 py-0.5 font-medium text-[#31485e]">
             人工复核 · 未自动停机
           </span>
         </div>
       </div>
 
-      {/* 结论与命中规则（单行紧凑展示） */}
+      {/* 结论与命中规则 */}
       {(data.conclusion || categories.length > 0) && (
         <div className="mt-1.5 space-y-1">
           {data.conclusion && (
-            <p className="text-[11px] text-slate-300 tabular-nums">{data.conclusion}</p>
+            <p className="text-[11px] text-[#31485e] tabular-nums">{data.conclusion}</p>
           )}
           {categories.map((cat) => (
             <div
               key={cat.code}
-              className="flex items-center gap-1.5 rounded border border-rose-500/35 bg-rose-950/40 px-2.5 py-1 text-[11px] text-rose-100"
+              className="flex items-center gap-1.5 rounded-lg border border-[#f9b8c4] bg-[#ffeef1] px-2.5 py-1.5 text-[11px] text-[#9f1239]"
             >
-              <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-rose-400" aria-hidden="true" />
+              <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-[#b41835]" aria-hidden="true" />
               <span className="min-w-0 break-words">
-                <strong className="font-semibold text-rose-200">命中规则 · {cat.title}：</strong>
+                <strong className="font-bold text-[#b41835]">命中规则 · {cat.title}：</strong>
                 {cat.reason}
               </span>
             </div>
@@ -341,81 +341,81 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
         </div>
       )}
 
-      {/* 2. 四维核心指标水平紧凑条（消除垂直堆叠与空白黑洞） */}
+      {/* 2. 四维核心指标水平紧凑条 */}
       <div className={`mt-2.5 grid gap-2 ${compact ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'}`}>
         {/* 维度 1：连接状态拆解 */}
         {dim1 && (
-          <div className={`flex min-w-0 flex-col justify-between rounded-lg border p-2.5 ${riskBadgeMeta(dim1.risk).box}`}>
+          <div className={`flex min-w-0 flex-col justify-between rounded-xl border p-2.5 shadow-xs ${riskBadgeMeta(dim1.risk).box}`}>
             <div className="flex items-center justify-between gap-1.5">
-              <span className="truncate text-[11px] font-semibold text-slate-100" title={dim1.title}>
+              <span className="truncate text-[11px] font-bold text-[#0b1636]" title={dim1.title}>
                 {shortDimTitle(dim1.key, dim1.title)}
               </span>
-              <span className={`shrink-0 rounded border px-1.5 py-0.2 text-[9px] font-medium ${riskBadgeMeta(dim1.risk).badge}`}>
+              <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold ${riskBadgeMeta(dim1.risk).badge}`}>
                 {riskBadgeMeta(dim1.risk).label}
               </span>
             </div>
 
             <div className="my-1.5">
               <div className="flex items-baseline justify-between gap-1 font-mono text-[11px] tabular-nums">
-                <span className="text-slate-200">
-                  总计 <strong className="text-white">{totalSockets}</strong>
+                <span className="text-[#31485e]">
+                  总计 <strong className="text-[#0b1636]">{totalSockets}</strong>
                 </span>
-                <span className="text-[10px] text-cyan-300">
+                <span className="text-[10px] font-semibold text-[#0657b8]">
                   EST {established} ({estPct}%) · TW {timeWait} ({twPct}%)
                 </span>
               </div>
-              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-slate-950">
-                <div style={{ width: `${estPct}%` }} className="bg-cyan-500" title={`ESTABLISHED ${established} (${estPct}%)`} />
-                <div style={{ width: `${twPct}%` }} className="bg-emerald-500" title={`TIME_WAIT ${timeWait} (${twPct}%)`} />
-                {synSent > 0 && <div style={{ width: `${synSentPct}%` }} className="bg-rose-500" title={`SYN_SENT ${synSent}`} />}
-                {otherPct > 0 && <div style={{ width: `${otherPct}%` }} className="bg-slate-700" title="其他状态" />}
+              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-[#e2ecf6]">
+                <div style={{ width: `${estPct}%` }} className="bg-[#087bff]" title={`ESTABLISHED ${established} (${estPct}%)`} />
+                <div style={{ width: `${twPct}%` }} className="bg-[#147468]" title={`TIME_WAIT ${timeWait} (${twPct}%)`} />
+                {synSent > 0 && <div style={{ width: `${synSentPct}%` }} className="bg-[#dc2626]" title={`SYN_SENT ${synSent}`} />}
+                {otherPct > 0 && <div style={{ width: `${otherPct}%` }} className="bg-[#94a3b8]" title="其他状态" />}
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-1 border-t border-slate-800/70 pt-1.5 font-mono text-[10px] text-slate-400 tabular-nums">
+            <div className="flex flex-wrap items-center justify-between gap-1 border-t border-[#e1ebf4] pt-1.5 font-mono text-[10px] text-[#4a607a] tabular-nums">
               <span>SYN_SENT {synSent} · RECV {synRecv} · UDP {udpSockets}</span>
-              <span className="text-sky-300">入{incomingEst}⇄出{outboundEst}</span>
+              <span className="font-semibold text-[#0657b8]">入{incomingEst}⇄出{outboundEst}</span>
             </div>
           </div>
         )}
 
         {/* 维度 2：入站并发业务源 */}
         {dim2 && (
-          <div className={`flex min-w-0 flex-col justify-between rounded-lg border p-2.5 ${riskBadgeMeta(dim2.risk).box}`}>
+          <div className={`flex min-w-0 flex-col justify-between rounded-xl border p-2.5 shadow-xs ${riskBadgeMeta(dim2.risk).box}`}>
             <div className="flex items-center justify-between gap-1.5">
-              <span className="truncate text-[11px] font-semibold text-slate-100" title={dim2.title}>
+              <span className="truncate text-[11px] font-bold text-[#0b1636]" title={dim2.title}>
                 {shortDimTitle(dim2.key, dim2.title)}
               </span>
-              <span className={`shrink-0 rounded border px-1.5 py-0.2 text-[9px] font-medium ${riskBadgeMeta(dim2.risk).badge}`}>
+              <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold ${riskBadgeMeta(dim2.risk).badge}`}>
                 {riskBadgeMeta(dim2.risk).label}
               </span>
             </div>
 
             <div className="my-1.5">
               <div className="flex items-baseline justify-between gap-1 font-mono text-[11px] tabular-nums">
-                <span className={inIpsCount >= 10 ? 'text-amber-200' : 'text-slate-200'}>
-                  真实来源 <strong className={inIpsCount >= 10 ? 'text-amber-300' : 'text-cyan-300'}>{inIpsCount}</strong> IP
+                <span className={inIpsCount >= 10 ? 'text-[#9a5b00]' : 'text-[#31485e]'}>
+                  真实来源 <strong className={inIpsCount >= 10 ? 'text-[#b45309]' : 'text-[#087bff]'}>{inIpsCount}</strong> IP
                 </span>
-                <span className="text-[10px] text-slate-300">
+                <span className="text-[10px] text-[#4a607a]">
                   入站活跃 {incomingEst} 条
                 </span>
               </div>
-              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-slate-950">
+              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-[#e2ecf6]">
                 <div
                   style={{ width: `${Math.min(100, Math.max(6, Math.round((inIpsCount / 15) * 100)))}%` }}
-                  className={inIpsCount >= 10 ? 'bg-amber-400' : 'bg-cyan-500'}
+                  className={inIpsCount >= 10 ? 'bg-[#d97706]' : 'bg-[#087bff]'}
                 />
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-1 border-t border-slate-800/70 pt-1.5 font-mono text-[10px] text-slate-400 tabular-nums">
+            <div className="flex flex-wrap items-center justify-between gap-1 border-t border-[#e1ebf4] pt-1.5 font-mono text-[10px] text-[#4a607a] tabular-nums">
               <span>未建连探测 {m2.inbound_syn_recv_unique_ips ?? 0} IP</span>
               {effectiveInv?.relay_ips ? (
-                <span className="text-amber-300">中继 {effectiveInv.relay_ips} IP</span>
+                <span className="font-semibold text-[#9a5b00]">中继 {effectiveInv.relay_ips} IP</span>
               ) : m2.socks_detected ? (
-                <span className="text-rose-300">SOCKS5({m2.socks_auth_mode || 'unknown'})</span>
+                <span className="font-semibold text-[#b41835]">SOCKS5({m2.socks_auth_mode || 'unknown'})</span>
               ) : (
-                <span className="text-slate-300">独立网络 ~{effectiveInv?.estimated_independent_sources?.low ?? 1} 个</span>
+                <span className="text-[#31485e]">独立网络 ~{effectiveInv?.estimated_independent_sources?.low ?? 1} 个</span>
               )}
             </div>
           </div>
@@ -423,39 +423,39 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
 
         {/* 维度 3：出站目标与进程画像 */}
         {dim3 && (
-          <div className={`flex min-w-0 flex-col justify-between rounded-lg border p-2.5 ${riskBadgeMeta(dim3.risk).box}`}>
+          <div className={`flex min-w-0 flex-col justify-between rounded-xl border p-2.5 shadow-xs ${riskBadgeMeta(dim3.risk).box}`}>
             <div className="flex items-center justify-between gap-1.5">
-              <span className="truncate text-[11px] font-semibold text-slate-100" title={dim3.title}>
+              <span className="truncate text-[11px] font-bold text-[#0b1636]" title={dim3.title}>
                 {shortDimTitle(dim3.key, dim3.title)}
               </span>
-              <span className={`shrink-0 rounded border px-1.5 py-0.2 text-[9px] font-medium ${riskBadgeMeta(dim3.risk).badge}`}>
+              <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold ${riskBadgeMeta(dim3.risk).badge}`}>
                 {riskBadgeMeta(dim3.risk).label}
               </span>
             </div>
 
             <div className="my-1.5">
               <div className="flex items-baseline justify-between gap-1 font-mono text-[11px] tabular-nums">
-                <span className="text-slate-200">
-                  出站活跃 <strong className="text-white">{outboundEst}</strong>
+                <span className="text-[#31485e]">
+                  出站活跃 <strong className="text-[#0b1636]">{outboundEst}</strong>
                 </span>
-                <span className="text-[10px] text-slate-300">
+                <span className="text-[10px] text-[#4a607a]">
                   目标 {outIpsCount} IP / {outPortsCount} 端口
                 </span>
               </div>
-              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-slate-950">
+              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-[#e2ecf6]">
                 <div
                   style={{ width: `${suspiciousOut > 0 ? Math.min(100, suspiciousOut * 15) : Math.min(100, Math.max(5, Math.round((outIpsCount / 60) * 100)))}%` }}
-                  className={suspiciousOut >= 5 ? 'bg-rose-500' : 'bg-emerald-500'}
+                  className={suspiciousOut >= 5 ? 'bg-[#dc2626]' : 'bg-[#147468]'}
                 />
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-1 border-t border-slate-800/70 pt-1.5 font-mono text-[10px] text-slate-400 tabular-nums">
-              <span className={suspiciousOut >= 5 ? 'text-rose-300 font-semibold' : ''}>
+            <div className="flex items-center justify-between gap-1 border-t border-[#e1ebf4] pt-1.5 font-mono text-[10px] text-[#4a607a] tabular-nums">
+              <span className={suspiciousOut >= 5 ? 'font-bold text-[#b41835]' : ''}>
                 敏感端口 {suspiciousOut}
               </span>
               {primaryProc ? (
-                <span className="min-w-0 truncate text-cyan-300" title={`${primaryProc.process}(PID ${primaryProc.pid}, 入${primaryProc.inbound_connections ?? 0}/出${primaryProc.outbound_connections ?? 0})`}>
+                <span className="min-w-0 truncate font-semibold text-[#0657b8]" title={`${primaryProc.process}(PID ${primaryProc.pid}, 入${primaryProc.inbound_connections ?? 0}/出${primaryProc.outbound_connections ?? 0})`}>
                   {primaryProc.process} (PID {primaryProc.pid})
                 </span>
               ) : (
@@ -467,35 +467,35 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
 
         {/* 维度 4：包速率与带宽特征 */}
         {dim4 && (
-          <div className={`flex min-w-0 flex-col justify-between rounded-lg border p-2.5 ${riskBadgeMeta(dim4.risk).box}`}>
+          <div className={`flex min-w-0 flex-col justify-between rounded-xl border p-2.5 shadow-xs ${riskBadgeMeta(dim4.risk).box}`}>
             <div className="flex items-center justify-between gap-1.5">
-              <span className="truncate text-[11px] font-semibold text-slate-100" title={dim4.title}>
+              <span className="truncate text-[11px] font-bold text-[#0b1636]" title={dim4.title}>
                 {shortDimTitle(dim4.key, dim4.title)}
               </span>
-              <span className={`shrink-0 rounded border px-1.5 py-0.2 text-[9px] font-medium ${riskBadgeMeta(dim4.risk).badge}`}>
+              <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold ${riskBadgeMeta(dim4.risk).badge}`}>
                 {riskBadgeMeta(dim4.risk).label}
               </span>
             </div>
 
             <div className="my-1.5">
               <div className="flex items-baseline justify-between gap-1 font-mono text-[11px] tabular-nums">
-                <span className="text-slate-200">
-                  TX <strong className="text-white">{txPps}</strong> · RX <strong className="text-white">{rxPps}</strong> pps
+                <span className="text-[#31485e]">
+                  TX <strong className="text-[#0b1636]">{txPps}</strong> · RX <strong className="text-[#0b1636]">{rxPps}</strong> pps
                 </span>
-                <span className="text-[10px] text-slate-300">
+                <span className="text-[10px] text-[#4a607a]">
                   均包 {avgPkt} B
                 </span>
               </div>
-              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-slate-950">
+              <div className="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-[#e2ecf6]">
                 <div
                   style={{ width: `${Math.min(100, Math.max(6, Math.round((Math.max(txPps, rxPps) / 1500) * 100)))}%` }}
-                  className={txPps >= 1500 && avgPkt <= 160 ? 'bg-rose-500' : 'bg-emerald-500'}
+                  className={txPps >= 1500 && avgPkt <= 160 ? 'bg-[#dc2626]' : 'bg-[#147468]'}
                 />
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-1 border-t border-slate-800/70 pt-1.5 font-mono text-[10px] text-slate-400 tabular-nums">
-              <span className="truncate text-emerald-300">
+            <div className="flex items-center justify-between gap-1 border-t border-[#e1ebf4] pt-1.5 font-mono text-[10px] text-[#4a607a] tabular-nums">
+              <span className="truncate font-semibold text-[#147468]">
                 {avgPkt >= 500
                   ? '大包吞吐 (Web/传输)'
                   : txPps >= 1500 && avgPkt <= 160
@@ -510,11 +510,11 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
         )}
       </div>
 
-      {/* 3. 运营场景内联评估条（单行药丸化，替代高大四卡片） */}
+      {/* 3. 运营场景内联评估条 */}
       {scenarios.length > 0 && (
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800/90 bg-slate-900/55 px-2.5 py-1.5">
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#cedae7] bg-white px-3 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <span className="shrink-0 text-[10px] font-semibold text-slate-300">
+            <span className="shrink-0 text-[10px] font-bold text-[#0b1636]">
               场景评估：
             </span>
             {scenarios.map((sc) => {
@@ -523,51 +523,51 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
                 <span
                   key={sc.key}
                   title={`${sc.label}（${meta.fullLabel}）：${sc.basis}`}
-                  className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${meta.pill}`}
+                  className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${meta.pill}`}
                 >
                   <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} aria-hidden="true" />
-                  <span className="truncate max-w-[11rem]">{sc.label.replace(/（.*?）/g, '')}</span>
-                  <span className="font-mono text-[9px] opacity-85">{meta.label}</span>
+                  <span className="max-w-[11rem] truncate">{sc.label.replace(/（.*?）/g, '')}</span>
+                  <span className="font-mono text-[9px] font-bold">{meta.label}</span>
                 </span>
               );
             })}
           </div>
           {topScenario && (
-            <span className="min-w-0 truncate text-[10px] text-slate-400 tabular-nums" title={topScenario.basis}>
+            <span className="min-w-0 truncate text-[10px] text-[#4a607a] tabular-nums" title={topScenario.basis}>
               首要倾向：{topScenario.basis}
             </span>
           )}
         </div>
       )}
 
-      {/* 4. 按需折叠明细区（采用原生 <details> 保持 Find-in-page 可检索与键盘无障碍，双列网格消除留白） */}
-      <details className="group mt-2 rounded-lg border border-slate-800/80 bg-slate-900/40">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-[11px] select-none transition-colors hover:bg-slate-800/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 [&::-webkit-details-marker]:hidden">
-          <span className="inline-flex items-center gap-1.5 font-medium text-sky-300">
+      {/* 4. 按需折叠明细区 */}
+      <details className="group mt-2 rounded-xl border border-[#cedae7] bg-white">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-xl px-3 py-2 text-[11px] select-none transition-colors hover:bg-[#f4f8fd] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#087bff] [&::-webkit-details-marker]:hidden">
+          <span className="inline-flex items-center gap-1.5 font-bold text-[#0657b8]">
             <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform duration-150 group-open:rotate-90" aria-hidden="true" />
             <span className="group-open:hidden">展开 IP 与诊断明细</span>
             <span className="hidden group-open:inline">收起明细</span>
           </span>
-          <span className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-slate-400 tabular-nums">
+          <span className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-[#4a607a] tabular-nums">
             <span>入站样本 {inboundIpDetails.length} IP</span>
             {outboundIpDetails.length > 0 && <span>· 出站样本 {outboundIpDetails.length} IP</span>}
             {aggregatedSourceNetworks.length > 0 && (
-              <span className="hidden sm:inline text-slate-300">
+              <span className="hidden text-[#31485e] sm:inline">
                 · 网络聚类：{aggregatedSourceNetworks.slice(0, 2).map((g) => `${g.label}(${g.ips}IP)`).join(' / ')}
               </span>
             )}
           </span>
         </summary>
 
-        <div className="space-y-2.5 border-t border-slate-800/80 p-2.5">
+        <div className="space-y-2.5 border-t border-[#dce5ef] bg-[#f4f8fd] p-3">
           {/* 来源网络去重聚合条 */}
           {aggregatedSourceNetworks.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 rounded border border-slate-800/90 bg-slate-950/70 px-2.5 py-1.5 text-[10px] text-slate-300 tabular-nums">
-              <span className="font-semibold text-slate-200">来源网络去重透视：</span>
+            <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[#cedae7] bg-white px-2.5 py-2 text-[10px] text-[#31485e] tabular-nums">
+              <span className="font-bold text-[#0b1636]">来源网络去重透视：</span>
               {aggregatedSourceNetworks.map((net, i) => (
                 <span
                   key={`${net.label}-${i}`}
-                  className="rounded border border-slate-800 bg-slate-900/90 px-1.5 py-0.5 font-mono text-slate-200"
+                  className="rounded border border-[#d2dfec] bg-[#f4f8fd] px-1.5 py-0.5 font-mono text-[#0b1636]"
                 >
                   {net.label} ({net.ips} IP · {net.conns} 活跃{net.asns.length > 0 ? ` · ${net.asns.join('/')}` : ''})
                 </span>
@@ -578,14 +578,14 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
           {/* 入站并发来源 IP 双列紧凑网格 */}
           {inboundIpDetails.length > 0 && (
             <div>
-              <div className="mb-1.5 flex items-center justify-between text-[10px] text-slate-400">
-                <span className="inline-flex items-center gap-1 font-semibold text-slate-200">
-                  <ArrowDownLeft className="h-3 w-3 text-cyan-400" aria-hidden="true" />
+              <div className="mb-1.5 flex items-center justify-between text-[10px] text-[#4a607a]">
+                <span className="inline-flex items-center gap-1 font-bold text-[#0b1636]">
+                  <ArrowDownLeft className="h-3 w-3 text-[#087bff]" aria-hidden="true" />
                   <span>入站已建连公网来源明细 (Top {Math.min(inboundIpDetails.length, 8)})</span>
                 </span>
                 <span className="font-mono tabular-nums">已排除仅 SYN 探测未建连 IP</span>
               </div>
-              <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2 font-mono text-[11px] tabular-nums">
+              <div className="grid grid-cols-1 gap-1.5 font-mono text-[11px] tabular-nums md:grid-cols-2">
                 {inboundIpDetails.slice(0, 8).map((item: SocketAbuseIpDetail) => {
                   const fallbackGeo = [
                     item.country_name || (item.country && item.country !== 'UN' ? item.country : ''),
@@ -603,17 +603,17 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
                   return (
                     <div
                       key={item.ip}
-                      className="flex min-w-0 items-center justify-between gap-2 rounded border border-slate-800/90 bg-slate-950/85 px-2.5 py-1.5"
+                      className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-[#cedae7] bg-white px-2.5 py-1.5"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="font-semibold text-sky-300">{item.ip}</span>
+                          <span className="break-all font-bold text-[#0657b8]">{item.ip}</span>
                           {item.network_label && (
                             <span
-                              className={`rounded px-1 py-0.2 text-[9px] font-sans ${
+                              className={`rounded px-1 py-0.5 font-sans text-[9px] font-semibold ${
                                 isRelay
-                                  ? 'border border-amber-700/50 bg-amber-950/70 text-amber-200'
-                                  : 'bg-indigo-950/65 text-indigo-200'
+                                  ? 'border border-[#f7d58b] bg-[#fef6e4] text-[#9a5b00]'
+                                  : 'border border-indigo-200 bg-indigo-50 text-indigo-800'
                               }`}
                             >
                               {item.network_label}
@@ -621,14 +621,14 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
                           )}
                         </div>
                         {geoText && (
-                          <div className="mt-0.5 truncate font-sans text-[10px] text-slate-400" title={geoText}>
+                          <div className="mt-0.5 truncate font-sans text-[10px] text-[#4a607a]" title={geoText}>
                             {geoText}
                           </div>
                         )}
                       </div>
-                      <div className="shrink-0 text-right text-[10px] text-slate-300">
+                      <div className="shrink-0 text-right text-[10px] text-[#31485e]">
                         <div>已建连 {item.established_connections ?? 0} / 总 {item.connections ?? 0}</div>
-                        {portsText && <div className="text-sky-300">{portsText}</div>}
+                        {portsText && <div className="font-semibold text-[#0657b8]">{portsText}</div>}
                       </div>
                     </div>
                   );
@@ -640,18 +640,18 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
           {/* 出站目标 IP 双列紧凑网格 */}
           {outboundIpDetails.length > 0 && (
             <div>
-              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1 text-[10px] text-slate-400">
-                <span className="inline-flex items-center gap-1 font-semibold text-slate-200">
-                  <ArrowUpRight className="h-3 w-3 text-emerald-400" aria-hidden="true" />
+              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1 text-[10px] text-[#4a607a]">
+                <span className="inline-flex items-center gap-1 font-bold text-[#0b1636]">
+                  <ArrowUpRight className="h-3 w-3 text-[#147468]" aria-hidden="true" />
                   <span>出站访问目标公网明细 (Top {Math.min(outboundIpDetails.length, 6)})</span>
                 </span>
                 {inv?.outbound_orgs && inv.outbound_orgs.length > 0 && (
-                  <span className="font-mono text-slate-300">
+                  <span className="font-mono text-[#31485e]">
                     目标归属：{inv.outbound_orgs.slice(0, 4).map((o) => `${o.org}(${o.connections})`).join(' · ')}
                   </span>
                 )}
               </div>
-              <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2 font-mono text-[11px] tabular-nums">
+              <div className="grid grid-cols-1 gap-1.5 font-mono text-[11px] tabular-nums md:grid-cols-2">
                 {outboundIpDetails.slice(0, 6).map((item: SocketAbuseIpDetail) => {
                   const fallbackGeo = [
                     item.country_name || (item.country && item.country !== 'UN' ? item.country : ''),
@@ -668,19 +668,19 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
                   return (
                     <div
                       key={item.ip}
-                      className="flex min-w-0 items-center justify-between gap-2 rounded border border-slate-800/90 bg-slate-950/85 px-2.5 py-1.5"
+                      className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-[#cedae7] bg-white px-2.5 py-1.5"
                     >
                       <div className="min-w-0 flex-1">
-                        <span className="font-semibold text-sky-300">{item.ip}</span>
+                        <span className="break-all font-bold text-[#0657b8]">{item.ip}</span>
                         {geoText && (
-                          <div className="mt-0.5 truncate font-sans text-[10px] text-emerald-200/90" title={geoText}>
+                          <div className="mt-0.5 truncate font-sans text-[10px] text-[#147468]" title={geoText}>
                             {geoText}
                           </div>
                         )}
                       </div>
-                      <div className="shrink-0 text-right text-[10px] text-slate-300">
+                      <div className="shrink-0 text-right text-[10px] text-[#31485e]">
                         <div>活跃 {item.established_connections ?? 0} / 总 {item.connections ?? 0}</div>
-                        {portsText && <div className="text-slate-400">{portsText}</div>}
+                        {portsText && <div className="text-[#4a607a]">{portsText}</div>}
                       </div>
                     </div>
                   );
@@ -689,12 +689,12 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
             </div>
           )}
 
-          {/* 捕获到的代理进程启动参数（含脱敏与一键复制排查命令） */}
+          {/* 捕获到的代理进程启动参数 */}
           {Array.isArray(effectiveInv?.proxy_processes) && effectiveInv.proxy_processes.length > 0 && (
-            <div className="rounded border border-slate-800 bg-slate-950/80 p-2">
+            <div className="rounded-lg border border-[#cedae7] bg-white p-2.5">
               <div className="flex items-center justify-between text-[10px]">
-                <span className="inline-flex items-center gap-1 font-semibold text-sky-200">
-                  <Terminal className="h-3 w-3 text-sky-400" aria-hidden="true" />
+                <span className="inline-flex items-center gap-1 font-bold text-[#0657b8]">
+                  <Terminal className="h-3 w-3 text-[#087bff]" aria-hidden="true" />
                   <span>检测到活跃代理进程与启动命令 (密码/密钥已自动脱敏)</span>
                 </span>
               </div>
@@ -702,28 +702,28 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
                 {effectiveInv.proxy_processes.map((proc: SocketAbuseProcessCommand) => (
                   <div
                     key={proc.pid}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-800 bg-slate-900/90 px-2.5 py-1.5"
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#dce5ef] bg-[#f4f8fd] px-2.5 py-1.5"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2 text-[10px]">
-                        <span className="rounded bg-sky-950 px-1.5 py-0.5 text-sky-300">
+                        <span className="rounded border border-[#a9d1ff] bg-[#e8f3ff] px-1.5 py-0.5 font-semibold text-[#0657b8]">
                           {proc.process} (PID {proc.pid})
                         </span>
                         {Array.isArray(proc.listeners) && proc.listeners.length > 0 && (
-                          <span className="text-emerald-400">监听: {proc.listeners.join(', ')}</span>
+                          <span className="font-semibold text-[#147468]">监听: {proc.listeners.join(', ')}</span>
                         )}
                         {Array.isArray(proc.forwards) && proc.forwards.length > 0 && (
-                          <span className="text-amber-400">转发: {proc.forwards.join(', ')}</span>
+                          <span className="font-semibold text-[#9a5b00]">转发: {proc.forwards.join(', ')}</span>
                         )}
                       </div>
-                      <div className="mt-0.5 break-all text-[10px] text-slate-300">{proc.command}</div>
+                      <div className="mt-0.5 break-all text-[10px] text-[#31485e]">{proc.command}</div>
                     </div>
                     <button
                       type="button"
                       onClick={() => handleCopyCmd(proc.command, proc.pid)}
-                      className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[10px] text-slate-200 hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-sky-300"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[#cedae7] bg-white px-2 py-1 text-[10px] font-semibold text-[#0b1636] hover:border-[#087bff] hover:text-[#08458c]"
                     >
-                      {copiedPid === proc.pid ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                      {copiedPid === proc.pid ? <Check className="h-3 w-3 text-[#147468]" aria-hidden="true" /> : <Copy className="h-3 w-3" aria-hidden="true" />}
                       <span>{copiedPid === proc.pid ? '已复制' : '复制命令'}</span>
                     </button>
                   </div>
@@ -733,35 +733,35 @@ export const SocketAbuseEvidence: React.FC<SocketAbuseEvidenceProps> = ({
           )}
 
           {/* 四维文字详述与场景完整依据双列面板 */}
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 text-[10px] text-slate-400">
-            <div className="space-y-1 rounded border border-slate-800/80 bg-slate-950/60 p-2">
-              <div className="flex items-center gap-1 font-semibold text-slate-300">
-                <Activity className="h-3 w-3 text-sky-400" aria-hidden="true" />
+          <div className="grid grid-cols-1 gap-2 text-[10px] text-[#31485e] md:grid-cols-2">
+            <div className="space-y-1 rounded-lg border border-[#cedae7] bg-white p-2.5">
+              <div className="flex items-center gap-1 font-bold text-[#0b1636]">
+                <Activity className="h-3 w-3 text-[#087bff]" aria-hidden="true" />
                 <span>四维指标诊断说明</span>
               </div>
               {dimensions.map((d) => (
                 <div key={d.key} className="leading-relaxed">
-                  <span className="font-medium text-slate-200">{shortDimTitle(d.key, d.title)}：</span>
+                  <span className="font-semibold text-[#0b1636]">{shortDimTitle(d.key, d.title)}：</span>
                   <span>{d.summary}</span>
                 </div>
               ))}
             </div>
 
             {effectiveInv && (
-              <div className="space-y-1 rounded border border-slate-800/80 bg-slate-950/60 p-2">
-                <div className="flex items-center gap-1 font-semibold text-slate-300">
-                  <Gauge className="h-3 w-3 text-amber-400" aria-hidden="true" />
+              <div className="space-y-1 rounded-lg border border-[#cedae7] bg-white p-2.5">
+                <div className="flex items-center gap-1 font-bold text-[#0b1636]">
+                  <Gauge className="h-3 w-3 text-[#d97706]" aria-hidden="true" />
                   <span>场景评估依据与排查边界</span>
                 </div>
                 {scenarios.map((sc) => (
                   <div key={sc.key} className="leading-relaxed">
-                    <span className="font-medium text-slate-200">{sc.label} ({scenarioMeta(sc.likelihood).fullLabel})：</span>
+                    <span className="font-semibold text-[#0b1636]">{sc.label} ({scenarioMeta(sc.likelihood).fullLabel})：</span>
                     <span>{sc.basis}</span>
                   </div>
                 ))}
                 {Array.isArray(effectiveInv.notes) && effectiveInv.notes.map((note, idx) => (
-                  <div key={idx} className="flex items-start gap-1 text-slate-400">
-                    <span className="text-sky-400">•</span>
+                  <div key={idx} className="flex items-start gap-1 text-[#4a607a]">
+                    <span className="text-[#087bff]">•</span>
                     <span>{note}</span>
                   </div>
                 ))}

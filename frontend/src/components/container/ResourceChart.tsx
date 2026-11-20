@@ -19,7 +19,7 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
     if (!chartRef.current) return;
 
     if (!chartInstance.current) {
-      chartInstance.current = echarts.init(chartRef.current, 'dark');
+      chartInstance.current = echarts.init(chartRef.current);
     }
 
     const timestamps = history.map((h) => h.timestamp_iso_utc8?.split(' ')[1] || '');
@@ -30,17 +30,23 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
-        backgroundColor: 'rgba(15, 23, 42, 0.95)',
-        borderColor: '#334155',
-        textStyle: { color: '#f8fafc', fontSize: 12, fontFamily: 'Fira Sans' },
+        backgroundColor: '#ffffff',
+        borderColor: '#cedae7',
+        borderWidth: 1,
+        textStyle: {
+          color: '#0b1636',
+          fontSize: 12,
+          fontFamily: "'Plus Jakarta Sans', 'Segoe UI', sans-serif",
+        },
+        extraCssText: 'box-shadow: 0 8px 24px -10px rgba(7, 51, 101, 0.22); border-radius: 10px;',
         formatter: (params: any) => {
           if (!Array.isArray(params) || params.length === 0) return '';
           const time = params[0].name;
-          let html = `<div class="font-mono font-bold text-xs mb-1 text-slate-300">${time}</div>`;
+          let html = `<div style="font-family:Inconsolata,'Fira Code',monospace;font-weight:700;font-size:12px;margin-bottom:4px;color:#31485e">${time}</div>`;
           params.forEach((p: any) => {
-            html += `<div class="flex items-center justify-between gap-4 text-xs">
-              <span style="color:${p.color}">● ${p.seriesName}</span>
-              <span class="font-mono font-bold">${p.value}%</span>
+            html += `<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:#0b1636">
+              <span style="color:${p.color};font-weight:600">● ${p.seriesName}</span>
+              <span style="font-family:Inconsolata,'Fira Code',monospace;font-weight:700;color:#0b1636">${p.value}%</span>
             </div>`;
           });
           return html;
@@ -48,7 +54,7 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
       },
       legend: {
         data: ['CPU %', '内存 %'],
-        textStyle: { color: '#94a3b8', fontSize: 11 },
+        textStyle: { color: '#475569', fontSize: 11 },
         top: 0,
         right: 10,
       },
@@ -62,17 +68,17 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
         type: 'category',
         data: timestamps,
         boundaryGap: false,
-        axisLine: { lineStyle: { color: '#334155' } },
-        axisLabel: { color: '#64748b', fontSize: 10, fontFamily: 'Fira Code' },
+        axisLine: { lineStyle: { color: '#cedae7' } },
+        axisLabel: { color: '#475569', fontSize: 10, fontFamily: "Inconsolata, 'Fira Code', monospace" },
       },
       yAxis: {
         type: 'value',
         max: 100,
-        splitLine: { lineStyle: { color: '#1e293b' } },
+        splitLine: { lineStyle: { color: '#e1ebf4' } },
         axisLabel: {
-          color: '#64748b',
+          color: '#475569',
           fontSize: 10,
-          fontFamily: 'Fira Code',
+          fontFamily: "Inconsolata, 'Fira Code', monospace",
           formatter: '{value}%',
         },
       },
@@ -83,12 +89,12 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
           smooth: true,
           showSymbol: false,
           data: cpuSeries,
-          itemStyle: { color: '#38bdf8' },
+          itemStyle: { color: '#087bff' },
           lineStyle: { width: 2 },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(56, 189, 248, 0.25)' },
-              { offset: 1, color: 'rgba(56, 189, 248, 0.0)' },
+              { offset: 0, color: 'rgba(8, 123, 255, 0.22)' },
+              { offset: 1, color: 'rgba(8, 123, 255, 0.0)' },
             ]),
           },
         },
@@ -98,12 +104,12 @@ export const ResourceChart: React.FC<ResourceChartProps> = ({ history }) => {
           smooth: true,
           showSymbol: false,
           data: memSeries,
-          itemStyle: { color: '#22c55e' },
+          itemStyle: { color: '#ff6b00' },
           lineStyle: { width: 2 },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(34, 197, 94, 0.25)' },
-              { offset: 1, color: 'rgba(34, 197, 94, 0.0)' },
+              { offset: 0, color: 'rgba(255, 107, 0, 0.20)' },
+              { offset: 1, color: 'rgba(255, 107, 0, 0.0)' },
             ]),
           },
         },

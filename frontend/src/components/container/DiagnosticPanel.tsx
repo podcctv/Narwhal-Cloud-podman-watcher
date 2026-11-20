@@ -108,33 +108,35 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   const inboundSourceAssessmentByIp = new Map(
     (inboundSourceHistory?.assessments || []).map((item) => [item.ip, item]),
   );
+
   const inboundBehaviorLabels: Record<string, { label: string; className: string; detail: string }> = {
     repeated_established_listener_transport: {
       label: '重复连接到已监听端口',
-      className: 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200',
+      className: 'border-[#b4e4dc] bg-[#e6f7f4] text-[#147468]',
       detail: '近几次采样都观察到该 IP 与容器监听端口建立 TCP 连接并收到回包。它只证明传输层连接被接受；扫描器也能完成握手，不能证明有正常业务数据或确认用户身份。',
     },
     repeated_uncompleted_multiport_probe: {
       label: '重复探测多个非监听端口',
-      className: 'border-amber-500/30 bg-amber-950/30 text-amber-200',
+      className: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]',
       detail: '同一 IP 在多次采样中访问多个没有本地监听服务的端口，且多数连接未完成；这是较强的扫描行为线索，不等于已证明恶意。',
     },
     mixed_repeated_listener_transport_and_probe_clues: {
       label: '监听端口连接与多端口探测线索并存',
-      className: 'border-amber-500/30 bg-amber-950/30 text-amber-200',
+      className: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]',
       detail: '该 IP 既出现监听端口的已建立连接，也出现多端口未完成连接；这些只是传输层线索，不能据此确认业务、恶意意图或客户身份。',
     },
     mixed_single_sample_clues: {
       label: '单次快照线索混合',
-      className: 'border-slate-700 bg-slate-900 text-slate-300',
+      className: 'border-[#cedae7] bg-white text-[#31485e]',
       detail: '服务访问和未完成连接线索都只出现于有限采样，证据不足以分类。',
     },
     insufficient_evidence: {
       label: '历史证据不足',
-      className: 'border-slate-700 bg-slate-900 text-slate-300',
+      className: 'border-[#cedae7] bg-white text-[#31485e]',
       detail: '当前历史窗口没有足够的重复 conntrack 证据；不能据此判断是用户业务还是扫描。',
     },
   };
+
   const inboundBehaviorCounts = (inboundSourceHistory?.assessments || []).reduce(
     (counts, item) => {
       if (item.classification === 'repeated_established_listener_transport') counts.listener += 1;
@@ -145,6 +147,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     },
     { listener: 0, probe: 0, mixed: 0, unknown: 0 },
   );
+
   const automaticReputationCandidates = useMemo(() => {
     const candidates = sample?.inbound_ips?.length
       ? sample.inbound_ips
@@ -162,10 +165,12 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
       .slice(0, 5)
       .map((ip) => ip.ip as string);
   }, [sample?.inbound_ips, sample?.connection_ips]);
+
   const highlyReportedInboundIps = inboundIps.filter((ip) => {
     const result = reputationByIp[ip.ip || ''];
     return result?.status === 'checked' && Number(result.abuse_confidence_score || 0) >= 75;
   });
+
   const diagnosticSnapshotId = action?.id ?? sample?.report_timestamp_utc8 ?? '';
   const reputationLookupScope = [
     identity.host_id,
@@ -181,9 +186,6 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
   const reputationSampleFresh = sampleAgeSeconds >= -60 && sampleAgeSeconds <= 24 * 60 * 60;
 
   React.useEffect(() => {
-    // Alert-driven deep samples have a non-zero alert_id, so the manual-action
-    // status endpoint can return action=null while a valid sample is available.
-    // Pending/failed manual actions still suppress old data.
     const sampleIsComplete = !action || action.status === 'succeeded';
     if (!reputationConfigured || isStale || !sampleIsComplete || !reputationSampleFresh || !sample || !diagnosticSnapshotId) return;
     let active = true;
@@ -193,8 +195,6 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
         if (reputationLookupsStarted.current.has(lookupKey)) continue;
         let result = await checkReputation(ip);
         if (!active) return;
-        // Retry only transient network/server failures once. Invalid keys and
-        // quota errors are terminal and must not consume more provider calls.
         if (result?.retryable) {
           await new Promise(resolve => setTimeout(resolve, 1500));
           if (!active) return;
@@ -207,6 +207,7 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
     void checkTopInboundIps();
     return () => { active = false; };
   }, [action, automaticReputationCandidates, checkReputation, diagnosticSnapshotId, isStale, reputationConfigured, reputationLookupScope, reputationSampleFresh, sample]);
+
   const attribution = sample?.connection_attribution;
   const attributionUnavailable = connectionAttributionUnavailable(attribution, sample?.connection_count);
   const connectionSockets = sample?.communication_sockets || [];
@@ -228,32 +229,37 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
 
   const getConnectionOrigin = (socket: NonNullable<typeof connectionSockets>[number]) => {
     const confidence = socket.origin_confidence || 'unknown';
-    if (confidence === 'mixed') return { label: '方向证据冲突', className: 'border-rose-500/30 bg-rose-950/30 text-rose-200' };
+    if (confidence === 'mixed') return { label: '方向证据冲突', className: 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]' };
     if (socket.direction === 'outbound') {
       return confidence === 'confirmed'
-        ? { label: '本地进程发起 · 已确认', className: 'border-sky-500/30 bg-sky-950/30 text-sky-200' }
+        ? { label: '本地进程发起 · 已确认', className: 'border-[#9ccaff] bg-[#e8f3ff] text-[#0657b8]' }
         : confidence === 'probable'
-          ? { label: '本地进程发起 · 推定', className: 'border-amber-500/30 bg-amber-950/30 text-amber-200' }
-          : { label: '本机出站 · 发起方待核实', className: 'border-slate-700 bg-slate-900 text-slate-300' };
+          ? { label: '本地进程发起 · 推定', className: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]' }
+          : { label: '本机出站 · 发起方待核实', className: 'border-[#cedae7] bg-[#eef3f9] text-[#31485e]' };
     }
     if (socket.direction === 'inbound') {
       return confidence === 'confirmed'
-        ? { label: '外部发起 · 已确认', className: 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200' }
+        ? { label: '外部发起 · 已确认', className: 'border-[#b4e4dc] bg-[#e6f7f4] text-[#147468]' }
         : confidence === 'probable'
-          ? { label: '外部发起 · 推定', className: 'border-amber-500/30 bg-amber-950/30 text-amber-200' }
-          : { label: '外部入站 · 发起方待核实', className: 'border-slate-700 bg-slate-900 text-slate-300' };
+          ? { label: '外部发起 · 推定', className: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]' }
+          : { label: '外部入站 · 发起方待核实', className: 'border-[#cedae7] bg-[#eef3f9] text-[#31485e]' };
     }
-    return { label: '发起方未知', className: 'border-slate-700 bg-slate-900 text-slate-300' };
+    return { label: '发起方未知', className: 'border-[#cedae7] bg-[#eef3f9] text-[#31485e]' };
   };
 
   const renderIpGroup = (title: string, description: string, ips: typeof inboundIps, direction: 'inbound' | 'outbound' | 'unknown') => (
     <div>
-      <h4 className="text-xs font-bold text-slate-200 mb-1 flex items-center gap-1.5">
-        <Globe className={`h-3.5 w-3.5 ${direction === 'inbound' ? 'text-emerald-400' : direction === 'outbound' ? 'text-sky-400' : 'text-amber-400'}`} />
+      <h4 className="mb-1 flex items-center gap-1.5 text-xs font-extrabold text-[#0e233c]">
+        <Globe
+          className={`h-3.5 w-3.5 ${
+            direction === 'inbound' ? 'text-[#147468]' : direction === 'outbound' ? 'text-[#087bff]' : 'text-[#9a5b00]'
+          }`}
+          aria-hidden="true"
+        />
         <span>{title} ({ips.length})</span>
       </h4>
-      <p className="mb-2 text-[11px] text-slate-500">{description}</p>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto font-mono text-xs">
+      <p className="mb-2 text-[11px] text-[#4a607a]">{description}</p>
+      <div className="grid max-h-56 grid-cols-1 gap-2.5 overflow-y-auto font-mono text-xs sm:grid-cols-2">
         {ips.map((ip, idx) => {
           const evidence = direction === 'inbound' ? ip.network_evidence : undefined;
           const reputation = direction === 'inbound' ? reputationByIp[ip.ip || ''] : undefined;
@@ -272,29 +278,53 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
               : originConfidence === 'mixed'
                 ? '方向证据不一致，暂不归因；请以单条连接详情和下一次采样复核。'
                 : originConfidence === 'probable'
-                ? '更像是外部远端连接到容器服务；但监听端口/已建立状态不能单独证明原始发起方，请优先参考 conntrack 五元组。'
-                : '这是入站连接；旧版或不完整快照未保存足够的方向证据，请重新采样核实。'
+                  ? '更像是外部远端连接到容器服务；但监听端口/已建立状态不能单独证明原始发起方，请优先参考 conntrack 五元组。'
+                  : '这是入站连接；旧版或不完整快照未保存足够的方向证据，请重新采样核实。'
             : direction === 'outbound'
               ? originConfidence === 'confirmed'
                 ? '已确认由容器内本地进程发起（TCP 握手或 conntrack 五元组确认本端是原始发起方）。'
                 : originConfidence === 'mixed'
                   ? '方向证据不一致，暂不归因；请以单条连接详情和下一次采样复核。'
                   : originConfidence === 'probable'
-                  ? '较可能由容器内本地进程发起。已建立连接的快照看不到最初握手；这是方向推定，不是绝对证明。'
-                  : '当前快照无法确认连接发起方。'
+                    ? '较可能由容器内本地进程发起。已建立连接的快照看不到最初握手；这是方向推定，不是绝对证明。'
+                    : '当前快照无法确认连接发起方。'
               : '采样没有足够证据确定连接方向；不要据此归因给客户或自动判定恶意。';
           const originTone = originConfidence === 'confirmed'
-            ? direction === 'inbound' ? 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200' : 'border-sky-500/30 bg-sky-950/30 text-sky-200'
+            ? direction === 'inbound'
+              ? 'border-[#b4e4dc] bg-[#e6f7f4] text-[#147468]'
+              : 'border-[#9ccaff] bg-[#e8f3ff] text-[#0657b8]'
             : originConfidence === 'mixed'
-              ? 'border-rose-500/30 bg-rose-950/30 text-rose-200'
-            : 'border-amber-500/30 bg-amber-950/30 text-amber-200';
+              ? 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]'
+              : 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]';
+
           const evidenceLabels: Record<string, { label: string; className: string; detail: string }> = {
-            possible_multiport_probe: { label: '疑似多端口探测线索', className: 'border-amber-500/30 bg-amber-950/30 text-amber-200', detail: '同一来源访问多个端口，且未完成或未见回包的 TCP 流较多；这是单次快照线索，不等于确认攻击。' },
-            bidirectional_tcp_observed: { label: '观察到 TCP 双向通信', className: 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200', detail: '服务端也观察到回包，说明连接有双向通信；不能据此确认用户身份或请求目的。' },
-            mixed_connection_evidence: { label: '双向连接与未回复请求并存', className: 'border-sky-500/30 bg-sky-950/30 text-sky-200', detail: '同一来源既有双向通信，也有未见回包的流；可能包含正常访问和失败/探测请求。' },
-            unreplied_tcp_observed: { label: '存在未完成的 TCP 连接', className: 'border-amber-500/30 bg-amber-950/30 text-amber-200', detail: '可能是扫描、被拒绝的连接或网络丢包；单凭此项无法判定恶意。' },
-            insufficient_transport_evidence: { label: '传输层证据不足', className: 'border-slate-700 bg-slate-900 text-slate-300', detail: '当前快照不能区分正常访问与探测。' },
+            possible_multiport_probe: {
+              label: '疑似多端口探测线索',
+              className: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]',
+              detail: '同一来源访问多个端口，且未完成或未见回包的 TCP 流较多；这是单次快照线索，不等于确认攻击。',
+            },
+            bidirectional_tcp_observed: {
+              label: '观察到 TCP 双向通信',
+              className: 'border-[#b4e4dc] bg-[#e6f7f4] text-[#147468]',
+              detail: '服务端也观察到回包，说明连接有双向通信；不能据此确认用户身份或请求目的。',
+            },
+            mixed_connection_evidence: {
+              label: '双向连接与未回复请求并存',
+              className: 'border-[#9ccaff] bg-[#e8f3ff] text-[#0657b8]',
+              detail: '同一来源既有双向通信，也有未见回包的流；可能包含正常访问和失败/探测请求。',
+            },
+            unreplied_tcp_observed: {
+              label: '存在未完成的 TCP 连接',
+              className: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]',
+              detail: '可能是扫描、被拒绝的连接或网络丢包；单凭此项无法判定恶意。',
+            },
+            insufficient_transport_evidence: {
+              label: '传输层证据不足',
+              className: 'border-[#cedae7] bg-white text-[#31485e]',
+              detail: '当前快照不能区分正常访问与探测。',
+            },
           };
+
           const evidenceView = evidenceLabels[evidence?.classification || ''];
           const sourceBehavior = direction === 'inbound' && ip.ip
             ? inboundSourceAssessmentByIp.get(ip.ip)
@@ -317,99 +347,172 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
                   : reputation?.message;
           const repTone = reputation?.status !== 'checked'
             ? reputation?.status === 'error'
-              ? 'border-amber-500/30 bg-amber-950/30 text-amber-200'
-              : 'border-slate-700 bg-slate-900 text-slate-300'
+              ? 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]'
+              : 'border-[#cedae7] bg-white text-[#31485e]'
             : (reputation.abuse_confidence_score || 0) >= 75
-              ? 'border-rose-500/30 bg-rose-950/30 text-rose-200'
+              ? 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]'
               : (reputation.abuse_confidence_score || 0) > 0 || ((reputation.total_reports || 0) > 0 && reputation.is_whitelisted !== true)
-                ? 'border-amber-500/30 bg-amber-950/30 text-amber-200'
-                : 'border-slate-700 bg-slate-900 text-slate-300';
+                ? 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]'
+                : 'border-[#cedae7] bg-white text-[#31485e]';
+
           return (
-          <div key={`${direction}-${ip.ip}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-            <div className="flex items-center justify-between gap-2 font-bold text-slate-200">
-              <span className="break-all">{ip.ip}</span>
-              <span className="shrink-0 text-slate-400">{direction === 'inbound' ? ip.inbound : direction === 'outbound' ? ip.outbound : ip.unknown} conns</span>
-            </div>
-            <div className="mt-1 text-[11px] text-slate-400">
-              {[ip.country || 'UN', ip.region, ip.city].filter(Boolean).join(' · ')}
-            </div>
-            <div className="mt-0.5 wrap-break-word text-[11px] text-slate-500">
-              运营商：{ip.isp || '暂未识别'}{ip.asn ? ` · AS${ip.asn}` : ''}
-            </div>
-            <div className={`mt-2 rounded-md border px-2 py-1.5 text-[11px] ${originTone}`}>
-              <strong>{direction === 'inbound' ? originConfidence === 'mixed' ? '发起方：证据冲突' : '发起方：外部远端' : direction === 'outbound' ? originConfidence === 'confirmed' ? '发起方：本地进程（已确认）' : originConfidence === 'mixed' ? '发起方：证据冲突' : originConfidence === 'probable' ? '发起方：较可能是本地进程' : '发起方：方向证据不足' : '发起方：待确认'}</strong>
-              <p className="mt-0.5 leading-4 opacity-90">{originJudgment}</p>
-              {directionEvidence && directionEvidence.length > 0 && <p className="mt-1 leading-4 opacity-80">证据：{directionEvidence.map((value) => originEvidenceLabels[value] || value).join('；')}</p>}
-              {directionalProcesses && directionalProcesses.length > 0 && <p className="mt-1 leading-4 opacity-80">进程归属：{directionalProcesses.map((item) => `${item.process || 'unknown'}${item.pid ? ` (PID ${item.pid})` : ''}`).join('、')}</p>}
-            </div>
-            {direction !== 'unknown' && <div className="mt-1 wrap-break-word text-[11px] text-slate-400">
-              <strong>{direction === 'inbound' ? '服务端接受进程：' : '本地发起进程：'}</strong>
-              {directionalProcesses && directionalProcesses.length > 0
-                ? directionalProcesses.map((item) => `${item.process || 'unknown'}${item.pid ? ` (PID ${item.pid})` : ''}`).join('、')
-                : ip.processes?.length
-                  ? `旧版快照仅有关联列表，未按方向区分：${ip.processes.join('、')}`
-                  : '进程 / PID 归属本次未取得'}
-            </div>}
-            {direction === 'inbound' && sourceBehavior && sourceBehaviorView && <div className={sourceBehaviorView.className + ' mt-2 rounded-md border px-2 py-1.5 text-[11px]'}>
-              <strong>{sourceBehaviorView.label}</strong>
-              <p className="mt-0.5 leading-4 opacity-90">{sourceBehaviorView.detail}</p>
-              <p className="mt-1 text-[10px] opacity-80">
-                近 {Math.round((inboundSourceHistory?.lookback_seconds || 600) / 60)} 分钟 · 样本 {sourceBehavior.sample_count || 0} 次 ·
-                监听端口连接样本 {sourceBehavior.listener_transport_samples ?? sourceBehavior.service_activity_samples ?? 0} 次 · 探测线索 {sourceBehavior.probe_clue_samples || 0} 次
-              </p>
-              {(sourceBehavior.service_ports?.length || sourceBehavior.non_listener_ports?.length || 0) > 0 && <p className="mt-1 text-[10px] opacity-80">
-                已监听端口：{sourceBehavior.service_ports?.join(', ') || '-'} · 非监听端口：{sourceBehavior.non_listener_ports?.join(', ') || '-'}
-              </p>}
-              <p className="mt-1 text-[10px] opacity-80">这是网络行为判断，不是用户身份或恶意结论；AbuseIPDB 信誉分另行参考。</p>
-            </div>}
-            {direction === 'inbound' && <div className="mt-2 space-y-1.5 border-t border-slate-800 pt-2">
-              {evidenceView ? <div className={`rounded-md border px-2 py-1.5 text-[11px] ${evidenceView.className}`}>
-                <strong>{evidenceView.label}</strong>
-                <p className="mt-0.5 leading-4 opacity-90">{evidenceView.detail}</p>
-                <p className="mt-1 text-[10px] opacity-80">TCP 已建立 {evidence?.tcp_established_flows || 0} 条 · 未见回包 {evidence?.tcp_unreplied_flows || 0} 条 · 握手待完成 {evidence?.tcp_handshake_pending_flows || 0} 条 · 回包 {evidence?.reply_packets || 0} · 目标端口 {(evidence?.public_ports || []).join(', ') || '未识别'}</p>
-                <p className="mt-1 text-[10px] opacity-80">证据：{(evidence?.evidence_sources || []).join('、') || 'conntrack 状态快照'} · 范围：{evidence?.scope || '单次快照'}</p>
-              </div> : <p className="text-[11px] text-slate-500">没有关联到 conntrack 状态快照；来源 IP 数量本身不能证明扫描或客户操作。</p>}
-              <div className="flex flex-wrap items-center gap-2">
-                <button type="button" disabled={!reputationConfigured || checkingReputation !== null} onClick={() => checkReputation(ip.ip || '')} className="min-h-11 rounded-md border border-sky-700/60 bg-sky-950/30 px-3 py-2 text-[11px] font-semibold text-sky-200 hover:bg-sky-900/50 disabled:cursor-not-allowed disabled:opacity-50">
-                  {checkingReputation === ip.ip ? '查询中…' : reputationConfigured ? '查询 AbuseIPDB' : '先配置 AbuseIPDB Key'}
-                </button>
-                {reputation && <span className="text-[10px] text-slate-500">{reputation.cached ? '缓存结果' : reputation.checked_at ? new Date(reputation.checked_at * 1000).toLocaleString('zh-CN', { hour12: false }) : ''}</span>}
+            <div key={`${direction}-${ip.ip}-${idx}`} className="min-w-0 rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5">
+              <div className="flex items-center justify-between gap-2 font-bold text-[#0b1636]">
+                <span className="min-w-0 break-all">{ip.ip}</span>
+                <span className="shrink-0 text-[#4a607a] tabular-nums">
+                  {direction === 'inbound' ? ip.inbound : direction === 'outbound' ? ip.outbound : ip.unknown} conns
+                </span>
               </div>
-              {reputation && <div className={`rounded-md border px-2 py-1.5 text-[11px] ${repTone}`}>
-                <strong>{repLabel}</strong>
-                {reputation.status === 'checked' && <p className="mt-0.5 leading-4 opacity-90">公开举报 {reputation.total_reports || 0} 次 · 最近举报 {reputation.last_reported_at || '无'} · AbuseIPDB 白名单：{reputation.is_whitelisted === true ? '是' : reputation.is_whitelisted === false ? '否' : '未说明'}{reputation.usage_type ? ` · 网络类型 ${reputation.usage_type}` : ''}</p>}
-                {reputation.status === 'checked'
-                  ? <p className="mt-0.5 leading-4 opacity-80">{reputation.message}</p>
-                  : <>
-                    <p className="mt-0.5 leading-4 opacity-90">{reputation.message || '暂时无法取得 AbuseIPDB 信誉数据。'}</p>
-                    {(reputation.provider_status || reputation.retry_after_seconds) && <p className="mt-1 tabular-nums text-[10px] opacity-80">
-                      上游 HTTP {reputation.provider_status || '—'}
-                      {reputation.retry_after_seconds ? ` · ${reputation.retry_after_seconds} 秒后可重试` : ''}
-                    </p>}
-                    {reputation.retryable
-                      ? <p className="mt-1 leading-4 opacity-80">这是临时连接或服务端故障，可重新查询；查询失败不会被当作“无滥用记录”。</p>
-                      : <p className="mt-1 leading-4 opacity-80">查询失败、未配置或额度不足均不代表该 IP 安全或恶意。</p>}
-                  </>}
-              </div>}
-            </div>}
-          </div>
+              <div className="mt-1 font-sans text-[11px] text-[#31485e]">
+                {[ip.country || 'UN', ip.region, ip.city].filter(Boolean).join(' · ')}
+              </div>
+              <div className="mt-0.5 wrap-break-word font-sans text-[11px] text-[#4a607a]">
+                运营商：{ip.isp || '暂未识别'}{ip.asn ? ` · AS${ip.asn}` : ''}
+              </div>
+              <div className={`mt-2 rounded-lg border px-2.5 py-2 font-sans text-[11px] ${originTone}`}>
+                <strong>
+                  {direction === 'inbound'
+                    ? originConfidence === 'mixed' ? '发起方：证据冲突' : '发起方：外部远端'
+                    : direction === 'outbound'
+                      ? originConfidence === 'confirmed'
+                        ? '发起方：本地进程（已确认）'
+                        : originConfidence === 'mixed'
+                          ? '发起方：证据冲突'
+                          : originConfidence === 'probable'
+                            ? '发起方：较可能是本地进程'
+                            : '发起方：方向证据不足'
+                      : '发起方：待确认'}
+                </strong>
+                <p className="mt-0.5 leading-4">{originJudgment}</p>
+                {directionEvidence && directionEvidence.length > 0 && (
+                  <p className="mt-1 leading-4 opacity-90">
+                    证据：{directionEvidence.map((value) => originEvidenceLabels[value] || value).join('；')}
+                  </p>
+                )}
+                {directionalProcesses && directionalProcesses.length > 0 && (
+                  <p className="mt-1 leading-4 opacity-90">
+                    进程归属：{directionalProcesses.map((item) => `${item.process || 'unknown'}${item.pid ? ` (PID ${item.pid})` : ''}`).join('、')}
+                  </p>
+                )}
+              </div>
+
+              {direction !== 'unknown' && (
+                <div className="mt-1.5 wrap-break-word font-sans text-[11px] text-[#31485e]">
+                  <strong>{direction === 'inbound' ? '服务端接受进程：' : '本地发起进程：'}</strong>
+                  {directionalProcesses && directionalProcesses.length > 0
+                    ? directionalProcesses.map((item) => `${item.process || 'unknown'}${item.pid ? ` (PID ${item.pid})` : ''}`).join('、')
+                    : ip.processes?.length
+                      ? `旧版快照仅有关联列表，未按方向区分：${ip.processes.join('、')}`
+                      : '进程 / PID 归属本次未取得'}
+                </div>
+              )}
+
+              {direction === 'inbound' && sourceBehavior && sourceBehaviorView && (
+                <div className={`${sourceBehaviorView.className} mt-2 rounded-lg border px-2.5 py-2 font-sans text-[11px]`}>
+                  <strong>{sourceBehaviorView.label}</strong>
+                  <p className="mt-0.5 leading-4">{sourceBehaviorView.detail}</p>
+                  <p className="mt-1 text-[10px] opacity-90">
+                    近 {Math.round((inboundSourceHistory?.lookback_seconds || 600) / 60)} 分钟 · 样本 {sourceBehavior.sample_count || 0} 次 ·
+                    监听端口连接样本 {sourceBehavior.listener_transport_samples ?? sourceBehavior.service_activity_samples ?? 0} 次 · 探测线索 {sourceBehavior.probe_clue_samples || 0} 次
+                  </p>
+                  {(sourceBehavior.service_ports?.length || sourceBehavior.non_listener_ports?.length || 0) > 0 && (
+                    <p className="mt-1 text-[10px] opacity-90">
+                      已监听端口：{sourceBehavior.service_ports?.join(', ') || '-'} · 非监听端口：{sourceBehavior.non_listener_ports?.join(', ') || '-'}
+                    </p>
+                  )}
+                  <p className="mt-1 text-[10px] opacity-85">这是网络行为判断，不是用户身份或恶意结论；AbuseIPDB 信誉分另行参考。</p>
+                </div>
+              )}
+
+              {direction === 'inbound' && (
+                <div className="mt-2 space-y-2 border-t border-[#d2dfec] pt-2 font-sans">
+                  {evidenceView ? (
+                    <div className={`rounded-lg border px-2.5 py-2 text-[11px] ${evidenceView.className}`}>
+                      <strong>{evidenceView.label}</strong>
+                      <p className="mt-0.5 leading-4">{evidenceView.detail}</p>
+                      <p className="mt-1 text-[10px] opacity-90">
+                        TCP 已建立 {evidence?.tcp_established_flows || 0} 条 · 未见回包 {evidence?.tcp_unreplied_flows || 0} 条 · 握手待完成 {evidence?.tcp_handshake_pending_flows || 0} 条 · 回包 {evidence?.reply_packets || 0} · 目标端口 {(evidence?.public_ports || []).join(', ') || '未识别'}
+                      </p>
+                      <p className="mt-1 text-[10px] opacity-85">
+                        证据：{(evidence?.evidence_sources || []).join('、') || 'conntrack 状态快照'} · 范围：{evidence?.scope || '单次快照'}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-[#4a607a]">没有关联到 conntrack 状态快照；来源 IP 数量本身不能证明扫描或客户操作。</p>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={!reputationConfigured || checkingReputation !== null}
+                      onClick={() => checkReputation(ip.ip || '')}
+                      className="min-h-11 rounded-lg border border-[#9ccaff] bg-white px-3 py-2 text-[11px] font-bold text-[#0657b8] transition-colors hover:border-[#087bff] hover:bg-[#e8f3ff] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {checkingReputation === ip.ip ? '查询中…' : reputationConfigured ? '查询 AbuseIPDB' : '先配置 AbuseIPDB Key'}
+                    </button>
+                    {reputation && (
+                      <span className="text-[10px] text-[#4a607a]">
+                        {reputation.cached
+                          ? '缓存结果'
+                          : reputation.checked_at
+                            ? new Date(reputation.checked_at * 1000).toLocaleString('zh-CN', { hour12: false })
+                            : ''}
+                      </span>
+                    )}
+                  </div>
+
+                  {reputation && (
+                    <div className={`rounded-lg border px-2.5 py-2 text-[11px] ${repTone}`}>
+                      <strong>{repLabel}</strong>
+                      {reputation.status === 'checked' && (
+                        <p className="mt-0.5 leading-4">
+                          公开举报 {reputation.total_reports || 0} 次 · 最近举报 {reputation.last_reported_at || '无'} · AbuseIPDB 白名单：
+                          {reputation.is_whitelisted === true ? '是' : reputation.is_whitelisted === false ? '否' : '未说明'}
+                          {reputation.usage_type ? ` · 网络类型 ${reputation.usage_type}` : ''}
+                        </p>
+                      )}
+                      {reputation.status === 'checked' ? (
+                        <p className="mt-0.5 leading-4 opacity-90">{reputation.message}</p>
+                      ) : (
+                        <>
+                          <p className="mt-0.5 leading-4">{reputation.message || '暂时无法取得 AbuseIPDB 信誉数据。'}</p>
+                          {(reputation.provider_status || reputation.retry_after_seconds) && (
+                            <p className="mt-1 tabular-nums text-[10px] opacity-90">
+                              上游 HTTP {reputation.provider_status || '—'}
+                              {reputation.retry_after_seconds ? ` · ${reputation.retry_after_seconds} 秒后可重试` : ''}
+                            </p>
+                          )}
+                          {reputation.retryable ? (
+                            <p className="mt-1 leading-4 opacity-90">这是临时连接或服务端故障，可重新查询；查询失败不会被当作“无滥用记录”。</p>
+                          ) : (
+                            <p className="mt-1 leading-4 opacity-90">查询失败、未配置或额度不足均不代表该 IP 安全或恶意。</p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           );
         })}
-        {ips.length === 0 && <div className="text-[11px] text-slate-500">采样瞬间未发现可见的公网 IP。</div>}
+        {ips.length === 0 && (
+          <div className="font-sans text-[11px] text-[#4a607a]">采样瞬间未发现可见的公网 IP。</div>
+        )}
       </div>
     </div>
   );
 
   return (
-    <div className="rounded-xl border border-sky-500/30 bg-linear-to-br from-slate-900 via-slate-900/90 to-sky-950/30 p-4 shadow-xs">
+    <div className="rn2-card overflow-hidden bg-white">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+      <div className="flex flex-col justify-between gap-3 border-b border-[#cedae7] bg-[#f4f8fd] px-4 py-3.5 sm:flex-row sm:items-center">
         <div>
           <div className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-sky-400" />
-            <h3 className="text-sm font-bold text-slate-100">按需深度快照分析</h3>
+            <Sparkles className="h-4 w-4 text-[#087bff]" aria-hidden="true" />
+            <h3 className="text-sm font-extrabold text-[#0e233c]">按需深度快照分析</h3>
           </div>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="mt-0.5 text-xs text-[#4a607a]">
             一次性有界快照（不持续抓包、不全盘扫描）；配置 AbuseIPDB 后，完成时自动查询入站连接数最多的 5 个公网 IP。
           </p>
         </div>
@@ -418,231 +521,312 @@ export const DiagnosticPanel: React.FC<DiagnosticPanelProps> = ({
           type="button"
           disabled={submitting || isQueuedOrDispatched || !isSupportedRuntime || isStale}
           onClick={handleRequest}
-          className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 transition-all disabled:opacity-50 shadow-xs shrink-0"
+          className="rn2-btn rn2-btn-sm rn2-btn-orange min-h-11 shrink-0 px-3.5 disabled:opacity-50"
         >
-          <Sparkles className="h-3.5 w-3.5" />
+          <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
           <span>
             {submitting
               ? '提交中...'
               : isQueuedOrDispatched
-              ? '等待上报中'
-              : isStale
-              ? '采样已过期'
-              : '请求深度上报'}
+                ? '等待上报中'
+                : isStale
+                  ? '采样已过期'
+                  : '请求深度上报'}
           </span>
         </button>
       </div>
 
-      {/* State Status Banner */}
-      <div className="my-3">
-        {!isSupportedRuntime ? (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-950/40 p-2.5 text-xs text-amber-300">
-            Docker 默认仅提醒，当前节点不支持深度快照采集。
+      <div className="p-4">
+        {/* State Status Banner */}
+        <div className="mb-3">
+          {!isSupportedRuntime ? (
+            <div className="rounded-lg border border-[#e8bf70] bg-[#fef6e4] p-2.5 text-xs font-medium text-[#9a5b00]">
+              Docker 默认仅提醒，当前节点不支持深度快照采集。
+            </div>
+          ) : isStale ? (
+            <div className="flex items-center gap-2 rounded-lg border border-[#e8bf70] bg-[#fef6e4] p-2.5 text-xs font-medium text-[#9a5b00]">
+              <AlertCircle className="h-4 w-4 shrink-0 text-[#d97706]" aria-hidden="true" />
+              <span>该容器的监控采样已过期，无法向 Agent 下发任务。请确认容器仍在运行并恢复监控后重试。</span>
+            </div>
+          ) : action?.status === 'queued' ? (
+            <div className="flex items-center gap-2 rounded-lg border border-[#9ccaff] bg-[#e8f3ff] p-2.5 text-xs font-medium text-[#0657b8]">
+              <Clock className="h-4 w-4 animate-spin text-[#087bff]" aria-hidden="true" />
+              <span>任务 #{action.id} 已排队，等待节点守护进程领取（通常 10 秒内）...</span>
+            </div>
+          ) : action?.status === 'dispatched' ? (
+            <div className="flex items-center gap-2 rounded-lg border border-[#9ccaff] bg-[#e8f3ff] p-2.5 text-xs font-medium text-[#0657b8]">
+              <Clock className="h-4 w-4 animate-spin text-[#087bff]" aria-hidden="true" />
+              <span>任务 #{action.id} 已由节点领取，正在等待指标返回...</span>
+            </div>
+          ) : action?.status === 'succeeded' ? (
+            <div className="flex items-center gap-2 rounded-lg border border-[#b4e4dc] bg-[#e6f7f4] p-2.5 text-xs font-medium text-[#147468]">
+              <CheckCircle2 className="h-4 w-4 text-[#147468]" aria-hidden="true" />
+              <span>深度采样完成 · {action.updated_at_utc8 || '最新'}</span>
+            </div>
+          ) : action?.status === 'failed' ? (
+            <div className="flex items-center gap-2 rounded-lg border border-[#f1b4bf] bg-[#ffeef1] p-2.5 text-xs font-medium text-[#b41835]">
+              <AlertCircle className="h-4 w-4 text-[#b41835]" aria-hidden="true" />
+              <span>采样失败：{action.result_message || '节点未返回报告'}</span>
+            </div>
+          ) : (
+            <div className="text-xs text-[#4a607a]">尚未请求深度上报快照。</div>
+          )}
+        </div>
+
+        {/* Snapshot Data View */}
+        {sample && (
+          <div className="space-y-4 pt-1">
+            {inboundSourceHistory && (
+              <div
+                className={
+                  inboundSourceHistory.status === 'available'
+                    ? 'rounded-xl border border-[#9ccaff] bg-[#e8f3ff]/65 p-3 text-xs leading-5 text-[#0e233c]'
+                    : 'rounded-xl border border-[#e8bf70] bg-[#fef6e4] p-3 text-xs leading-5 text-[#784600]'
+                }
+              >
+                <div className="font-bold">近 10 分钟入站行为对照</div>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-semibold tabular-nums">
+                  <span>有效 conntrack 采样 {inboundSourceHistory.conntrack_sample_count || 0} 次</span>
+                  <span>监听端口连接 {inboundBehaviorCounts.listener} 个 IP</span>
+                  <span>重复多端口探测 {inboundBehaviorCounts.probe} 个 IP</span>
+                  <span>混合线索 {inboundBehaviorCounts.mixed} 个 IP</span>
+                  <span>待判断 {inboundBehaviorCounts.unknown} 个 IP</span>
+                </div>
+                <p className="mt-1 text-[#31485e]">
+                  对照快照时间：{inboundSourceHistory.reference_sample_at
+                    ? new Date(inboundSourceHistory.reference_sample_at * 1000).toLocaleString('zh-CN', { hour12: false })
+                    : '未知'}。
+                  {inboundSourceHistory.status === 'available'
+                    ? '需至少 ' + (inboundSourceHistory.minimum_repeat_samples || 2) + ' 次、跨 ' + (inboundSourceHistory.minimum_repeat_span_seconds || 15) + ' 秒的采样，才会标记重复行为。'
+                    : '有效历史采样不足，系统会保留“证据不足”，不会把多 IP 数量当成扫描或客户违规。'}
+                  {' '}重复连接到监听端口只代表传输层连接被接受；不能证明正常业务、恶意意图或客户身份。除非服务认证日志经主控端核实，否则告警仅用于防护，不发给客户。AbuseIPDB 只代表外部历史举报信号。
+                </p>
+              </div>
+            )}
+
+            {reputationSettingsLoaded && (
+              <div
+                aria-live="polite"
+                className={`rounded-xl border p-2.5 text-xs leading-5 ${
+                  reputationConfigured
+                    ? 'border-[#9ccaff] bg-[#e8f3ff]/65 text-[#0657b8]'
+                    : 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]'
+                }`}
+              >
+                {reputationConfigured
+                  ? `AbuseIPDB 已启用：打开诊断面板并取得有效深度快照后，自动查询最多 5 个入站公网 IP；不是逐连接或后台持续扫描。结果缓存 24 小时，每日保护上限 900 次。信誉分只作提醒，不会自动封禁。${checkingReputation ? ` 正在查询 ${checkingReputation}…` : ''}`
+                  : 'AbuseIPDB 尚未配置 API Key；请到“系统设置 → 入站 IP 信誉查询”加密保存后，深度快照才会自动检查前 5 个入站公网 IP。'}
+              </div>
+            )}
+
+            {highlyReportedInboundIps.length > 0 && (
+              <div role="alert" className="rounded-xl border border-[#f1b4bf] bg-[#ffeef1] p-3 text-xs leading-5 text-[#b41835]">
+                <strong>AbuseIPDB 高举报信号：{highlyReportedInboundIps.length} 个来源</strong>
+                <span className="ml-1 inline-flex flex-wrap gap-1.5">
+                  {highlyReportedInboundIps.map((ip) => (
+                    <span
+                      key={ip.ip}
+                      className="inline-flex items-center gap-1 rounded border border-[#f1b4bf] bg-white px-1.5 py-0.5 text-[#b41835]"
+                    >
+                      <span className="font-mono break-all">{ip.ip}</span>
+                      <span className="tabular-nums font-bold">
+                        {reputationByIp[ip.ip || '']?.abuse_confidence_score || 0}/100
+                      </span>
+                    </span>
+                  ))}
+                </span>
+                <p className="mt-1 text-[#881337]">
+                  这是第三方社区举报信誉，不足以证明本次连接是攻击或归责客户；请结合本页连接方向、进程和 conntrack 证据人工判断。
+                </p>
+              </div>
+            )}
+
+            {/* Rate Summary Cards */}
+            <div className="grid grid-cols-2 gap-2.5 font-mono text-xs sm:grid-cols-4">
+              <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5">
+                <span className="block font-sans text-[10px] font-bold uppercase tracking-wider text-[#4a607a]">瞬时 RX 带宽</span>
+                <span className="mt-0.5 block text-sm font-extrabold text-[#147468] tabular-nums">
+                  {fmtMbps(sample.network_rates?.rx_bps)} Mbps
+                </span>
+              </div>
+              <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5">
+                <span className="block font-sans text-[10px] font-bold uppercase tracking-wider text-[#4a607a]">瞬时 TX 带宽</span>
+                <span className="mt-0.5 block text-sm font-extrabold text-[#087bff] tabular-nums">
+                  {fmtMbps(sample.network_rates?.tx_bps)} Mbps
+                </span>
+              </div>
+              <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5">
+                <span className="block font-sans text-[10px] font-bold uppercase tracking-wider text-[#4a607a]">连接 IP 数</span>
+                <span className="mt-0.5 block text-sm font-extrabold text-[#0b1636] tabular-nums">
+                  {sample.unique_connection_ips || 0} IPs
+                </span>
+              </div>
+              <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5">
+                <span className="block font-sans text-[10px] font-bold uppercase tracking-wider text-[#4a607a]">进程数量</span>
+                <span className="mt-0.5 block text-sm font-extrabold text-[#0b1636] tabular-nums">
+                  {sample.process_count || 0} Procs
+                </span>
+              </div>
+            </div>
+
+            {attribution && (
+              <div className="rounded-xl border border-[#9ccaff] bg-[#e8f3ff]/55 p-3 text-xs">
+                <div className="font-bold text-[#0e233c]">连接发起方深度核验</div>
+                <div className="mt-2 grid grid-cols-2 gap-2 tabular-nums sm:grid-cols-4">
+                  <div className="rounded-lg border border-[#d2dfec] bg-white p-2">
+                    <span className="block text-[10px] font-semibold text-[#4a607a]">本地发起 · 已确认</span>
+                    <strong className="mt-0.5 block text-sm text-[#0657b8]">
+                      {attributionUnavailable ? '未采集' : attribution.confirmed_local_initiated ?? 0}
+                    </strong>
+                  </div>
+                  <div className="rounded-lg border border-[#d2dfec] bg-white p-2">
+                    <span className="block text-[10px] font-semibold text-[#4a607a]">本地发起 · 推定</span>
+                    <strong className="mt-0.5 block text-sm text-[#9a5b00]">
+                      {attributionUnavailable ? '未采集' : attribution.probable_local_initiated ?? 0}
+                    </strong>
+                  </div>
+                  <div className="rounded-lg border border-[#d2dfec] bg-white p-2">
+                    <span className="block text-[10px] font-semibold text-[#4a607a]">外部发起 · 已确认</span>
+                    <strong className="mt-0.5 block text-sm text-[#147468]">
+                      {attributionUnavailable ? '未采集' : attribution.confirmed_remote_initiated ?? 0}
+                    </strong>
+                  </div>
+                  <div className="rounded-lg border border-[#d2dfec] bg-white p-2">
+                    <span className="block text-[10px] font-semibold text-[#4a607a]">方向未知</span>
+                    <strong className="mt-0.5 block text-sm text-[#31485e]">
+                      {attributionUnavailable ? '未采集' : attribution.unknown_direction ?? 0}
+                    </strong>
+                  </div>
+                </div>
+                <p className="mt-2 leading-4 text-[#31485e]">
+                  {attributionUnavailable
+                    ? `总连接 ${sample?.connection_count || 0} 条，但没有采到逐连接来源/PID 数据；这些归属数字未知，不能按 0 判断。`
+                    : `已归属进程/PID ${attribution.process_attributed_sockets ?? 0}/${attribution.captured_sockets ?? 0} 条；conntrack 五元组确认 ${attribution.conntrack_confirmed_sockets ?? 0} 条。`}
+                  {!attribution.conntrack_available && ' 当前节点未提供 conntrack，已确认数可能较少。'}
+                  {(attribution.conntrack_snapshot_truncated || attribution.socket_snapshot_truncated) && ' 快照达到采集上限，结果不是全量。'}
+                </p>
+              </div>
+            )}
+
+            {connectionSockets.length > 0 && (
+              <details className="overflow-hidden rounded-xl border border-[#cedae7] bg-[#f4f8fd]">
+                <summary className="cursor-pointer list-none px-3.5 py-2.5 text-xs font-bold text-[#0e233c] transition-colors hover:bg-[#e8f3ff]/70">
+                  逐条连接证据（{connectionSockets.length} 条{connectionSockets.length > 100 ? '，最多展示前 100 条' : ''}）
+                  <span className="ml-2 font-normal text-[#4a607a]">展开核对端点、状态、进程与发起方向</span>
+                </summary>
+                <div className="max-h-96 space-y-2 overflow-y-auto border-t border-[#cedae7] p-2.5">
+                  {connectionSockets.slice(0, 100).map((socket, index) => {
+                    const origin = getConnectionOrigin(socket);
+                    const evidence = socket.direction_evidence
+                      ? originEvidenceLabels[socket.direction_evidence] || socket.direction_evidence
+                      : '没有方向证据';
+                    return (
+                      <article
+                        key={`${socket.proto || 'unknown'}-${socket.local || ''}-${socket.remote || ''}-${index}`}
+                        className="min-w-0 rounded-lg border border-[#d2dfec] bg-white p-2.5"
+                      >
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${origin.className}`}>{origin.label}</span>
+                          <span className="rounded border border-[#cedae7] bg-[#f4f8fd] px-1.5 py-0.5 text-[10px] font-semibold text-[#31485e]">
+                            {String(socket.proto || 'unknown').toUpperCase()}
+                          </span>
+                          <span className="rounded border border-[#cedae7] bg-[#f4f8fd] px-1.5 py-0.5 text-[10px] text-[#4a607a]">
+                            {socket.state || '状态未知'}
+                          </span>
+                        </div>
+                        <div className="mt-1.5 min-w-0 break-all font-mono text-[11px] font-semibold text-[#0b1636]">
+                          {socket.local || '-'} → {socket.remote || '-'}
+                        </div>
+                        <div className="mt-1 wrap-break-word text-[11px] text-[#31485e]">
+                          进程：{socket.process || 'unknown'}
+                          {Number(socket.pid || 0) > 0 ? ` · PID ${socket.pid}` : ' · PID 未取得'}
+                          {socket.process_role === 'initiator'
+                            ? ' · 角色：发起方'
+                            : socket.process_role === 'acceptor'
+                              ? ' · 角色：接受连接的服务端'
+                              : ''}
+                        </div>
+                        <div className="mt-1 wrap-break-word text-[10px] text-[#4a607a]">判定依据：{evidence}</div>
+                        {Array.isArray(socket.original_remote_ips) && socket.original_remote_ips.length > 0 && (
+                          <div className="mt-1 min-w-0 break-all text-[10px] font-semibold text-[#147468]">
+                            conntrack 五元组还原来源：{socket.original_remote_ips.join(', ')}
+                          </div>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+                <p className="border-t border-[#cedae7] bg-white px-3.5 py-2 text-[10px] leading-4 text-[#4a607a]">
+                  “PID/进程归属”只说明哪个进程持有该 socket；发起方向以握手状态或 conntrack 五元组为准。没有这些强证据时只标推定/未知，不据此判定恶意。
+                </p>
+              </details>
+            )}
+
+            {/* Detailed Processes Table */}
+            {sample.processes?.items && sample.processes.items.length > 0 && (
+              <div>
+                <h4 className="mb-2 flex items-center gap-1.5 text-xs font-extrabold text-[#0e233c]">
+                  <Terminal className="h-3.5 w-3.5 text-[#087bff]" aria-hidden="true" />
+                  <span>快照进程列表 ({sample.processes.items.length})</span>
+                </h4>
+                <div className="max-h-48 divide-y divide-[#e1ebf4] overflow-y-auto rounded-xl border border-[#d2dfec] bg-[#f4f8fd] font-mono text-xs">
+                  {sample.processes.items.map((p, idx) => (
+                    <div key={idx} className="p-2.5 transition-colors hover:bg-white">
+                      <div className="flex items-center justify-between gap-2 font-bold text-[#0b1636]">
+                        <span className="truncate">{p.process || 'unknown'} · PID {p.pid}</span>
+                        <span className="shrink-0 text-[#0657b8] tabular-nums">
+                          CPU {fmtNumber(p.cpu_percent)}% · RSS {fmtBytes(p.rss_bytes)}
+                        </span>
+                      </div>
+                      <div className="mt-1 truncate text-[11px] text-[#4a607a]">{p.command || '-'}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {renderIpGroup('接入容器的公网来源', '展示远端来源及本地接受进程；服务端进程不等于连接发起方。', inboundIps, 'inbound')}
+
+            {inboundPortEvidence.length > 0 && (
+              <section className="rounded-xl border border-[#cedae7] bg-[#f4f8fd] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-xs font-extrabold text-[#0e233c]">
+                    NAT / 代理端口级来源关联 ({inboundPortEvidence.length})
+                  </h4>
+                  <span className="rounded border border-[#e8bf70] bg-[#fef6e4] px-2 py-0.5 text-[10px] font-bold text-[#9a5b00]">
+                    聚合推定 · 非逐连接确认
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] leading-4 text-[#31485e]">
+                  当 NAT 或用户态代理隐藏了公网来源时，主控按容器目标端口汇总来源 IP 和监听进程。端口上有进程只能说明服务在接收连接，不能把每个 IP 精确绑定到某个已建立 socket，也不能据此判断客户有责。
+                </p>
+                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {inboundPortEvidence.slice(0, 20).map((item, index) => (
+                    <article key={`${item.container_port || 0}-${index}`} className="min-w-0 rounded-lg border border-[#d2dfec] bg-white p-2.5 text-[11px]">
+                      <div className="font-bold text-[#0b1636]">
+                        容器端口 {item.container_port || '-'} · {item.connections || 0} 条聚合连接
+                      </div>
+                      <div className="mt-1 min-w-0 break-all text-[#31485e]">
+                        来源 IP ({item.source_ip_count || 0})：{(item.source_ips || []).join('、') || '-'}
+                      </div>
+                      <div className="mt-1 wrap-break-word text-[#4a607a]">
+                        监听进程：
+                        {(item.process_listeners || [])
+                          .map(listener => `${listener.process || 'unknown'}${listener.pid ? ` (PID ${listener.pid})` : ''}`)
+                          .join('、') || '未取得'}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {renderIpGroup('容器访问的公网目标', '展示本地进程与连接方向证据；仅看到已建立连接时会标为“较可能”，不会冒充握手级确认。', outboundIps, 'outbound')}
+            {unclassifiedIps.length > 0 &&
+              renderIpGroup('方向待确认的公网连接', '采样证据不足以判断哪一端先发起；保留单独展示，避免误归因。', unclassifiedIps, 'unknown')}
           </div>
-        ) : isStale ? (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-950/40 p-2.5 text-xs text-amber-300">
-            <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
-            <span>该容器的监控采样已过期，无法向 Agent 下发任务。请确认容器仍在运行并恢复监控后重试。</span>
-          </div>
-        ) : action?.status === 'queued' ? (
-          <div className="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-950/40 p-2.5 text-xs text-sky-300">
-            <Clock className="h-4 w-4 animate-spin text-sky-400" />
-            <span>任务 #{action.id} 已排队，等待节点守护进程领取（通常 10 秒内）...</span>
-          </div>
-        ) : action?.status === 'dispatched' ? (
-          <div className="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-950/40 p-2.5 text-xs text-sky-300">
-            <Clock className="h-4 w-4 animate-spin text-sky-400" />
-            <span>任务 #{action.id} 已由节点领取，正在等待指标返回...</span>
-          </div>
-        ) : action?.status === 'succeeded' ? (
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/40 p-2.5 text-xs text-emerald-300">
-            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-            <span>深度采样完成 · {action.updated_at_utc8 || '最新'}</span>
-          </div>
-        ) : action?.status === 'failed' ? (
-          <div className="flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-950/40 p-2.5 text-xs text-rose-300">
-            <AlertCircle className="h-4 w-4 text-rose-400" />
-            <span>采样失败：{action.result_message || '节点未返回报告'}</span>
-          </div>
-        ) : (
-          <div className="text-xs text-slate-500">尚未请求深度上报快照。</div>
         )}
       </div>
-
-      {/* Snapshot Data View */}
-      {sample && (
-        <div className="space-y-4 pt-2">
-          {inboundSourceHistory && <div className={inboundSourceHistory.status === 'available'
-            ? 'rounded-lg border border-sky-500/25 bg-sky-950/20 p-3 text-xs leading-5 text-sky-100'
-            : 'rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-xs leading-5 text-amber-100'}>
-            <div className="font-semibold">近 10 分钟入站行为对照</div>
-            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 tabular-nums">
-              <span>有效 conntrack 采样 {inboundSourceHistory.conntrack_sample_count || 0} 次</span>
-              <span>监听端口连接 {inboundBehaviorCounts.listener} 个 IP</span>
-              <span>重复多端口探测 {inboundBehaviorCounts.probe} 个 IP</span>
-              <span>混合线索 {inboundBehaviorCounts.mixed} 个 IP</span>
-              <span>待判断 {inboundBehaviorCounts.unknown} 个 IP</span>
-            </div>
-            <p className="mt-1 text-slate-300">
-              对照快照时间：{inboundSourceHistory.reference_sample_at
-                ? new Date(inboundSourceHistory.reference_sample_at * 1000).toLocaleString('zh-CN', { hour12: false })
-                : '未知'}。
-              {inboundSourceHistory.status === 'available'
-                ? '需至少 ' + (inboundSourceHistory.minimum_repeat_samples || 2) + ' 次、跨 ' + (inboundSourceHistory.minimum_repeat_span_seconds || 15) + ' 秒的采样，才会标记重复行为。'
-                : '有效历史采样不足，系统会保留“证据不足”，不会把多 IP 数量当成扫描或客户违规。'}
-              {' '}重复连接到监听端口只代表传输层连接被接受；不能证明正常业务、恶意意图或客户身份。除非服务认证日志经主控端核实，否则告警仅用于防护，不发给客户。AbuseIPDB 只代表外部历史举报信号。
-            </p>
-          </div>}
-          {reputationSettingsLoaded && <div aria-live="polite" className={`rounded-lg border p-2.5 text-xs leading-5 ${reputationConfigured ? 'border-sky-500/25 bg-sky-950/20 text-sky-200' : 'border-amber-500/30 bg-amber-950/30 text-amber-200'}`}>
-            {reputationConfigured
-              ? `AbuseIPDB 已启用：打开诊断面板并取得有效深度快照后，自动查询最多 5 个入站公网 IP；不是逐连接或后台持续扫描。结果缓存 24 小时，每日保护上限 900 次。信誉分只作提醒，不会自动封禁。${checkingReputation ? ` 正在查询 ${checkingReputation}…` : ''}`
-              : 'AbuseIPDB 尚未配置 API Key；请到“系统设置 → 入站 IP 信誉查询”加密保存后，深度快照才会自动检查前 5 个入站公网 IP。'}
-          </div>}
-          {highlyReportedInboundIps.length > 0 && <div role="alert" className="rounded-lg border border-red-500/40 bg-red-950/30 p-3 text-xs leading-5 text-red-200">
-            <strong>AbuseIPDB 高举报信号：{highlyReportedInboundIps.length} 个来源</strong>
-            <span className="ml-1 inline-flex flex-wrap gap-1.5">
-              {highlyReportedInboundIps.map((ip) => <span key={ip.ip} className="inline-flex items-center gap-1 rounded-sm border border-red-500/30 bg-red-950/50 px-1.5 py-0.5">
-                <span className="font-mono">{ip.ip}</span>
-                <span className="tabular-nums">{reputationByIp[ip.ip || '']?.abuse_confidence_score || 0}/100</span>
-              </span>)}
-            </span>
-            <p className="mt-1 text-red-200/80">这是第三方社区举报信誉，不足以证明本次连接是攻击或归责客户；请结合本页连接方向、进程和 conntrack 证据人工判断。</p>
-          </div>}
-          {/* Rate Summary Cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs">
-            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-              <span className="text-slate-500 block text-[10px]">瞬时 RX 带宽</span>
-              <span className="text-emerald-400 font-bold text-sm">
-                {fmtMbps(sample.network_rates?.rx_bps)} Mbps
-              </span>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-              <span className="text-slate-500 block text-[10px]">瞬时 TX 带宽</span>
-              <span className="text-sky-400 font-bold text-sm">
-                {fmtMbps(sample.network_rates?.tx_bps)} Mbps
-              </span>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-              <span className="text-slate-500 block text-[10px]">连接 IP 数</span>
-              <span className="text-slate-200 font-bold text-sm">
-                {sample.unique_connection_ips || 0} IPs
-              </span>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-              <span className="text-slate-500 block text-[10px]">进程数量</span>
-              <span className="text-slate-200 font-bold text-sm">
-                {sample.process_count || 0} Procs
-              </span>
-            </div>
-          </div>
-
-          {attribution && (
-            <div className="rounded-lg border border-sky-500/25 bg-sky-950/20 p-3 text-xs">
-              <div className="font-semibold text-sky-200">连接发起方深度核验</div>
-              <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4 tabular-nums">
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">本地发起 · 已确认</span><strong className="text-sky-300">{attributionUnavailable ? '未采集' : attribution.confirmed_local_initiated ?? 0}</strong></div>
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">本地发起 · 推定</span><strong className="text-amber-300">{attributionUnavailable ? '未采集' : attribution.probable_local_initiated ?? 0}</strong></div>
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">外部发起 · 已确认</span><strong className="text-emerald-300">{attributionUnavailable ? '未采集' : attribution.confirmed_remote_initiated ?? 0}</strong></div>
-                <div className="rounded-md bg-slate-950/60 p-2"><span className="block text-[10px] text-slate-500">方向未知</span><strong className="text-slate-300">{attributionUnavailable ? '未采集' : attribution.unknown_direction ?? 0}</strong></div>
-              </div>
-              <p className="mt-2 leading-4 text-slate-400">
-                {attributionUnavailable
-                  ? `总连接 ${sample?.connection_count || 0} 条，但没有采到逐连接来源/PID 数据；这些归属数字未知，不能按 0 判断。`
-                  : `已归属进程/PID ${attribution.process_attributed_sockets ?? 0}/${attribution.captured_sockets ?? 0} 条；conntrack 五元组确认 ${attribution.conntrack_confirmed_sockets ?? 0} 条。`}
-                {!attribution.conntrack_available && ' 当前节点未提供 conntrack，已确认数可能较少。'}
-                {(attribution.conntrack_snapshot_truncated || attribution.socket_snapshot_truncated) && ' 快照达到采集上限，结果不是全量。'}
-              </p>
-            </div>
-          )}
-
-          {connectionSockets.length > 0 && (
-            <details className="overflow-hidden rounded-lg border border-slate-700 bg-slate-950/50">
-              <summary className="cursor-pointer list-none px-3 py-2.5 text-xs font-semibold text-slate-200 hover:bg-slate-900/70">
-                逐条连接证据（{connectionSockets.length} 条{connectionSockets.length > 100 ? '，最多展示前 100 条' : ''}）
-                <span className="ml-2 font-normal text-slate-500">展开核对端点、状态、进程与发起方向</span>
-              </summary>
-              <div className="max-h-96 space-y-2 overflow-y-auto border-t border-slate-800 p-2">
-                {connectionSockets.slice(0, 100).map((socket, index) => {
-                  const origin = getConnectionOrigin(socket);
-                  const evidence = socket.direction_evidence
-                    ? originEvidenceLabels[socket.direction_evidence] || socket.direction_evidence
-                    : '没有方向证据';
-                  return (
-                    <article key={`${socket.proto || 'unknown'}-${socket.local || ''}-${socket.remote || ''}-${index}`} className="min-w-0 rounded-md border border-slate-800 bg-slate-900/70 p-2.5">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={`rounded-sm border px-1.5 py-0.5 text-[10px] font-semibold ${origin.className}`}>{origin.label}</span>
-                        <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300">{String(socket.proto || 'unknown').toUpperCase()}</span>
-                        <span className="rounded-sm border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400">{socket.state || '状态未知'}</span>
-                      </div>
-                      <div className="mt-1.5 break-all font-mono text-[11px] text-slate-200">{socket.local || '-'} → {socket.remote || '-'}</div>
-                      <div className="mt-1 wrap-break-word text-[11px] text-slate-400">
-                        进程：{socket.process || 'unknown'}{Number(socket.pid || 0) > 0 ? ` · PID ${socket.pid}` : ' · PID 未取得'}
-                        {socket.process_role === 'initiator' ? ' · 角色：发起方' : socket.process_role === 'acceptor' ? ' · 角色：接受连接的服务端' : ''}
-                      </div>
-                      <div className="mt-1 wrap-break-word text-[10px] text-slate-500">判定依据：{evidence}</div>
-                      {Array.isArray(socket.original_remote_ips) && socket.original_remote_ips.length > 0 && (
-                        <div className="mt-1 break-all text-[10px] text-emerald-300">conntrack 五元组还原来源：{socket.original_remote_ips.join(', ')}</div>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-              <p className="border-t border-slate-800 px-3 py-2 text-[10px] leading-4 text-slate-500">
-                “PID/进程归属”只说明哪个进程持有该 socket；发起方向以握手状态或 conntrack 五元组为准。没有这些强证据时只标推定/未知，不据此判定恶意。
-              </p>
-            </details>
-          )}
-
-          {/* Detailed Processes Table */}
-          {sample.processes?.items && sample.processes.items.length > 0 && (
-            <div>
-              <h4 className="text-xs font-bold text-slate-200 mb-2 flex items-center gap-1.5">
-                <Terminal className="h-3.5 w-3.5 text-sky-400" />
-                <span>快照进程列表 ({sample.processes.items.length})</span>
-              </h4>
-              <div className="max-h-48 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 divide-y divide-slate-800/60 font-mono text-xs">
-                {sample.processes.items.map((p, idx) => (
-                  <div key={idx} className="p-2.5 hover:bg-slate-900/60 transition-colors">
-                    <div className="flex items-center justify-between text-slate-200 font-semibold">
-                      <span>{p.process || 'unknown'} · PID {p.pid}</span>
-                      <span className="text-sky-400">
-                        CPU {fmtNumber(p.cpu_percent)}% · RSS {fmtBytes(p.rss_bytes)}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-slate-400 truncate mt-1">
-                      {p.command || '-'}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {renderIpGroup('接入容器的公网来源', '展示远端来源及本地接受进程；服务端进程不等于连接发起方。', inboundIps, 'inbound')}
-          {inboundPortEvidence.length > 0 && (
-            <section className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-xs font-bold text-slate-200">NAT / 代理端口级来源关联 ({inboundPortEvidence.length})</h4>
-                <span className="rounded-sm border border-amber-500/30 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-200">聚合推定 · 非逐连接确认</span>
-              </div>
-              <p className="mt-1 text-[11px] leading-4 text-slate-400">
-                当 NAT 或用户态代理隐藏了公网来源时，主控按容器目标端口汇总来源 IP 和监听进程。端口上有进程只能说明服务在接收连接，不能把每个 IP 精确绑定到某个已建立 socket，也不能据此判断客户有责。
-              </p>
-              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {inboundPortEvidence.slice(0, 20).map((item, index) => (
-                  <article key={`${item.container_port || 0}-${index}`} className="min-w-0 rounded-md border border-slate-800 bg-slate-900/70 p-2.5 text-[11px]">
-                    <div className="font-semibold text-slate-200">容器端口 {item.container_port || '-'} · {item.connections || 0} 条聚合连接</div>
-                    <div className="mt-1 break-all text-slate-400">来源 IP ({item.source_ip_count || 0})：{(item.source_ips || []).join('、') || '-'}</div>
-                    <div className="mt-1 wrap-break-word text-slate-500">监听进程：{(item.process_listeners || []).map(listener => `${listener.process || 'unknown'}${listener.pid ? ` (PID ${listener.pid})` : ''}`).join('、') || '未取得'}</div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          )}
-          {renderIpGroup('容器访问的公网目标', '展示本地进程与连接方向证据；仅看到已建立连接时会标为“较可能”，不会冒充握手级确认。', outboundIps, 'outbound')}
-          {unclassifiedIps.length > 0 && renderIpGroup('方向待确认的公网连接', '采样证据不足以判断哪一端先发起；保留单独展示，避免误归因。', unclassifiedIps, 'unknown')}
-        </div>
-      )}
     </div>
   );
 };

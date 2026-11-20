@@ -15,53 +15,168 @@ export const AdmissionStatus: React.FC<{ data?: ContainerSecurity['admission']; 
   const probationSources = data.probation_sources ?? sources.filter(x => x.confirmed === false);
   const confirmedCount = confirmedSources.length;
   const displaySources = isModernEnforced ? confirmedSources : sources;
-  const tone = !verified ? 'border-amber-500/35 text-amber-300' : sourceLimitEnforced && blocked.length ? 'border-rose-500/45 text-rose-300' : data.limited ? 'border-amber-500/35 text-amber-300' : 'border-sky-400/25 text-emerald-300';
+
+  const cardTone = !verified
+    ? 'border-[#e8bf70]'
+    : sourceLimitEnforced && blocked.length
+      ? 'border-[#f1b4bf]'
+      : data.limited
+        ? 'border-[#e8bf70]'
+        : 'border-[#cedae7]';
+
+  const headerTone = !verified
+    ? 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]'
+    : sourceLimitEnforced && blocked.length
+      ? 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]'
+      : data.limited
+        ? 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]'
+        : 'border-[#cedae7] bg-[#f4f8fd] text-[#0e233c]';
+
+  const badgeTone = !verified
+    ? 'text-[#9a5b00]'
+    : sourceLimitEnforced && blocked.length
+      ? 'text-[#b41835]'
+      : data.limited
+        ? 'text-[#9a5b00]'
+        : 'text-[#147468]';
+
   const minutes = Math.max(0, Math.ceil(((data.review_at || 0) - now) / 60));
-  return <section aria-label="容器网络准入保护" className={`min-w-0 overflow-hidden rounded-xl border bg-[#02182f]/80 text-xs ${tone}`}>
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-1 border-b border-sky-400/15 bg-[#031d3d]/90 px-3 py-2 font-semibold">
-      <span className="tabular-nums">{verified ? isModernEnforced ? `业务入站准入 ${confirmedCount}/${sourceLimit} IP` : sourceLimitEnforced ? `旧版入站准入 ${sources.length}/5` : `入站来源观测 ${sources.length} 个样本` : '准入保护未确认'}</span>
-      <span className="tabular-nums">{verified && sourceLimitEnforced && blocked.length > 0 ? (isModernEnforced ? `已拦截 ${blocked.length} 个超限来源` : `旧版规则已拦 ${blocked.length} 个来源`) : verified && data.limited ? 'TCP 上限 500' : ''}</span>
-    </div>
-    {!compact && <div className="space-y-2.5 p-3 text-slate-300">
-      <p>{verified ? isModernEnforced ? `默认限制单容器最多保持 ${sourceLimit} 个已建连业务 IP（仅统计容器监听端口上已完成 TCP 三次握手进入 ESTABLISHED 状态的真实客户端 IP，未建连 SYN 扫描探针不计入且 15 秒自动清理）。超过上限的新来源连接已被自动阻断；已确认来源断开后空闲 120 秒自动释放名额。` : sourceLimitEnforced ? '该节点 Agent 仍在按旧版前 5 个来源限制新连接；来源 IP 不等于真实用户数，扫描流量可能占用名额。请升级 Agent。' : '当前节点未开启来源 IP 数量限制（观察模式）。下方最多显示已建立连接来源样本。' : data.error || '采样已过期或执行未验证，不能确认当前保护状态。'}</p>
-      {data.limited && <p>TCP 当前 {data.tcp_connections ?? '未知'} 条；{minutes > 0 ? `${minutes} 分钟后复查` : '等待有效采样复查'}，已追加 {data.extensions || 0} 次。已有连接自然回落。</p>}
-      <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-        <div>
-          <div className="mb-1 font-medium text-sky-300">{isModernEnforced ? `已建连活跃业务来源 (${confirmedCount}/${sourceLimit})` : sourceLimitEnforced ? '旧版保留来源' : '已建立连接来源样本'}</div>
-          {displaySources.length ? displaySources.map(x => (
-            <div key={x.ip} className="break-all font-mono text-[11px]">
-              {x.ip}
-              {isModernEnforced && (
-                <span className={`ml-1.5 rounded px-1 py-0.5 font-sans text-[10px] ${x.active_established === false ? 'bg-slate-800 text-slate-400' : 'bg-emerald-950/70 text-emerald-300'}`}>
-                  {x.active_established === false ? '空闲保持(120s内)' : '已建连(ESTABLISHED)'}
-                </span>
-              )}
-              <span className="ml-2 font-sans text-slate-400">首次观测 {new Date(x.first_seen * 1000).toLocaleString('zh-CN')}</span>
-            </div>
-          )) : <p className="text-slate-400">暂未观测到已建连业务来源</p>}
-          {isModernEnforced && probationSources.length > 0 && (
-            <p className="mt-1 text-[10px] text-slate-400">另有 {probationSources.length} 个未完成握手的 SYN 探测/待确认来源（不占用业务配额，15 秒未建连自动丢弃）。</p>
-          )}
-        </div>
-        <div><div className="mb-1 font-medium text-amber-300">{isModernEnforced ? '近两分钟超限阻断来源' : sourceLimitEnforced ? '近两分钟旧版拒绝记录' : '历史拒绝记录（旧版规则）'}</div>{blocked.length ? blocked.map(([ip, x]) => <div key={ip} className="break-all font-mono text-[11px]">{ip}<span className="ml-2 font-sans text-slate-400">阻断 {x.packets} 包</span></div>) : <p className="text-slate-400">未记录到拒绝事件</p>}</div>
+
+  return (
+    <section
+      aria-label="容器网络准入保护"
+      className={`min-w-0 overflow-hidden rounded-[14px] border bg-white text-xs text-[#0b1636] shadow-xs ${cardTone}`}
+    >
+      <div className={`flex min-w-0 flex-wrap items-center justify-between gap-1.5 border-b px-3.5 py-2.5 font-bold ${headerTone}`}>
+        <span className="tabular-nums">
+          {verified
+            ? isModernEnforced
+              ? `业务入站准入 ${confirmedCount}/${sourceLimit} IP`
+              : sourceLimitEnforced
+                ? `旧版入站准入 ${sources.length}/5`
+                : `入站来源观测 ${sources.length} 个样本`
+            : '准入保护未确认'}
+        </span>
+        <span className={`tabular-nums ${badgeTone}`}>
+          {verified && sourceLimitEnforced && blocked.length > 0
+            ? isModernEnforced
+              ? `已拦截 ${blocked.length} 个超限来源`
+              : `旧版规则已拦 ${blocked.length} 个来源`
+            : verified && data.limited
+              ? 'TCP 上限 500'
+              : verified
+                ? '运行受保护'
+                : ''}
+        </span>
       </div>
-      <p className="text-[11px] text-slate-400">TCP 并发统计已建立连接：超过 1000 持续 2 分钟后，新 TCP 连接上限为 500，至少 30 分钟；复查仍 ≥500 会追加 30 分钟。持续低于 500 且有效采样满 2 分钟、当前期限已到才解除。缺数据不会当成恢复。</p>
-      {(data.sni_blocked_total || 0) > 0 && (
-        <div className="rounded border border-amber-500/30 bg-amber-950/20 p-2 text-[11px] text-amber-200 space-y-1">
-          <div className="font-medium">
-            SNI 白名单阻断：累计 {data.sni_blocked_total} 次（CN 无 SNI {data.sni_cn_missing_total || 0} 次）
+
+      {!compact && (
+        <div className="min-w-0 space-y-3 p-3.5 text-[#31485e]">
+          <p className="leading-5">
+            {verified
+              ? isModernEnforced
+                ? `默认限制单容器最多保持 ${sourceLimit} 个已建连业务 IP（仅统计容器监听端口上已完成 TCP 三次握手进入 ESTABLISHED 状态的真实客户端 IP，未建连 SYN 扫描探针不计入且 15 秒自动清理）。超过上限的新来源连接已被自动阻断；已确认来源断开后空闲 120 秒自动释放名额。`
+                : sourceLimitEnforced
+                  ? '该节点 Agent 仍在按旧版前 5 个来源限制新连接；来源 IP 不等于真实用户数，扫描流量可能占用名额。请升级 Agent。'
+                  : '当前节点未开启来源 IP 数量限制（观察模式）。下方最多显示已建立连接来源样本。'
+              : data.error || '采样已过期或执行未验证，不能确认当前保护状态。'}
+          </p>
+
+          {data.limited && (
+            <p className="rounded-lg border border-[#e8bf70] bg-[#fef6e4] px-2.5 py-2 font-medium text-[#9a5b00]">
+              TCP 当前 {data.tcp_connections ?? '未知'} 条；{minutes > 0 ? `${minutes} 分钟后复查` : '等待有效采样复查'}，已追加 {data.extensions || 0} 次。已有连接自然回落。
+            </p>
+          )}
+
+          <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+            <div className="min-w-0 rounded-lg border border-[#d2dfec] bg-[#f4f8fd] p-2.5">
+              <div className="mb-1.5 font-bold text-[#0657b8]">
+                {isModernEnforced
+                  ? `已建连活跃业务来源 (${confirmedCount}/${sourceLimit})`
+                  : sourceLimitEnforced
+                    ? '旧版保留来源'
+                    : '已建立连接来源样本'}
+              </div>
+              {displaySources.length ? (
+                <div className="min-w-0 space-y-1.5">
+                  {displaySources.map(x => (
+                    <div key={x.ip} className="min-w-0 break-all font-mono text-[11px] text-[#0b1636]">
+                      <span className="min-w-0 break-all font-semibold">{x.ip}</span>
+                      {isModernEnforced && (
+                        <span
+                          className={`ml-1.5 inline-block rounded border px-1.5 py-0.5 font-sans text-[10px] font-semibold ${
+                            x.active_established === false
+                              ? 'border-[#cedae7] bg-[#eef3f9] text-[#4a607a]'
+                              : 'border-[#b4e4dc] bg-[#e6f7f4] text-[#147468]'
+                          }`}
+                        >
+                          {x.active_established === false ? '空闲保持(120s内)' : '已建连(ESTABLISHED)'}
+                        </span>
+                      )}
+                      <span className="ml-2 font-sans text-[#4a607a]">
+                        首次观测 {new Date(x.first_seen * 1000).toLocaleString('zh-CN')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[#4a607a]">暂未观测到已建连业务来源</p>
+              )}
+              {isModernEnforced && probationSources.length > 0 && (
+                <p className="mt-1.5 text-[10px] text-[#4a607a]">
+                  另有 {probationSources.length} 个未完成握手的 SYN 探测/待确认来源（不占用业务配额，15 秒未建连自动丢弃）。
+                </p>
+              )}
+            </div>
+
+            <div className="min-w-0 rounded-lg border border-[#d2dfec] bg-[#f4f8fd] p-2.5">
+              <div className="mb-1.5 font-bold text-[#9a5b00]">
+                {isModernEnforced
+                  ? '近两分钟超限阻断来源'
+                  : sourceLimitEnforced
+                    ? '近两分钟旧版拒绝记录'
+                    : '历史拒绝记录（旧版规则）'}
+              </div>
+              {blocked.length ? (
+                <div className="min-w-0 space-y-1">
+                  {blocked.map(([ip, x]) => (
+                    <div key={ip} className="min-w-0 break-all font-mono text-[11px] text-[#0b1636]">
+                      <span className="min-w-0 break-all font-semibold">{ip}</span>
+                      <span className="ml-2 font-sans text-[#4a607a]">阻断 {x.packets} 包</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[#4a607a]">未记录到拒绝事件</p>
+              )}
+            </div>
           </div>
-          {data.sni_recent_blocked && data.sni_recent_blocked.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {data.sni_recent_blocked.slice(0, 6).map((item, idx) => (
-                <span key={idx} className="rounded bg-amber-950/60 px-1.5 py-0.5 font-mono text-[10px]">
-                  {item.sni || 'CN-NO-SNI'} ({(item.proto || 'tls').toUpperCase()}/{item.dst_port ?? '-'}) ×{item.count}
-                </span>
-              ))}
+
+          <p className="text-[11px] leading-4 text-[#4a607a]">
+            TCP 并发统计已建立连接：超过 1000 持续 2 分钟后，新 TCP 连接上限为 500，至少 30 分钟；复查仍 ≥500 会追加 30 分钟。持续低于 500 且有效采样满 2 分钟、当前期限已到才解除。缺数据不会当成恢复。
+          </p>
+
+          {(data.sni_blocked_total || 0) > 0 && (
+            <div className="space-y-1.5 rounded-lg border border-[#e8bf70] bg-[#fef6e4] p-2.5 text-[11px] text-[#784600]">
+              <div className="font-bold text-[#9a5b00]">
+                SNI 白名单阻断：累计 {data.sni_blocked_total} 次（CN 无 SNI {data.sni_cn_missing_total || 0} 次）
+              </div>
+              {data.sni_recent_blocked && data.sni_recent_blocked.length > 0 && (
+                <div className="flex min-w-0 flex-wrap gap-1.5">
+                  {data.sni_recent_blocked.slice(0, 6).map((item, idx) => (
+                    <span
+                      key={idx}
+                      className="min-w-0 break-all rounded border border-[#e8bf70] bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#9a5b00]"
+                    >
+                      {item.sni || 'CN-NO-SNI'} ({(item.proto || 'tls').toUpperCase()}/{item.dst_port ?? '-'}) ×{item.count}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
-    </div>}
-  </section>;
+    </section>
+  );
 };

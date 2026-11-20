@@ -43,6 +43,21 @@ interface ContainerDrawerProps {
   onRefresh: () => void;
 }
 
+type DrawerSectionId =
+  | 'drawer-sec-resources'
+  | 'drawer-sec-admission'
+  | 'drawer-sec-compliance'
+  | 'drawer-sec-evidence'
+  | 'drawer-sec-diagnostic';
+
+const DRAWER_SECTIONS: Array<{ id: DrawerSectionId; label: string }> = [
+  { id: 'drawer-sec-resources', label: '资源监控' },
+  { id: 'drawer-sec-admission', label: '网络准入' },
+  { id: 'drawer-sec-compliance', label: '服务合规' },
+  { id: 'drawer-sec-evidence', label: '连接证据' },
+  { id: 'drawer-sec-diagnostic', label: '实时诊断' },
+];
+
 const RESOURCE_GUARD_STATES: Record<string, string> = {
   normal: '正常',
   watching: '持续采样中',
@@ -78,15 +93,41 @@ const RESOURCE_GUARD_STATES: Record<string, string> = {
 };
 
 const guardTone = (state?: string) => {
-  if (['limited', 'active'].includes(state || '')) return 'border-sky-500/30 bg-sky-950/30 text-sky-200';
-  if (['limit_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'state_unavailable', 'sampling_unavailable', 'limit_readback_unavailable', 'orphaned_cgroup', 'unavailable', 'apply_unverified'].includes(state || '')) {
-    return 'border-rose-500/30 bg-rose-950/20 text-rose-200';
+  if (['limited', 'active'].includes(state || '')) return 'border-[#9ccaff] bg-[#e8f3ff]/75 text-[#0657b8]';
+  if ([
+    'limit_failed',
+    'limited_unverified',
+    'limit_unverified',
+    'restore_failed',
+    'state_unavailable',
+    'sampling_unavailable',
+    'limit_readback_unavailable',
+    'orphaned_cgroup',
+    'unavailable',
+    'apply_unverified',
+  ].includes(state || '')) {
+    return 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]';
   }
-  if (['watching', 'waiting_for_host_pressure', 'waiting_for_host_psi', 'waiting_for_pressure', 'applying', 'escalating', 'restoring', 'waiting_for_other_limit', 'retry_wait', 'warming', 'cooldown', 'psi_unavailable'].includes(state || '')) {
-    return 'border-amber-500/30 bg-amber-950/20 text-amber-200';
+  if ([
+    'watching',
+    'waiting_for_host_pressure',
+    'waiting_for_host_psi',
+    'waiting_for_pressure',
+    'applying',
+    'escalating',
+    'restoring',
+    'waiting_for_other_limit',
+    'retry_wait',
+    'warming',
+    'cooldown',
+    'psi_unavailable',
+  ].includes(state || '')) {
+    return 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]';
   }
-  if (['normal', 'restored', 'manual_reset'].includes(state || '')) return 'border-emerald-500/25 bg-emerald-950/15 text-emerald-200';
-  return 'border-slate-700 bg-slate-900/60 text-slate-300';
+  if (['normal', 'restored', 'manual_reset'].includes(state || '')) {
+    return 'border-[#b4e4dc] bg-[#e6f7f4]/75 text-[#147468]';
+  }
+  return 'border-[#cedae7] bg-[#f4f8fd] text-[#31485e]';
 };
 
 const guardStateLabel = (state?: string) => RESOURCE_GUARD_STATES[state || ''] || '状态待核实';
@@ -134,18 +175,27 @@ const formatAlertValue = (value: unknown) => {
 };
 
 const protocolGuardState = (summary?: ProtocolGuardSummary) => {
-  if (!summary) return { label: '未上报管控状态', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
+  if (!summary) return { label: '未上报管控状态', tone: 'border-[#cedae7] bg-[#eef3f9] text-[#31485e]' };
   switch (summary.state) {
-    case 'blocked': return { label: '阻断已核验', tone: 'border-emerald-500/30 bg-emerald-950/20 text-emerald-200' };
-    case 'partial': return { label: '部分阻断', tone: 'border-rose-500/40 bg-rose-950/30 text-rose-200' };
-    case 'unverified': return summary.detected
-      ? { label: '阻断待核验', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' }
-      : { label: '未检测到 (扫描待核验)', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
-    case 'release_pending': return { label: '放行待核验', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' };
-    case 'not_detected': return summary.detected
-      ? { label: '检测状态冲突', tone: 'border-amber-500/40 bg-amber-950/30 text-amber-200' }
-      : { label: '未检测到目标协议', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
-    default: return { label: summary.state ? '状态待核实' : '未上报管控状态', tone: 'border-slate-700 bg-slate-900/60 text-slate-300' };
+    case 'blocked':
+      return { label: '阻断已核验', tone: 'border-[#b4e4dc] bg-[#e6f7f4] text-[#147468]' };
+    case 'partial':
+      return { label: '部分阻断', tone: 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]' };
+    case 'unverified':
+      return summary.detected
+        ? { label: '阻断待核验', tone: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]' }
+        : { label: '未检测到 (扫描待核验)', tone: 'border-[#cedae7] bg-[#eef3f9] text-[#31485e]' };
+    case 'release_pending':
+      return { label: '放行待核验', tone: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]' };
+    case 'not_detected':
+      return summary.detected
+        ? { label: '检测状态冲突', tone: 'border-[#e8bf70] bg-[#fef6e4] text-[#9a5b00]' }
+        : { label: '未检测到目标协议', tone: 'border-[#cedae7] bg-[#eef3f9] text-[#31485e]' };
+    default:
+      return {
+        label: summary.state ? '状态待核实' : '未上报管控状态',
+        tone: 'border-[#cedae7] bg-[#eef3f9] text-[#31485e]',
+      };
   }
 };
 
@@ -202,46 +252,55 @@ const ProtocolGuardCard: React.FC<{ label: 'VMess' | 'Trojan'; summary?: Protoco
   ];
 
   return (
-    <article className="min-w-0 rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-2">
+    <article className="min-w-0 space-y-2 rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-xs font-semibold text-slate-100">{label}</h4>
-        <span className={`rounded-full border px-2 py-0.5 text-[10px] ${state.tone}`}>{state.label}</span>
+        <h4 className="text-xs font-extrabold text-[#0e233c]">{label}</h4>
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${state.tone}`}>{state.label}</span>
       </div>
-      <p className="text-[11px] text-slate-400">
+      <p className="text-[11px] font-medium text-[#4a607a]">
         配置端点 {configured?.length ?? '—'} · 已阻断 {blocked?.length ?? '—'} · 待核验 {pending?.length ?? '—'}
       </p>
-      {summary?.reason && <p className="text-[11px] leading-relaxed text-slate-300">{summary.reason}</p>}
+      {summary?.reason && <p className="text-[11px] leading-relaxed text-[#31485e]">{summary.reason}</p>}
       {endpoints.length > 0 && (
-        <ul className="space-y-1 border-t border-slate-800 pt-2 text-[10px] text-slate-300">
+        <ul className="space-y-1 border-t border-[#d2dfec] pt-2 text-[10px] text-[#0b1636]">
           {endpoints.map((endpoint, index) => {
             const reasonText = endpoint.reason ? (endpointReasonLabels[endpoint.reason] || endpoint.reason) : '';
             return (
-              <li key={`${endpoint.status}-${endpoint.proto || ''}-${endpoint.port || 0}-${endpoint.pid || 0}-${index}`} className="flex min-w-0 items-start justify-between gap-2">
+              <li
+                key={`${endpoint.status}-${endpoint.proto || ''}-${endpoint.port || 0}-${endpoint.pid || 0}-${index}`}
+                className="flex min-w-0 items-start justify-between gap-2"
+              >
                 <span className="min-w-0 break-all font-mono">
                   {formatProtocolEndpoint(endpoint)}
                   {reasonText && (
-                    <span className="ml-1.5 font-sans text-[9px] text-slate-400" title={`待核实原因代号: ${endpoint.reason}`}>
+                    <span className="ml-1.5 font-sans text-[9px] text-[#4a607a]" title={`待核实原因代号: ${endpoint.reason}`}>
                       ({reasonText})
                     </span>
                   )}
                 </span>
-                <span className={endpoint.status === '已阻断' ? 'shrink-0 text-emerald-300 font-semibold' : 'shrink-0 text-amber-300 font-semibold'}>{endpoint.status}</span>
+                <span className={endpoint.status === '已阻断' ? 'shrink-0 font-bold text-[#147468]' : 'shrink-0 font-bold text-[#9a5b00]'}>
+                  {endpoint.status}
+                </span>
               </li>
             );
           })}
         </ul>
       )}
       {evidenceItems.length > 0 && (
-        <dl className="grid gap-1 border-t border-slate-800 pt-2 text-[10px] sm:grid-cols-2">
+        <dl className="grid gap-1.5 border-t border-[#d2dfec] pt-2 text-[10px] sm:grid-cols-2">
           {evidenceItems.map(([name, value]) => (
             <div key={name} className="min-w-0">
-              <dt className="text-slate-500">{name}</dt>
-              <dd className="break-words text-slate-300">{value}</dd>
+              <dt className="font-semibold text-[#4a607a]">{name}</dt>
+              <dd className="break-words text-[#0b1636]">{value}</dd>
             </div>
           ))}
         </dl>
       )}
-      {!summary && <p className="text-[10px] text-slate-500">当前容器数据未提供此协议的管控结果，不能据此判断为已阻断或未检测到。</p>}
+      {!summary && (
+        <p className="text-[10px] text-[#4a607a]">
+          当前容器数据未提供此协议的管控结果，不能据此判断为已阻断或未检测到。
+        </p>
+      )}
     </article>
   );
 };
@@ -265,11 +324,24 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [diagnostic, setDiagnostic] = useState<DiagnosticData | null>(null);
   const [isDrawerActionLoading, setIsDrawerActionLoading] = useState(false);
-  const [pendingDecision, setPendingDecision] = useState<'deny' | 'allow_silent' | 'resolve' | 'release_udp_throttle' | 'freeze_container' | 'unfreeze_container' | 'apply_udp_blackhole' | 'release_udp_blackhole' | null>(null);
+  const [pendingDecision, setPendingDecision] = useState<
+    | 'deny'
+    | 'allow_silent'
+    | 'resolve'
+    | 'release_udp_throttle'
+    | 'freeze_container'
+    | 'unfreeze_container'
+    | 'apply_udp_blackhole'
+    | 'release_udp_blackhole'
+    | null
+  >(null);
   const [userEmail, setUserEmail] = useState('');
   const [userNote, setUserNote] = useState('');
   const [isSavingUserNote, setIsSavingUserNote] = useState(false);
+  const [activeAnchor, setActiveAnchor] = useState<DrawerSectionId>('drawer-sec-resources');
+
   const drawerPanelRef = useRef<HTMLDivElement>(null);
+  const drawerBodyRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
   const pendingDecisionRef = useRef(pendingDecision);
@@ -332,6 +404,14 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
     setUserEmail(container?.user_email || '');
     setUserNote(container?.user_note || '');
   }, [container?.container_id, container?.user_email, container?.user_note]);
+
+  const jumpToSection = (sectionId: DrawerSectionId) => {
+    setActiveAnchor(sectionId);
+    const target = drawerBodyRef.current?.querySelector<HTMLElement>(`#${sectionId}`);
+    if (!target) return;
+    const reduceMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+  };
 
   const saveUserNote = async () => {
     if (!identity || !container?.container_id) return;
@@ -567,7 +647,7 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
     ? { title: '确认处置封禁？', description: `对 ${identity.container_name} 确认违规处置，停止违规行为。`, confirmLabel: '确认处置', tone: 'danger' as const }
     : pendingDecision === 'allow_silent'
     ? { title: '确认放行不处置？', description: '当前放行后不再提醒，在告警历史中显示。', confirmLabel: '确认放行', tone: 'primary' as const }
-    : { title: '确认标记为已解决？', description: '活动告警将转入历史记录，再次检测到异常时仍会恢复告警。', confirmLabel: '标为已解决', tone: 'primary' as const }
+    : { title: '确认标记为已解决？', description: '活动告警将转入历史记录，再次检测到异常时仍会恢复告警。', confirmLabel: '标为已解决', tone: 'primary' as const };
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="container-drawer-title">
@@ -575,876 +655,1083 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
       <div
         onClick={onClose}
         aria-hidden="true"
-        className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs transition-opacity animate-in fade-in duration-200"
+        className="absolute inset-0 bg-[#02182f]/60 backdrop-blur-xs transition-opacity animate-in fade-in duration-200"
       />
 
-      {/* Slide-over Drawer Panel */}
+      {/* Slide-over Drawer Panel (RackNerd ctrl. Light-Ice Workspace) */}
       <div className="absolute inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10">
-        <div ref={drawerPanelRef} tabIndex={-1} className="min-w-0 w-screen max-w-2xl transform bg-[#041e3c] border-l border-sky-400/25 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
-          {/* Drawer Header */}
-          <div className="flex items-center justify-between border-b border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647] px-4 py-3.5 sm:px-6 sm:py-4">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="rounded-xl bg-[#087bff]/15 p-2.5 text-[#00b6ec] border border-[#087bff]/40 shrink-0">
-                <Box className="h-5 w-5" />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h2 id="container-drawer-title" className="text-base font-bold text-slate-100 truncate">
-                    {identity.container_name}
-                  </h2>
-                  <StatusBadge
-                    status={drawerStatus}
-                    label={drawerStatusLabel}
-                    size="sm"
-                    pulse={drawerStatus === 'healthy'}
-                  />
-                  <span
-                    className={`rounded-full border px-2 py-0.2 text-[10px] font-mono font-medium ${
-                      isVersionMatch
-                        ? 'border-emerald-500/30 bg-emerald-950/50 text-emerald-400'
-                        : 'border-amber-500/30 bg-amber-950/50 text-amber-400'
-                    }`}
-                  >
-                    Agent v{agentVersion}
-                  </span>
+        <div
+          ref={drawerPanelRef}
+          tabIndex={-1}
+          className="flex min-w-0 w-screen max-w-full sm:max-w-2xl flex-col border-l border-[#cedae7] bg-[#f2f7ff] text-[#0b1636] shadow-2xl transition-transform animate-in slide-in-from-right duration-250"
+        >
+          {/* Sticky Midnight RackNerd Header + Quick-Jump Pills */}
+          <div className="sticky top-0 z-20 shrink-0 border-b border-white/10 bg-[linear-gradient(125deg,#163957,#0e233c_58%,#0c1c30)] text-[#e6f4ff] shadow-md">
+            <div className="flex items-center justify-between gap-3 px-4 pt-3.5 pb-2.5 sm:px-6 sm:pt-4">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="shrink-0 rounded-xl border border-[#54c7ff]/35 bg-[#087bff]/20 p-2.5 text-[#54c7ff]">
+                  <Box className="h-5 w-5" aria-hidden="true" />
                 </div>
-                <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5">
-                  <span className="font-mono">{identity.host_id}</span>
-                  <span>•</span>
-                  <span>
-                    {identity.project ? `${identity.runtime}/${identity.project}` : identity.runtime}
-                  </span>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded bg-[#087bff] px-1.5 py-0.5 font-mono text-[10px] font-extrabold tracking-tight text-white">
+                      ctrl.
+                    </span>
+                    <h2 id="container-drawer-title" className="truncate text-base font-extrabold text-white">
+                      {identity.container_name}
+                    </h2>
+                    <StatusBadge
+                      status={drawerStatus}
+                      label={drawerStatusLabel}
+                      size="sm"
+                      pulse={drawerStatus === 'healthy'}
+                    />
+                    <span
+                      className={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold ${
+                        isVersionMatch
+                          ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
+                          : 'border-amber-400/40 bg-amber-500/15 text-amber-200'
+                      }`}
+                    >
+                      Agent v{agentVersion}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-[#b7d6f2]">
+                    <span className="font-mono font-semibold">{identity.host_id}</span>
+                    <span aria-hidden="true">•</span>
+                    <span>
+                      {identity.project ? `${identity.runtime}/${identity.project}` : identity.runtime}
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="flex items-center gap-2">
               <button
                 ref={closeButtonRef}
                 type="button"
                 onClick={onClose}
                 aria-label="关闭容器详情"
-                className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-800 bg-slate-900/80 text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-sky-400"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-white/15 bg-white/10 text-[#e6f4ff] transition-colors hover:bg-white/20 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-[#54c7ff]"
                 title="关闭抽屉 (Esc)"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
+
+            {/* Quick-jump section anchor pills */}
+            <nav
+              aria-label="容器详情分区导航"
+              className="flex items-center gap-1.5 overflow-x-auto border-t border-white/10 bg-[#031d3d]/65 px-4 py-2 sm:px-6"
+            >
+              {DRAWER_SECTIONS.map((secItem) => {
+                const isActive = activeAnchor === secItem.id;
+                return (
+                  <button
+                    key={secItem.id}
+                    type="button"
+                    onClick={() => jumpToSection(secItem.id)}
+                    aria-current={isActive ? 'location' : undefined}
+                    className={`shrink-0 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                      isActive
+                        ? 'border-[#54c7ff] bg-[#087bff] text-white shadow-xs'
+                        : 'border-white/15 bg-white/8 text-[#c9e0f5] hover:border-[#54c7ff]/60 hover:bg-white/15 hover:text-white'
+                    }`}
+                  >
+                    {secItem.label}
+                  </button>
+                );
+              })}
+            </nav>
           </div>
 
           {/* Drawer Scrollable Body */}
-          <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 sm:space-y-6">
-            <AdmissionStatus data={sec.admission} stale={container?.alerts?.stale} />
-            {Array.isArray(sec.service_audit?.services) && sec.service_audit.services.length > 0 && (
-              <section className="rounded-xl border border-indigo-500/30 bg-indigo-950/20 p-4 space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-indigo-200">容器服务配置画像（已脱敏）</h3>
-                  {(sec.service_audit.violations_count || 0) > 0 ? (
-                    <span className="rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-semibold text-rose-200 tabular-nums">
-                      {sec.service_audit.violations_count} 项违规配置
+          <div ref={drawerBodyRef} className="flex-1 space-y-5 overflow-y-auto p-4 sm:space-y-6 sm:p-6">
+            {/* Section 1: 资源监控 */}
+            <div id="drawer-sec-resources" className="scroll-mt-4 space-y-5">
+              {/* Quick KPI Cards Grid */}
+              <div className="grid grid-cols-1 gap-2.5 font-mono text-xs sm:grid-cols-3 sm:gap-3">
+                <div className="overflow-hidden rounded-[14px] border border-[#cedae7] bg-white shadow-xs">
+                  <div className="flex items-center gap-1.5 border-b border-[#d2dfec] bg-[#f4f8fd] px-3 py-2 font-sans text-[11px] font-extrabold uppercase tracking-wider text-[#0657b8]">
+                    <Cpu className="h-3.5 w-3.5 text-[#087bff]" aria-hidden="true" /> CPU 占用
+                  </div>
+                  <div className="p-3">
+                    <span className="text-xl font-extrabold text-[#0b1636] tabular-nums">
+                      {formatMetricPercent(container?.cpu_percent)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="overflow-hidden rounded-[14px] border border-[#cedae7] bg-white shadow-xs">
+                  <div className="flex items-center gap-1.5 border-b border-[#d2dfec] bg-[#f4f8fd] px-3 py-2 font-sans text-[11px] font-extrabold uppercase tracking-wider text-[#147468]">
+                    <HardDrive className="h-3.5 w-3.5 text-[#147468]" aria-hidden="true" /> 内存使用
+                  </div>
+                  <div className="p-3">
+                    <span className="text-xl font-extrabold text-[#0b1636] tabular-nums">
+                      {formatMetricPercent(container?.mem_percent)}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[10px] font-semibold text-[#4a607a] tabular-nums">
+                      {formatMetricBytes(container?.mem_bytes)} / {formatMetricBytes(container?.mem_limit_bytes)}
+                    </span>
+                  </div>
+                </div>
+
+                <div
+                  className={`overflow-hidden rounded-[14px] border shadow-xs ${
+                    inIpAlert
+                      ? 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]'
+                      : 'border-[#cedae7] bg-white'
+                  }`}
+                >
+                  <div
+                    className={`flex items-center gap-1.5 border-b px-3 py-2 font-sans text-[11px] font-extrabold uppercase tracking-wider ${
+                      inIpAlert
+                        ? 'border-[#f1b4bf] bg-[#fddce2] text-[#b41835]'
+                        : 'border-[#d2dfec] bg-[#f4f8fd] text-[#9a5b00]'
+                    }`}
+                  >
+                    <Network className="h-3.5 w-3.5 text-[#ff6b00]" aria-hidden="true" /> 入站去重 IP
+                  </div>
+                  <div className="p-3">
+                    <span className={`text-xl font-extrabold tabular-nums ${inIpAlert ? 'text-[#b41835]' : 'text-[#0b1636]'}`}>
+                      {inIps ?? (sec.communication_detail_available === false ? '不可用' : '—')}
+                    </span>
+                    <span className={`mt-0.5 block text-[10px] font-semibold tabular-nums ${inIpAlert ? 'text-[#881337]' : 'text-[#4a607a]'}`}>
+                      阈值：{inThresh} IPs
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {identity.runtime === 'runman' && (
+                <section className="rn2-card bg-white p-4" aria-label="Runman 可写层占用">
+                  <div className="flex items-center gap-2 text-sm font-extrabold text-[#0e233c]">
+                    <HardDrive className="h-4 w-4 text-[#087bff]" aria-hidden="true" />
+                    Runman 可写层占用
+                  </div>
+                  <p className="mt-2 font-mono text-sm font-bold tabular-nums text-[#0b1636]">
+                    {container?.container_disk_rw_available
+                      ? container.container_disk_rw_logical_available
+                        ? `${formatMetricBytes(container.container_disk_rw_logical_file_bytes)} / ${formatMetricBytes(container.container_disk_rw_bytes)}`
+                        : `逻辑文件量不可用 · ${formatMetricBytes(container.container_disk_rw_bytes)}`
+                      : '当前样本不可用'}
+                  </p>
+                  <p className="mt-1 text-[11px] text-[#4a607a]">
+                    普通文件逻辑内容 / upperdir 已分配块；不含目录、符号链接、xattr 和 whiteout 归档开销，与 Podman SizeRw 不保证逐字节等价。
+                  </p>
+                </section>
+              )}
+
+              {identity.runtime === 'runman' && (
+                <section className="rn2-card bg-white p-4" aria-label="Runman 磁盘镜像占用">
+                  <div className="flex items-center gap-2 text-sm font-extrabold text-[#0e233c]">
+                    <HardDrive className="h-4 w-4 text-[#147468]" aria-hidden="true" />
+                    Runman 磁盘镜像占用
+                  </div>
+                  <p className="mt-2 font-mono text-sm font-bold tabular-nums text-[#0b1636]">
+                    {container?.container_disk_backing_image_available
+                      ? `${formatMetricBytes(container.container_disk_backing_image_allocated_bytes)} / ${formatMetricBytes(container.container_disk_backing_image_logical_bytes)}`
+                      : '当前样本不可用'}
+                  </p>
+                  <p className="mt-1 text-[11px] text-[#4a607a]">
+                    已分配块 / 镜像逻辑容量；该值来自宿主机 disk.img 文件分配量。
+                  </p>
+                </section>
+              )}
+
+              {/* Visual Charts: CPU & Memory */}
+              <div className="rn2-card bg-white p-4">
+                <h3 className="mb-2 flex items-center gap-2 text-xs font-extrabold text-[#0e233c]">
+                  <Activity className="h-4 w-4 text-[#087bff]" aria-hidden="true" />
+                  <span>CPU 与内存历史趋势 (24h)</span>
+                </h3>
+                <ResourceChart history={history} />
+              </div>
+
+              {/* Visual Charts: Network Bandwidth */}
+              <div className="rn2-card bg-white p-4">
+                <h3 className="mb-2 flex items-center gap-2 text-xs font-extrabold text-[#0e233c]">
+                  <Network className="h-4 w-4 text-[#147468]" aria-hidden="true" />
+                  <span>实时吞吐速率趋势 (RX & TX)</span>
+                </h3>
+                <NetworkChart history={history} />
+              </div>
+
+              {/* Protocol Breakdown & Traffic Symmetry */}
+              <div className="rn2-card space-y-3 bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="flex items-center gap-2 text-xs font-extrabold text-[#0e233c]">
+                    <Activity className="h-4 w-4 text-[#087bff]" aria-hidden="true" />
+                    <span>协议流量拆分与流量对称性</span>
+                  </h3>
+                  {container?.alerts?.traffic_imbalance ? (
+                    <span className="flex items-center gap-1 rounded-full border border-[#f1b4bf] bg-[#ffeef1] px-2.5 py-0.5 text-[11px] font-bold text-[#b41835]">
+                      <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                      <span>
+                        入出失衡 {container.alerts.traffic_imbalance_ratio}x (
+                        {container.alerts.traffic_imbalance_direction === 'outbound_heavy' ? '出栈偏高' : '入栈偏高'})
+                      </span>
                     </span>
                   ) : (
-                    <span className="rounded-full border border-emerald-500/35 bg-emerald-950/50 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
-                      配置合规
+                    <span className="flex items-center gap-1 rounded-full border border-[#b4e4dc] bg-[#e6f7f4] px-2.5 py-0.5 text-[11px] font-bold text-[#147468]">
+                      <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                      <span>入出栈流量均衡</span>
                     </span>
                   )}
                 </div>
-                <div className="space-y-2">
-                  {sec.service_audit.services.map((svc: any, idx: number) => (
-                    <div key={`${svc.engine}-${svc.pid}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-900/75 px-3 py-2 text-xs text-slate-300 space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono font-semibold text-indigo-300">{svc.engine}</span>
-                        <span className="text-[11px] text-slate-500 tabular-nums">PID {svc.pid}</span>
-                      </div>
-                      {Array.isArray(svc.inbounds) && svc.inbounds.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {svc.inbounds.map((inb: any, j: number) => (
-                            <span key={j} className="rounded border border-slate-700 bg-slate-950/80 px-1.5 py-0.5 font-mono text-[11px] text-slate-200">
-                              {inb.protocol}:{inb.port || 0}
-                              {Array.isArray(inb.sni_list) && inb.sni_list.length > 0 ? ` · SNI=${inb.sni_list.join(',')}` : ''}
-                              {!inb.auth_configured ? ' · 无认证' : ''}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-            {(identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman') && (
-              <section className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-4 space-y-3">
-                <div className="flex items-start gap-3">
-                  <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-2 text-sky-300">
-                    <Mail className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-semibold text-slate-100">用户邮箱与备注</h3>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-400">用于搜索、人工核对和后续封禁定位；保存信息不会自动停止或限制容器。</p>
-                  </div>
-                </div>
-                <label className="block space-y-1.5">
-                  <span className="flex items-center gap-2 text-xs font-medium text-slate-300">
-                    用户邮箱
-                    {container?.user_email_source === 'upstream' && <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-300">上游 API 自动同步</span>}
-                    {container?.user_email_source === 'manual' && <span className="rounded-full border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-400">手工备注</span>}
-                    {container?.user_email_source === 'unmatched' && (
-                      <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">
-                        {container.user_email_status?.startsWith('上游已匹配此实例') ? '上游已匹配实例 (待补邮箱)' : '上游实例未匹配'}
+
+                <div className="grid grid-cols-1 gap-3 font-mono text-xs sm:grid-cols-3">
+                  {/* TCP Traffic Card */}
+                  <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3">
+                    <span className="mb-1 block font-sans text-[11px] font-bold text-[#0657b8]">
+                      TCP 协议流量
+                    </span>
+                    <div className="flex items-center justify-between text-[#0b1636]">
+                      <span className="flex items-center font-bold text-[#147468]" title="TCP 入栈速率">
+                        <ArrowDownLeft className="mr-0.5 h-3.5 w-3.5" aria-hidden="true" />
+                        {container?.tcp_rx_bps == null ? '—' : `${fmtMbps(container.tcp_rx_bps)} Mbps`}
                       </span>
-                    )}
-                  </span>
-                  <input
-                    type="email"
-                    maxLength={254}
-                    value={userEmail}
-                    onChange={(event) => setUserEmail(event.target.value)}
-                    placeholder="例如 user@example.com"
-                    disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="ui-input"
-                  />
-                  {container?.user_email_source === 'unmatched' && container.user_email_status && (
-                    <p className="text-[11px] leading-relaxed text-amber-300">{container.user_email_status.replace(/。+$/, '')}。系统不会按容器名称猜邮箱；请核对上游实例 UUID，或手工补充邮箱。</p>
-                  )}
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-xs font-medium text-slate-300">内部备注 <span className="font-normal text-slate-500">（可选，最多 500 字）</span></span>
-                  <textarea
-                    value={userNote}
-                    maxLength={500}
-                    onChange={(event) => setUserNote(event.target.value)}
-                    placeholder="记录订单号、沟通情况或封禁核对信息"
-                    rows={2}
-                    disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950/90 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-hidden focus:ring-2 focus:ring-sky-400/30 disabled:opacity-50"
-                  />
-                </label>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[11px] text-slate-500">Ctrl+K 全局搜索可直接输入邮箱或备注内容。</p>
-                  <button
-                    type="button"
-                    onClick={saveUserNote}
-                    disabled={isSavingUserNote || !container?.container_id || Boolean(container?.alerts?.stale)}
-                    className="ui-btn ui-btn-secondary ui-btn-sm"
+                      <span className="flex items-center font-bold text-[#087bff]" title="TCP 出栈速率">
+                        <ArrowUpRight className="mr-0.5 h-3.5 w-3.5" aria-hidden="true" />
+                        {container?.tcp_tx_bps == null ? '—' : `${fmtMbps(container.tcp_tx_bps)} Mbps`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* UDP Traffic Card */}
+                  <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3">
+                    <span className="mb-1 block font-sans text-[11px] font-bold text-[#4b3da5]">
+                      UDP 协议流量
+                    </span>
+                    <div className="flex items-center justify-between text-[#0b1636]">
+                      <span className="flex items-center font-bold text-[#147468]" title="UDP 入栈速率">
+                        <ArrowDownLeft className="mr-0.5 h-3.5 w-3.5" aria-hidden="true" />
+                        {container?.udp_rx_bps == null ? '—' : `${fmtMbps(container.udp_rx_bps)} Mbps`}
+                      </span>
+                      <span className="flex items-center font-bold text-[#087bff]" title="UDP 出栈速率">
+                        <ArrowUpRight className="mr-0.5 h-3.5 w-3.5" aria-hidden="true" />
+                        {container?.udp_tx_bps == null ? '—' : `${fmtMbps(container.udp_tx_bps)} Mbps`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Hysteria 2 (hy2) Status Card */}
+                  <div
+                    className={`rounded-xl border p-3 ${
+                      container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected
+                        ? 'border-[#d3c2f7] bg-[#f5f0ff] text-[#4c2889]'
+                        : 'border-[#d2dfec] bg-[#f4f8fd] text-[#31485e]'
+                    }`}
                   >
-                    <Save className="h-3.5 w-3.5" />
-                    {isSavingUserNote ? '保存中…' : '保存备注'}
-                  </button>
-                </div>
-              </section>
-            )}
-            {/* Quick KPI Cards Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3 font-mono text-xs">
-              <div className="overflow-hidden rounded-xl border border-sky-400/20 bg-[#02182f]/80">
-                <div className="flex items-center gap-1.5 border-b border-sky-400/15 bg-[#031d3d] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-sky-300">
-                  <Cpu className="h-3.5 w-3.5 text-[#00b6ec]" /> CPU 占用
-                </div>
-                <div className="p-3">
-                  <span className="text-lg font-bold text-white tabular-nums">
-                    {formatMetricPercent(container?.cpu_percent)}
-                  </span>
-                </div>
-              </div>
-
-              <div className="overflow-hidden rounded-xl border border-sky-400/20 bg-[#02182f]/80">
-                <div className="flex items-center gap-1.5 border-b border-sky-400/15 bg-[#031d3d] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-emerald-300">
-                  <HardDrive className="h-3.5 w-3.5 text-emerald-400" /> 内存使用
-                </div>
-                <div className="p-3">
-                  <span className="text-lg font-bold text-white tabular-nums">
-                    {formatMetricPercent(container?.mem_percent)}
-                  </span>
-                  <span className="text-[10px] text-slate-400 block truncate tabular-nums">
-                    {formatMetricBytes(container?.mem_bytes)} / {formatMetricBytes(container?.mem_limit_bytes)}
-                  </span>
-                </div>
-              </div>
-
-              <div
-                className={`overflow-hidden rounded-xl border ${
-                  inIpAlert
-                    ? 'border-rose-500/45 bg-rose-950/30 text-rose-300'
-                    : 'border-sky-400/20 bg-[#02182f]/80'
-                }`}
-              >
-                <div className={`flex items-center gap-1.5 border-b px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${inIpAlert ? 'border-rose-500/25 bg-rose-950/60 text-rose-300' : 'border-sky-400/15 bg-[#031d3d] text-amber-300'}`}>
-                  <Network className="h-3.5 w-3.5 text-[#ff7900]" /> 入站去重 IP
-                </div>
-                <div className="p-3">
-                  <span className={`text-lg font-bold tabular-nums ${inIpAlert ? 'text-rose-400' : 'text-white'}`}>
-                    {inIps ?? (sec.communication_detail_available === false ? '不可用' : '—')}
-                  </span>
-                  <span className="text-[10px] text-slate-400 block tabular-nums">
-                    阈值：{inThresh} IPs
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {identity.runtime === 'runman' && (
-              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4" aria-label="Runman 可写层占用">
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                  <HardDrive className="h-4 w-4 text-sky-300" />
-                  Runman 可写层占用
-                </div>
-                <p className="mt-2 text-sm tabular-nums text-slate-200">
-                  {container?.container_disk_rw_available
-                    ? container.container_disk_rw_logical_available
-                      ? `${formatMetricBytes(container.container_disk_rw_logical_file_bytes)} / ${formatMetricBytes(container.container_disk_rw_bytes)}`
-                      : `逻辑文件量不可用 · ${formatMetricBytes(container.container_disk_rw_bytes)}`
-                    : '当前样本不可用'}
-                </p>
-                <p className="mt-1 text-[11px] text-slate-400">
-                  普通文件逻辑内容 / upperdir 已分配块；不含目录、符号链接、xattr 和 whiteout 归档开销，与 Podman SizeRw 不保证逐字节等价。
-                </p>
-              </section>
-            )}
-
-            {identity.runtime === 'runman' && (
-              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4" aria-label="Runman 磁盘镜像占用">
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                  <HardDrive className="h-4 w-4 text-emerald-300" />
-                  Runman 磁盘镜像占用
-                </div>
-                <p className="mt-2 text-sm tabular-nums text-slate-200">
-                  {container?.container_disk_backing_image_available
-                    ? `${formatMetricBytes(container.container_disk_backing_image_allocated_bytes)} / ${formatMetricBytes(container.container_disk_backing_image_logical_bytes)}`
-                    : '当前样本不可用'}
-                </p>
-                <p className="mt-1 text-[11px] text-slate-400">已分配块 / 镜像逻辑容量；该值来自宿主机 disk.img 文件分配量。</p>
-              </section>
-            )}
-
-            {container && isGuardRuntime && (
-              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3" aria-label="容器活动告警与保护信号">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                      <Shield className="h-4 w-4 text-amber-300" />
-                      告警与保护信号
-                    </h3>
-                    <p className="mt-1 text-[11px] text-slate-400">
-                      {drawerIsStale ? '数据已过期，以下为最近一次匹配记录。' : '展示服务端当前匹配到的活动告警；保护信号不等于违规认定。'}
-                    </p>
-                  </div>
-                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] tabular-nums text-slate-300">{containerAlerts.length} 项</span>
-                </div>
-                {containerAlerts.length === 0 ? (
-                  <p className="rounded-lg border border-dashed border-slate-800 px-3 py-3 text-xs text-slate-400">暂无匹配的活动告警。资源保护与协议阻断状态请查看下方卡片。</p>
-                ) : (
-                  <ul className="space-y-2">
-                    {containerAlerts.map((alert) => (
-                      <li key={alert.id} className={`rounded-lg border p-3 ${alert.protection_only ? 'border-sky-800/70 bg-sky-950/20' : alert.severity === 'critical' ? 'border-rose-800/70 bg-rose-950/20' : 'border-amber-800/60 bg-amber-950/15'}`}>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className={`rounded-full border px-2 py-0.5 text-[10px] ${alert.protection_only ? 'border-sky-700 bg-sky-950/70 text-sky-200' : alert.severity === 'critical' ? 'border-rose-700 bg-rose-950/70 text-rose-200' : 'border-amber-700 bg-amber-950/70 text-amber-200'}`}>
-                            {alert.protection_only ? '保护信号' : alert.severity === 'critical' ? '严重告警' : alert.severity === 'info' ? '提示' : '安全告警'}
-                          </span>
-                          <span className="text-[10px] text-slate-500">{alert.type}</span>
-                        </div>
-                        <h4 className="mt-2 text-xs font-semibold text-slate-100">{alert.title || alert.type}</h4>
-                        <p className="mt-1 break-words text-[11px] leading-relaxed text-slate-300">{alert.message}</p>
-                        <SocketAbuseEvidence alert={alert} compact />
-                        {(alert.value != null || alert.threshold != null) && (
-                          <p className="mt-1 text-[10px] tabular-nums text-slate-400">
-                            {alert.value != null ? `当前值：${formatAlertValue(alert.value)}` : ''}
-                            {alert.value != null && alert.threshold != null ? ' · ' : ''}
-                            {alert.threshold != null ? `阈值：${formatAlertValue(alert.threshold)}` : ''}
-                          </p>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {sec?.socket_abuse && !containerAlerts.some((alert) => Boolean(extractSocketAbuseAssessment(alert))) && (
-                  <SocketAbuseEvidence assessment={sec.socket_abuse} compact />
-                )}
-              </section>
-            )}
-
-            {(identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman') && (
-              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                      <Gauge className="h-4 w-4 text-sky-300" />
-                      CPU、内存与磁盘 I/O 自动保护
-                    </h3>
-                    <p className="mt-1 text-[11px] text-slate-400">显示触发依据、已读回限额与恢复进度；保护信号不等于客户滥用认定。</p>
-                  </div>
-                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] text-slate-300">Incus / Podman / Runman</span>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-                  <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(cpuGuard?.state)}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="flex items-center gap-1.5 text-xs font-semibold"><Cpu className="h-3.5 w-3.5" />CPU 保护</span>
-                      <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(cpuGuard?.state)}</span>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-slate-300">
-                      当前 {formatMetricPercent(cpuGuardCurrent)}
-                      {cpuGuard?.effective_cpus ? ` · 配额容量 ${fmtNumber(cpuGuard.effective_cpus, 2)} 核` : ''}
-                      {cpuGuard?.host_busy_percent !== undefined && cpuGuard.host_busy_percent !== null ? ` · 母鸡忙碌 ${fmtNumber(cpuGuard.host_busy_percent, 1)}%` : ''}
-                      {cpuGuard?.host_cpu_psi_some_avg10 != null ? ` · 母鸡 CPU PSI ${fmtNumber(cpuGuard.host_cpu_psi_some_avg10, 2)}%` : cpuGuard?.host_pressure_basis === 'host_busy_psi_unavailable_fallback' ? ' · PSI 不可用，按母鸡忙碌率兼容判断' : ''}
-                    </p>
-                    {cpuGuard?.state === 'watching' && (
-                      <p className="text-[11px] text-amber-200">持续高占用 {cpuGuard.high_samples ?? '—'}/{cpuGuard.required_samples ?? '—'} 次，已观察 {formatMinutes(cpuGuard.confirmed_duration_seconds)}。</p>
-                    )}
-                    {['limited', 'limit_unverified', 'limited_unverified', 'limit_failed', 'restore_failed', 'escalating', 'restoring'].includes(cpuGuard?.state || '') && (
-                      <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
-                        <p>原限额：<span className="font-mono text-slate-100">{cpuGuard?.original_limit || '未记录'}</span></p>
-                        <p>策略目标：<span className="font-mono text-slate-100">{cpuGuard?.expected_limit || cpuGuard?.active_limit || '等待读回'}</span>{cpuGuard?.tier ? ` · 第 ${cpuGuard.tier} 阶（约原容量 ${cpuGuard.tier_percent_of_original ?? '-'}%）` : ''}</p>
-                        <p>内核当前读回：<span className="font-mono text-slate-100">{cpuGuard?.actual_limit || '暂不可读'}</span> · {cpuGuard?.readback_confirmed ? `已核实${cpuGuard.readback_confirmed_at ? ` · ${new Date(cpuGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}` : '尚未确认目标值'}</p>
-                        <p>恢复条件：低占用连续 {cpuGuard?.recovery_samples ?? '—'}/{cpuGuard?.recovery_samples_required ?? '—'} 次，观察窗口 {formatMinutes(cpuGuard?.recovery_duration_seconds)}。</p>
-                      </div>
-                    )}
-                    {cpuGuard?.top_process?.process && (
-                      <p className="text-[11px] text-slate-300">主要进程：<span className="font-mono text-sky-200">{cpuGuard.top_process.process}</span>{cpuGuard.top_process.pid ? ` · PID ${cpuGuard.top_process.pid}` : ''}{cpuGuard.top_process.cpu_percent !== undefined ? ` · ${fmtNumber(cpuGuard.top_process.cpu_percent, 1)}%` : ''}</p>
-                    )}
-                    <p className="text-[11px] leading-relaxed text-slate-400">{cpuGuard?.message || cpuGuard?.action?.message || (cpuGuard?.state === 'normal' ? '当前未达到持续保护条件。' : '等待 Agent 采样与读回状态。')}</p>
-                    {cpuGuard?.recheck_interval_seconds ? <p className="text-[10px] text-slate-500">每约 {formatMinutes(cpuGuard.recheck_interval_seconds)} 复查一次。</p> : null}
-                  </div>
-
-                  <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(memoryGuard?.state)}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="flex items-center gap-1.5 text-xs font-semibold"><Activity className="h-3.5 w-3.5" />内存保护</span>
-                      <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(memoryGuard?.state)}</span>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-slate-300">
-                      当前 {memoryGuard?.memory_current_bytes != null ? fmtBytes(memoryGuard.memory_current_bytes) : '未知'}
-                      {memoryGuard?.memory_max_bytes != null ? ` / ${fmtBytes(memoryGuard.memory_max_bytes)}` : ' / 未设上限'}
-                      {memoryGuard?.memory_used_percent != null ? ` · ${fmtNumber(memoryGuard.memory_used_percent, 1)}%` : ''}
-                    </p>
-                    <p className="text-[11px] text-slate-300">
-                      内存 PSI：母鸡 {memoryGuard?.host_psi_some_avg10 != null ? `${fmtNumber(memoryGuard.host_psi_some_avg10, 1)}%` : '不可用'}
-                      {' · '}容器 {memoryGuard?.container_psi_some_avg10 != null ? `${fmtNumber(memoryGuard.container_psi_some_avg10, 1)}%` : '不可用'}
-                    </p>
-                    {memoryGuard?.state === 'watching' && (
-                      <p className="text-[11px] text-amber-200">高内存与 PSI 持续 {memoryGuard.high_samples ?? '—'}/{memoryGuard.required_samples ?? '—'} 次，已观察 {formatMinutes(memoryGuard.confirmed_duration_seconds)}。</p>
-                    )}
-                    {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'apply_unverified'].includes(memoryGuard?.state || '') && (
-                      <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
-                        <p>原 memory.high：<span className="font-mono text-slate-100">{formatMemoryHigh(memoryGuard?.original_limit)}</span></p>
-                        <p>当前 memory.high：<span className="font-mono text-slate-100">{formatMemoryHigh(memoryGuard?.active_limit)}</span>{memoryGuard?.tier ? ` · 第 ${memoryGuard.tier} 阶（约 memory.max 的 ${memoryGuard.tier_percent_of_max ?? '-'}%）` : ''}</p>
-                        <p>恢复条件：低 PSI 连续 {memoryGuard?.recovery_samples ?? '—'}/{memoryGuard?.recovery_samples_required ?? '—'} 次，观察窗口 {formatMinutes(memoryGuard?.recovery_duration_seconds)}。</p>
-                      </div>
-                    )}
-                    {memoryGuard?.state === 'cooldown' && memoryGuard.retry_after_seconds ? (
-                      <p className="text-[11px] text-amber-200">原限额已恢复，约 {formatMinutes(memoryGuard.retry_after_seconds)} 后重新评估。</p>
-                    ) : null}
-                    <p className="text-[11px] leading-relaxed text-slate-400">{memoryGuard?.message || (memoryGuard?.state === 'normal' ? '当前未达到持续内存压力保护条件。' : '等待 Agent 采样与限额读回。')}</p>
-                  </div>
-
-                  <div className={`min-w-0 rounded-lg border p-3 space-y-2 ${guardTone(ioGuard?.state)}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="flex items-center gap-1.5 text-xs font-semibold"><HardDrive className="h-3.5 w-3.5" />磁盘 I/O 保护</span>
-                      <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px]">{guardStateLabel(ioGuard?.state)}</span>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-slate-300">
-                      {ioGuard?.device ? `设备 ${ioGuard.device}` : ioGuard?.state === 'normal' ? '常规读写 (未触发限额)' : '设备待识别'}
-                      {ioGuard?.device_busy_percent !== undefined && ioGuard.device_busy_percent !== null ? ` · 磁盘忙碌 ${fmtNumber(ioGuard.device_busy_percent, 1)}%` : ''}
-                      {ioGuard?.host_io_psi_some_avg10 != null ? ` · 母鸡 I/O PSI ${fmtNumber(ioGuard.host_io_psi_some_avg10, 2)}%` : ioGuard?.host_pressure_basis === 'device_busy_fallback_psi_unavailable' ? ' · PSI 不可用，按设备忙碌率兼容判断' : ''}
-                      {ioGuard?.dominant_share_percent !== undefined ? ` · 容器占比 ${fmtNumber(ioGuard.dominant_share_percent, 1)}%` : ''}
-                    </p>
-                    {ioGuard?.state === 'watching' && (
-                      <p className="text-[11px] text-amber-200">持续压力 {ioGuard.sample_count ?? '—'}/{ioGuard.required_samples ?? '—'} 次，已观察 {formatMinutes(ioGuard.confirmed_duration_seconds)}。</p>
-                    )}
-                    {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'retry_wait'].includes(ioGuard?.state || '') && (
-                      <div className="rounded-md border border-slate-700/80 bg-slate-950/50 p-2 text-[11px] space-y-1">
-                        <p>原 I/O 限额：<span className="font-mono text-slate-100">{formatIoLimit(ioGuard?.original_limit)}</span></p>
-                        <p>策略目标：<span className="font-mono text-slate-100">{formatIoLimit(ioGuard?.expected_limit || ioGuard?.active_limit)}</span>{ioGuard?.tier ? ` · 第 ${ioGuard.tier} 阶（约基线 ${ioGuard.tier_percent_of_baseline ?? '-'}%）` : ''}</p>
-                        <p>内核当前读回：<span className="font-mono text-slate-100">{ioGuard?.actual_limit ? formatIoLimit(ioGuard.actual_limit) : '暂不可读'}</span> · {ioGuard?.readback_confirmed ? `已核实${ioGuard.readback_confirmed_at ? ` · ${new Date(ioGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}` : '尚未确认目标值'}</p>
-                        <p>恢复条件：低压力连续 {ioGuard?.recovery_samples ?? '—'}/{ioGuard?.recovery_samples_required ?? '—'} 次，观察窗口 {formatMinutes(ioGuard?.recovery_duration_seconds)}。</p>
-                        {ioGuard?.retry_after_seconds ? <p className="text-amber-200">约 {formatMinutes(ioGuard.retry_after_seconds)} 后自动重试。</p> : null}
-                      </div>
-                    )}
-                    {ioGuard?.observed_rates && (
-                      <p className="text-[11px] text-slate-300">当前读/写：{formatIoRate(ioGuard.observed_rates.rbps)} / {formatIoRate(ioGuard.observed_rates.wbps)}；IOPS {fmtNumber(ioGuard.observed_rates.riops, 0)} / {fmtNumber(ioGuard.observed_rates.wiops, 0)}。</p>
-                    )}
-                    <p className="text-[11px] leading-relaxed text-slate-400">{ioGuard?.message || (ioGuard?.state === 'normal' ? '当前未达到持续宿主机磁盘压力及容器归属条件。' : '等待 Agent 采样与读回状态。')}</p>
-                    {ioGuard?.recheck_interval_seconds ? <p className="text-[10px] text-slate-500">每约 {formatMinutes(ioGuard.recheck_interval_seconds)} 复查一次。</p> : null}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-[11px] text-slate-300">
-                  <p className="font-semibold text-slate-200">PSI 等待压力（近 10 秒）</p>
-                  <p className="mt-1">母鸡 CPU / 内存 / 磁盘 I/O：{psiPercent(resourcePressure?.host, 'cpu')} · {psiPercent(resourcePressure?.host, 'memory')} · {psiPercent(resourcePressure?.host, 'io')}</p>
-                  <p>容器 CPU / 内存 / 磁盘 I/O：{psiPercent(resourcePressure?.container, 'cpu')} · {psiPercent(resourcePressure?.container, 'memory')} · {psiPercent(resourcePressure?.container, 'io')}</p>
-                  <p className="mt-1 text-sky-200">{resourcePressure?.explanation || resourcePressure?.container?.reason || '等待新版 Agent 上报 PSI；部分旧内核或 cgroup 配置不提供该指标。'}</p>
-                  <p className="mt-1 text-slate-500">PSI 表示任务因资源压力而等待的时间比例；它辅助区分持续计算与资源争用，不用于认定用户行为。</p>
-                </div>
-              </section>
-            )}
-
-            {container && isGuardRuntime && (
-              <section className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 space-y-3" aria-label="VMess 与 Trojan 协议管控">
-                <div>
-                  <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                    <Shield className="h-4 w-4 text-violet-300" />
-                    VMess / Trojan 阻断状态
-                  </h3>
-                  <p className="mt-1 text-[11px] text-slate-400">区分已读回阻断、部分阻断和待核验端点；缺少 Agent 状态时不会显示为已阻断。</p>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <ProtocolGuardCard label="VMess" summary={sec.vmess_guard} />
-                  <ProtocolGuardCard label="Trojan" summary={sec.trojan_guard} />
-                </div>
-              </section>
-            )}
-
-            {/* Visual Charts: CPU & Memory */}
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-              <h3 className="text-xs font-bold text-slate-200 mb-2 flex items-center gap-2">
-                <Activity className="h-4 w-4 text-sky-400" />
-                <span>CPU 与内存历史趋势 (24h)</span>
-              </h3>
-              <ResourceChart history={history} />
-            </div>
-
-            {/* Visual Charts: Network Bandwidth */}
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-              <h3 className="text-xs font-bold text-slate-200 mb-2 flex items-center gap-2">
-                <Network className="h-4 w-4 text-emerald-400" />
-                <span>实时吞吐速率趋势 (RX & TX)</span>
-              </h3>
-              <NetworkChart history={history} />
-            </div>
-
-            {/* Protocol Breakdown & Traffic Symmetry */}
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-slate-200 flex items-center gap-2">
-                  <Activity className="h-4 w-4 text-sky-400" />
-                  <span>协议流量拆分与流量对称性</span>
-                </h3>
-                {container?.alerts?.traffic_imbalance ? (
-                  <span className="text-[11px] font-bold text-rose-300 bg-rose-500/10 border border-rose-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
-                    <ArrowUpDown className="h-3 w-3 text-rose-400" />
-                    <span>入出失衡 {container.alerts.traffic_imbalance_ratio}x ({container.alerts.traffic_imbalance_direction === 'outbound_heavy' ? '出栈偏高' : '入栈偏高'})</span>
-                  </span>
-                ) : (
-                  <span className="text-[11px] font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full flex items-center gap-1">
-                    <CheckCircle2 className="h-3 w-3" />
-                    <span>入出栈流量均衡</span>
-                  </span>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
-                {/* TCP Traffic Card */}
-                <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-                  <span className="text-slate-400 block text-[11px] mb-1 text-blue-400 font-semibold">
-                    TCP 协议流量
-                  </span>
-                  <div className="flex items-center justify-between text-slate-200">
-                    <span className="flex items-center text-emerald-400" title="TCP 入栈速率">
-                      <ArrowDownLeft className="h-3.5 w-3.5 mr-0.5" />
-                      {container?.tcp_rx_bps == null ? '—' : `${fmtMbps(container.tcp_rx_bps)} Mbps`}
-                    </span>
-                    <span className="flex items-center text-sky-400" title="TCP 出栈速率">
-                      <ArrowUpRight className="h-3.5 w-3.5 mr-0.5" />
-                      {container?.tcp_tx_bps == null ? '—' : `${fmtMbps(container.tcp_tx_bps)} Mbps`}
-                    </span>
-                  </div>
-                </div>
-
-                {/* UDP Traffic Card */}
-                <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-                  <span className="text-slate-400 block text-[11px] mb-1 text-violet-400 font-semibold">
-                    UDP 协议流量
-                  </span>
-                  <div className="flex items-center justify-between text-slate-200">
-                    <span className="flex items-center text-emerald-400" title="UDP 入栈速率">
-                      <ArrowDownLeft className="h-3.5 w-3.5 mr-0.5" />
-                      {container?.udp_rx_bps == null ? '—' : `${fmtMbps(container.udp_rx_bps)} Mbps`}
-                    </span>
-                    <span className="flex items-center text-sky-400" title="UDP 出栈速率">
-                      <ArrowUpRight className="h-3.5 w-3.5 mr-0.5" />
-                      {container?.udp_tx_bps == null ? '—' : `${fmtMbps(container.udp_tx_bps)} Mbps`}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Hysteria 2 (hy2) Status Card */}
-                <div className={`rounded-lg border p-3 ${
-                  container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected
-                    ? 'border-violet-500/40 bg-violet-950/20 text-violet-300'
-                    : 'border-slate-800 bg-slate-900/60 text-slate-300'
-                }`}>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[11px] font-semibold text-violet-400 flex items-center gap-1">
-                      <Radio className="h-3 w-3" />
-                      Hysteria 2 协议
-                    </span>
-                    {(container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
-                      <span className="text-[10px] font-bold bg-violet-500/20 border border-violet-500/40 px-1.5 py-0.2 rounded-sm text-violet-200">
-                        {hy2ConfidenceLabel}
+                    <div className="mb-1 flex items-center justify-between gap-1">
+                      <span className="flex items-center gap-1 font-sans text-[11px] font-bold text-[#5b34b0]">
+                        <Radio className="h-3 w-3" aria-hidden="true" />
+                        Hysteria 2 协议
                       </span>
-                    )}
-                  </div>
-                  <div className="text-[11px] mt-1">
-                    {container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected ? (
-                      <div>
-                        <span>UDP 并发：{container?.security?.hy2_protocol?.udp_concurrency ?? container?.alerts?.hy2_concurrency ?? '—'}</span>
-                        {container?.security?.hy2_protocol?.process && (
-                          <span className="text-slate-400 ml-1.5">({container.security.hy2_protocol.process})</span>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-slate-500">未发现运行特征</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* UDP Throttle & Anti-Abuse Control Card */}
-                {(container?.alerts?.udp_throttled || sec.udp_throttle?.throttled || container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
-                  <div className={`col-span-1 sm:col-span-2 rounded-lg border p-3 ${
-                    container?.alerts?.udp_throttled || sec.udp_throttle?.throttled
-                      ? 'border-rose-500/50 bg-rose-950/30 text-rose-200'
-                      : 'border-slate-800 bg-slate-900/60 text-slate-300'
-                  }`}>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] font-semibold flex items-center gap-1.5">
-                        <Gauge className={`h-3.5 w-3.5 ${
-                          container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? 'text-rose-400' : 'text-slate-400'
-                        }`} />
-                        <span>UDP 流量管控与限速</span>
-                      </span>
-                      {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
-                        <span className="text-[10px] font-bold bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 rounded-sm text-rose-300 animate-pulse">
-                          {udpThrottleRate == null ? '限速生效中（速率未知）' : `限速生效中: ${udpThrottleRate} Mbps`}
-                        </span>
-                      ) : (
-                        <span className="text-[10px] font-medium bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-sm text-emerald-400">
-                          全速运行 (自动防滥用保护中)
+                      {(container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
+                        <span className="rounded border border-[#c4b1f4] bg-white px-1.5 py-0.5 text-[10px] font-bold text-[#5b34b0]">
+                          {hy2ConfidenceLabel}
                         </span>
                       )}
                     </div>
-                    {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
-                      <div className="space-y-2 mt-2">
-                        <p className="text-[11px] text-rose-300/90 leading-relaxed">
-                          {sec.udp_throttle?.reason || '因持续 3 分钟上下行严重失衡且高 UDP 并发触发靶向限速。已保护 TCP 与 SSH 保持千兆线速。'}
-                        </p>
-                        <div className="flex items-center justify-between pt-1 border-t border-rose-500/20 text-[10px] text-rose-300/70 font-mono">
-                          <span>剩余冷却时间：{udpThrottleRemaining == null ? '未知' : `约 ${Math.ceil(udpThrottleRemaining / 60)} 分钟`}</span>
-                          <span>24h 限速触发：{udpThrottleCount == null ? '未知' : `${udpThrottleCount} 次`}</span>
+                    <div className="mt-1 text-[11px]">
+                      {container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected ? (
+                        <div>
+                          <span className="font-bold">
+                            UDP 并发：{container?.security?.hy2_protocol?.udp_concurrency ?? container?.alerts?.hy2_concurrency ?? '—'}
+                          </span>
+                          {container?.security?.hy2_protocol?.process && (
+                            <span className="ml-1.5 text-[#4a607a]">({container.security.hy2_protocol.process})</span>
+                          )}
                         </div>
-                        <div className="pt-1">
-                          <button
-                            type="button"
-                            disabled={isDrawerActionLoading}
-                            onClick={() => setPendingDecision('release_udp_throttle')}
-                            className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/80 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-900 transition-all disabled:opacity-50 shadow-xs"
-                          >
-                            <Unlock className="h-3.5 w-3.5 text-sky-400" />
-                            <span>立即解除限速</span>
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-[11px] text-slate-400 mt-1">
-                        当前未触发 UDP 限速，限速状态以 Agent 回报为准。
-                      </div>
-                    )}
+                      ) : (
+                        <span className="font-sans text-[#4a607a]">未发现运行特征</span>
+                      )}
+                    </div>
                   </div>
-                )}
+
+                  {/* UDP Throttle & Anti-Abuse Control Card */}
+                  {(container?.alerts?.udp_throttled || sec.udp_throttle?.throttled || container?.security?.hy2_protocol?.detected || container?.alerts?.hy2_detected) && (
+                    <div
+                      className={`col-span-1 rounded-xl border p-3 sm:col-span-3 ${
+                        container?.alerts?.udp_throttled || sec.udp_throttle?.throttled
+                          ? 'border-[#f1b4bf] bg-[#ffeef1] text-[#b41835]'
+                          : 'border-[#d2dfec] bg-[#f4f8fd] text-[#31485e]'
+                      }`}
+                    >
+                      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 font-sans text-[11px] font-bold">
+                          <Gauge
+                            className={`h-3.5 w-3.5 ${
+                              container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? 'text-[#b41835]' : 'text-[#4a607a]'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span>UDP 流量管控与限速</span>
+                        </span>
+                        {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
+                          <span className="animate-pulse rounded border border-[#f1b4bf] bg-white px-2 py-0.5 text-[10px] font-extrabold text-[#b41835]">
+                            {udpThrottleRate == null ? '限速生效中（速率未知）' : `限速生效中: ${udpThrottleRate} Mbps`}
+                          </span>
+                        ) : (
+                          <span className="rounded border border-[#b4e4dc] bg-[#e6f7f4] px-2 py-0.5 text-[10px] font-bold text-[#147468]">
+                            全速运行 (自动防滥用保护中)
+                          </span>
+                        )}
+                      </div>
+                      {container?.alerts?.udp_throttled || sec.udp_throttle?.throttled ? (
+                        <div className="mt-2 space-y-2 font-sans">
+                          <p className="text-[11px] leading-relaxed text-[#881337]">
+                            {sec.udp_throttle?.reason || '因持续 3 分钟上下行严重失衡且高 UDP 并发触发靶向限速。已保护 TCP 与 SSH 保持千兆线速。'}
+                          </p>
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#f1b4bf] pt-2 font-mono text-[10px] text-[#881337]">
+                            <span>
+                              剩余冷却时间：{udpThrottleRemaining == null ? '未知' : `约 ${Math.ceil(udpThrottleRemaining / 60)} 分钟`}
+                            </span>
+                            <span>24h 限速触发：{udpThrottleCount == null ? '未知' : `${udpThrottleCount} 次`}</span>
+                          </div>
+                          <div className="pt-1">
+                            <button
+                              type="button"
+                              disabled={isDrawerActionLoading}
+                              onClick={() => setPendingDecision('release_udp_throttle')}
+                              className="rn2-btn rn2-btn-sm rn2-btn-blue min-h-11 disabled:opacity-50"
+                            >
+                              <Unlock className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>立即解除限速</span>
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-1 font-sans text-[11px] text-[#4a607a]">
+                          当前未触发 UDP 限速，限速状态以 Agent 回报为准。
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
+
+              {(identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman') && (
+                <section className="rn2-card space-y-3 bg-white p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="flex items-center gap-2 text-sm font-extrabold text-[#0e233c]">
+                        <Gauge className="h-4 w-4 text-[#087bff]" aria-hidden="true" />
+                        CPU、内存与磁盘 I/O 自动保护
+                      </h3>
+                      <p className="mt-1 text-[11px] text-[#4a607a]">
+                        显示触发依据、已读回限额与恢复进度；保护信号不等于客户滥用认定。
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-[#cedae7] bg-[#f4f8fd] px-2.5 py-1 text-[10px] font-bold text-[#31485e]">
+                      Incus / Podman / Runman
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+                    <div className={`min-w-0 space-y-2 rounded-xl border p-3 ${guardTone(cpuGuard?.state)}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-xs font-extrabold">
+                          <Cpu className="h-3.5 w-3.5" aria-hidden="true" />CPU 保护
+                        </span>
+                        <span className="rounded-full border border-current/25 bg-white/80 px-2 py-0.5 text-[10px] font-bold">
+                          {guardStateLabel(cpuGuard?.state)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-[#0b1636]">
+                        当前 {formatMetricPercent(cpuGuardCurrent)}
+                        {cpuGuard?.effective_cpus ? ` · 配额容量 ${fmtNumber(cpuGuard.effective_cpus, 2)} 核` : ''}
+                        {cpuGuard?.host_busy_percent !== undefined && cpuGuard.host_busy_percent !== null
+                          ? ` · 母鸡忙碌 ${fmtNumber(cpuGuard.host_busy_percent, 1)}%`
+                          : ''}
+                        {cpuGuard?.host_cpu_psi_some_avg10 != null
+                          ? ` · 母鸡 CPU PSI ${fmtNumber(cpuGuard.host_cpu_psi_some_avg10, 2)}%`
+                          : cpuGuard?.host_pressure_basis === 'host_busy_psi_unavailable_fallback'
+                            ? ' · PSI 不可用，按母鸡忙碌率兼容判断'
+                            : ''}
+                      </p>
+                      {cpuGuard?.state === 'watching' && (
+                        <p className="text-[11px] font-semibold text-[#9a5b00]">
+                          持续高占用 {cpuGuard.high_samples ?? '—'}/{cpuGuard.required_samples ?? '—'} 次，已观察{' '}
+                          {formatMinutes(cpuGuard.confirmed_duration_seconds)}。
+                        </p>
+                      )}
+                      {['limited', 'limit_unverified', 'limited_unverified', 'limit_failed', 'restore_failed', 'escalating', 'restoring'].includes(cpuGuard?.state || '') && (
+                        <div className="space-y-1 rounded-lg border border-[#d2dfec] bg-white p-2.5 text-[11px] text-[#31485e]">
+                          <p>原限额：<span className="font-mono font-bold text-[#0b1636]">{cpuGuard?.original_limit || '未记录'}</span></p>
+                          <p>
+                            策略目标：<span className="font-mono font-bold text-[#0b1636]">{cpuGuard?.expected_limit || cpuGuard?.active_limit || '等待读回'}</span>
+                            {cpuGuard?.tier ? ` · 第 ${cpuGuard.tier} 阶（约原容量 ${cpuGuard.tier_percent_of_original ?? '-'}%）` : ''}
+                          </p>
+                          <p>
+                            内核当前读回：<span className="font-mono font-bold text-[#0b1636]">{cpuGuard?.actual_limit || '暂不可读'}</span> ·{' '}
+                            {cpuGuard?.readback_confirmed
+                              ? `已核实${cpuGuard.readback_confirmed_at ? ` · ${new Date(cpuGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}`
+                              : '尚未确认目标值'}
+                          </p>
+                          <p>
+                            恢复条件：低占用连续 {cpuGuard?.recovery_samples ?? '—'}/{cpuGuard?.recovery_samples_required ?? '—'} 次，观察窗口{' '}
+                            {formatMinutes(cpuGuard?.recovery_duration_seconds)}。
+                          </p>
+                        </div>
+                      )}
+                      {cpuGuard?.top_process?.process && (
+                        <p className="text-[11px] text-[#31485e]">
+                          主要进程：<span className="font-mono font-bold text-[#0657b8]">{cpuGuard.top_process.process}</span>
+                          {cpuGuard.top_process.pid ? ` · PID ${cpuGuard.top_process.pid}` : ''}
+                          {cpuGuard.top_process.cpu_percent !== undefined ? ` · ${fmtNumber(cpuGuard.top_process.cpu_percent, 1)}%` : ''}
+                        </p>
+                      )}
+                      <p className="text-[11px] leading-relaxed text-[#4a607a]">
+                        {cpuGuard?.message || cpuGuard?.action?.message || (cpuGuard?.state === 'normal' ? '当前未达到持续保护条件。' : '等待 Agent 采样与读回状态。')}
+                      </p>
+                      {cpuGuard?.recheck_interval_seconds ? (
+                        <p className="text-[10px] text-[#4a607a]">每约 {formatMinutes(cpuGuard.recheck_interval_seconds)} 复查一次。</p>
+                      ) : null}
+                    </div>
+
+                    <div className={`min-w-0 space-y-2 rounded-xl border p-3 ${guardTone(memoryGuard?.state)}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-xs font-extrabold">
+                          <Activity className="h-3.5 w-3.5" aria-hidden="true" />内存保护
+                        </span>
+                        <span className="rounded-full border border-current/25 bg-white/80 px-2 py-0.5 text-[10px] font-bold">
+                          {guardStateLabel(memoryGuard?.state)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-[#0b1636]">
+                        当前 {memoryGuard?.memory_current_bytes != null ? fmtBytes(memoryGuard.memory_current_bytes) : '未知'}
+                        {memoryGuard?.memory_max_bytes != null ? ` / ${fmtBytes(memoryGuard.memory_max_bytes)}` : ' / 未设上限'}
+                        {memoryGuard?.memory_used_percent != null ? ` · ${fmtNumber(memoryGuard.memory_used_percent, 1)}%` : ''}
+                      </p>
+                      <p className="text-[11px] text-[#31485e]">
+                        内存 PSI：母鸡 {memoryGuard?.host_psi_some_avg10 != null ? `${fmtNumber(memoryGuard.host_psi_some_avg10, 1)}%` : '不可用'}
+                        {' · '}容器 {memoryGuard?.container_psi_some_avg10 != null ? `${fmtNumber(memoryGuard.container_psi_some_avg10, 1)}%` : '不可用'}
+                      </p>
+                      {memoryGuard?.state === 'watching' && (
+                        <p className="text-[11px] font-semibold text-[#9a5b00]">
+                          高内存与 PSI 持续 {memoryGuard.high_samples ?? '—'}/{memoryGuard.required_samples ?? '—'} 次，已观察{' '}
+                          {formatMinutes(memoryGuard.confirmed_duration_seconds)}。
+                        </p>
+                      )}
+                      {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'apply_unverified'].includes(memoryGuard?.state || '') && (
+                        <div className="space-y-1 rounded-lg border border-[#d2dfec] bg-white p-2.5 text-[11px] text-[#31485e]">
+                          <p>原 memory.high：<span className="font-mono font-bold text-[#0b1636]">{formatMemoryHigh(memoryGuard?.original_limit)}</span></p>
+                          <p>
+                            当前 memory.high：<span className="font-mono font-bold text-[#0b1636]">{formatMemoryHigh(memoryGuard?.active_limit)}</span>
+                            {memoryGuard?.tier ? ` · 第 ${memoryGuard.tier} 阶（约 memory.max 的 ${memoryGuard.tier_percent_of_max ?? '-'}%）` : ''}
+                          </p>
+                          <p>
+                            恢复条件：低 PSI 连续 {memoryGuard?.recovery_samples ?? '—'}/{memoryGuard?.recovery_samples_required ?? '—'} 次，观察窗口{' '}
+                            {formatMinutes(memoryGuard?.recovery_duration_seconds)}。
+                          </p>
+                        </div>
+                      )}
+                      {memoryGuard?.state === 'cooldown' && memoryGuard.retry_after_seconds ? (
+                        <p className="text-[11px] font-semibold text-[#9a5b00]">
+                          原限额已恢复，约 {formatMinutes(memoryGuard.retry_after_seconds)} 后重新评估。
+                        </p>
+                      ) : null}
+                      <p className="text-[11px] leading-relaxed text-[#4a607a]">
+                        {memoryGuard?.message || (memoryGuard?.state === 'normal' ? '当前未达到持续内存压力保护条件。' : '等待 Agent 采样与限额读回。')}
+                      </p>
+                    </div>
+
+                    <div className={`min-w-0 space-y-2 rounded-xl border p-3 ${guardTone(ioGuard?.state)}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-xs font-extrabold">
+                          <HardDrive className="h-3.5 w-3.5" aria-hidden="true" />磁盘 I/O 保护
+                        </span>
+                        <span className="rounded-full border border-current/25 bg-white/80 px-2 py-0.5 text-[10px] font-bold">
+                          {guardStateLabel(ioGuard?.state)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-[#0b1636]">
+                        {ioGuard?.device ? `设备 ${ioGuard.device}` : ioGuard?.state === 'normal' ? '常规读写 (未触发限额)' : '设备待识别'}
+                        {ioGuard?.device_busy_percent !== undefined && ioGuard.device_busy_percent !== null
+                          ? ` · 磁盘忙碌 ${fmtNumber(ioGuard.device_busy_percent, 1)}%`
+                          : ''}
+                        {ioGuard?.host_io_psi_some_avg10 != null
+                          ? ` · 母鸡 I/O PSI ${fmtNumber(ioGuard.host_io_psi_some_avg10, 2)}%`
+                          : ioGuard?.host_pressure_basis === 'device_busy_fallback_psi_unavailable'
+                            ? ' · PSI 不可用，按设备忙碌率兼容判断'
+                            : ''}
+                        {ioGuard?.dominant_share_percent !== undefined ? ` · 容器占比 ${fmtNumber(ioGuard.dominant_share_percent, 1)}%` : ''}
+                      </p>
+                      {ioGuard?.state === 'watching' && (
+                        <p className="text-[11px] font-semibold text-[#9a5b00]">
+                          持续压力 {ioGuard.sample_count ?? '—'}/{ioGuard.required_samples ?? '—'} 次，已观察{' '}
+                          {formatMinutes(ioGuard.confirmed_duration_seconds)}。
+                        </p>
+                      )}
+                      {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'retry_wait'].includes(ioGuard?.state || '') && (
+                        <div className="space-y-1 rounded-lg border border-[#d2dfec] bg-white p-2.5 text-[11px] text-[#31485e]">
+                          <p>原 I/O 限额：<span className="font-mono font-bold text-[#0b1636]">{formatIoLimit(ioGuard?.original_limit)}</span></p>
+                          <p>
+                            策略目标：<span className="font-mono font-bold text-[#0b1636]">{formatIoLimit(ioGuard?.expected_limit || ioGuard?.active_limit)}</span>
+                            {ioGuard?.tier ? ` · 第 ${ioGuard.tier} 阶（约基线 ${ioGuard.tier_percent_of_baseline ?? '-'}%）` : ''}
+                          </p>
+                          <p>
+                            内核当前读回：<span className="font-mono font-bold text-[#0b1636]">{ioGuard?.actual_limit ? formatIoLimit(ioGuard.actual_limit) : '暂不可读'}</span> ·{' '}
+                            {ioGuard?.readback_confirmed
+                              ? `已核实${ioGuard.readback_confirmed_at ? ` · ${new Date(ioGuard.readback_confirmed_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : ''}`
+                              : '尚未确认目标值'}
+                          </p>
+                          <p>
+                            恢复条件：低压力连续 {ioGuard?.recovery_samples ?? '—'}/{ioGuard?.recovery_samples_required ?? '—'} 次，观察窗口{' '}
+                            {formatMinutes(ioGuard?.recovery_duration_seconds)}。
+                          </p>
+                          {ioGuard?.retry_after_seconds ? (
+                            <p className="font-semibold text-[#9a5b00]">约 {formatMinutes(ioGuard.retry_after_seconds)} 后自动重试。</p>
+                          ) : null}
+                        </div>
+                      )}
+                      {ioGuard?.observed_rates && (
+                        <p className="text-[11px] text-[#31485e]">
+                          当前读/写：{formatIoRate(ioGuard.observed_rates.rbps)} / {formatIoRate(ioGuard.observed_rates.wbps)}；IOPS{' '}
+                          {fmtNumber(ioGuard.observed_rates.riops, 0)} / {fmtNumber(ioGuard.observed_rates.wiops, 0)}。
+                        </p>
+                      )}
+                      <p className="text-[11px] leading-relaxed text-[#4a607a]">
+                        {ioGuard?.message || (ioGuard?.state === 'normal' ? '当前未达到持续宿主机磁盘压力及容器归属条件。' : '等待 Agent 采样与读回状态。')}
+                      </p>
+                      {ioGuard?.recheck_interval_seconds ? (
+                        <p className="text-[10px] text-[#4a607a]">每约 {formatMinutes(ioGuard.recheck_interval_seconds)} 复查一次。</p>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3 text-[11px] text-[#31485e]">
+                    <p className="font-extrabold text-[#0e233c]">PSI 等待压力（近 10 秒）</p>
+                    <p className="mt-1">
+                      母鸡 CPU / 内存 / 磁盘 I/O：{psiPercent(resourcePressure?.host, 'cpu')} · {psiPercent(resourcePressure?.host, 'memory')} ·{' '}
+                      {psiPercent(resourcePressure?.host, 'io')}
+                    </p>
+                    <p>
+                      容器 CPU / 内存 / 磁盘 I/O：{psiPercent(resourcePressure?.container, 'cpu')} · {psiPercent(resourcePressure?.container, 'memory')} ·{' '}
+                      {psiPercent(resourcePressure?.container, 'io')}
+                    </p>
+                    <p className="mt-1 font-medium text-[#0657b8]">
+                      {resourcePressure?.explanation || resourcePressure?.container?.reason || '等待新版 Agent 上报 PSI；部分旧内核或 cgroup 配置不提供该指标。'}
+                    </p>
+                    <p className="mt-1 text-[#4a607a]">PSI 表示任务因资源压力而等待的时间比例；它辅助区分持续计算与资源争用，不用于认定用户行为。</p>
+                  </div>
+                </section>
+              )}
             </div>
 
-                            {/* Sensitive Dropped Files Alert */}
-                {Array.isArray(sec.sensitive_file_events) && sec.sensitive_file_events.length > 0 && (
-                  <div className="col-span-1 sm:col-span-2 rounded-lg border border-rose-500/50 bg-rose-950/30 p-3 text-rose-200">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] font-semibold flex items-center gap-1.5 text-rose-300">
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
-                        <span>检测到敏感目录可执行文件落地 ({sec.sensitive_file_events.length} 个)</span>
+            {/* Section 2: 网络准入 */}
+            <div id="drawer-sec-admission" className="scroll-mt-4">
+              <AdmissionStatus data={sec.admission} stale={container?.alerts?.stale} />
+            </div>
+
+            {/* Section 3: 服务合规 */}
+            <div id="drawer-sec-compliance" className="scroll-mt-4 space-y-5">
+              {Array.isArray(sec.service_audit?.services) && sec.service_audit.services.length > 0 && (
+                <section className="rn2-card space-y-2.5 bg-white p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-extrabold text-[#0e233c]">容器服务配置画像（已脱敏）</h3>
+                    {(sec.service_audit.violations_count || 0) > 0 ? (
+                      <span className="rounded-full border border-[#f1b4bf] bg-[#ffeef1] px-2.5 py-0.5 text-[10px] font-bold text-[#b41835] tabular-nums">
+                        {sec.service_audit.violations_count} 项违规配置
                       </span>
-                      <span className="text-[10px] font-bold bg-rose-500/20 border border-rose-500/50 px-2 py-0.5 rounded-sm text-rose-300 animate-pulse">
-                        高危落地
+                    ) : (
+                      <span className="rounded-full border border-[#b4e4dc] bg-[#e6f7f4] px-2.5 py-0.5 text-[10px] font-bold text-[#147468]">
+                        配置合规
                       </span>
-                    </div>
-                    <div className="space-y-1.5 mt-2">
-                      {sec.sensitive_file_events.map((evt, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-2 rounded bg-slate-950/50 border border-rose-900/40 text-xs font-mono">
-                          <div className="truncate mr-2">
-                            <span className="text-slate-200 font-semibold">{evt.filename}</span>
-                            <span className="text-slate-400 ml-2 text-[11px]">{evt.path}</span>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0 text-[11px]">
-                            {evt.is_elf && <span className="px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40">ELF</span>}
-                            <span className="text-slate-400">{evt.size_bytes} B</span>
-                            {evt.sha256_prefix && <span className="text-slate-500 font-mono">{evt.sha256_prefix}...</span>}
-                          </div>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    {sec.service_audit.services.map((svc: any, idx: number) => (
+                      <div key={`${svc.engine}-${svc.pid}-${idx}`} className="space-y-1.5 rounded-xl border border-[#d2dfec] bg-[#f4f8fd] px-3 py-2.5 text-xs text-[#31485e]">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono font-bold text-[#0657b8]">{svc.engine}</span>
+                          <span className="text-[11px] font-semibold text-[#4a607a] tabular-nums">PID {svc.pid}</span>
                         </div>
+                        {Array.isArray(svc.inbounds) && svc.inbounds.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {svc.inbounds.map((inb: any, j: number) => (
+                              <span
+                                key={j}
+                                className="rounded border border-[#cedae7] bg-white px-2 py-0.5 font-mono text-[11px] font-semibold text-[#0b1636]"
+                              >
+                                {inb.protocol}:{inb.port || 0}
+                                {Array.isArray(inb.sni_list) && inb.sni_list.length > 0 ? ` · SNI=${inb.sni_list.join(',')}` : ''}
+                                {!inb.auth_configured ? ' · 无认证' : ''}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {(identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman') && (
+                <section className="rn2-card space-y-3 bg-white p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="rounded-xl border border-[#9ccaff] bg-[#e8f3ff] p-2 text-[#0657b8]">
+                      <Mail className="h-4 w-4" aria-hidden="true" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-sm font-extrabold text-[#0e233c]">用户邮箱与备注</h3>
+                      <p className="mt-1 text-xs leading-relaxed text-[#4a607a]">
+                        用于搜索、人工核对和后续封禁定位；保存信息不会自动停止或限制容器。
+                      </p>
+                    </div>
+                  </div>
+                  <label className="block space-y-1.5">
+                    <span className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#31485e]">
+                      用户邮箱
+                      {container?.user_email_source === 'upstream' && (
+                        <span className="rounded-full border border-[#9ccaff] bg-[#e8f3ff] px-2 py-0.5 text-[10px] font-bold text-[#0657b8]">
+                          上游 API 自动同步
+                        </span>
+                      )}
+                      {container?.user_email_source === 'manual' && (
+                        <span className="rounded-full border border-[#cedae7] bg-[#eef3f9] px-2 py-0.5 text-[10px] font-bold text-[#31485e]">
+                          手工备注
+                        </span>
+                      )}
+                      {container?.user_email_source === 'unmatched' && (
+                        <span className="rounded-full border border-[#e8bf70] bg-[#fef6e4] px-2 py-0.5 text-[10px] font-bold text-[#9a5b00]">
+                          {container.user_email_status?.startsWith('上游已匹配此实例') ? '上游已匹配实例 (待补邮箱)' : '上游实例未匹配'}
+                        </span>
+                      )}
+                    </span>
+                    <input
+                      type="email"
+                      maxLength={254}
+                      value={userEmail}
+                      onChange={(event) => setUserEmail(event.target.value)}
+                      placeholder="例如 user@example.com"
+                      disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
+                      className="rn2-input"
+                    />
+                    {container?.user_email_source === 'unmatched' && container.user_email_status && (
+                      <p className="text-[11px] leading-relaxed font-medium text-[#9a5b00]">
+                        {container.user_email_status.replace(/。+$/, '')}。系统不会按容器名称猜邮箱；请核对上游实例 UUID，或手工补充邮箱。
+                      </p>
+                    )}
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-bold text-[#31485e]">
+                      内部备注 <span className="font-normal text-[#4a607a]">（可选，最多 500 字）</span>
+                    </span>
+                    <textarea
+                      value={userNote}
+                      maxLength={500}
+                      onChange={(event) => setUserNote(event.target.value)}
+                      placeholder="记录订单号、沟通情况或封禁核对信息"
+                      rows={2}
+                      disabled={!container?.container_id || Boolean(container?.alerts?.stale)}
+                      className="w-full resize-y rounded-[10px] border border-[#cedae7] bg-white px-3.5 py-2.5 text-sm text-[#0b1636] placeholder:text-[#697b9c] focus:border-[#087bff] focus:outline-hidden focus:ring-2 focus:ring-[#087bff]/20 disabled:opacity-50"
+                    />
+                  </label>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] text-[#4a607a]">Ctrl+K 全局搜索可直接输入邮箱或备注内容。</p>
+                    <button
+                      type="button"
+                      onClick={saveUserNote}
+                      disabled={isSavingUserNote || !container?.container_id || Boolean(container?.alerts?.stale)}
+                      className="rn2-btn rn2-btn-sm rn2-btn-blue min-h-11"
+                    >
+                      <Save className="h-3.5 w-3.5" aria-hidden="true" />
+                      {isSavingUserNote ? '保存中…' : '保存备注'}
+                    </button>
+                  </div>
+                </section>
+              )}
+
+              {container && isGuardRuntime && (
+                <section className="rn2-card space-y-3 bg-white p-4" aria-label="容器活动告警与保护信号">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="flex items-center gap-2 text-sm font-extrabold text-[#0e233c]">
+                        <Shield className="h-4 w-4 text-[#d97706]" aria-hidden="true" />
+                        告警与保护信号
+                      </h3>
+                      <p className="mt-1 text-[11px] text-[#4a607a]">
+                        {drawerIsStale ? '数据已过期，以下为最近一次匹配记录。' : '展示服务端当前匹配到的活动告警；保护信号不等于违规认定。'}
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-[#cedae7] bg-[#f4f8fd] px-2.5 py-1 text-[10px] font-bold tabular-nums text-[#31485e]">
+                      {containerAlerts.length} 项
+                    </span>
+                  </div>
+                  {containerAlerts.length === 0 ? (
+                    <p className="rounded-xl border border-dashed border-[#cedae7] bg-[#f4f8fd] px-3 py-3 text-xs text-[#4a607a]">
+                      暂无匹配的活动告警。资源保护与协议阻断状态请查看上方与下方卡片。
+                    </p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {containerAlerts.map((alert) => (
+                        <li
+                          key={alert.id}
+                          className={`rounded-xl border p-3 ${
+                            alert.protection_only
+                              ? 'border-[#9ccaff] bg-[#e8f3ff]/65'
+                              : alert.severity === 'critical'
+                                ? 'border-[#f1b4bf] bg-[#ffeef1]'
+                                : 'border-[#e8bf70] bg-[#fef6e4]'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className={`rounded-full border bg-white px-2 py-0.5 text-[10px] font-bold ${
+                                alert.protection_only
+                                  ? 'border-[#9ccaff] text-[#0657b8]'
+                                  : alert.severity === 'critical'
+                                    ? 'border-[#f1b4bf] text-[#b41835]'
+                                    : 'border-[#e8bf70] text-[#9a5b00]'
+                              }`}
+                            >
+                              {alert.protection_only ? '保护信号' : alert.severity === 'critical' ? '严重告警' : alert.severity === 'info' ? '提示' : '安全告警'}
+                            </span>
+                            <span className="font-mono text-[10px] font-semibold text-[#4a607a]">{alert.type}</span>
+                          </div>
+                          <h4 className="mt-2 text-xs font-extrabold text-[#0b1636]">{alert.title || alert.type}</h4>
+                          <p className="mt-1 break-words text-[11px] leading-relaxed text-[#31485e]">{alert.message}</p>
+                          <SocketAbuseEvidence alert={alert} compact />
+                          {(alert.value != null || alert.threshold != null) && (
+                            <p className="mt-1 text-[10px] font-medium tabular-nums text-[#4a607a]">
+                              {alert.value != null ? `当前值：${formatAlertValue(alert.value)}` : ''}
+                              {alert.value != null && alert.threshold != null ? ' · ' : ''}
+                              {alert.threshold != null ? `阈值：${formatAlertValue(alert.threshold)}` : ''}
+                            </p>
+                          )}
+                        </li>
                       ))}
-                    </div>
-                  </div>
-                )}
+                    </ul>
+                  )}
+                  {sec?.socket_abuse && !containerAlerts.some((alert) => Boolean(extractSocketAbuseAssessment(alert))) && (
+                    <SocketAbuseEvidence assessment={sec.socket_abuse} compact />
+                  )}
+                </section>
+              )}
 
-                {/* Phase 1 Kernel Defense & Containment Controls */}
-                <div className="col-span-1 sm:col-span-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-slate-300">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-[11px] font-semibold flex items-center gap-1.5 text-slate-200">
-                      <Shield className="h-3.5 w-3.5 text-sky-400" />
-                      <span>容器内核防护与应急阻断 (Phase 1 核心防线)</span>
+              {container && isGuardRuntime && (
+                <section className="rn2-card space-y-3 bg-white p-4" aria-label="VMess 与 Trojan 协议管控">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-sm font-extrabold text-[#0e233c]">
+                      <Shield className="h-4 w-4 text-[#5b34b0]" aria-hidden="true" />
+                      VMess / Trojan 阻断状态
+                    </h3>
+                    <p className="mt-1 text-[11px] text-[#4a607a]">区分已读回阻断、部分阻断和待核验端点；缺少 Agent 状态时不会显示为已阻断。</p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <ProtocolGuardCard label="VMess" summary={sec.vmess_guard} />
+                    <ProtocolGuardCard label="Trojan" summary={sec.trojan_guard} />
+                  </div>
+                </section>
+              )}
+
+              {/* Sensitive Dropped Files Alert */}
+              {Array.isArray(sec.sensitive_file_events) && sec.sensitive_file_events.length > 0 && (
+                <div className="rounded-[14px] border border-[#f1b4bf] bg-[#ffeef1] p-4 text-[#b41835]">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-xs font-extrabold text-[#b41835]">
+                      <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                      <span>检测到敏感目录可执行文件落地 ({sec.sensitive_file_events.length} 个)</span>
                     </span>
-                    <span className="text-[10px] font-mono text-slate-500">
-                      cgroup v2 · NetNS · Host Veth
+                    <span className="animate-pulse rounded border border-[#f1b4bf] bg-white px-2 py-0.5 text-[10px] font-extrabold text-[#b41835]">
+                      高危落地
                     </span>
                   </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                    {/* Freeze Control */}
-                    <div className="p-2.5 rounded-md border border-slate-800/80 bg-slate-950/40 flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-slate-300 flex items-center gap-1.5">
-                            <Snowflake className="h-3.5 w-3.5 text-sky-400" />
-                            进程冻结挂起
-                          </span>
-                          {sec.freeze_guard?.frozen ? (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/40 font-bold animate-pulse">
-                              已冻结 (frozen 1)
-                            </span>
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">
-                              正常运行
+                  <div className="space-y-1.5">
+                    {sec.sensitive_file_events.map((evt, idx) => (
+                      <div key={idx} className="flex items-center justify-between gap-2 rounded-lg border border-[#f1b4bf] bg-white p-2.5 font-mono text-xs">
+                        <div className="min-w-0 truncate">
+                          <span className="font-bold text-[#0b1636]">{evt.filename}</span>
+                          <span className="ml-2 text-[11px] text-[#4a607a]">{evt.path}</span>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2 text-[11px]">
+                          {evt.is_elf && (
+                            <span className="rounded border border-[#f1b4bf] bg-[#ffeef1] px-1.5 py-0.5 font-bold text-[#b41835]">
+                              ELF
                             </span>
                           )}
+                          <span className="text-[#31485e]">{evt.size_bytes} B</span>
+                          {evt.sha256_prefix && <span className="font-mono text-[#4a607a]">{evt.sha256_prefix}...</span>}
                         </div>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                          瞬间定格容器所有线程，内存现场与取证完整保留，不破坏进程。
-                        </p>
                       </div>
-                      <div className="pt-2 mt-1 border-t border-slate-800/50">
-                        {sec.freeze_guard?.frozen ? (
-                          <button
-                            type="button"
-                            disabled={isDrawerActionLoading}
-                            onClick={() => setPendingDecision('unfreeze_container')}
-                            className="w-full flex items-center justify-center gap-1 rounded bg-sky-600 hover:bg-sky-500 text-white px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
-                          >
-                            <Unlock className="h-3 w-3" />
-                            <span>解除冻结恢复</span>
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={isDrawerActionLoading}
-                            onClick={() => setPendingDecision('freeze_container')}
-                            className="w-full flex items-center justify-center gap-1 rounded border border-sky-500/40 bg-sky-950/40 hover:bg-sky-900/60 text-sky-300 px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
-                          >
-                            <Snowflake className="h-3 w-3" />
-                            <span>挂起冻结进程</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* UDP Blackhole Control */}
-                    <div className="p-2.5 rounded-md border border-slate-800/80 bg-slate-950/40 flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-slate-300 flex items-center gap-1.5">
-                            <Gauge className="h-3.5 w-3.5 text-amber-400" />
-                            出站 UDP 专项阻断
-                          </span>
-                          {sec.udp_blackhole?.active ? (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold">
-                              阻断中 (放行DNS)
-                            </span>
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">
-                              全速放行
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                          定向切断容器出站 UDP 洪水与放大攻击，保留 TCP、SSH 及入站通道。
-                        </p>
-                      </div>
-                      <div className="pt-2 mt-1 border-t border-slate-800/50">
-                        {sec.udp_blackhole?.active ? (
-                          <button
-                            type="button"
-                            disabled={isDrawerActionLoading}
-                            onClick={() => setPendingDecision('release_udp_blackhole')}
-                            className="w-full flex items-center justify-center gap-1 rounded bg-amber-600 hover:bg-amber-500 text-white px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
-                          >
-                            <Unlock className="h-3 w-3" />
-                            <span>解除 UDP 阻断</span>
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={isDrawerActionLoading}
-                            onClick={() => setPendingDecision('apply_udp_blackhole')}
-                            className="w-full flex items-center justify-center gap-1 rounded border border-amber-500/40 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 px-2 py-1 text-xs font-semibold transition-all disabled:opacity-50"
-                          >
-                            <Shield className="h-3 w-3" />
-                            <span>实施 UDP 黑洞</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Anti-IP Spoof Status Bar */}
-                  <div className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-between text-[11px]">
-                    <span className="text-slate-400 flex items-center gap-1.5">
-                      <Shield className="h-3 w-3 text-emerald-400" />
-                      宿主机 Veth 源地址反欺骗校验 (Anti-IP Spoofing)
-                    </span>
-                    {sec.anti_spoof?.active ? (
-                      <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                        <Check className="h-3 w-3" /> 已启用 strict rp_filter 与源 IP 白名单
-                      </span>
-                    ) : (
-                      <span className="text-slate-500">
-                        内核标准转发模式
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-{/* Security Checks & Surface Risk */}
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
-              <h3 className="text-xs font-bold text-slate-200 flex items-center gap-2">
-                <Shield className="h-4 w-4 text-amber-400" />
-                <span>安全合规与暴露面排查</span>
-              </h3>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                {/* SOCKS Check */}
-                <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-                  <span className="text-slate-400 block text-[11px]">SOCKS 代理服务</span>
-                  <div className="mt-1 font-semibold">
-                    {socks?.detected ? (
-                      <span className="text-amber-400">
-                        已检测 · {socks.auth_mode === 'no_auth' ? '无认证 (高危)' : socks.auth_mode === 'weak_password' ? '弱密码 (高危)' : socks.auth_mode}
-                        {socks.public_exposure && ' · 公网暴露'}
-                      </span>
-                    ) : (
-                      <span className="text-emerald-400">未发现可疑 SOCKS 代理</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Panel Pairing */}
-                <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-                  <span className="text-slate-400 block text-[11px]">第三方控制面板对接</span>
-                  <div className="mt-1 font-semibold">
-                    {pairing?.detected ? (
-                      <span className={pairing.approved ? 'text-emerald-400' : 'text-rose-400'}>
-                        {pairing.approved ? '已放行对接' : '检测到未授权面板特征'}
-                      </span>
-                    ) : (
-                      <span className="text-emerald-400">未发现异常对接</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* If Risk is detected in SOCKS or Panel, show Quick Disposition Controls */}
-              {activeActionableAlert &&
-                ((socks?.detected && (socks.auth_mode === 'no_auth' || socks.auth_mode === 'weak_password')) ||
-                  (pairing?.detected && !pairing.approved)) && (
-                <div className="rounded-xl border border-rose-500/50 bg-rose-950/40 p-3.5 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-rose-300 font-bold text-xs">
-                      <AlertTriangle className="h-4 w-4 text-rose-400 animate-pulse" />
-                      <span>检测到非合规安全风险需处置</span>
-                    </div>
-                  </div>
-                  <p className="text-[11px] text-slate-300">
-                    {socks?.detected && socks.auth_mode === 'no_auth'
-                      ? '当前容器正在运行开放且无认证的 SOCKS 代理服务，极易被利用为跳板。'
-                      : socks?.detected && socks.auth_mode === 'weak_password'
-                      ? '当前容器正在运行弱密码 SOCKS 代理服务，容易被撞库后滥用为跳板。'
-                      : pairing?.detected && !pairing.approved
-                      ? '当前容器检测到未经放行的第三方机场节点对接活动与内部特征。'
-                      : '检测到运行风险，建议定向处置或加入安全白名单。'}
-                  </p>
-                  <div className="flex items-center gap-2 pt-1 flex-wrap">
-                    <button
-                      type="button"
-                      disabled={isDrawerActionLoading}
-                      onClick={() => setPendingDecision('deny')}
-                      className="flex items-center gap-1.5 rounded-lg border border-rose-500/60 bg-rose-950/90 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900 transition-all disabled:opacity-50 shadow-xs"
-                    >
-                      <Ban className="h-3.5 w-3.5" />
-                      <span>{isDrawerActionLoading ? '处理中...' : '定向处置违规服务'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isDrawerActionLoading}
-                      onClick={() => setPendingDecision('allow_silent')}
-                      className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/90 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 transition-all disabled:opacity-50"
-                    >
-                      <Check className="h-3.5 w-3.5 text-emerald-400" />
-                      <span>放行此策略</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isDrawerActionLoading}
-                      onClick={() => setPendingDecision('resolve')}
-                      className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-900/60 transition-all disabled:opacity-50"
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                      <span>标记已解决</span>
-                    </button>
+                    ))}
                   </div>
                 </div>
               )}
 
-              {/* Listening Ports & Exposure */}
-              <div className="font-mono text-xs space-y-1 text-slate-300 pt-1">
-                {container?.network_addresses && container.network_addresses.length > 0 && (
-                  <div className="flex justify-between py-1 border-t border-slate-800/80">
-                    <span className="text-slate-500">网络 IP</span>
-                    <span className="truncate max-w-xs select-all text-sky-300">
-                      {container.network_addresses.join(', ')}
+              {/* Phase 1 Kernel Defense & Containment Controls */}
+              <div className="rn2-card space-y-3 bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 text-xs font-extrabold text-[#0e233c]">
+                    <Shield className="h-4 w-4 text-[#087bff]" aria-hidden="true" />
+                    <span>容器内核防护与应急阻断 (Phase 1 核心防线)</span>
+                  </span>
+                  <span className="font-mono text-[10px] font-semibold text-[#4a607a]">
+                    cgroup v2 · NetNS · Host Veth
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
+                  {/* Freeze Control */}
+                  <div className="flex flex-col justify-between rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3">
+                    <div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 font-bold text-[#0e233c]">
+                          <Snowflake className="h-3.5 w-3.5 text-[#087bff]" aria-hidden="true" />
+                          进程冻结挂起
+                        </span>
+                        {sec.freeze_guard?.frozen ? (
+                          <span className="animate-pulse rounded border border-[#9ccaff] bg-[#e8f3ff] px-1.5 py-0.5 text-[10px] font-bold text-[#0657b8]">
+                            已冻结 (frozen 1)
+                          </span>
+                        ) : (
+                          <span className="rounded border border-[#cedae7] bg-white px-1.5 py-0.5 text-[10px] font-semibold text-[#4a607a]">
+                            正常运行
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1.5 text-[11px] leading-relaxed text-[#4a607a]">
+                        瞬间定格容器所有线程，内存现场与取证完整保留，不破坏进程。
+                      </p>
+                    </div>
+                    <div className="mt-2 border-t border-[#d2dfec] pt-2.5">
+                      {sec.freeze_guard?.frozen ? (
+                        <button
+                          type="button"
+                          disabled={isDrawerActionLoading}
+                          onClick={() => setPendingDecision('unfreeze_container')}
+                          className="rn2-btn rn2-btn-sm rn2-btn-blue min-h-11 w-full disabled:opacity-50"
+                        >
+                          <Unlock className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>解除冻结恢复</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isDrawerActionLoading}
+                          onClick={() => setPendingDecision('freeze_container')}
+                          className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[10px] border border-[#9ccaff] bg-white px-3 py-2 text-xs font-bold text-[#0657b8] transition-colors hover:border-[#087bff] hover:bg-[#e8f3ff] disabled:opacity-50"
+                        >
+                          <Snowflake className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>挂起冻结进程</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* UDP Blackhole Control */}
+                  <div className="flex flex-col justify-between rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3">
+                    <div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 font-bold text-[#0e233c]">
+                          <Gauge className="h-3.5 w-3.5 text-[#d97706]" aria-hidden="true" />
+                          出站 UDP 专项阻断
+                        </span>
+                        {sec.udp_blackhole?.active ? (
+                          <span className="rounded border border-[#e8bf70] bg-[#fef6e4] px-1.5 py-0.5 text-[10px] font-bold text-[#9a5b00]">
+                            阻断中 (放行DNS)
+                          </span>
+                        ) : (
+                          <span className="rounded border border-[#cedae7] bg-white px-1.5 py-0.5 text-[10px] font-semibold text-[#4a607a]">
+                            全速放行
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1.5 text-[11px] leading-relaxed text-[#4a607a]">
+                        定向切断容器出站 UDP 洪水与放大攻击，保留 TCP、SSH 及入站通道。
+                      </p>
+                    </div>
+                    <div className="mt-2 border-t border-[#d2dfec] pt-2.5">
+                      {sec.udp_blackhole?.active ? (
+                        <button
+                          type="button"
+                          disabled={isDrawerActionLoading}
+                          onClick={() => setPendingDecision('release_udp_blackhole')}
+                          className="rn2-btn rn2-btn-sm rn2-btn-orange min-h-11 w-full disabled:opacity-50"
+                        >
+                          <Unlock className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>解除 UDP 阻断</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isDrawerActionLoading}
+                          onClick={() => setPendingDecision('apply_udp_blackhole')}
+                          className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[10px] border border-[#e8bf70] bg-white px-3 py-2 text-xs font-bold text-[#9a5b00] transition-colors hover:border-[#d97706] hover:bg-[#fef6e4] disabled:opacity-50"
+                        >
+                          <Shield className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>实施 UDP 黑洞</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Anti-IP Spoof Status Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#e1ebf4] pt-2.5 text-[11px]">
+                  <span className="flex items-center gap-1.5 font-medium text-[#31485e]">
+                    <Shield className="h-3.5 w-3.5 text-[#147468]" aria-hidden="true" />
+                    宿主机 Veth 源地址反欺骗校验 (Anti-IP Spoofing)
+                  </span>
+                  {sec.anti_spoof?.active ? (
+                    <span className="flex items-center gap-1 font-bold text-[#147468]">
+                      <Check className="h-3.5 w-3.5" aria-hidden="true" /> 已启用 strict rp_filter 与源 IP 白名单
+                    </span>
+                  ) : (
+                    <span className="font-medium text-[#4a607a]">内核标准转发模式</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Security Checks & Surface Risk */}
+              <div className="rn2-card space-y-3 bg-white p-4">
+                <h3 className="flex items-center gap-2 text-xs font-extrabold text-[#0e233c]">
+                  <Shield className="h-4 w-4 text-[#d97706]" aria-hidden="true" />
+                  <span>安全合规与暴露面排查</span>
+                </h3>
+
+                <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
+                  {/* SOCKS Check */}
+                  <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3">
+                    <span className="block text-[11px] font-semibold text-[#4a607a]">SOCKS 代理服务</span>
+                    <div className="mt-1 font-bold">
+                      {socks?.detected ? (
+                        <span className="text-[#9a5b00]">
+                          已检测 · {socks.auth_mode === 'no_auth' ? '无认证 (高危)' : socks.auth_mode === 'weak_password' ? '弱密码 (高危)' : socks.auth_mode}
+                          {socks.public_exposure && ' · 公网暴露'}
+                        </span>
+                      ) : (
+                        <span className="text-[#147468]">未发现可疑 SOCKS 代理</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Panel Pairing */}
+                  <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-3">
+                    <span className="block text-[11px] font-semibold text-[#4a607a]">第三方控制面板对接</span>
+                    <div className="mt-1 font-bold">
+                      {pairing?.detected ? (
+                        <span className={pairing.approved ? 'text-[#147468]' : 'text-[#b41835]'}>
+                          {pairing.approved ? '已放行对接' : '检测到未授权面板特征'}
+                        </span>
+                      ) : (
+                        <span className="text-[#147468]">未发现异常对接</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* If Risk is detected in SOCKS or Panel, show Quick Disposition Controls */}
+                {activeActionableAlert &&
+                  ((socks?.detected && (socks.auth_mode === 'no_auth' || socks.auth_mode === 'weak_password')) ||
+                    (pairing?.detected && !pairing.approved)) && (
+                    <div className="space-y-2.5 rounded-xl border border-[#f1b4bf] bg-[#ffeef1] p-3.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs font-extrabold text-[#b41835]">
+                          <AlertTriangle className="h-4 w-4 animate-pulse" aria-hidden="true" />
+                          <span>检测到非合规安全风险需处置</span>
+                        </div>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-[#881337]">
+                        {socks?.detected && socks.auth_mode === 'no_auth'
+                          ? '当前容器正在运行开放且无认证的 SOCKS 代理服务，极易被利用为跳板。'
+                          : socks?.detected && socks.auth_mode === 'weak_password'
+                            ? '当前容器正在运行弱密码 SOCKS 代理服务，容易被撞库后滥用为跳板。'
+                            : pairing?.detected && !pairing.approved
+                              ? '当前容器检测到未经放行的第三方机场节点对接活动与内部特征。'
+                              : '检测到运行风险，建议定向处置或加入安全白名单。'}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          disabled={isDrawerActionLoading}
+                          onClick={() => setPendingDecision('deny')}
+                          className="rn2-btn rn2-btn-sm rn2-btn-danger min-h-11 disabled:opacity-50"
+                        >
+                          <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>{isDrawerActionLoading ? '处理中...' : '定向处置违规服务'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isDrawerActionLoading}
+                          onClick={() => setPendingDecision('allow_silent')}
+                          className="rn2-btn rn2-btn-sm rn2-btn-ghost min-h-11 disabled:opacity-50"
+                        >
+                          <Check className="h-3.5 w-3.5 text-[#147468]" aria-hidden="true" />
+                          <span>放行此策略</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isDrawerActionLoading}
+                          onClick={() => setPendingDecision('resolve')}
+                          className="inline-flex min-h-11 items-center gap-1.5 rounded-[10px] border border-[#b4e4dc] bg-[#e6f7f4] px-3 py-1.5 text-xs font-bold text-[#147468] transition-colors hover:bg-[#d2efe9] disabled:opacity-50"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>标记已解决</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {/* Listening Ports & Exposure */}
+                <div className="space-y-1 pt-1 font-mono text-xs text-[#0b1636]">
+                  {container?.network_addresses && container.network_addresses.length > 0 && (
+                    <div className="flex items-center justify-between gap-2 border-t border-[#e1ebf4] py-1.5">
+                      <span className="font-sans font-semibold text-[#4a607a]">网络 IP</span>
+                      <span className="min-w-0 max-w-xs break-all select-all text-right font-bold text-[#0657b8]">
+                        {container.network_addresses.join(', ')}
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2 border-t border-[#e1ebf4] py-1.5">
+                    <span className="font-sans font-semibold text-[#4a607a]">监听端口</span>
+                    <span className="max-w-xs truncate text-right text-[#0b1636]">
+                      {(sec.listening_ports || []).join(', ') || '无对外开放端口'}
                     </span>
                   </div>
-                )}
-                <div className="flex justify-between py-1 border-t border-slate-800/80">
-                  <span className="text-slate-500">监听端口</span>
-                  <span className="truncate max-w-xs">
-                    {(sec.listening_ports || []).join(', ') || '无对外开放端口'}
-                  </span>
-                </div>
-                <div className="flex justify-between py-1 border-t border-slate-800/80">
-                  <span className="text-slate-500">NAT 暴露映射</span>
-                  <span className="truncate max-w-xs">
-                    {(sec.network_exposure || [])
-                      .map((x) => `${x.listen} → ${x.target}`)
-                      .join(', ') || '内部隔离'}
-                  </span>
-                </div>
-                <div className="flex justify-between py-1 border-t border-slate-800/80">
-                  <span className="text-slate-500">最高 CPU 进程</span>
-                  <span className="text-sky-300 truncate max-w-xs" title={container?.top_cpu_process_command}>
-                    {container?.top_cpu_process_command
-                      ? `PID ${container.top_cpu_process_pid} (${fmtNumber(container.top_cpu_process_cpu_percent)}%) · ${container.top_cpu_process_command}`
-                      : '无显著负载进程'}
-                  </span>
+                  <div className="flex items-center justify-between gap-2 border-t border-[#e1ebf4] py-1.5">
+                    <span className="font-sans font-semibold text-[#4a607a]">NAT 暴露映射</span>
+                    <span className="max-w-xs truncate text-right text-[#0b1636]">
+                      {(sec.network_exposure || [])
+                        .map((x) => `${x.listen} → ${x.target}`)
+                        .join(', ') || '内部隔离'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 border-t border-[#e1ebf4] py-1.5">
+                    <span className="font-sans font-semibold text-[#4a607a]">最高 CPU 进程</span>
+                    <span className="max-w-xs truncate text-right font-semibold text-[#0657b8]" title={container?.top_cpu_process_command}>
+                      {container?.top_cpu_process_command
+                        ? `PID ${container.top_cpu_process_pid} (${fmtNumber(container.top_cpu_process_cpu_percent)}%) · ${container.top_cpu_process_command}`
+                        : '无显著负载进程'}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <ConnectionEvidenceTimeline identity={identity} />
+            {/* Section 4: 连接证据 */}
+            <div id="drawer-sec-evidence" className="scroll-mt-4">
+              <ConnectionEvidenceTimeline identity={identity} />
+            </div>
 
-            {/* On-Demand Diagnostic Panel */}
-            <DiagnosticPanel
-              identity={identity}
-              diagnostic={diagnostic}
-              isStale={Boolean(container?.alerts?.stale)}
-              onRefresh={() => {
-                api.getContainerDiagnostic(identity).then(setDiagnostic);
-              }}
-              onToast={onToast}
-            />
+            {/* Section 5: 实时诊断 */}
+            <div id="drawer-sec-diagnostic" className="scroll-mt-4">
+              <DiagnosticPanel
+                identity={identity}
+                diagnostic={diagnostic}
+                isStale={Boolean(container?.alerts?.stale)}
+                onRefresh={() => {
+                  api.getContainerDiagnostic(identity).then(setDiagnostic);
+                }}
+                onToast={onToast}
+              />
+            </div>
           </div>
         </div>
       </div>
+
       <ConfirmDialog
         open={Boolean(pendingDecision)}
         {...confirmationCopy}

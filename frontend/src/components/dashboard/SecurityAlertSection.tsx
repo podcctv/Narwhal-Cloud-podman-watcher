@@ -132,13 +132,13 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   );
 
   const healthStripNode = hasHealthStrip && nodeHealth ? (
-    <div className="mb-4 overflow-hidden rounded-xl border border-sky-400/20 bg-[#031d3d]/95 text-xs text-slate-300 shadow-[0_6px_18px_-6px_rgba(2,10,24,0.65)]">
+    <div className="rn2-card mb-4 overflow-hidden text-xs text-[#31485e]">
       <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 sm:px-5">
         {(nodeHealth.sni_violations?.total || 0) > 0 && (
           <button
             type="button"
             onClick={() => setShowSniDetails(v => !v)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-950/50 px-2.5 py-1 text-amber-200 hover:bg-amber-900/50 transition-colors tabular-nums"
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[#f7d58b] bg-[#fef6e4] px-2.5 py-1 font-semibold text-[#9a5b00] transition-colors hover:border-[#d97706] hover:bg-[#fdecc8] tabular-nums"
           >
             <span>
               SNI 白名单拦截 {nodeHealth.sni_violations?.total} 次（CN 无 SNI {nodeHealth.sni_violations?.cn_missing_sni_count || 0}）
@@ -146,38 +146,38 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
                 ? ` · ${nodeHealth.sni_violations.top_disallowed_snis.slice(0, 3).map((x) => `${x.sni}:${x.count}`).join(', ')}`
                 : ''}
             </span>
-            <span className="text-[10px] text-amber-300/80 underline">
+            <span className="text-[10px] font-bold underline">
               {showSniDetails ? '收起明细' : '查看明细'}
             </span>
           </button>
         )}
         {(nodeHealth.rfw_unhealthy_hosts?.length || 0) > 0 && (
-          <span className="rounded-md border border-rose-500/35 bg-rose-950/50 px-2 py-1 text-rose-200">
+          <span className="rounded-lg border border-[#f9b8c4] bg-[#ffeef1] px-2.5 py-1 font-semibold text-[#b41835]">
             RFW 异常：{nodeHealth.rfw_unhealthy_hosts?.map((h) => `${h.host_id}(${h.status})`).join('、')}
           </span>
         )}
         {(nodeHealth.auto_update_issues?.length || 0) > 0 && (
-          <span className="rounded-md border border-sky-500/35 bg-sky-950/50 px-2 py-1 text-sky-200 tabular-nums">
+          <span className="rounded-lg border border-[#a9d1ff] bg-[#e8f3ff] px-2.5 py-1 font-semibold text-[#0657b8] tabular-nums">
             待更新/更新异常节点：{nodeHealth.auto_update_issues?.length} 台
           </span>
         )}
       </div>
       {showSniDetails && (nodeHealth.sni_violations?.items?.length || 0) > 0 && (
-        <div className="border-t border-sky-400/15 bg-[#02182f]/80 px-4 py-2.5 sm:px-5 space-y-1.5 max-h-60 overflow-y-auto">
+        <div className="max-h-60 space-y-1.5 overflow-y-auto border-t border-[#dce5ef] bg-[#f4f8fd] px-4 py-2.5 sm:px-5">
           {nodeHealth.sni_violations!.items!.slice(0, 20).map((item) => (
-            <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-[11px] border-b border-slate-800/50 pb-1 last:border-b-0 last:pb-0">
-              <div className="flex flex-wrap items-center gap-2 min-w-0">
-                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-mono text-amber-300">
+            <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-[#dce5ef] pb-1.5 text-[11px] last:border-b-0 last:pb-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="rounded border border-[#f7d58b] bg-[#fef6e4] px-1.5 py-0.5 font-mono font-semibold text-[#9a5b00]">
                   {item.sni || (item.reason === 'missing_or_invalid_sni_cn' ? 'CN 无有效 SNI' : '未知 SNI')}
                 </span>
-                <span className="font-mono text-slate-400">
+                <span className="font-mono text-[#4a607a]">
                   {(item.proto || 'tls').toUpperCase()}/{item.dst_port ?? '-'}
                 </span>
-                <span className="text-slate-300 truncate max-w-[220px]" title={`${item.host_id} / ${item.container_name}`}>
+                <span className="max-w-[220px] truncate font-medium text-[#0b1636]" title={`${item.host_id} / ${item.container_name}`}>
                   {item.host_id} · {item.container_name.slice(0, 12)}
                 </span>
               </div>
-              <span className="text-slate-500 tabular-nums">
+              <span className="text-[#697b9c] tabular-nums">
                 已阻断 · {new Date(item.last_seen * 1000).toLocaleString('zh-CN')}
               </span>
             </div>
@@ -191,31 +191,31 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
     return (
       <>
         {healthStripNode}
-        <section className="mb-6 rounded-xl border border-emerald-400/30 bg-[#041e3c]/95 p-4 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.65)] sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-emerald-400">
-              <ShieldCheck className="h-5 w-5" />
+        <section className="rn2-card mb-6 border-[#9de2d8] p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl border border-[#9de2d8] bg-[#e6f7f4] p-2.5 text-[#147468]">
+                <ShieldCheck className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <div>
+                <h2 className="text-sm font-bold text-[#147468]">
+                  当前没有新的活动安全告警
+                </h2>
+                <p className="mt-0.5 text-xs text-[#31485e]">
+                  已隔离事件仍需单独复核；没有告警不代表已覆盖所有加密业务行为。
+                </p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-sm font-bold text-emerald-300">
-                当前没有新的活动安全告警
-              </h2>
-              <p className="mt-0.5 text-xs text-emerald-400/80">
-                已隔离事件仍需单独复核；没有告警不代表已覆盖所有加密业务行为。
-              </p>
-            </div>
+            <button
+              type="button"
+              onClick={onViewAllHistory}
+              className="rn2-btn rn2-btn-ghost rn2-btn-sm min-h-9"
+            >
+              <span>查看处置历史</span>
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={onViewAllHistory}
-            className="flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-white"
-          >
-            <span>查看处置历史</span>
-            <ExternalLink className="h-3 w-3" />
-          </button>
-        </div>
-      </section>
+        </section>
       </>
     );
   }
@@ -223,315 +223,328 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   return (
     <>
       {healthStripNode}
-      <section className="mb-6 overflow-hidden rounded-xl border border-rose-500/40 bg-[#041e3c]/95 shadow-[0_10px_28px_-8px_rgba(244,63,94,0.2)]">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-500/25 bg-linear-to-r from-[#2b0f1b] via-[#1a1632] to-[#031d3d] px-4 py-3 sm:px-5">
-        <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-          <div className="rounded-lg border border-rose-500/40 bg-rose-500/15 p-1.5 text-rose-400">
-            <ShieldAlert className="h-4 w-4" />
+      <section className="rn2-card mb-6 overflow-hidden border-[#f5a3b3]">
+        {/* Midnight Header */}
+        <div
+          className="rn2-card-head"
+          style={{ background: 'linear-gradient(125deg, #35162b, #162844 58%, #0c1c30)' }}
+        >
+          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+            <div className="rounded-lg border border-rose-400/45 bg-rose-500/20 p-1.5 text-rose-200">
+              <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <span className="rn2-eyebrow block text-rose-200">SECURITY ALERTS CENTER</span>
+              <h2 className="flex flex-wrap items-center gap-2 text-sm font-bold text-white sm:text-base">
+                <span>安全告警中心</span>
+                <span className="rounded-full border border-rose-400/50 bg-rose-500/25 px-2 py-0.5 font-mono text-[11px] font-bold text-rose-100 tabular-nums">
+                  {alerts.length} 项安全提醒
+                </span>
+                {protectionOnlyCount > 0 && (
+                  <span className="rounded-full border border-[#54c7ff]/45 bg-[#02182f]/75 px-2 py-0.5 text-[10px] font-semibold text-[#bde6ff] tabular-nums">
+                    {protectionOnlyCount} 项仅保护 · 不计用户滥用
+                  </span>
+                )}
+              </h2>
+            </div>
           </div>
-          <h2 className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-100">
-            <span>安全告警中心</span>
-            <span className="rounded-full border border-rose-500/40 bg-rose-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-rose-300 tabular-nums">
-              {alerts.length} 项安全提醒
-            </span>
-            {protectionOnlyCount > 0 && (
-              <span className="rounded-full border border-sky-400/35 bg-[#02182f] px-2 py-0.5 text-[10px] font-medium text-sky-200 tabular-nums">
-                {protectionOnlyCount} 项仅保护 · 不计用户滥用
-              </span>
-            )}
-          </h2>
+
+          <button
+            type="button"
+            onClick={onViewAllHistory}
+            className="rn2-btn rn2-btn-ghost rn2-btn-sm min-h-9"
+          >
+            <span>查看全部告警记录</span>
+            <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
         </div>
 
-        <button
-          type="button"
-          onClick={onViewAllHistory}
-          className="flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-400/30 bg-[#02182f] px-3 py-1.5 text-xs font-semibold text-[#00b6ec] transition-colors hover:border-[#087bff]/60 hover:bg-[#072647] hover:text-white"
-        >
-          <span>查看全部告警记录</span>
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
-      </div>
+        {/* Alert List (keep p-5 on each item div for E2E regression selectors) */}
+        <div className="divide-y divide-[#dce5ef] bg-white">
+          {alerts.map((alert) => {
+            const isProcessing = submittingId === alert.id;
+            const protectionOnly = isProtectionOnlySignal(alert);
+            const prohibitedActivity = alert.type === 'prohibited_activity';
+            const admissionUnverified = alert.type === 'admission_unverified';
+            const deepEvidence = alert.deep_evidence;
+            const attribution = deepEvidence?.connection_attribution;
+            const attributionUnavailable = connectionAttributionUnavailable(attribution, deepEvidence?.connection_count);
+            const inboundEvidence = deepEvidence?.inbound_ips ||
+              (deepEvidence?.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0);
+            const outboundEvidence = deepEvidence?.outbound_ips ||
+              (deepEvidence?.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0);
+            const inboundEvidenceUnavailable = attributionUnavailable && inboundEvidence.length === 0;
+            const outboundEvidenceUnavailable = attributionUnavailable && outboundEvidence.length === 0;
+            const probeIpCount = new Set(inboundEvidence
+              .filter((item) => item.network_evidence?.classification === 'possible_multiport_probe')
+              .map((item) => item.ip)
+              .filter(Boolean)).size;
+            const runtimeText = alert.project
+              ? `${alert.runtime}/${alert.project}`
+              : alert.runtime;
+            const isActionFailed = alert.latest_action?.status === 'failed';
+            const canRemediate = hasRemediationEvidence(alert);
+            const connlimitAction = alert.latest_action;
+            const connlimitExpiresAt = Number(connlimitAction?.params?.lease_expires_at || 0);
+            const connlimitActive = connlimitAction?.action_type === 'apply_container_connlimit'
+              && connlimitAction.status === 'succeeded' && connlimitExpiresAt > Math.floor(Date.now() / 1000);
+            const connlimitPending = ['apply_container_connlimit', 'release_container_connlimit'].includes(connlimitAction?.action_type || '')
+              && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
+            const canUseConnlimit = alert.type === 'container_connection_count'
+              && (alert.runtime === 'incus' || alert.runtime === 'runman') && (alert.project || '') === 'default';
+            const isSocketAbuseReview = alert.type === 'socket_abuse_suspected';
+            const canFreezeContainer = isSocketAbuseReview
+              && Boolean(alert.container_name)
+              && ['incus', 'podman', 'runman'].includes(alert.runtime);
+            const freezePending = connlimitAction?.action_type === 'freeze_container'
+              && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
 
-      {/* Alert List */}
-      <div className="divide-y divide-sky-400/15">
-        {alerts.map((alert) => {
-          const isProcessing = submittingId === alert.id;
-          const protectionOnly = isProtectionOnlySignal(alert);
-          const prohibitedActivity = alert.type === 'prohibited_activity';
-          const admissionUnverified = alert.type === 'admission_unverified';
-          const deepEvidence = alert.deep_evidence;
-          const attribution = deepEvidence?.connection_attribution;
-          const attributionUnavailable = connectionAttributionUnavailable(attribution, deepEvidence?.connection_count);
-          const inboundEvidence = deepEvidence?.inbound_ips ||
-            (deepEvidence?.connection_ips || []).filter((entry) => Number(entry.inbound || 0) > 0);
-          const outboundEvidence = deepEvidence?.outbound_ips ||
-            (deepEvidence?.connection_ips || []).filter((entry) => Number(entry.outbound || 0) > 0);
-          const inboundEvidenceUnavailable = attributionUnavailable && inboundEvidence.length === 0;
-          const outboundEvidenceUnavailable = attributionUnavailable && outboundEvidence.length === 0;
-          const probeIpCount = new Set(inboundEvidence
-            .filter((item) => item.network_evidence?.classification === 'possible_multiport_probe')
-            .map((item) => item.ip)
-            .filter(Boolean)).size;
-          const runtimeText = alert.project
-            ? `${alert.runtime}/${alert.project}`
-            : alert.runtime;
-          const isActionFailed = alert.latest_action?.status === 'failed';
-          const canRemediate = hasRemediationEvidence(alert);
-          const connlimitAction = alert.latest_action;
-          const connlimitExpiresAt = Number(connlimitAction?.params?.lease_expires_at || 0);
-          const connlimitActive = connlimitAction?.action_type === 'apply_container_connlimit'
-            && connlimitAction.status === 'succeeded' && connlimitExpiresAt > Math.floor(Date.now() / 1000);
-          const connlimitPending = ['apply_container_connlimit', 'release_container_connlimit'].includes(connlimitAction?.action_type || '')
-            && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
-          const canUseConnlimit = alert.type === 'container_connection_count'
-            && (alert.runtime === 'incus' || alert.runtime === 'runman') && (alert.project || '') === 'default';
-          const isSocketAbuseReview = alert.type === 'socket_abuse_suspected';
-          const canFreezeContainer = isSocketAbuseReview
-            && Boolean(alert.container_name)
-            && ['incus', 'podman', 'runman'].includes(alert.runtime);
-          const freezePending = connlimitAction?.action_type === 'freeze_container'
-            && ['queued', 'dispatched', 'running'].includes(connlimitAction?.status || '');
+            return (
+              <div
+                key={alert.id}
+                className="p-5 flex flex-col justify-between gap-4 transition-colors hover:bg-[#f8fbff] lg:flex-row lg:items-start"
+              >
+                {/* Alert Content */}
+                <div className="min-w-0 flex-1 space-y-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge status={alert.severity} size="sm" />
+                    {protectionOnly && (
+                      <span className="rn2-pill rn2-pill-sm rn2-pill-blue">
+                        <ShieldCheck className="h-3 w-3" aria-hidden="true" />
+                        <span>保护类 · 用户归因未确认</span>
+                      </span>
+                    )}
+                    <span className="text-sm font-bold text-[#0b1636]">
+                      {alert.title || alert.type}
+                    </span>
+                    <span className="rounded-md border border-[#cedae7] bg-[#f4f8fd] px-2 py-0.5 font-mono text-xs font-semibold text-[#31485e]">
+                      {alert.host_id}
+                    </span>
+                    <span className="rounded-md border border-[#cedae7] bg-[#f4f8fd] px-2 py-0.5 font-mono text-xs text-[#4a607a]">
+                      {runtimeText}
+                    </span>
+                    {alert.container_name && (
+                      <span className="rounded-md border border-[#a9d1ff] bg-[#e8f3ff] px-2 py-0.5 font-mono text-xs font-semibold text-[#0657b8]">
+                        {alert.container_name}
+                      </span>
+                    )}
+                    <span className="text-xs text-[#697b9c] tabular-nums">
+                      出现 {alert.occurrence_count || 1} 次 · 最近 {alert.last_seen_utc8 || '-'}
+                    </span>
+                  </div>
 
-          return (
-            <div
-              key={alert.id}
-              className="p-5 hover:bg-slate-800/25 transition-colors flex flex-col lg:flex-row lg:items-start justify-between gap-4"
-            >
-              {/* Alert Content */}
-              <div className="min-w-0 flex-1 space-y-2.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusBadge status={alert.severity} size="sm" />
+                  <p className="text-xs leading-relaxed text-[#31485e]">
+                    {alert.message}
+                  </p>
+                  <SocketAbuseEvidence alert={alert} />
+                  <ProtocolGuardEvidence alert={alert} />
                   {protectionOnly && (
-                    <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 bg-sky-950/50 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
-                      <ShieldCheck className="h-3 w-3" />
-                      保护类 · 用户归因未确认
-                    </span>
+                    extractSocketAbuseAssessment(alert) && !deepEvidence && !admissionUnverified ? (
+                      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[#a9d1ff] bg-[#f4f8fd] px-3 py-1.5 text-[11px] text-[#31485e]">
+                        <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#087bff]" aria-hidden="true" />
+                        <span className="font-bold text-[#0657b8]">仅作为主机保护信号：</span>
+                        <span>当前数据仅反映连接、流量或访问特征，尚未通过应用认证日志关联具体用户，不作为滥用指控或处罚依据。</span>
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-[#a9d1ff] bg-[#f4f8fd] px-3.5 py-2.5 text-[11px] leading-relaxed text-[#31485e]">
+                        <div className="flex items-center gap-1.5 font-bold text-[#0657b8]">
+                          <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                          {admissionUnverified ? '保护状态待核实' : '仅作为主机保护信号'}
+                        </div>
+                        <p className="mt-1">
+                          {admissionUnverified
+                            ? '采样或规则校验未通过，当前不能确认防护是否生效；这不代表已确认攻击，也不归因为用户行为。'
+                            : '当前数据只反映连接、流量或访问特征，尚未通过应用/代理认证日志关联到具体用户；不作为用户滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。'}
+                        </p>
+                        {deepEvidence ? (
+                          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-[#d2dfec] pt-2 text-[#31485e] tabular-nums">
+                            <span>深度快照：{deepEvidence.captured_at_utc8 || '时间未上报'}</span>
+                            <span>入站：{formatConnectionEvidenceCount(deepEvidence.inbound_unique_ips, inboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.inbound_process_count, attributionUnavailable)} 进程</span>
+                            <span>出站：{formatConnectionEvidenceCount(deepEvidence.outbound_unique_ips, outboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.outbound_process_count, attributionUnavailable)} 进程</span>
+                            {attribution && <span>
+                              发起方向：本机进程已确认 {formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)} / 远端发起已确认 {formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)} / 未知 {formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}
+                            </span>}
+                            {probeIpCount > 0 && <span className="font-semibold text-[#9a5b00]">多端口探测线索 {probeIpCount} IP（非攻击定论）</span>}
+                            {attribution && (attributionUnavailable
+                              ? <span className="font-semibold text-[#9a5b00]">连接明细未采集，发起方向与进程归属未知，不能按 0 条判断</span>
+                              : <span>进程/PID 归属 {formatConnectionEvidenceRatio(attribution.process_attributed_sockets, attribution.captured_sockets, false)} 条</span>)}
+                            {attribution?.conntrack_available === false && !attributionUnavailable && <span className="font-semibold text-[#9a5b00]">conntrack 不可用；其余方向只按 socket 状态证据判定</span>}
+                          </div>
+                        ) : (
+                          <p className="mt-2 border-t border-[#d2dfec] pt-2 text-[#697b9c]">
+                            尚无深度连接快照；目前不能判断连接来源、发起方向或对应进程。
+                          </p>
+                        )}
+                        <p className="mt-1 text-[#697b9c]">连接方向或进程归属不等于用户身份；需要认证日志才能把行为关联到用户。</p>
+                      </div>
+                    )
                   )}
-                  <span className="text-sm font-semibold text-slate-100">
-                    {alert.title || alert.type}
-                  </span>
-                  <span className="rounded-md border border-slate-700/70 bg-slate-800/90 px-2 py-0.5 font-mono text-xs text-slate-300">
-                    {alert.host_id}
-                  </span>
-                  <span className="rounded-md border border-slate-700/70 bg-slate-800/90 px-2 py-0.5 font-mono text-xs text-slate-300">
-                    {runtimeText}
-                  </span>
-                  {alert.container_name && (
-                    <span className="rounded-md border border-sky-500/35 bg-sky-950/60 px-2 py-0.5 font-mono text-xs text-sky-300">
-                      {alert.container_name}
-                    </span>
+                  <SocksPasswordReview alert={alert} onRefresh={onRefresh} onToast={onToast} />
+
+                  {/* Remediation Failure Explanation Banner */}
+                  {isActionFailed && (
+                    <div className="mt-2 flex items-start gap-2 rounded-xl border border-[#f9b8c4] bg-[#ffeef1] p-3 text-xs text-[#9f1239]">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#b41835]" aria-hidden="true" />
+                      <div className="min-w-0 flex-1">
+                        <div className="font-bold text-[#b41835]">
+                          {prohibitedActivity ? '隔离恢复未验证：' : '前次定向处置未成功：'}
+                        </div>
+                        <div className="mt-0.5 break-all font-mono text-[11px] text-[#0b1636]">
+                          {alert.latest_action?.result_message || '节点未返回具体失败原因'}
+                        </div>
+                        <div className="mt-1 text-[11px] text-[#7f1d1d]">
+                          {prohibitedActivity
+                            ? '请到上方隔离复核区选择恢复原实例网络，或在容器已重装/已删除时核验旧实例身份。此类告警不能通过放行、忽略或普通标记解决。'
+                            : '请根据回执检查节点版本、权限及残留守护进程后重试。标记已解决只归档告警，不会清理程序；风险仍存在时会再次告警。'}
+                        </div>
+                      </div>
+                    </div>
                   )}
-                  <span className="text-xs text-slate-400 tabular-nums">
-                    出现 {alert.occurrence_count || 1} 次 · 最近 {alert.last_seen_utc8 || '-'}
-                  </span>
                 </div>
 
-                <p className="text-xs leading-relaxed text-slate-200">
-                  {alert.message}
-                </p>
-                <SocketAbuseEvidence alert={alert} />
-                <ProtocolGuardEvidence alert={alert} />
-                {protectionOnly && (
-                  extractSocketAbuseAssessment(alert) && !deepEvidence && !admissionUnverified ? (
-                    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-sky-800/60 bg-sky-950/20 px-3 py-1.5 text-[11px] text-slate-300">
-                      <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-sky-300" />
-                      <span className="font-semibold text-sky-200">仅作为主机保护信号：</span>
-                      <span>当前数据仅反映连接、流量或访问特征，尚未通过应用认证日志关联具体用户，不作为滥用指控或处罚依据。</span>
-                    </div>
+                {/* Action Buttons */}
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {alert.container_name && (
+                    <button
+                      type="button"
+                      onClick={() => onSelectContainer({
+                        host_id: alert.host_id,
+                        runtime: alert.runtime,
+                        project: alert.project || '',
+                        container_name: alert.container_name || '',
+                      })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#a9d1ff] bg-[#e8f3ff] px-3 py-1.5 text-xs font-semibold text-[#0657b8] transition-colors hover:border-[#087bff] hover:bg-[#d7eaff]"
+                      title="打开该告警对应的容器详情"
+                    >
+                      <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>查看容器</span>
+                    </button>
+                  )}
+                  {prohibitedActivity && (
+                    <button
+                      type="button"
+                      onClick={openQuarantineReview}
+                      className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-[#f7d58b] bg-[#fef6e4] px-3 py-1.5 text-xs font-semibold text-[#9a5b00] transition-colors hover:border-[#d97706] hover:bg-[#fdecc8]"
+                      aria-controls="quarantine-review"
+                      title="前往管理员隔离复核流程"
+                    >
+                      <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>前往隔离复核</span>
+                    </button>
+                  )}
+                  {!protectionOnly && <UserNoticeAction alertId={alert.id} onToast={onToast} />}
+                  {canUseConnlimit && !prohibitedActivity && (connlimitActive ? (
+                    <button
+                      type="button"
+                      disabled={isProcessing || connlimitPending}
+                      onClick={() => setPendingDecision({ id: alert.id, decision: 'release_container_connlimit' })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#f7d58b] bg-[#fef6e4] px-3 py-1.5 text-xs font-semibold text-[#9a5b00] transition-colors hover:border-[#d97706] hover:bg-[#fdecc8] disabled:opacity-50"
+                      title="移除本系统创建的临时 TCP 限额"
+                    >
+                      <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>解除 TCP 限额</span>
+                    </button>
                   ) : (
-                    <div className="rounded-xl border border-sky-800/70 bg-sky-950/25 px-3.5 py-2.5 text-[11px] leading-relaxed text-slate-300">
-                      <div className="flex items-center gap-1.5 font-semibold text-sky-200">
-                        <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
-                        {admissionUnverified ? '保护状态待核实' : '仅作为主机保护信号'}
-                      </div>
-                      <p className="mt-1">
-                        {admissionUnverified
-                          ? '采样或规则校验未通过，当前不能确认防护是否生效；这不代表已确认攻击，也不归因为用户行为。'
-                          : '当前数据只反映连接、流量或访问特征，尚未通过应用/代理认证日志关联到具体用户；不作为用户滥用指控或处罚依据。若达到独立保护阈值，系统可能限制新连接或停止目标容器，并只发送说明保护动作的通知。'}
-                      </p>
-                      {deepEvidence ? (
-                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-sky-900/70 pt-2 text-slate-300 tabular-nums">
-                          <span>深度快照：{deepEvidence.captured_at_utc8 || '时间未上报'}</span>
-                          <span>入站：{formatConnectionEvidenceCount(deepEvidence.inbound_unique_ips, inboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.inbound_process_count, attributionUnavailable)} 进程</span>
-                          <span>出站：{formatConnectionEvidenceCount(deepEvidence.outbound_unique_ips, outboundEvidenceUnavailable)} IP / {formatConnectionEvidenceCount(deepEvidence.outbound_process_count, attributionUnavailable)} 进程</span>
-                          {attribution && <span>
-                            发起方向：本机进程已确认 {formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)} / 远端发起已确认 {formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)} / 未知 {formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}
-                          </span>}
-                          {probeIpCount > 0 && <span className="text-amber-200">多端口探测线索 {probeIpCount} IP（非攻击定论）</span>}
-                          {attribution && (attributionUnavailable
-                            ? <span className="text-amber-200">连接明细未采集，发起方向与进程归属未知，不能按 0 条判断</span>
-                            : <span>进程/PID 归属 {formatConnectionEvidenceRatio(attribution.process_attributed_sockets, attribution.captured_sockets, false)} 条</span>)}
-                          {attribution?.conntrack_available === false && !attributionUnavailable && <span className="text-amber-200">conntrack 不可用；其余方向只按 socket 状态证据判定</span>}
-                        </div>
-                      ) : (
-                        <p className="mt-2 border-t border-sky-900/70 pt-2 text-slate-400">
-                          尚无深度连接快照；目前不能判断连接来源、发起方向或对应进程。
-                        </p>
-                      )}
-                      <p className="mt-1 text-slate-400">连接方向或进程归属不等于用户身份；需要认证日志才能把行为关联到用户。</p>
-                    </div>
-                  )
-                )}
-                <SocksPasswordReview alert={alert} onRefresh={onRefresh} onToast={onToast} />
+                    <button
+                      type="button"
+                      disabled={isProcessing || connlimitPending}
+                      onClick={() => setPendingDecision({ id: alert.id, decision: 'apply_container_connlimit' })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#f7d58b] bg-[#fef6e4] px-3 py-1.5 text-xs font-semibold text-[#9a5b00] transition-colors hover:border-[#d97706] hover:bg-[#fdecc8] disabled:opacity-50"
+                      title="每方向临时限制并发 TCP 新连接；不影响 UDP 和既有连接"
+                    >
+                      <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{connlimitPending ? 'TCP 限额处理中...' : '临时 TCP 限额'}</span>
+                    </button>
+                  ))}
+                  {canRemediate && !prohibitedActivity && (
+                    <button
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => setPendingDecision({ id: alert.id, decision: 'deny' })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#f9b8c4] bg-[#ffeef1] px-3 py-1.5 text-xs font-semibold text-[#b41835] transition-colors hover:border-[#fb7185] hover:bg-[#ffe4e6] disabled:opacity-50"
+                      title="定向清理恶意进程或停止非合规服务（不停止整个容器）"
+                    >
+                      <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>
+                        {isProcessing
+                          ? '处理中...'
+                          : isActionFailed
+                          ? '重试定向处置'
+                          : '定向处置'}
+                      </span>
+                    </button>
+                  )}
 
-                {/* Remediation Failure Explanation Banner */}
-                {isActionFailed && (
-                  <div className="mt-2 flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
-                    <div className="min-w-0 flex-1">
-                      <div className="font-semibold text-rose-300">
-                        {prohibitedActivity ? '隔离恢复未验证：' : '前次定向处置未成功：'}
-                      </div>
-                      <div className="mt-0.5 break-all font-mono text-[11px] text-slate-300">
-                        {alert.latest_action?.result_message || '节点未返回具体失败原因'}
-                      </div>
-                      <div className="mt-1 text-[11px] text-slate-400">
-                        {prohibitedActivity
-                          ? '请到上方隔离复核区选择恢复原实例网络，或在容器已重装/已删除时核验旧实例身份。此类告警不能通过放行、忽略或普通标记解决。'
-                          : '请根据回执检查节点版本、权限及残留守护进程后重试。标记已解决只归档告警，不会清理程序；风险仍存在时会再次告警。'}
-                      </div>
-                    </div>
-                  </div>
-                )}
+                  {canFreezeContainer && !prohibitedActivity && (
+                    <button
+                      type="button"
+                      disabled={isProcessing || freezePending}
+                      onClick={() => setPendingDecision({ id: alert.id, decision: 'freeze_container' })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#f9b8c4] bg-[#ffeef1] px-3 py-1.5 text-xs font-semibold text-[#b41835] transition-colors hover:border-[#fb7185] hover:bg-[#ffe4e6] disabled:opacity-50"
+                      title="挂起冻结该容器实例，立即阻断异常连接并标记告警已处理"
+                    >
+                      <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{freezePending ? '封禁执行中...' : '封禁'}</span>
+                    </button>
+                  )}
+
+                  {(!protectionOnly || isSocketAbuseReview) && !prohibitedActivity && (
+                    <button
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => setPendingDecision({ id: alert.id, decision: 'allow_silent' })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#cedae7] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#0b1636] transition-colors hover:border-[#147468] hover:bg-[#e6f7f4] hover:text-[#147468] disabled:opacity-50"
+                      title={isSocketAbuseReview ? '忽略该容器的此类 Socket 异常提醒（可在告警历史中恢复）' : '放行并永久不再提醒此项告警'}
+                    >
+                      <Check className="h-3.5 w-3.5 text-[#147468]" aria-hidden="true" />
+                      <span>{isSocketAbuseReview ? '忽略' : '放行策略'}</span>
+                    </button>
+                  )}
+
+                  {isActionFailed && !prohibitedActivity && (
+                    <button
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => setPendingDecision({ id: alert.id, decision: 'resolve' })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#9de2d8] bg-[#e6f7f4] px-2.5 py-1.5 text-xs font-semibold text-[#147468] transition-colors hover:bg-[#d1f0ea] disabled:opacity-50"
+                      title="手动确认问题已处理，直接消除此告警"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>标记已解决</span>
+                    </button>
+                  )}
+
+                  {(!protectionOnly || isSocketAbuseReview) && !prohibitedActivity && (
+                    <button
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => setPendingDecision({ id: alert.id, decision: 'dismiss_once' })}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[#cedae7] bg-[#f4f8fd] px-2.5 py-1.5 text-xs font-medium text-[#4a607a] transition-colors hover:border-[#087bff] hover:bg-white hover:text-[#0b1636] disabled:opacity-50"
+                      title={isSocketAbuseReview ? '跳过本次告警提醒，后续状态变化时仍会再次提醒' : '本次临时忽略'}
+                    >
+                      <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{isSocketAbuseReview ? '跳过本次' : '本次忽略'}</span>
+                    </button>
+                  )}
+                </div>
               </div>
+            );
+          })}
+        </div>
 
-              {/* Action Buttons */}
-              <div className="flex shrink-0 flex-wrap items-center gap-2">
-                {alert.container_name && (
-                  <button
-                    type="button"
-                    onClick={() => onSelectContainer({
-                      host_id: alert.host_id,
-                      runtime: alert.runtime,
-                      project: alert.project || '',
-                      container_name: alert.container_name || '',
-                    })}
-                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-950/60 px-3 py-1.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-sky-900/70"
-                    title="打开该告警对应的容器详情"
-                  >
-                    <ArrowUpRight className="h-3.5 w-3.5" />
-                    <span>查看容器</span>
-                  </button>
-                )}
-                {prohibitedActivity && (
-                  <button
-                    type="button"
-                    onClick={openQuarantineReview}
-                    className="flex min-h-11 items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-900/70 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400"
-                    aria-controls="quarantine-review"
-                    title="前往管理员隔离复核流程"
-                  >
-                    <ShieldAlert className="h-3.5 w-3.5" />
-                    <span>前往隔离复核</span>
-                  </button>
-                )}
-                {!protectionOnly && <UserNoticeAction alertId={alert.id} onToast={onToast} />}
-                {canUseConnlimit && !prohibitedActivity && (connlimitActive ? (
-                  <button
-                    type="button"
-                    disabled={isProcessing || connlimitPending}
-                    onClick={() => setPendingDecision({ id: alert.id, decision: 'release_container_connlimit' })}
-                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 transition-all hover:bg-amber-900/70 disabled:opacity-50"
-                    title="移除本系统创建的临时 TCP 限额"
-                  >
-                    <ShieldAlert className="h-3.5 w-3.5" />
-                    <span>解除 TCP 限额</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={isProcessing || connlimitPending}
-                    onClick={() => setPendingDecision({ id: alert.id, decision: 'apply_container_connlimit' })}
-                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-200 transition-all hover:bg-amber-900/70 disabled:opacity-50"
-                    title="每方向临时限制并发 TCP 新连接；不影响 UDP 和既有连接"
-                  >
-                    <ShieldAlert className="h-3.5 w-3.5" />
-                    <span>{connlimitPending ? 'TCP 限额处理中...' : '临时 TCP 限额'}</span>
-                  </button>
-                ))}
-                {canRemediate && !prohibitedActivity && <button
-                  type="button"
-                  disabled={isProcessing}
-                  onClick={() => setPendingDecision({ id: alert.id, decision: 'deny' })}
-                  className="flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 transition-all hover:bg-rose-900/90 disabled:opacity-50"
-                  title="定向清理恶意进程或停止非合规服务（不停止整个容器）"
-                >
-                  <Ban className="h-3.5 w-3.5" />
-                  <span>
-                    {isProcessing
-                      ? '处理中...'
-                      : isActionFailed
-                      ? '重试定向处置'
-                      : '定向处置'}
-                  </span>
-                </button>}
-
-                {canFreezeContainer && !prohibitedActivity && (
-                  <button
-                    type="button"
-                    disabled={isProcessing || freezePending}
-                    onClick={() => setPendingDecision({ id: alert.id, decision: 'freeze_container' })}
-                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/80 px-3 py-1.5 text-xs font-semibold text-rose-200 transition-all hover:bg-rose-900/90 disabled:opacity-50"
-                    title="挂起冻结该容器实例，立即阻断异常连接并标记告警已处理"
-                  >
-                    <Ban className="h-3.5 w-3.5" />
-                    <span>{freezePending ? '封禁执行中...' : '封禁'}</span>
-                  </button>
-                )}
-
-                {(!protectionOnly || isSocketAbuseReview) && !prohibitedActivity && <button
-                  type="button"
-                  disabled={isProcessing}
-                  onClick={() => setPendingDecision({ id: alert.id, decision: 'allow_silent' })}
-                  className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition-all hover:bg-slate-700 disabled:opacity-50"
-                  title={isSocketAbuseReview ? '忽略该容器的此类 Socket 异常提醒（可在告警历史中恢复）' : '放行并永久不再提醒此项告警'}
-                >
-                  <Check className="h-3.5 w-3.5 text-emerald-400" />
-                  <span>{isSocketAbuseReview ? '忽略' : '放行策略'}</span>
-                </button>}
-
-                {isActionFailed && !prohibitedActivity && (
-                  <button
-                    type="button"
-                    disabled={isProcessing}
-                    onClick={() => setPendingDecision({ id: alert.id, decision: 'resolve' })}
-                    className="flex min-h-10 items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 transition-all hover:bg-emerald-900/60 disabled:opacity-50"
-                    title="手动确认问题已处理，直接消除此告警"
-                  >
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                    <span>标记已解决</span>
-                  </button>
-                )}
-
-                {(!protectionOnly || isSocketAbuseReview) && !prohibitedActivity && <button
-                  type="button"
-                  disabled={isProcessing}
-                  onClick={() => setPendingDecision({ id: alert.id, decision: 'dismiss_once' })}
-                  className="flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/85 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-all hover:bg-slate-700 disabled:opacity-50"
-                  title={isSocketAbuseReview ? '跳过本次告警提醒，后续状态变化时仍会再次提醒' : '本次临时忽略'}
-                >
-                  <EyeOff className="h-3.5 w-3.5 text-slate-400" />
-                  <span>{isSocketAbuseReview ? '跳过本次' : '本次忽略'}</span>
-                </button>}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <ConfirmDialog
-        open={Boolean(pendingDecision)}
-        {...confirmationCopy}
-        isSubmitting={pendingDecision ? submittingId === pendingDecision.id : false}
-        onCancel={() => setPendingDecision(null)}
-        onConfirm={async () => {
-          if (!pendingDecision) return;
-          const decision = pendingDecision;
-          await handleDecision(decision.id, decision.decision);
-          setPendingDecision(null);
-        }}
-      />
-    </section>
+        <ConfirmDialog
+          open={Boolean(pendingDecision)}
+          {...confirmationCopy}
+          isSubmitting={pendingDecision ? submittingId === pendingDecision.id : false}
+          onCancel={() => setPendingDecision(null)}
+          onConfirm={async () => {
+            if (!pendingDecision) return;
+            const decision = pendingDecision;
+            await handleDecision(decision.id, decision.decision);
+            setPendingDecision(null);
+          }}
+        />
+      </section>
     </>
   );
 };

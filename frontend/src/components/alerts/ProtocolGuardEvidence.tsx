@@ -37,10 +37,10 @@ const stageLabel: Record<string, string> = {
 };
 
 const stageTone = (value: string) => {
-  if (['confirmed', 'confirmed_for_blocked_endpoints', 'not_required', 'not_detected'].includes(value)) return 'text-emerald-200';
-  if (['partially_confirmed', 'removal_unverified', 'not_detected_or_incomplete', 'pending_or_unverified', 'pending_or_internal_only'].includes(value)) return 'text-amber-200';
-  if (['failed_or_unavailable'].includes(value)) return 'text-rose-200';
-  return 'text-slate-300';
+  if (['confirmed', 'confirmed_for_blocked_endpoints', 'not_required', 'not_detected'].includes(value)) return 'font-semibold text-[#147468]';
+  if (['partially_confirmed', 'removal_unverified', 'not_detected_or_incomplete', 'pending_or_unverified', 'pending_or_internal_only'].includes(value)) return 'font-semibold text-[#9a5b00]';
+  if (['failed_or_unavailable'].includes(value)) return 'font-semibold text-[#b41835]';
+  return 'text-[#31485e]';
 };
 
 const endpointLabel = (item: Record<string, any>, applicationProtocol: string) => {
@@ -69,24 +69,63 @@ export const ProtocolGuardEvidence: React.FC<{ alert: SecurityAlert }> = ({ aler
   ];
   const title = protocol === 'trojan' ? 'Trojan 端口证据链' : 'VMess 端口证据链';
 
-  return <details className="mt-2 rounded-lg border border-slate-700/80 bg-slate-950/40 px-3 py-2 text-[11px]">
-    <summary className="cursor-pointer font-semibold text-sky-200">{title} · 配置 {configured.length} · 已阻断 {blocked.length} · 待核实 {pending.length}</summary>
-    <div className="mt-2 grid gap-1 sm:grid-cols-2">
-      {stages.map(([label, value]) => <p key={label} className="min-w-0"><span className="text-slate-400">{label}：</span><span className={stageTone(value)}>{stageLabel[value] || value}</span></p>)}
-    </div>
-    {configured.length > 0 && <div className="mt-2 border-t border-slate-800 pt-2">
-      <p className="font-semibold text-slate-300">配置中检测到的入口</p>
-      <ul className="mt-1 space-y-1 text-slate-400">{configured.slice(0, 12).map((item: Record<string, any>, index: number) => <li key={`${item.pid}-${item.port}-${index}`} className="break-all">{endpointLabel(item, protocol)}{item.port_config_complete ? ' · 配置解析完整' : ''}</li>)}</ul>
-    </div>}
-    {blocked.length > 0 && <div className="mt-2 border-t border-slate-800 pt-2">
-      <p className="font-semibold text-emerald-200">规则已读回确认</p>
-      <ul className="mt-1 space-y-1 text-slate-300">{blocked.slice(0, 12).map((item: Record<string, any>, index: number) => <li key={`${item.proto}-${item.port}-${index}`} className="break-all">{endpointLabel(item, protocol)}</li>)}</ul>
-    </div>}
-    {pending.length > 0 && <div className="mt-2 border-t border-slate-800 pt-2">
-      <p className="font-semibold text-amber-200">尚未阻断的端点及原因</p>
-      <ul className="mt-1 space-y-1 text-slate-300">{pending.slice(0, 12).map((item: Record<string, any>, index: number) => <li key={`${item.proto}-${item.port}-${index}`} className="break-all">{endpointLabel(item, protocol)} · {REASONS[item.reason] || item.reason || '证据不足'}</li>)}</ul>
-    </div>}
-    {chain.listener_inventory_source && <p className="mt-2 border-t border-slate-800 pt-2 text-slate-500">监听清单来源：{chain.listener_inventory_source}{chain.listener_inventory_reason ? ` · ${chain.listener_inventory_reason}` : ''}</p>}
-    <p className="mt-1 text-slate-500">只有配置端口与当前监听、公网暴露都能对应，且容器网络命名空间规则读回成功，才标记为已阻断。</p>
-  </details>;
+  return (
+    <details className="mt-2 rounded-xl border border-[#cedae7] bg-[#f4f8fd] px-3.5 py-2.5 text-[11px] text-[#0b1636]">
+      <summary className="cursor-pointer font-bold text-[#0657b8]">
+        {title} · 配置 {configured.length} · 已阻断 {blocked.length} · 待核实 {pending.length}
+      </summary>
+      <div className="mt-2 grid gap-1 sm:grid-cols-2">
+        {stages.map(([label, value]) => (
+          <p key={label} className="min-w-0">
+            <span className="text-[#697b9c]">{label}：</span>
+            <span className={stageTone(value)}>{stageLabel[value] || value}</span>
+          </p>
+        ))}
+      </div>
+      {configured.length > 0 && (
+        <div className="mt-2 border-t border-[#dce5ef] pt-2">
+          <p className="font-semibold text-[#0b1636]">配置中检测到的入口</p>
+          <ul className="mt-1 space-y-1 text-[#31485e]">
+            {configured.slice(0, 12).map((item: Record<string, any>, index: number) => (
+              <li key={`${item.pid}-${item.port}-${index}`} className="break-all font-mono">
+                {endpointLabel(item, protocol)}{item.port_config_complete ? ' · 配置解析完整' : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {blocked.length > 0 && (
+        <div className="mt-2 border-t border-[#dce5ef] pt-2">
+          <p className="font-semibold text-[#147468]">规则已读回确认</p>
+          <ul className="mt-1 space-y-1 text-[#31485e]">
+            {blocked.slice(0, 12).map((item: Record<string, any>, index: number) => (
+              <li key={`${item.proto}-${item.port}-${index}`} className="break-all font-mono">
+                {endpointLabel(item, protocol)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {pending.length > 0 && (
+        <div className="mt-2 border-t border-[#dce5ef] pt-2">
+          <p className="font-semibold text-[#9a5b00]">尚未阻断的端点及原因</p>
+          <ul className="mt-1 space-y-1 text-[#31485e]">
+            {pending.slice(0, 12).map((item: Record<string, any>, index: number) => (
+              <li key={`${item.proto}-${item.port}-${index}`} className="break-all font-mono">
+                {endpointLabel(item, protocol)} · {REASONS[item.reason] || item.reason || '证据不足'}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {chain.listener_inventory_source && (
+        <p className="mt-2 border-t border-[#dce5ef] pt-2 text-[#697b9c]">
+          监听清单来源：{chain.listener_inventory_source}{chain.listener_inventory_reason ? ` · ${chain.listener_inventory_reason}` : ''}
+        </p>
+      )}
+      <p className="mt-1 text-[#697b9c]">
+        只有配置端口与当前监听、公网暴露都能对应，且容器网络命名空间规则读回成功，才标记为已阻断。
+      </p>
+    </details>
+  );
 };

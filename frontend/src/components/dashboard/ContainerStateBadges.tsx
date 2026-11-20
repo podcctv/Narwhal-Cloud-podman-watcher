@@ -28,11 +28,11 @@ type GuardLike = {
 };
 
 const toneClasses: Record<SignalTone, string> = {
-  danger: 'border-rose-500/40 bg-rose-950/50 text-rose-200',
-  warning: 'border-amber-500/35 bg-amber-950/40 text-amber-200',
-  info: 'border-sky-500/35 bg-sky-950/40 text-sky-200',
-  success: 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200',
-  muted: 'border-slate-700 bg-slate-900 text-slate-300',
+  danger: 'border-[#f9b8c4] bg-[#ffeef1] text-[#b41835]',
+  warning: 'border-[#f7d58b] bg-[#fef6e4] text-[#9a5b00]',
+  info: 'border-[#a9d1ff] bg-[#e8f3ff] text-[#0657b8]',
+  success: 'border-[#9de2d8] bg-[#e6f7f4] text-[#147468]',
+  muted: 'border-[#cbd7e6] bg-[#eef3f9] text-[#4a607a]',
 };
 
 const matchingAlerts = (container: ContainerItem, alerts: SecurityAlert[] = []) => alerts.filter((alert) =>
@@ -159,7 +159,6 @@ export const hasContainerProtocolGuardNeedsReview = (container: ContainerItem): 
   const security = container.security || {};
   return [security.vmess_guard, security.trojan_guard].some((guard) =>
     (Boolean(guard?.detected || (Array.isArray(guard?.blocked_endpoints) && guard.blocked_endpoints.length > 0) || (Array.isArray(guard?.pending_endpoints) && guard.pending_endpoints.length > 0)) && (PROTOCOL_GUARD_REVIEW_STATES.includes(guard?.state || '') || Boolean(guard?.detected && guard.state !== 'blocked')))
-
   );
 };
 
@@ -213,15 +212,15 @@ const buildSignals = (container: ContainerItem, alerts: SecurityAlert[]): Contai
     add('udp-throttle', rate == null ? 'UDP 限速生效' : `UDP 限速 ${rate} Mbps`, 'info', security.udp_throttle?.reason || 'UDP 定向限速当前生效');
   }
   if (security.freeze_guard?.frozen) {
-    add('freeze-guard', '❄️ 进程已冻结', 'info', '容器全部进程已被 cgroup v2 挂起冻结，内存与取证现场完好保留');
+    add('freeze-guard', '进程已冻结', 'info', '容器全部进程已被 cgroup v2 挂起冻结，内存与取证现场完好保留');
   }
   if (security.udp_blackhole?.active) {
     const bhRem = security.udp_blackhole?.remaining_seconds;
-    const bhLabel = bhRem && bhRem > 0 ? `🛡️ UDP黑洞 (${Math.ceil(bhRem / 60)}m)` : '🛡️ UDP黑洞';
+    const bhLabel = bhRem && bhRem > 0 ? `UDP 黑洞 (${Math.ceil(bhRem / 60)}m)` : 'UDP 黑洞';
     add('udp-blackhole', bhLabel, 'warning', security.udp_blackhole?.reason || '容器出站 UDP 流量已被定向丢弃黑洞，TCP 与入站业务正常');
   }
   if (security.anti_spoof?.active) {
-    add('anti-spoof', '🔒 源IP防伪造', 'success', '宿主机网卡已启用 rp_filter 与源地址白名单校验');
+    add('anti-spoof', '源 IP 防伪造', 'success', '宿主机网卡已启用 rp_filter 与源地址白名单校验');
   }
   if (Array.isArray(security.sensitive_file_events) && security.sensitive_file_events.length > 0) {
     const count = security.sensitive_file_events.length;
@@ -229,7 +228,7 @@ const buildSignals = (container: ContainerItem, alerts: SecurityAlert[]): Contai
   }
   if (security.microburst?.detected) {
     const isFlood = security.microburst.flood_type === 'outbound_small_packet_flood';
-    add('microburst-alert', isFlood ? `⚡ 小包泛洪 (${security.microburst.tx_pps} PPS)` : `⚡ 瞬时突发 (${security.microburst.tx_pps} PPS)`, isFlood ? 'danger' : 'warning', `检测到短时高频微突发流量，瞬时发包率: ${security.microburst.tx_pps} PPS，平均包长: ${security.microburst.avg_tx_packet_size}B`);
+    add('microburst-alert', isFlood ? `小包泛洪 (${security.microburst.tx_pps} PPS)` : `瞬时突发 (${security.microburst.tx_pps} PPS)`, isFlood ? 'danger' : 'warning', `检测到短时高频微突发流量，瞬时发包率: ${security.microburst.tx_pps} PPS，平均包长: ${security.microburst.avg_tx_packet_size}B`);
   }
   if (container.alerts?.cpu) add('cpu-alert', 'CPU 高负载', 'warning');
   if (container.alerts?.memory) add('memory-alert', '内存压力', 'warning');
@@ -283,7 +282,7 @@ export const ContainerStateBadges: React.FC<ContainerStateBadgesProps> = ({
         <span
           key={signal.key}
           title={signal.title}
-          className={`inline-flex max-w-full items-center rounded-md border px-1.5 py-0.5 text-[10px] leading-tight ${toneClasses[signal.tone]}`}
+          className={`inline-flex max-w-full items-center rounded-md border px-1.5 py-0.5 text-[10px] font-semibold leading-tight ${toneClasses[signal.tone]}`}
         >
           <span className="truncate">{signal.label}</span>
         </span>
@@ -291,7 +290,7 @@ export const ContainerStateBadges: React.FC<ContainerStateBadgesProps> = ({
       {hiddenSignals.length > 0 && (
         <span
           title={hiddenSignals.map((signal) => `${signal.label}: ${signal.title}`).join('\n')}
-          className="inline-flex items-center rounded-md border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-[10px] text-slate-300"
+          className="inline-flex items-center rounded-md border border-[#cbd7e6] bg-[#eef3f9] px-1.5 py-0.5 text-[10px] font-medium text-[#4a607a]"
         >
           +{hiddenSignals.length} 项
         </span>

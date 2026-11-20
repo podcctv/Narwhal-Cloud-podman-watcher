@@ -9,6 +9,7 @@ interface HostReachabilityBadgeProps {
   hostId: string;
   ip?: string;
   className?: string;
+  surface?: 'midnight' | 'light';
 }
 
 function formatAgo(timestampSec: number): string {
@@ -21,24 +22,25 @@ function formatAgo(timestampSec: number): string {
 }
 
 function getCarrierLatencyColor(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined || ms <= 0) return 'text-slate-400';
-  if (ms < 80) return 'text-emerald-400';
-  if (ms < 180) return 'text-emerald-300';
-  if (ms < 280) return 'text-amber-300';
-  return 'text-rose-400';
+  if (ms === null || ms === undefined || ms <= 0) return 'text-[#697b9c]';
+  if (ms < 80) return 'text-[#147468]';
+  if (ms < 180) return 'text-[#0657b8]';
+  if (ms < 280) return 'text-[#9a5b00]';
+  return 'text-[#b41835]';
 }
 
 function getVerdictTextColor(verdict: string): string {
-  if (verdict === 'ok') return 'text-emerald-400';
-  if (verdict === 'gfw_blocked') return 'text-rose-400';
-  if (verdict === 'partial') return 'text-amber-300';
-  return 'text-slate-300';
+  if (verdict === 'ok') return 'text-[#147468]';
+  if (verdict === 'gfw_blocked') return 'text-[#b41835]';
+  if (verdict === 'partial') return 'text-[#9a5b00]';
+  return 'text-[#31485e]';
 }
 
 export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
   hostId,
   ip,
   className = '',
+  surface = 'midnight',
 }) => {
   const [summary, setSummary] = useState<ReachCheckSummary | null>(null);
   const [testedPort, setTestedPort] = useState<number>(443);
@@ -46,12 +48,9 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
   const [statsV6, setStatsV6] = useState<any>(null);
   const [rawItem, setRawItem] = useState<any>(null);
 
-  // Popover state & Portal positioning
   const [popoverOpen, setPopoverOpen] = useState<boolean>(false);
   const [popoverCoords, setPopoverCoords] = useState<{ top: number; left: number; showAbove: boolean } | null>(null);
   const [activeStack, setActiveStack] = useState<'v4' | 'v6'>('v4');
-
-  // Full detailed ReachCheckPanel modal (also Portal mounted to avoid contain:layout clipping)
   const [fullModalOpen, setFullModalOpen] = useState<boolean>(false);
 
   const triggerRef = useRef<HTMLSpanElement>(null);
@@ -59,7 +58,6 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
 
   const target = ip || hostId;
 
-  // 1. Check sessionStorage
   useEffect(() => {
     try {
       for (const p of [testedPort, 443, 80, 22]) {
@@ -73,7 +71,6 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
       }
     } catch { }
 
-    // 2. Fetch latest automated check result from server
     let active = true;
     api.getReachabilityHost(hostId)
       .then((res: any) => {
@@ -116,7 +113,6 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
     };
   }, [hostId, target]);
 
-  // Dynamic positioning for Popover
   const updatePosition = useCallback(() => {
     if (!triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
@@ -167,33 +163,34 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
     };
   }, [popoverOpen, updatePosition]);
 
-  // Badge visual theme tokens (Option A - Aurora Pulse Capsule)
   const isPing = summary?.protocol === 'PING' || testedPort <= 0;
   const portLabel = isPing ? 'ICMP' : `:${testedPort}`;
 
   const v4Latency = summary?.stats?.cnAverageMs ? `${summary.stats.cnAverageMs}ms` : '';
   const v6Latency = (statsV6?.cnAverageMs ?? statsV6?.cn_avg_ms) ? `${statsV6.cnAverageMs ?? statsV6.cn_avg_ms}ms` : '';
 
-  let badgeStyle = 'border-slate-700 bg-slate-900/80 text-slate-300 hover:border-slate-600';
-  let pulseColor = 'bg-slate-400';
-  let dotColor = 'bg-slate-500';
+  const isLightSurface = surface === 'light';
+  let badgeStyle = isLightSurface
+    ? 'border-[#cedae7] bg-[#f4f8fd] text-[#31485e] hover:border-[#087bff]'
+    : 'border-[#54c7ff]/35 bg-[#02182f]/80 text-[#e6f4ff] hover:border-[#54c7ff]';
+  let dotColor = 'bg-[#697b9c]';
 
   if (summary) {
     if (summary.verdict === 'ok') {
-      badgeStyle =
-        'border-emerald-500/40 bg-gradient-to-r from-emerald-950/70 via-slate-900/80 to-emerald-950/70 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.15)] hover:border-emerald-400 hover:shadow-[0_0_16px_rgba(16,185,129,0.3)]';
-      pulseColor = 'bg-emerald-400';
-      dotColor = 'bg-emerald-500';
+      badgeStyle = isLightSurface
+        ? 'border-[#9de2d8] bg-[#e6f7f4] text-[#147468] hover:border-[#147468]'
+        : 'border-emerald-400/55 bg-emerald-500/20 text-emerald-100 hover:border-emerald-300';
+      dotColor = 'bg-emerald-400';
     } else if (summary.verdict === 'gfw_blocked') {
-      badgeStyle =
-        'border-rose-500/50 bg-gradient-to-r from-rose-950/80 via-slate-900/80 to-rose-950/80 text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.2)] hover:border-rose-400 animate-pulse';
-      pulseColor = 'bg-rose-400';
-      dotColor = 'bg-rose-500';
+      badgeStyle = isLightSurface
+        ? 'border-[#f9b8c4] bg-[#ffeef1] text-[#b41835] hover:border-[#dc2626]'
+        : 'border-rose-400/65 bg-rose-500/25 text-rose-100 hover:border-rose-300';
+      dotColor = 'bg-rose-400';
     } else {
-      badgeStyle =
-        'border-amber-500/40 bg-gradient-to-r from-amber-950/70 via-slate-900/80 to-amber-950/70 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.15)] hover:border-amber-400';
-      pulseColor = 'bg-amber-400';
-      dotColor = 'bg-amber-500';
+      badgeStyle = isLightSurface
+        ? 'border-[#f7d58b] bg-[#fef6e4] text-[#9a5b00] hover:border-[#d97706]'
+        : 'border-amber-400/55 bg-amber-500/20 text-amber-100 hover:border-amber-300';
+      dotColor = 'bg-amber-400';
     }
   }
 
@@ -206,291 +203,270 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
           : summary.verdict === 'gfw_blocked'
               ? '国内受阻'
               : summary.verdict === 'partial'
-    ?`部分受阻 ${v4Latency}`
+    ? `部分受阻 ${v4Latency}`
     : '连接异常';
 
-// Active stack data for Popover
-const currentStats = activeStack === 'v6' && statsV6 ? statsV6 : summary?.stats;
-const displayTelecomMs = currentStats?.cnTelecomMs ?? currentStats?.cn_telecom_ms ?? null;
-const displayUnicomMs = currentStats?.cnUnicomMs ?? currentStats?.cn_unicom_ms ?? null;
-const displayMobileMs = currentStats?.cnMobileMs ?? currentStats?.cn_mobile_ms ?? null;
-const displayGlobalAvg = currentStats?.globalAverageMs ?? currentStats?.global_avg_ms ?? null;
-const displayMinMs = currentStats?.minLatencyMs ?? currentStats?.min_ms ?? null;
+  const currentStats = activeStack === 'v6' && statsV6 ? statsV6 : summary?.stats;
+  const displayTelecomMs = currentStats?.cnTelecomMs ?? currentStats?.cn_telecom_ms ?? null;
+  const displayUnicomMs = currentStats?.cnUnicomMs ?? currentStats?.cn_unicom_ms ?? null;
+  const displayMobileMs = currentStats?.cnMobileMs ?? currentStats?.cn_mobile_ms ?? null;
+  const displayGlobalAvg = currentStats?.globalAverageMs ?? currentStats?.global_avg_ms ?? null;
+  const displayMinMs = currentStats?.minLatencyMs ?? currentStats?.min_ms ?? null;
 
-const displayVerdict = (activeStack === 'v6' ? rawItem?.verdict_v6 : summary?.verdict) || summary?.verdict || 'ok';
-const displayVerdictLabel = (activeStack === 'v6' ? rawItem?.verdict_label_v6 : summary?.verdictLabel) || summary?.verdictLabel || '三网通畅';
-const displayVerdictDesc = (activeStack === 'v6' ? rawItem?.verdict_desc_v6 : summary?.verdictDescription) || summary?.verdictDescription || '';
+  const displayVerdict = (activeStack === 'v6' ? rawItem?.verdict_v6 : summary?.verdict) || summary?.verdict || 'ok';
+  const displayVerdictLabel = (activeStack === 'v6' ? rawItem?.verdict_label_v6 : summary?.verdictLabel) || summary?.verdictLabel || '三网通畅';
+  const displayVerdictDesc = (activeStack === 'v6' ? rawItem?.verdict_desc_v6 : summary?.verdictDescription) || summary?.verdictDescription || '';
 
-const checkedEpochSec = rawItem?.checked_at || (summary?.checkedAt ? Math.floor(summary.checkedAt / 1000) : 0);
-const timeAgoText = formatAgo(checkedEpochSec);
+  const checkedEpochSec = rawItem?.checked_at || (summary?.checkedAt ? Math.floor(summary.checkedAt / 1000) : 0);
+  const timeAgoText = formatAgo(checkedEpochSec);
 
-const statusBadgeStyle =
-  displayVerdict === 'ok'
-    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800/60'
-    : displayVerdict === 'gfw_blocked'
-      ? 'bg-rose-950/80 text-rose-300 border-rose-800/60'
-      : 'bg-amber-950/80 text-amber-300 border-amber-800/60';
+  const statusBadgeStyle =
+    displayVerdict === 'ok'
+      ? 'border-emerald-400/50 bg-emerald-500/25 text-emerald-100'
+      : displayVerdict === 'gfw_blocked'
+        ? 'border-rose-400/50 bg-rose-500/25 text-rose-100'
+        : 'border-amber-400/50 bg-amber-500/25 text-amber-100';
 
-return (
-  <>
-      {/* 
-        Badge Trigger: 
-        Uses <span role="button" tabIndex={0}> to eliminate button-in-button nesting 
-        inside host accordion bar and prevent event bubbling.
-      */}
+  return (
+    <>
       <span
-      ref={triggerRef}
-      role="button"
-      tabIndex={0}
-      onClick={(e) => {
-        e.stopPropagation();
-        setPopoverOpen((prev) => !prev);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
+        ref={triggerRef}
+        role="button"
+        tabIndex={0}
+        onClick={(e) => {
           e.stopPropagation();
           setPopoverOpen((prev) => !prev);
-        }
-      }}
-      className={`group relative inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-all duration-200 cursor-pointer select-none ${badgeStyle} ${className}`}
-      title={`全球与三网实时可达性 (端口: ${portLabel}) - 点击查看三网微详情`}
-      aria-haspopup="dialog"
-      aria-expanded={popoverOpen}
-    >
-      {/* Breathing Dual Pulse Dots */}
-      <span className="relative flex h-2 w-2 shrink-0">
-        <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${pulseColor}`} />
-        <span className={`relative inline-flex rounded-full h-2 w-2 ${dotColor}`} />
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            setPopoverOpen((prev) => !prev);
+          }
+        }}
+        className={`group relative inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${badgeStyle} ${className}`}
+        title={`全球与三网实时可达性 (端口: ${portLabel}) - 点击查看三网微详情`}
+        aria-haspopup="dialog"
+        aria-expanded={popoverOpen}
+      >
+        <span className={`relative inline-flex h-2 w-2 shrink-0 rounded-full ${dotColor}`} aria-hidden="true" />
+        <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
+        <span className="tracking-tight">{badgeText}</span>
+        <span
+          className={`rounded border px-1 py-0.2 font-mono text-[10px] ${
+            isLightSurface
+              ? 'border-[#cedae7] bg-white text-[#4a607a]'
+              : 'border-white/20 bg-black/25 text-[#cde8ff]'
+          }`}
+        >
+          {portLabel}
+        </span>
+        <ChevronDown
+          className={`h-3 w-3 shrink-0 opacity-75 transition-transform duration-200 group-hover:opacity-100 ${popoverOpen ? 'rotate-180' : ''}`}
+          aria-hidden="true"
+        />
       </span>
 
-      <Globe className="h-3 w-3 shrink-0" />
-    <span className="font-semibold text-white tracking-tight">{badgeText}</span>
-    <span className="font-mono text-[10px] opacity-80 bg-black/20 px-1 py-0.2 rounded border border-white/10">
-      {portLabel}
-    </span>
-
-      <ChevronDown
-        className={`h-3 w-3 shrink-0 transition-transform duration-200 opacity-70 group-hover:opacity-100 ${popoverOpen ? 'rotate-180 text-white' : ''
-          }`}
-      />
-      </span >
-
-{/* 
-        POPOVER (小浮窗) - Option A: Aurora Bento Capsule
-        Mounted via ReactDOM.createPortal directly to document.body,
-        completely escaping any ancestor contain:layout or overflow:hidden constraints!
-      */}
-{
-  popoverOpen && popoverCoords && createPortal(
-    <div
-      ref={popoverRef}
-      role="dialog"
-      aria-label="三网实时时延浮窗"
-      style={{
-        position: 'fixed',
-        top: `${popoverCoords.top}px`,
-        left: `${popoverCoords.left}px`,
-        width: '344px',
-        maxWidth: 'calc(100vw - 16px)',
-      }}
-      className="z-[9999] rounded-2xl border border-slate-700/80 bg-slate-900/96 p-4 shadow-2xl backdrop-blur-xl ring-1 ring-white/10 text-slate-100 animate-fade-in"
-      onClick={(e) => e.stopPropagation()}
-    >
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-slate-800">
-        <div>
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className={`h-2 w-2 rounded-full shrink-0 ${dotColor}`} />
-            <span className="text-xs font-bold text-white tracking-tight">全球与三网实时可达性</span>
-            <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-medium border ${statusBadgeStyle}`}>
-              {displayVerdictLabel}
-            </span>
-          </div>
-          <div className="text-[11px] text-slate-400 font-mono mt-0.5 truncate max-w-[250px]" title={hostId}>
-            {hostId} · {isPing ? '智能 ICMP' : `TCP :${testedPort}`}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => setPopoverOpen(false)}
-          className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer shrink-0"
-          aria-label="关闭浮窗"
+      {popoverOpen && popoverCoords && createPortal(
+        <div
+          ref={popoverRef}
+          role="dialog"
+          aria-label="三网实时时延浮窗"
+          style={{
+            position: 'fixed',
+            top: `${popoverCoords.top}px`,
+            left: `${popoverCoords.left}px`,
+            width: '344px',
+            maxWidth: 'calc(100vw - 16px)',
+          }}
+          className="rn2-card z-[9999] overflow-hidden shadow-[0_22px_54px_rgba(3,24,46,0.34)]"
+          onClick={(e) => e.stopPropagation()}
         >
-          <X className="w-3.5 h-3.5" />
-        </button>
-      </div>
+          {/* Midnight Popover Header */}
+          <div className="flex items-start justify-between gap-2 bg-[linear-gradient(125deg,#163957,#0e233c_58%,#0c1c30)] px-4 py-3 text-[#e6f4ff]">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
+                <span className="text-xs font-bold tracking-tight text-white">全球与三网实时可达性</span>
+                <span className={`rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold leading-none ${statusBadgeStyle}`}>
+                  {displayVerdictLabel}
+                </span>
+              </div>
+              <div className="mt-0.5 max-w-[250px] truncate font-mono text-[11px] text-[#b9d3ee]" title={hostId}>
+                {hostId} · {isPing ? '智能 ICMP' : `TCP :${testedPort}`}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPopoverOpen(false)}
+              className="shrink-0 rounded-lg border border-white/15 bg-white/10 p-1 text-[#cde8ff] transition-colors hover:bg-white/20 hover:text-white"
+              aria-label="关闭浮窗"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
 
-      {/* Dual Stack Switcher (if dual stack is present) */}
-      {isDualStack && (
-        <div className="flex items-center gap-1 mt-2.5 bg-slate-950/70 p-1 rounded-lg border border-slate-800 text-[11px]">
-          <span className="text-slate-500 text-[10px] px-1.5 font-medium">协议栈:</span>
-          <button
-            type="button"
-            onClick={() => setActiveStack('v4')}
-            className={`flex-1 py-0.5 rounded text-center font-mono font-medium transition cursor-pointer ${activeStack === 'v4'
-                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30 font-bold'
-                : 'text-slate-400 hover:text-slate-200'
-              }`}
-          >
-            IPv4 {v4Latency ? `(${v4Latency})` : ''}
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveStack('v6')}
-            className={`flex-1 py-0.5 rounded text-center font-mono font-medium transition cursor-pointer ${activeStack === 'v6'
-                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30 font-bold'
-                : 'text-slate-400 hover:text-slate-200'
-              }`}
-          >
-            IPv6 {v6Latency ? `(${v6Latency})` : ''}
-          </button>
-        </div>
+          <div className="bg-white p-3.5 text-[#0b1636]">
+            {isDualStack && (
+              <div className="mb-3 flex items-center gap-1 rounded-lg border border-[#cedae7] bg-[#f4f8fd] p-1 text-[11px]">
+                <span className="px-1.5 text-[10px] font-semibold text-[#697b9c]">协议栈:</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveStack('v4')}
+                  className={`flex-1 rounded py-1 text-center font-mono font-semibold transition ${
+                    activeStack === 'v4'
+                      ? 'bg-[#087bff] text-white shadow-xs'
+                      : 'text-[#4a607a] hover:text-[#0b1636]'
+                  }`}
+                >
+                  IPv4 {v4Latency ? `(${v4Latency})` : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveStack('v6')}
+                  className={`flex-1 rounded py-1 text-center font-mono font-semibold transition ${
+                    activeStack === 'v6'
+                      ? 'bg-[#087bff] text-white shadow-xs'
+                      : 'text-[#4a607a] hover:text-[#0b1636]'
+                  }`}
+                >
+                  IPv6 {v6Latency ? `(${v6Latency})` : ''}
+                </button>
+              </div>
+            )}
+
+            {/* 3-Carrier Cards */}
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5 text-center">
+                <div className="flex items-center justify-center gap-1 text-[10px] font-semibold text-[#4a607a]">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#087bff]" />
+                  <span>中国电信</span>
+                </div>
+                <div className={`mt-1 font-mono text-sm font-extrabold tabular-nums ${getCarrierLatencyColor(displayTelecomMs)}`}>
+                  {displayTelecomMs !== null && displayTelecomMs !== undefined && displayTelecomMs > 0 ? (
+                    <>{displayTelecomMs}<span className="ml-0.5 text-[10px] font-normal text-[#697b9c]">ms</span></>
+                  ) : (
+                    <span className="text-xs text-[#697b9c]">未采</span>
+                  )}
+                </div>
+                <div className="mt-0.5 font-mono text-[9px] font-semibold text-[#147468]">
+                  {displayVerdict === 'gfw_blocked' ? '受阻' : '0% 丢包'}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5 text-center">
+                <div className="flex items-center justify-center gap-1 text-[10px] font-semibold text-[#4a607a]">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#00b6ec]" />
+                  <span>中国联通</span>
+                </div>
+                <div className={`mt-1 font-mono text-sm font-extrabold tabular-nums ${getCarrierLatencyColor(displayUnicomMs)}`}>
+                  {displayUnicomMs !== null && displayUnicomMs !== undefined && displayUnicomMs > 0 ? (
+                    <>{displayUnicomMs}<span className="ml-0.5 text-[10px] font-normal text-[#697b9c]">ms</span></>
+                  ) : (
+                    <span className="text-xs text-[#697b9c]">未采</span>
+                  )}
+                </div>
+                <div className="mt-0.5 font-mono text-[9px] font-semibold text-[#147468]">
+                  {displayVerdict === 'gfw_blocked' ? '受阻' : '0% 丢包'}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-[#d2dfec] bg-[#f4f8fd] p-2.5 text-center">
+                <div className="flex items-center justify-center gap-1 text-[10px] font-semibold text-[#4a607a]">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-500" />
+                  <span>中国移动</span>
+                </div>
+                <div className={`mt-1 font-mono text-sm font-extrabold tabular-nums ${getCarrierLatencyColor(displayMobileMs)}`}>
+                  {displayMobileMs !== null && displayMobileMs !== undefined && displayMobileMs > 0 ? (
+                    <>{displayMobileMs}<span className="ml-0.5 text-[10px] font-normal text-[#697b9c]">ms</span></>
+                  ) : (
+                    <span className="text-xs text-[#697b9c]">未采</span>
+                  )}
+                </div>
+                <div className="mt-0.5 font-mono text-[9px] font-semibold text-[#147468]">
+                  {displayVerdict === 'gfw_blocked' ? '受阻' : '0% 丢包'}
+                </div>
+              </div>
+            </div>
+
+            {/* Metric Details Strip */}
+            <div className="mt-3 space-y-1.5 rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-2.5 text-[11px]">
+              <div className="flex items-center justify-between text-[#4a607a]">
+                <span>全球 18 节点均延</span>
+                <span className="font-mono font-bold text-[#0b1636] tabular-nums">
+                  {displayGlobalAvg !== null ? `${displayGlobalAvg} ms` : '未测'}
+                  {displayMinMs !== null && ` (最优 ${displayMinMs}ms)`}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[#4a607a]">
+                <span>GFW 阻断状态</span>
+                <span className={`font-semibold ${getVerdictTextColor(displayVerdict)}`}>
+                  {displayVerdictDesc || displayVerdictLabel || '正常可达'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[#4a607a]">
+                <span>双栈网络</span>
+                <span className="font-mono text-[10px] font-semibold text-[#0657b8]">
+                  {isDualStack ? 'IPv4 + IPv6 双栈已通' : '单栈 IPv4'}
+                </span>
+              </div>
+            </div>
+
+            {/* Footer Actions */}
+            <div className="mt-3 flex items-center justify-between border-t border-[#dce5ef] pt-2.5 text-[11px]">
+              <span className="font-mono text-[#697b9c]">{timeAgoText}</span>
+              <div className="flex items-center gap-3">
+                <a href="/tcping" className="font-medium text-[#4a607a] hover:text-[#087bff]">
+                  TCP 测速
+                </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPopoverOpen(false);
+                    setFullModalOpen(true);
+                  }}
+                  className="inline-flex cursor-pointer items-center gap-1 font-bold text-[#087bff] hover:text-[#0657b8]"
+                >
+                  <span>全网拓扑 →</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
 
-      {/* 3-Carrier Bento Cards (China Telecom / Unicom / Mobile) */}
-      <div className="grid grid-cols-3 gap-2 my-3">
-        {/* China Telecom */}
-        <div className="bg-gradient-to-b from-slate-950 to-slate-900/90 border border-slate-800/80 rounded-xl p-2.5 text-center relative overflow-hidden group hover:border-blue-500/40 transition">
-          <div className="text-[10px] font-medium text-slate-400 flex items-center justify-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 shrink-0" />
-            <span>中国电信</span>
-          </div>
-          <div className={`text-sm font-bold font-mono tabular-nums mt-1 ${getCarrierLatencyColor(displayTelecomMs)}`}>
-            {displayTelecomMs !== null && displayTelecomMs !== undefined && displayTelecomMs > 0 ? (
-              <>{displayTelecomMs}<span className="text-[10px] text-slate-400 ml-0.5">ms</span></>
-            ) : (
-              <span className="text-xs text-slate-500">未采</span>
-            )}
-          </div>
-          <div className="text-[9px] text-emerald-400/90 mt-0.5 font-mono">
-            {displayVerdict === 'gfw_blocked' ? '受阻' : '0% 丢包'}
-          </div>
-        </div>
-
-        {/* China Unicom */}
-        <div className="bg-gradient-to-b from-slate-950 to-slate-900/90 border border-slate-800/80 rounded-xl p-2.5 text-center relative overflow-hidden group hover:border-sky-500/40 transition">
-          <div className="text-[10px] font-medium text-slate-400 flex items-center justify-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0" />
-            <span>中国联通</span>
-          </div>
-          <div className={`text-sm font-bold font-mono tabular-nums mt-1 ${getCarrierLatencyColor(displayUnicomMs)}`}>
-            {displayUnicomMs !== null && displayUnicomMs !== undefined && displayUnicomMs > 0 ? (
-              <>{displayUnicomMs}<span className="text-[10px] text-slate-400 ml-0.5">ms</span></>
-            ) : (
-              <span className="text-xs text-slate-500">未采</span>
-            )}
-          </div>
-          <div className="text-[9px] text-emerald-400/90 mt-0.5 font-mono">
-            {displayVerdict === 'gfw_blocked' ? '受阻' : '0% 丢包'}
-          </div>
-        </div>
-
-        {/* China Mobile */}
-        <div className="bg-gradient-to-b from-slate-950 to-slate-900/90 border border-slate-800/80 rounded-xl p-2.5 text-center relative overflow-hidden group hover:border-violet-500/40 transition">
-          <div className="text-[10px] font-medium text-slate-400 flex items-center justify-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
-            <span>中国移动</span>
-          </div>
-          <div className={`text-sm font-bold font-mono tabular-nums mt-1 ${getCarrierLatencyColor(displayMobileMs)}`}>
-            {displayMobileMs !== null && displayMobileMs !== undefined && displayMobileMs > 0 ? (
-              <>{displayMobileMs}<span className="text-[10px] text-slate-400 ml-0.5">ms</span></>
-            ) : (
-              <span className="text-xs text-slate-500">未采</span>
-            )}
-          </div>
-          <div className="text-[9px] text-emerald-400/90 mt-0.5 font-mono">
-            {displayVerdict === 'gfw_blocked' ? '受阻' : '0% 丢包'}
-          </div>
-        </div>
-      </div>
-
-      {/* Metric Details Strip */}
-      <div className="bg-slate-950/70 rounded-xl p-2.5 border border-slate-800/80 text-[11px] space-y-1.5">
-        <div className="flex items-center justify-between text-slate-400">
-          <span>全球 18 节点均延</span>
-          <span className="font-mono text-slate-200 font-bold tabular-nums">
-            {displayGlobalAvg !== null ? `${displayGlobalAvg} ms` : '未测'}
-            {displayMinMs !== null && ` (最优 ${displayMinMs}ms)`}
-          </span>
-        </div>
-        <div className="flex items-center justify-between text-slate-400">
-          <span>GFW 阻断状态</span>
-          <span className={`font-medium flex items-center gap-1 ${getVerdictTextColor(displayVerdict)}`}>
-            {displayVerdictDesc || displayVerdictLabel || '正常可达'}
-          </span>
-        </div>
-        <div className="flex items-center justify-between text-slate-400">
-          <span>双栈网络</span>
-          <span className="text-sky-300 font-mono text-[10px]">
-            {isDualStack ? 'IPv4 + IPv6 双栈已通' : '单栈 IPv4'}
-          </span>
-        </div>
-      </div>
-
-      {/* Footer Actions */}
-      <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-slate-800/80 text-[11px]">
-        <span className="text-slate-500 font-mono">{timeAgoText}</span>
-        <div className="flex items-center gap-3">
-          <a
-            href="/tcping"
-            className="text-slate-400 hover:text-slate-200 transition"
-          >
-            TCP 测速
-          </a>
-          <button
-            type="button"
-            onClick={() => {
-              setPopoverOpen(false);
-              setFullModalOpen(true);
-            }}
-            className="inline-flex items-center gap-1 text-sky-400 hover:text-sky-300 font-medium transition cursor-pointer"
-          >
-            <span>全网拓扑 →</span>
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body
-  )
-}
-
-{/* 
-        Full ReachCheckPanel Modal
-        Also mounted via createPortal to document.body!
-      */}
-{
-  fullModalOpen && createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in"
-      onClick={() => setFullModalOpen(false)}
-    >
-      <div
-        className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          type="button"
+      {/* Full ReachCheckPanel Modal (ReachCheckPanel keeps dark internal palette, so wrap in dark shell for legible contrast) */}
+      {fullModalOpen && createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-[#02182f]/75 p-4 backdrop-blur-sm"
           onClick={() => setFullModalOpen(false)}
-          className="absolute top-4 right-4 rounded-lg p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition cursor-pointer"
-          aria-label="关闭"
         >
-          <X className="h-5 w-5" />
-        </button>
+          <div
+            className="rn2-dark-zone relative max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-[#54c7ff]/30 bg-[#02182f] p-6 text-slate-100 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setFullModalOpen(false)}
+              className="absolute right-4 top-4 cursor-pointer rounded-lg p-1.5 text-slate-300 transition hover:bg-white/10 hover:text-white"
+              aria-label="关闭"
+            >
+              <X className="h-5 w-5" aria-hidden="true" />
+            </button>
 
-        <ReachCheckPanel
-          initialTarget={summary?.target || target}
-          initialPort={testedPort}
-          availableHosts={[{ id: hostId, name: hostId, ip }]}
-          isLoggedIn={true}
-        />
-      </div>
-        </div >,
-    document.body
-  )
-}
+            <ReachCheckPanel
+              initialTarget={summary?.target || target}
+              initialPort={testedPort}
+              availableHosts={[{ id: hostId, name: hostId, ip }]}
+              isLoggedIn={true}
+            />
+          </div>
+        </div>,
+        document.body
+      )}
     </>
   );
 };

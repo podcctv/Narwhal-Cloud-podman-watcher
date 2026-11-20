@@ -19,42 +19,42 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
   return (
     <section aria-label="运行概览指标" className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
       {/* KPI 1: 在线主机 */}
-      <div className="relative overflow-hidden rounded-xl border border-[#087bff]/35 bg-[#041e3c]/95 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)] transition-colors hover:border-[#087bff]/70">
-        <div className="flex items-center justify-between gap-2 border-b border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647] px-3.5 py-2">
+      <div className="rn2-card overflow-hidden transition-colors hover:border-[#087bff]">
+        <div className="rn2-card-head px-3.5 py-2.5">
           <div className="min-w-0">
-            <span className="block text-[10px] font-bold uppercase tracking-wider text-[#00b6ec]">NODES ONLINE</span>
-            <span className="block text-xs font-semibold text-slate-200">在线主机</span>
+            <span className="rn2-eyebrow block text-[10px]">NODES ONLINE</span>
+            <span className="block text-xs font-semibold text-white">在线主机</span>
           </div>
-          <div className="rounded-lg border border-[#087bff]/40 bg-[#087bff]/15 p-1.5 text-[#00b6ec]">
-            <Server className="h-4 w-4" />
+          <div className="rounded-lg border border-[#54c7ff]/40 bg-[#087bff]/20 p-1.5 text-[#54c7ff]">
+            <Server className="h-4 w-4" aria-hidden="true" />
           </div>
         </div>
-        <div className="flex items-baseline justify-between gap-2 bg-[#02182f]/70 px-3.5 py-3">
-          <span className="font-mono text-2xl font-extrabold tracking-tight text-white tabular-nums sm:text-3xl">
+        <div className="flex items-baseline justify-between gap-2 bg-[#f4f8fd] px-3.5 py-3">
+          <span className="font-mono text-2xl font-extrabold tracking-tight text-[#0b1636] tabular-nums sm:text-3xl">
             {onlineHosts}
           </span>
-          <span className="rounded border border-sky-400/20 bg-[#031d3d] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-sky-300">
+          <span className="rn2-pill rn2-pill-sm rn2-pill-blue font-mono">
             Nodes
           </span>
         </div>
       </div>
 
-      {/* KPI 2: 监控容器 */}
-      <div className="relative overflow-hidden rounded-xl border border-emerald-400/30 bg-[#041e3c]/95 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)] transition-colors hover:border-emerald-400/65">
-        <div className="flex items-center justify-between gap-2 border-b border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647] px-3.5 py-2">
+      {/* KPI 2: 活跃容器 */}
+      <div className="rn2-card overflow-hidden transition-colors hover:border-[#147468]">
+        <div className="rn2-card-head px-3.5 py-2.5">
           <div className="min-w-0">
-            <span className="block text-[10px] font-bold uppercase tracking-wider text-emerald-400">ACTIVE INSTANCES</span>
-            <span className="block text-xs font-semibold text-slate-200">活跃容器</span>
+            <span className="rn2-eyebrow block text-[10px] text-emerald-300">ACTIVE INSTANCES</span>
+            <span className="block text-xs font-semibold text-white">活跃容器</span>
           </div>
-          <div className="rounded-lg border border-emerald-400/35 bg-emerald-500/15 p-1.5 text-emerald-400">
-            <Box className="h-4 w-4" />
+          <div className="rounded-lg border border-emerald-400/40 bg-emerald-500/20 p-1.5 text-emerald-300">
+            <Box className="h-4 w-4" aria-hidden="true" />
           </div>
         </div>
-        <div className="flex items-baseline justify-between gap-2 bg-[#02182f]/70 px-3.5 py-3">
-          <span className="font-mono text-2xl font-extrabold tracking-tight text-white tabular-nums sm:text-3xl">
+        <div className="flex items-baseline justify-between gap-2 bg-[#f4f8fd] px-3.5 py-3">
+          <span className="font-mono text-2xl font-extrabold tracking-tight text-[#0b1636] tabular-nums sm:text-3xl">
             {totalContainers}
           </span>
-          <span className="rounded border border-emerald-400/20 bg-[#031d3d] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+          <span className="rn2-pill rn2-pill-sm rn2-pill-teal font-mono">
             Containers
           </span>
         </div>
@@ -71,76 +71,75 @@ export const KpiGrid: React.FC<KpiGridProps> = ({
             onFilterAlerts();
           }
         }}
-        className={`relative cursor-pointer overflow-hidden rounded-xl border shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)] transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-[#00b6ec] ${
+        className={`rn2-card cursor-pointer overflow-hidden transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-[#087bff] ${
           activeAlerts > 0
-            ? 'border-[#ff7900]/60 bg-linear-to-b from-[#2b1406]/85 to-[#041e3c]/95 hover:border-[#ff7900]'
-            : 'border-sky-400/25 bg-[#041e3c]/95 hover:border-[#087bff]/60'
+            ? 'border-[#ff6b00] shadow-[0_0_0_1px_rgba(255,107,0,0.22),0_6px_18px_rgba(255,107,0,0.12)]'
+            : 'hover:border-[#087bff]'
         }`}
       >
         <div
-          className={`flex items-center justify-between gap-2 border-b px-3.5 py-2 ${
+          className="rn2-card-head px-3.5 py-2.5"
+          style={
             activeAlerts > 0
-              ? 'border-[#ff7900]/25 bg-linear-to-r from-[#291305] to-[#1a1523]'
-              : 'border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647]'
-          }`}
+              ? { background: 'linear-gradient(125deg, #4b1f08, #1f172b 58%, #0c1c30)' }
+              : undefined
+          }
         >
           <div className="min-w-0">
-            <span className={`block text-[10px] font-bold uppercase tracking-wider ${activeAlerts > 0 ? 'text-[#ff7900]' : 'text-slate-400'}`}>
+            <span className={`rn2-eyebrow block text-[10px] ${activeAlerts > 0 ? 'text-[#ffb37c]' : 'text-[#54c7ff]'}`}>
               SECURITY ALERTS
             </span>
-            <span className={`block text-xs font-semibold ${activeAlerts > 0 ? 'text-amber-100' : 'text-slate-200'}`}>
-              活动安全告警
-            </span>
+            <span className="block text-xs font-semibold text-white">活动安全告警</span>
           </div>
           <div
             className={`rounded-lg border p-1.5 ${
               activeAlerts > 0
-                ? 'border-[#ff7900]/45 bg-[#ff7900]/15 text-[#ff7900]'
-                : 'border-sky-400/20 bg-[#02182f] text-slate-400'
+                ? 'border-[#ff8100]/55 bg-[#ff6b00]/25 text-[#ffb37c]'
+                : 'border-[#54c7ff]/30 bg-[#087bff]/15 text-[#9ad8ff]'
             }`}
           >
-            <AlertTriangle className="h-4 w-4" />
+            <AlertTriangle className="h-4 w-4" aria-hidden="true" />
           </div>
         </div>
-        <div className="flex items-baseline justify-between gap-2 bg-[#02182f]/70 px-3.5 py-3">
+        <div className={`flex items-baseline justify-between gap-2 px-3.5 py-3 ${activeAlerts > 0 ? 'bg-[#fff3e8]' : 'bg-[#f4f8fd]'}`}>
           <div className="flex items-baseline gap-2">
             <span
               className={`font-mono text-2xl font-extrabold tracking-tight tabular-nums sm:text-3xl ${
-                activeAlerts > 0 ? 'text-[#ff7900]' : 'text-white'
+                activeAlerts > 0 ? 'text-[#c2410c]' : 'text-[#0b1636]'
               }`}
             >
               {activeAlerts}
             </span>
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Active</span>
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#697b9c]">Active</span>
           </div>
           {activeAlerts > 0 && (
-            <span className="flex items-center gap-0.5 rounded border border-[#ff7900]/40 bg-[#ff7900]/15 px-1.5 py-0.5 text-[11px] font-semibold text-amber-200">
-              查看 <ArrowUpRight className="h-3.5 w-3.5" />
+            <span className="rn2-pill rn2-pill-sm rn2-pill-orange inline-flex items-center gap-0.5">
+              查看 <ArrowUpRight className="h-3 w-3" aria-hidden="true" />
             </span>
           )}
         </div>
       </div>
 
       {/* KPI 4: hidden stale snapshots */}
-      <div className="relative overflow-hidden rounded-xl border border-sky-400/25 bg-[#041e3c]/95 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)] transition-colors hover:border-[#087bff]/60">
-        <div className="flex items-center justify-between gap-2 border-b border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647] px-3.5 py-2">
+      <div className="rn2-card overflow-hidden transition-colors hover:border-[#087bff]">
+        <div className="rn2-card-head px-3.5 py-2.5">
           <div className="min-w-0">
-            <span className="block text-[10px] font-bold uppercase tracking-wider text-sky-300/80">STALE SNAPSHOTS</span>
-            <span className="block text-xs font-semibold text-slate-200">已隐藏旧快照</span>
+            <span className="rn2-eyebrow block text-[10px] text-[#9ad8ff]">STALE SNAPSHOTS</span>
+            <span className="block text-xs font-semibold text-white">已隐藏旧快照</span>
           </div>
-          <div className="rounded-lg border border-sky-400/20 bg-[#02182f] p-1.5 text-slate-300">
-            <Clock3 className="h-4 w-4" />
+          <div className="rounded-lg border border-[#54c7ff]/30 bg-[#087bff]/15 p-1.5 text-[#9ad8ff]">
+            <Clock3 className="h-4 w-4" aria-hidden="true" />
           </div>
         </div>
-        <div className="flex items-baseline justify-between gap-2 bg-[#02182f]/70 px-3.5 py-3">
+        <div className="flex items-baseline justify-between gap-2 bg-[#f4f8fd] px-3.5 py-3">
           <span
             className={`font-mono text-2xl font-extrabold tracking-tight tabular-nums sm:text-3xl ${
-              hiddenStaleSnapshots > 0 ? 'text-amber-400' : 'text-white'
+              hiddenStaleSnapshots > 0 ? 'text-[#9a5b00]' : 'text-[#0b1636]'
             }`}
           >
             {hiddenStaleSnapshots}
           </span>
-          <span className="text-[11px] font-medium text-slate-400">保留在历史数据</span>
+          <span className="text-[11px] font-medium text-[#697b9c]">保留在历史数据</span>
         </div>
       </div>
     </section>
