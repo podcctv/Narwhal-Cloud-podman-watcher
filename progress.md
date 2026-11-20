@@ -2,6 +2,16 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 31：RackNerd BlackFriday 2026 风格全站 UI 与交互重构（v1.9.37）
+
+- **主题与字体系统重构（`frontend/index.html`、`frontend/src/styles/index.css`、`AppHeader`、`LoginPage`）**：
+  - 引入 `Plus Jakarta Sans` + `Inconsolata` + `Fira Code` 字体栈；构建深午夜蓝画布（`#02182f` / `#031d3d`）、电光蓝青高亮（`#087bff` / `#00b6ec` / `#54c7ff`）及高对比橙色主 CTA（`#ff6b00 -> #ff8100`）；新增 `.rn-spec-card`、`.rn-spec-card-head`、`.rn-spec-grid`、`.rn-eyebrow` 规格卡片体系。
+  - `AppHeader` 升级为 `#03182e` 午夜顶栏；`LoginPage` 升级为午夜 Hero 规格卡与橙色主按钮，严格保留 E2E 无障碍标签与懒加载隔离。
+- **总览看板与容器详情重构（`dashboard/*.tsx`、`container/*.tsx`）**：
+  - `KpiGrid`、工具栏、宿主机/容器卡片、安全告警、隔离复核、`TelemetrySection`、`ContainerDrawer` 与 `AdmissionStatus` 全面切换至双层午夜规格卡片与 `tabular-nums` 等宽指标网格。
+- **全控制台子视图统一（`SettingsView`、`FirewallView`、`OperationsView`、`CommerceView`、`StatsAnalyticsView`、`AlertHistoryView`、`UserInvestigationView`、`tcping-redesign.css`）**：
+  - 统一 7 大子视图与 TCP 测速页的午夜卡片头部、规格网格与高对比橙色主操作按钮。
+
 ## Phase 30：`tc-guard` 全量模块拆解、`server/db_maintenance.py` 抽离与合规联动修复（v1.9.35 / v1.9.36）
 
 - **`tc-guard` 模块化拆分（`rust/crates/tc-guard/src/`）**：
