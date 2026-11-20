@@ -823,7 +823,7 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({
                         </Signal>
                       </div>
 
-                      <div className="mt-3 grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))] gap-3">
+                      <div className="mt-3 grid min-w-0 gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))]">
                         <div className="col-span-full min-w-0">
                           <Signal title={sshOnlyAudit ? '小鸡 SSH 安全检查' : '母鸡完整性、漏洞与威胁指标'} level={auditLevel}>
                             {!hostAudit?.enabled ? (

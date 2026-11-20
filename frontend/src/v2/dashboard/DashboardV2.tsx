@@ -47,6 +47,8 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
   const [activeTab, setActiveTab] = useState<DashboardTab>('dashboard');
   const [workspaceFocus, setWorkspaceFocus] = useState<WorkspaceFocus>('all');
   const [telemetryFocus, setTelemetryFocus] = useState<{ hostId: string; nonce: number } | null>(null);
+  const [opsTarget, setOpsTarget] = useState<{ section?: string; hostId?: string; nonce?: number }>({});
+  const [firewallHostTarget, setFirewallHostTarget] = useState<{ hostId?: string; nonce?: number }>({});
 
   // Selected container for slide-over drawer
   const [selectedContainer, setSelectedContainer] = useState<ContainerIdentity | null>(null);
@@ -195,14 +197,27 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
     });
   }, [addToast, containers]);
 
+  const handleSelectTab = useCallback((tab: DashboardTab) => {
+    if (tab !== activeTab) {
+      setOpsTarget({});
+      setFirewallHostTarget({});
+    }
+    setActiveTab(tab);
+  }, [activeTab]);
+
   const handleQuickOps = useCallback((target: QuickOpsTarget, hostId?: string) => {
     onQuickOps?.(target, hostId);
     switch (target) {
       case 'cleanup':
+        setOpsTarget({ section: 'storage', hostId, nonce: Date.now() });
+        setActiveTab('operations');
+        break;
       case 'upgrades':
+        setOpsTarget({ section: 'upgrades', hostId, nonce: Date.now() });
         setActiveTab('operations');
         break;
       case 'firewall':
+        setFirewallHostTarget({ hostId, nonce: Date.now() });
         setActiveTab('firewall');
         break;
       case 'policy':
@@ -329,7 +344,7 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
         onLogout={logout}
         isLoggingOut={isLoggingOut}
         activeTab={activeTab}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectTab}
         serverVersion={serverVersion}
         activeAlertCount={activeAlertsCount}
         alertCountState={!hasLoadedData ? 'unknown' : dataFetchError ? 'stale' : 'current'}
@@ -477,23 +492,23 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
             {activeTab === 'alerts' && (
               <AlertHistoryView
                 onToast={addToast}
-                onBackToDashboard={() => setActiveTab('dashboard')}
+                onBackToDashboard={() => handleSelectTab('dashboard')}
               />
             )}
 
             {activeTab === 'investigation' && <UserInvestigationView />}
             {activeTab === 'commerce' && <CommerceView />}
-            {activeTab === 'firewall' && <FirewallView containers={currentContainers} telemetry={securityStatus} onToast={addToast} />}
+            {activeTab === 'firewall' && <FirewallView containers={currentContainers} telemetry={securityStatus} onToast={addToast} initialHostId={firewallHostTarget.hostId} />}
 
             {activeTab === 'stats' && (
               <StatsAnalyticsView
                 onSelectContainer={setSelectedContainer}
                 onToast={addToast}
-                onBackToDashboard={() => setActiveTab('dashboard')}
+                onBackToDashboard={() => handleSelectTab('dashboard')}
               />
             )}
             {(activeTab === 'settings' || activeTab === 'notifications') && <SettingsView onToast={addToast} />}
-            {activeTab === 'operations' && <OperationsView onToast={addToast} isPaused={isPaused} />}
+            {activeTab === 'operations' && <OperationsView onToast={addToast} isPaused={isPaused} initialSection={opsTarget.section} initialHostId={opsTarget.hostId} />}
           </Suspense>
         </ErrorBoundary>
       </main>
@@ -518,7 +533,12 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
         onClose={() => setIsSearchOpen(false)}
         containers={currentContainers}
         onSelectContainer={setSelectedContainer}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectTab}
+        onOpenOpsModule={(subTab) => {
+          setOpsTarget({ section: subTab, nonce: Date.now() });
+          setActiveTab('operations');
+        }}
+        onSelectHost={(hostId) => handleHostQuickNavigate('telemetry', hostId)}
       />
 
       {/* Toast Feedbacks */}

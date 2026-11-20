@@ -436,7 +436,7 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
         document.body
       )}
 
-      {/* Full ReachCheckPanel Modal (ReachCheckPanel keeps dark internal palette, so wrap in dark shell for legible contrast) */}
+      {/* Full ReachCheckPanel Modal */}
       {fullModalOpen && createPortal(
         <div
           role="dialog"
@@ -445,13 +445,13 @@ export const HostReachabilityBadge: React.FC<HostReachabilityBadgeProps> = ({
           onClick={() => setFullModalOpen(false)}
         >
           <div
-            className="rn2-dark-zone relative max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-[#54c7ff]/30 bg-[#02182f] p-6 text-slate-100 shadow-2xl"
+            className="relative max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-[#cedae7] bg-[#f2f7ff] p-6 text-[#0b1636] shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <button
               type="button"
               onClick={() => setFullModalOpen(false)}
-              className="absolute right-4 top-4 cursor-pointer rounded-lg p-1.5 text-slate-300 transition hover:bg-white/10 hover:text-white"
+              className="absolute right-4 top-4 cursor-pointer rounded-lg p-1.5 text-[#31485e] transition hover:bg-white hover:text-[#0b1636]"
               aria-label="关闭"
             >
               <X className="h-5 w-5" aria-hidden="true" />

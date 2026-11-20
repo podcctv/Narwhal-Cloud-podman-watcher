@@ -2,6 +2,20 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 32：Narwhal Monitor 2.0 全新 RackNerd BlackFriday / ctrl. 交互与视觉体系重构（v2.0.0）
+
+- **2.0 双对比度基础主题与设计原语（`frontend/index.html`、`frontend/src/v2/styles/theme-v2.css`、`frontend/src/styles/index.css`、`frontend/src/v2/components/Primitives.tsx`、`common/*.tsx`）**：
+  - 确立 Light-Ice 高亮工作区（`#f2f7ff` 画布、`#ffffff` 卡片、`#f4f8fd` 规格条、`#0b1636` 深墨正文、`#cedae7` / `#dce5ef` 边框）与 Deep Midnight Navy 头部/品牌区（`#02182f` / `#03182e` / `#031d3d` / `#163957`）双对比度视觉体系，搭配电光蓝（`#087bff` / `#00b6ec` / `#54c7ff`）、RackNerd 橙主 CTA（`#ff6b00 -> #ff8100`）与青绿健康色（`#147468`）。
+  - 构建 `.rn2-card`、`.rn2-card-head`、`.rn2-spec-strip`、`.rn2-btn-*`、`.rn2-input`、`.rn2-table-wrap`、`.rn2-pill-*` 与 `Primitives.tsx`（`SpecCard`、`SpecStrip`、`StatusPill`、`Eyebrow`、`EmptyWell`、`SectionTitle`），并将 `.ui-*` 旧类名映射至 Light-Ice 2.0；重构 `ConfirmDialog`、`Toast`、`StatusBadge`、`CountdownTimer` 与 `ErrorBoundary`。
+- **2.0 登录页、午夜导航壳层与命令面板（`LoginViewV2.tsx`、`ConsoleShell.tsx`、`console-shell.css`、`CommandPaletteV2.tsx`）**：
+  - 重构 `LoginPage`（`LoginViewV2`）为 `#02182f` 径向午夜 Hero 与 `#ffffff` 登录规格卡，严格保留零首屏 Dashboard 预加载与登录 E2E 契约；重构 `AppHeader`（`ConsoleShell`）为 `#03182e` 午夜导航顶栏，保留 8 大主标签与 `/tcping` 独立入口。
+  - 升级 `CommandPalette`（`CommandPaletteV2`），支持一键检索并直达 8 大主控制台视图、14 项运维工具、主机安全遥测与容器详情抽屉。
+- **2.0 总览看板、宿主机快捷联动与容器详情抽屉（`DashboardV2.tsx`、`HeroKpiBar.tsx`、`dashboard/*.tsx`、`container/*.tsx`、`alerts/{ProtocolGuardEvidence,SocketAbuseEvidence,SocksPasswordReview,UserNoticeAction}.tsx`）**：
+  - 新建 `DashboardV2` 与 `HeroKpiBar`（4 格午夜 KPI 横条、快捷运维入口及工作区焦点切换），并将快捷操作与 `CommandPalette` 打通至 `OperationsView`（`initialSection` / `initialHostId`）与 `FirewallView`（`initialHostId`）。
+  - 全量重构 `HostContainerList`（新增单宿主机命令栏）、`QuarantinePanel`、`SecurityAlertSection`、`TelemetrySection`、`HostReachabilityBadge`（`ReachCheckPanel` 弹窗同步切换 Light-Ice）及 `ContainerDrawer`（`ctrl.` 风格粘性午夜头部与锚点跳转栏），并将 `ResourceChart` / `NetworkChart` 切换为 Light-Ice ECharts 配色。
+- **运维中心、母机防火墙与全子视图升级（`OperationsView.tsx`、`FirewallView.tsx`、`SettingsView.tsx`、`CommerceView.tsx`、`StatsAnalyticsView.tsx`、`AlertHistoryView.tsx`、`UserInvestigationView.tsx`、`tcping/*`）**：
+  - `OperationsView` 将 14 个运维子模块升级为 4 大主题分组与即时关键字过滤；`FirewallView` 与 `FirewallNodePicker` 升级为 Light-Ice 主从策略工作台；同步完成系统设置与买家通知、经营分析（浅色 ECharts）、数据统计、告警历史、用户排查及全国 TCP 测速 / GFW 可达性面板重构，并将 `VERSION` 升级至 `2.0.0`。
+
 ## Phase 31：RackNerd BlackFriday 2026 风格全站 UI 与交互重构（v1.9.37）
 
 - **主题与字体系统重构（`frontend/index.html`、`frontend/src/styles/index.css`、`AppHeader`、`LoginPage`）**：

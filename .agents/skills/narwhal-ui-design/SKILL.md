@@ -14,26 +14,41 @@ This skill defines the visual language, information architecture, unified button
 
 ## 1. Visual Aesthetics & Design Tokens
 
-### Color Palette (Deep Slate Dark Theme)
-- **Canvas Background (`--color-dark`)**: `#020617` (`slate-950`)
-- **Surface Hierarchy**:
-  - **Level 1 Card / Panel (`--surface-1`)**: `#0F172A` (` bg-slate-900/75` with `border-slate-800`)
-  - **Level 2 Elevated / Interactive Row (`--surface-2`)**: `#172033` (`bg-slate-900` / hover `bg-[#172033]`)
-  - **Level 3 Input / Inset Well (`--surface-3`)**: `#020617` / `#0B1220` (`bg-slate-950/90` with `border-slate-700/80`)
-  - **Glass Overlay**: `rgba(15, 23, 42, 0.82)` + `backdrop-filter: blur(12px)`
-- **Brand & Accent**:
-  - **Primary Sky/Cyan**: `#38BDF8` (`sky-400`), `#0EA5E9` (`sky-500`), focus ring `#7DD3FC` (`sky-300`)
-- **Semantic Status Tokens** (Always pair color with explicit text label — never convey state by color alone):
-  - **Healthy / Verified (`emerald`)**: Text `#86EFAC` (`emerald-300`), Bg `rgba(6, 78, 59, 0.35)`, Border `rgba(16, 185, 129, 0.35)`
-  - **Warning / Awaiting Recheck / Cooling (`amber`)**: Text `#FCD34D` (`amber-300`), Bg `rgba(120, 53, 15, 0.35)`, Border `rgba(245, 158, 11, 0.35)`
-  - **Critical / Failed / Quarantined (`rose`)**: Text `#FDA4AF` (`rose-300`), Bg `rgba(136, 19, 55, 0.35)`, Border `rgba(244, 63, 94, 0.4)`
-  - **Protection / Protocol Guard (`violet` / `sky`)**: Text `#C4B5FD` (`violet-300`) or `#7DD3FC` (`sky-300`), Bg `rgba(76, 29, 149, 0.3)` / `rgba(12, 74, 110, 0.35)`
-  - **Stale / Offline / Unverified (`slate`)**: Text `#CBD5E1` (`slate-300`), Bg `rgba(30, 41, 59, 0.65)`, Border `#475569` (`slate-600`)
+### Color Palette (RackNerd 2.0 Dual-Contrast: Light-Ice Workspace + Midnight Navy Headers)
+- **Light-Ice Workspace Canvas (`--rn-soft` / `--surface-canvas`)**: `#f2f7ff` (radial sky glow `rgba(8, 123, 255, 0.07)` at top)
+- **Midnight Navy Mastheads & Heroes**:
+  - **Hero / Backdrop (`--rn-navy-0` / `--rn-navy-2`)**: `#02182f` -> `#031d3d` -> `#073365` (`.rn2-hero` radial gradient)
+  - **Masthead (`AppHeader` / `ConsoleShell`)**: `#03182e` -> `#021428`
+  - **Card Header Strip (`.rn2-card-head`)**: `linear-gradient(125deg, #163957, #0e233c 58%, #0c1c30)` with `#e6f4ff` text and `#54c7ff` eyebrow (blue variant `.rn2-card-head-blue`: `#0967bb -> #07376e`)
+- **Light-Ice Surface Hierarchy**:
+  - **Level 1 Card / Panel (`--surface-1` / `.rn2-card`)**: `#ffffff` with `1px solid #cedae7` (`--rn-line`), `border-radius: 14px`, `box-shadow: 0 5px 16px rgba(12, 37, 65, 0.07)`
+  - **Level 2 Recessed Spec Strip (`--surface-2` / `.rn2-spec-strip`)**: `#f4f8fd` (`--rn-spec-bg`) with `#d2dfec` (`--rn-cell-line`) vertical dividers
+  - **Level 3 Subtle Well / Input Hover (`--surface-3`)**: `#e8f1fb`, table header `#edf5fc`, border `#dce5ef` (`--rn-line-soft`)
+  - **Ink Hierarchy**: Primary `#0b1636` (`--rn-ink`), Secondary `#31485e` (`--rn-slate`), Muted `#697b9c` (`--rn-muted`)
+- **Brand, Accent & Primary CTA**:
+  - **Electric Blue / Cyan / Sky**: `#087bff` (`--rn-blue`), `#0967bb` (`--rn-blue-deep`), `#00b6ec` (`--rn-cyan`), `#54c7ff` (`--rn-sky`, focus outline in dark zones)
+  - **RackNerd Orange Primary CTA**: `linear-gradient(105deg, #ff6b00, #ff8100)` (`border: #ea5e00`, hover `#e05b00 -> #f06e00`, white text)
+- **Semantic Status Pills (`.rn2-pill` / `StatusPill` — always paired with explicit text labels)**:
+  - **Healthy / Verified (`rn2-pill-teal`)**: Text `#147468` (`--rn-teal`), Bg `#e6f7f4` (`--rn-teal-bg`), Border `#9de2d8`
+  - **Informational / Active (`rn2-pill-blue`)**: Text `#0657b8`, Bg `#e8f3ff`, Border `#a9d1ff`
+  - **Highlight / Action (`rn2-pill-orange`)**: Text `#b84800`, Bg `#fff3e8`, Border `#ffc899`
+  - **Warning / Awaiting Recheck (`rn2-pill-amber`)**: Text `#9a5b00`, Bg `#fef6e4`, Border `#f7d58b`
+  - **Critical / Failed / Quarantined (`rn2-pill-crimson`)**: Text `#b41835`, Bg `#ffeef1`, Border `#f9b8c4`
+  - **Stale / Offline / Unverified (`rn2-pill-slate`)**: Text `#4a607a`, Bg `#eef3f9`, Border `#cbd7e6`
 
 ### Typography & Numeric Discipline
-- **UI & CJK Body**: `'Fira Sans', Inter, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif`
-- **Monospace & Telemetry**: `'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace`
+- **UI & CJK Body (`--font-sans`)**: `'Plus Jakarta Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif`
+- **Monospace, Eyebrows & Telemetry (`--font-mono`)**: `'Inconsolata', 'Fira Code', ui-monospace, monospace`
 - **Tabular Figures (`tabular-nums`)**: Mandatory on all metrics, countdowns, timestamps, IP counts, bitrates, percentages, and currency values to prevent horizontal layout jitter during 10s live polling.
+
+### 2.0 Button & Form Token Classes (`frontend/src/v2/styles/theme-v2.css`)
+- **Buttons (`.rn2-btn`, `min-height: 44px` / `.rn2-btn-sm` `36px`)**:
+  - `.rn2-btn-orange`: High-emphasis primary submit/save/apply CTA (`#ff6b00 -> #ff8100`)
+  - `.rn2-btn-blue`: Electric blue secondary operational action (`#087bff -> #0967bb`)
+  - `.rn2-btn-navy`: Midnight navy action (`#163957 -> #0c1c30`)
+  - `.rn2-btn-ghost`: Crisp `#ffffff` with `#cedae7` border (`rgba(255,255,255,0.08)` inside `.rn2-card-head` / `.rn2-hero` / `.rn2-dark-zone`)
+  - `.rn2-btn-danger`: High-contrast crimson surface (`#fff1f2`, border `#fecdd3`, text `#be123c`)
+- **Controls**: `.rn2-input` / `.rn2-select` (`min-height: 44px`, `#ffffff` fill, `#cedae7` border, `#087bff` focus ring), `.rn2-table-wrap` (responsive container with sticky `#f4f8fd` header). Legacy `.ui-*` classes map automatically to Light-Ice 2.0 tokens.
 
 ---
 
@@ -91,25 +106,25 @@ This skill defines the visual language, information architecture, unified button
 
 ## 3. Unified Button Design System
 
-All buttons must use `type="button"` (unless submitting a `<form>`), include `cursor-pointer` when enabled, `disabled:cursor-not-allowed disabled:opacity-50`, and visible keyboard focus (`focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2`).
+All buttons must use `type="button"` (unless submitting a `<form>`), include `cursor-pointer` when enabled, `disabled:cursor-not-allowed disabled:opacity-50`, and visible keyboard focus (`focus-visible:outline-2 focus-visible:outline-[#087bff] focus-visible:outline-offset-2`, or `#54c7ff` inside midnight headers).
 
 ### Button Variants
-1. **Primary CTA (`btn-primary`)**:
-   - High-emphasis solid fill for main form submissions and primary workflow actions (`登录控制台`, `查询 / 刷新`, `保存并同步`, `保存并应用到这台母鸡`).
-   - Style: `bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300 active:bg-sky-500 shadow-xs`
-2. **Secondary Action (`btn-secondary`)**:
-   - Tinted sky surface for standard operational actions (`请求只读复扫`, `预览影响`, `加入期望规则`, `发现并预览格式`).
-   - Style: `border border-sky-500/40 bg-sky-500/10 text-sky-200 font-medium hover:bg-sky-500/20 hover:border-sky-400`
-3. **Neutral / Utility (`btn-neutral`)**:
-   - Slate surface for refreshes, navigation returns, cancel buttons, and secondary toggles (`刷新`, `返回总览`, `取消`, `清空搜索`).
-   - Style: `border border-slate-700 bg-slate-800/90 text-slate-200 font-medium hover:bg-slate-700 hover:border-slate-600`
-4. **Danger / Destructive (`btn-danger`)**:
-   - Rose surface for container stop, rule deletion, or quarantine actions (`人工决定停止`, `删除`, `清理恶意进程`).
-   - Style: `border border-rose-500/40 bg-rose-500/15 text-rose-200 font-medium hover:bg-rose-500/25 hover:border-rose-400`
+1. **Primary CTA (`.rn2-btn-orange` / `.ui-btn-primary`)**:
+   - High-emphasis RackNerd Orange gradient fill for main form submissions and primary workflow actions (`登录控制台`, `查询 / 刷新`, `保存并同步`, `保存并应用到这台母鸡`).
+   - Style: `rn2-btn rn2-btn-orange` (`linear-gradient(105deg, #ff6b00, #ff8100)` with `#ea5e00` border and `#ffffff` text)
+2. **Secondary Action (`.rn2-btn-blue` / `.rn2-btn-navy` / `.ui-btn-secondary`)**:
+   - Electric Blue or Midnight Navy surface for standard operational actions (`请求只读复扫`, `预览影响`, `加入期望规则`, `发现并预览格式`).
+   - Style: `rn2-btn rn2-btn-blue` (`linear-gradient(125deg, #087bff, #0967bb)`) or `#e8f3ff` / `border-[#96c5ff]` / `text-[#0657b8]`
+3. **Neutral / Utility (`.rn2-btn-ghost` / `.ui-btn-neutral`)**:
+   - Crisp white Light-Ice surface for refreshes, navigation returns, cancel buttons, and secondary toggles (`刷新`, `返回总览`, `取消`, `清空搜索`).
+   - Style: `rn2-btn rn2-btn-ghost` (`bg-white border-[#cedae7] text-[#0b1636] hover:bg-[#f4f8fd] hover:border-[#087bff]`, auto-darkened inside `.rn2-card-head` / `.rn2-hero`)
+4. **Danger / Destructive (`.rn2-btn-danger` / `.ui-btn-danger`)**:
+   - High-contrast Light-Ice rose surface for container stop, rule deletion, or quarantine actions (`人工决定停止`, `删除`, `清理恶意进程`).
+   - Style: `rn2-btn rn2-btn-danger` (`bg-[#fff1f2] border-[#fecdd3] text-[#be123c] hover:bg-[#ffe4e6] hover:border-[#fb7185]`)
 5. **Filter Chip / Segmented Toggle (`btn-chip`)**:
    - Used in toolbars and sub-navigation (`aria-pressed` or `aria-current="page"`).
-   - Inactive: `border border-slate-800 bg-slate-950/60 text-slate-400 hover:bg-slate-800/60 hover:text-slate-200`
-   - Active: `border border-sky-500/50 bg-sky-500/20 text-sky-200 shadow-xs` (or semantic color variant for risk/protocol chips).
+   - Inactive: `border border-[#d2dfec] bg-[#f4f8fd] text-[#31485e] hover:border-[#087bff] hover:bg-[#e8f3ff] hover:text-[#08458c]`
+   - Active: `border border-[#0867d6] bg-[#087bff] text-white shadow-xs` (or semantic Light-Ice color variant for risk/protocol chips).
 
 ### Button Size Tiers & Touch Ergonomics
 - **Touch Target Rule**: Primary navigation, header tools, login submit, dialog actions, and mobile full-width actions MUST maintain `min-h-11` (`44px`) or `h-12` (`48px`) to satisfy WCAG 2.2 AA touch target guidelines and `test_header_ui.cjs` / `test_login_ui.cjs`.
@@ -121,12 +136,12 @@ All buttons must use `type="button"` (unless submitting a `<form>`), include `cu
 
 ### Standard Form Controls
 - **Text / Number / Password / Select (`input`, `select`, `textarea`)**:
-  - Height: `min-h-11` (`44px`) for standalone forms (`LoginPage`, `UserInvestigationView`, `OperationsView`, `CommerceView`, `FirewallView`, `SettingsView`); `h-9` (`36px`) for dense inline table/toolbar filters.
-  - Surface & Border: `w-full min-w-0 rounded-lg border border-slate-700 bg-slate-950/90 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 transition-colors`
-  - Focus State: `focus:border-sky-400 focus:outline-hidden focus:ring-2 focus:ring-sky-400/25`
-  - Disabled / Busy State: `disabled:cursor-not-allowed disabled:opacity-55`
+  - Height: `min-h-11` (`44px`) for standalone forms (`LoginViewV2`, `UserInvestigationView`, `OperationsView`, `CommerceView`, `FirewallView`, `SettingsView`); `min-h-9` (`36px`, `.rn2-input-sm`) for dense inline table/toolbar filters.
+  - Surface & Border (`.rn2-input` / `.rn2-select`): `w-full min-w-0 rounded-[10px] border border-[#cedae7] bg-white px-3 py-2 text-sm text-[#0b1636] placeholder:text-[#697b9c] transition-colors`
+  - Focus State: `focus:border-[#087bff] focus:outline-hidden focus:ring-3 focus:ring-[#087bff]/16`
+  - Disabled / Busy State: `disabled:cursor-not-allowed disabled:bg-[#f4f8fd] disabled:opacity-72`
 - **Labels & Field Groups**:
-  - Always associate `<label>` with control (either wrapping `<label className="block text-xs font-medium text-slate-300">Label<input className="mt-1.5 ..."/></label>` or explicit `htmlFor` + `id`).
+  - Always associate `<label>` with control (either wrapping `<label className="block text-xs font-semibold text-[#31485e]">Label<input className="rn2-input mt-1.5"/></label>` or explicit `htmlFor` + `id`).
   - Never rely on `placeholder` alone as the only label (except search inputs that have an explicit `aria-label`).
 - **Password & Secret Inputs**:
   - Must provide an inline reveal toggle button (`aria-label="显示密码"` / `"隐藏密码"`, `aria-pressed`) with `pr-12` padding on the input so text never collides with the icon button.
