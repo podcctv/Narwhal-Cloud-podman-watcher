@@ -182,7 +182,7 @@ pub fn extract_config_path_from_argv(engine: &str, argv: &[String]) -> Option<St
     let mut i = 1usize;
     while i < argv.len() {
         let arg = argv[i].as_str();
-        if matches!(arg, "-c" | "--config" | "-config" | "-conf" | "-C" | "-confdir" | "-D") {
+        if matches!(arg, "-c" | "--config" | "-config" | "-conf" | "-C" | "-confdir" | "-D" | "-db" | "--db") {
             if let Some(next) = argv.get(i + 1) {
                 if !next.is_empty() && !next.starts_with('-') {
                     return Some(next.clone());
@@ -205,6 +205,7 @@ pub fn extract_config_path_from_argv(engine: &str, argv: &[String]) -> Option<St
         "xray" => Some("/etc/xray/config.json".to_string()),
         "v2ray" => Some("/etc/v2ray/config.json".to_string()),
         "hysteria2" => Some("/etc/hysteria/config.yaml".to_string()),
+        "proxy-panel" => Some("/etc/x-ui/x-ui.db".to_string()),
         _ => None,
     }
 }
@@ -235,6 +236,20 @@ fn resolve_contained_path(container_root: &Path, cwd: &str, raw_cfg: &str) -> Op
         return None;
     }
     Some(canon_target)
+}
+
+fn read_bounded_bytes(path: &Path) -> Option<Vec<u8>> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    let mut f = File::open(path).ok()?;
+    let mut buf = Vec::with_capacity((meta.len() as usize).min(MAX_CONFIG_BYTES));
+    f.by_ref()
+        .take(MAX_CONFIG_BYTES as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(buf)
 }
 
 fn read_bounded_utf8(path: &Path) -> Option<String> {
@@ -538,6 +553,84 @@ pub fn parse_toml_or_ini_service_inbounds(engine: &str, raw: &str) -> Vec<Servic
     }]
 }
 
+pub fn parse_panel_db_inbounds(raw: &[u8]) -> Vec<ServiceInboundSummary> {
+    let text = String::from_utf8_lossy(raw);
+    let mut out = Vec::new();
+    let mut seen_snis = BTreeSet::new();
+    let mut sni_list = Vec::new();
+    let mut tls_enabled = false;
+
+    for key in ["\"serverName\"", "\"server_name\"", "\"sni\""] {
+        let mut rest = text.as_ref();
+        while let Some(pos) = rest.find(key) {
+            let after_key = &rest[pos + key.len()..];
+            if let Some(colon) = after_key.find(':') {
+                let after_colon = after_key[colon + 1..].trim_start();
+                if let Some(stripped) = after_colon.strip_prefix('"') {
+                    if let Some(end_q) = stripped.find('"') {
+                        push_unique_sni(&mut sni_list, &mut seen_snis, &stripped[..end_q]);
+                        tls_enabled = true;
+                    }
+                }
+            }
+            rest = &rest[pos + key.len()..];
+            if sni_list.len() >= MAX_SNIS_PER_INBOUND {
+                break;
+            }
+        }
+    }
+
+    for arr_key in ["\"serverNames\"", "\"server_names\""] {
+        let mut rest = text.as_ref();
+        while let Some(pos) = rest.find(arr_key) {
+            let after_key = &rest[pos + arr_key.len()..];
+            if let Some(open_b) = after_key.find('[') {
+                if let Some(close_b) = after_key[open_b + 1..].find(']') {
+                    let inside = &after_key[open_b + 1..open_b + 1 + close_b];
+                    for part in inside.split(',') {
+                        let clean = part.trim().trim_matches('"').trim();
+                        push_unique_sni(&mut sni_list, &mut seen_snis, clean);
+                        if !clean.is_empty() {
+                            tls_enabled = true;
+                        }
+                    }
+                }
+            }
+            rest = &rest[pos + arr_key.len()..];
+            if sni_list.len() >= MAX_SNIS_PER_INBOUND {
+                break;
+            }
+        }
+    }
+
+    let mut found_protos = BTreeSet::new();
+    for proto in ["vmess", "trojan", "vless", "shadowsocks", "socks", "http"] {
+        let needle = format!("\"{proto}\"");
+        if text.contains(&needle) || text.contains(proto) {
+            if matches!(proto, "vmess" | "trojan") {
+                found_protos.insert(proto.to_string());
+            } else if text.contains(&needle) {
+                found_protos.insert(proto.to_string());
+            }
+        }
+    }
+
+    if found_protos.is_empty() && !sni_list.is_empty() {
+        found_protos.insert("vless".to_string());
+    }
+
+    for proto in found_protos.into_iter().take(16) {
+        out.push(ServiceInboundSummary {
+            protocol: proto,
+            port: 0,
+            tls_enabled,
+            sni_list: sni_list.clone(),
+            auth_configured: true,
+        });
+    }
+    out
+}
+
 pub fn evaluate_service_violations(svc: &ServiceConfigSummary) -> Vec<ServiceViolation> {
     evaluate_service_violations_with_policy(svc, None, None)
 }
@@ -684,14 +777,20 @@ pub fn audit_container_services_with_policy(
                             }
                         }
                     }
-                } else if let Some(raw_cfg) = read_bounded_utf8(&safe_path) {
+                } else {
                     let ext = safe_path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    if raw_cfg.trim_start().starts_with('{') {
-                        inbounds = parse_json_service_inbounds(engine, &raw_cfg);
-                    } else if matches!(ext, "toml" | "ini" | "conf") {
-                        inbounds = parse_toml_or_ini_service_inbounds(engine, &raw_cfg);
-                    } else {
-                        inbounds = parse_yaml_service_inbounds(engine, &raw_cfg);
+                    if matches!(ext, "db" | "sqlite" | "sqlite3") {
+                        if let Some(raw_bytes) = read_bounded_bytes(&safe_path) {
+                            inbounds = parse_panel_db_inbounds(&raw_bytes);
+                        }
+                    } else if let Some(raw_cfg) = read_bounded_utf8(&safe_path) {
+                        if raw_cfg.trim_start().starts_with('{') {
+                            inbounds = parse_json_service_inbounds(engine, &raw_cfg);
+                        } else if matches!(ext, "toml" | "ini" | "conf") {
+                            inbounds = parse_toml_or_ini_service_inbounds(engine, &raw_cfg);
+                        } else {
+                            inbounds = parse_yaml_service_inbounds(engine, &raw_cfg);
+                        }
                     }
                 }
             }
@@ -945,5 +1044,33 @@ mod tests {
         assert_eq!(s_inb[0].protocol, "socks");
         assert_eq!(s_inb[0].port, 1080);
         assert!(!s_inb[0].auth_configured);
+    }
+
+    #[test]
+    fn test_proxy_panel_sqlite_db_sanitized_audit() {
+        let mut fake_sqlite = b"SQLite format 3\0\x04\x00some_binary_header".to_vec();
+        fake_sqlite.extend_from_slice(
+            br#"{"clients":[{"id":"SECRET-UUID-999","password":"SECRET-PASS"}]}|{"network":"tcp","security":"reality","realitySettings":{"serverNames":["bad-panel.example.com","crates.io"]}}|trojan"#,
+        );
+        let inbounds = parse_panel_db_inbounds(&fake_sqlite);
+        assert!(!inbounds.is_empty());
+        assert!(inbounds.iter().any(|i| i.protocol == "trojan"));
+        assert!(inbounds[0].sni_list.contains(&"bad-panel.example.com".to_string()));
+        let svc = ServiceConfigSummary {
+            engine: "proxy-panel".to_string(),
+            pid: 555,
+            inbounds,
+        };
+        let viols = evaluate_service_violations(&svc);
+        let codes: Vec<&str> = viols.iter().map(|v| v.code).collect();
+        assert!(codes.contains(&"service_disallowed_protocol"));
+        assert!(codes.contains(&"service_disallowed_sni"));
+        let audit = ContainerServiceAudit {
+            services: vec![svc],
+            violations: viols,
+        };
+        let json = audit.to_json();
+        assert!(!json.contains("SECRET-UUID-999"));
+        assert!(!json.contains("SECRET-PASS"));
     }
 }

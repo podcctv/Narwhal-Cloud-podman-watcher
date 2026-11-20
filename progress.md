@@ -2,6 +2,11 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 33：`service-audit` 代理面板 SQLite 数据库只读脱敏解析（v2.0.1）
+
+- **`service-audit` 面板库直读（`rust/crates/service-audit/src/lib.rs`）**：
+  - 新增 `read_bounded_bytes` 与 `parse_panel_db_inbounds`（`#![forbid(unsafe_code)]`、无外部 C 依赖），支持从 `x-ui.db` / `3x-ui` 等面板 SQLite 文件（默认 `/etc/x-ui/x-ui.db` 或 `-db` 参数）中安全提取脱敏后的协议与 SNI 配置（不读取也不导出任何 UUID/密码/私钥），并补充 `test_proxy_panel_sqlite_db_sanitized_audit` 单元测试。
+
 ## Phase 32：Narwhal Monitor 2.0 全新 RackNerd BlackFriday / ctrl. 交互与视觉体系重构（v2.0.0）
 
 - **2.0 双对比度基础主题与设计原语（`frontend/index.html`、`frontend/src/v2/styles/theme-v2.css`、`frontend/src/styles/index.css`、`frontend/src/v2/components/Primitives.tsx`、`common/*.tsx`）**：
