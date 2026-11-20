@@ -153,16 +153,16 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
           };
 
           const glowClass = risk.isCritical || hasResourceGuardFailure
-            ? 'border-rose-500/40 bg-rose-950/20 glow-rose'
+            ? 'border-rose-500/45 bg-[#041e3c]/95 shadow-[0_0_14px_rgba(244,63,94,0.12)]'
             : risk.isWarning || hasProtocolGuardNeedsReview || hasResourceAlert
-            ? 'border-amber-500/40 bg-amber-950/20 glow-amber'
-            : 'border-slate-800 bg-slate-900/60 hover:border-slate-700';
+            ? 'border-[#ff7900]/45 bg-[#041e3c]/95 shadow-[0_0_12px_rgba(255,121,0,0.08)]'
+            : 'border-sky-400/20 bg-[#041e3c]/95 hover:border-[#087bff]/60';
 
           return (
             <div
               key={`card-${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`}
               onClick={() => onSelect(identity)}
-              className={`rounded-2xl border p-4 transition-all cursor-pointer space-y-3 ${glowClass}`}
+              className={`rounded-xl border p-3.5 transition-colors cursor-pointer space-y-3 ${glowClass}`}
             >
               {/* Header */}
               <div className="flex items-center justify-between">
@@ -214,42 +214,42 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
 
               {/* Bento Metrics 4-Grid */}
               <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                <div className="rounded-lg bg-[#02182f]/75 p-2.5 border border-sky-400/15">
                   <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
-                    <CpuIcon className="h-3 w-3 text-sky-400" />
+                    <CpuIcon className="h-3 w-3 text-[#00b6ec]" />
                     <span>CPU 使用率</span>
                   </div>
-                  <div className="text-sm font-bold text-slate-200 mt-1">
+                  <div className="text-sm font-bold text-slate-100 mt-1 tabular-nums">
                     {cpu !== null ? `${cpu.toFixed(1)}%` : '—'}
                   </div>
                 </div>
 
-                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                <div className="rounded-lg bg-[#02182f]/75 p-2.5 border border-sky-400/15">
                   <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
-                    <HardDrive className="h-3 w-3 text-indigo-400" />
+                    <HardDrive className="h-3 w-3 text-emerald-400" />
                     <span>内存占用</span>
                   </div>
-                  <div className="text-sm font-bold text-slate-200 mt-1 truncate">
+                  <div className="text-sm font-bold text-slate-100 mt-1 truncate tabular-nums">
                     {memUsed} {mem !== null ? `(${mem.toFixed(0)}%)` : ''}
                   </div>
                 </div>
 
-                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                <div className="rounded-lg bg-[#02182f]/75 p-2.5 border border-sky-400/15">
                   <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
                     <ArrowDownLeft className="h-3 w-3 text-emerald-400" />
                     <span>网络 RX / TX</span>
                   </div>
-                  <div className="text-xs font-bold text-slate-200 mt-1 truncate">
+                  <div className="text-xs font-bold text-slate-100 mt-1 truncate tabular-nums">
                     ↓{rxMbps ? `${rxMbps}M` : '0'} · ↑{txMbps ? `${txMbps}M` : '0'}
                   </div>
                 </div>
 
-                <div className="rounded-xl bg-slate-950/60 p-2.5 border border-slate-800/80">
+                <div className="rounded-lg bg-[#02182f]/75 p-2.5 border border-sky-400/15">
                   <div className="text-[10px] text-slate-400 flex items-center gap-1 font-sans">
-                    <Activity className="h-3 w-3 text-amber-400" />
+                    <Activity className="h-3 w-3 text-[#ff7900]" />
                     <span>连接 / 进程</span>
                   </div>
-                  <div className="text-xs font-bold text-slate-200 mt-1">
+                  <div className="text-xs font-bold text-slate-100 mt-1 tabular-nums">
                     {c.conn_count ?? 0} conn · {sec.process_count ?? 0} proc
                   </div>
                 </div>
@@ -269,11 +269,11 @@ export const ContainerTableView: React.FC<ContainerTableViewProps> = ({
         tabIndex={0}
         role="region"
         aria-label="容器状态数据表格"
-        className="hidden md:block ui-table-wrap rounded-2xl border border-slate-800/90 bg-slate-950/70 shadow-2xl overflow-hidden"
+        className="hidden md:block ui-table-wrap rounded-xl border border-sky-400/20 bg-[#041e3c]/95 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)] overflow-hidden"
       >
       <table className="w-full text-left border-collapse text-xs">
         <thead>
-          <tr className="border-b border-slate-800/90 bg-slate-900/90 text-[11px] font-semibold text-slate-400 font-mono">
+          <tr className="border-b border-sky-400/15 bg-[#031d3d] text-[11px] font-semibold text-sky-200/80 font-mono">
             <th scope="col" className="py-2.5 pl-3 pr-2 w-8">状态</th>
             {renderSortHeader('name', '容器名称 / 运行时')}
             {renderSortHeader('cpu', 'CPU')}

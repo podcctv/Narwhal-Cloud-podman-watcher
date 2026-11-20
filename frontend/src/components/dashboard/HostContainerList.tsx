@@ -458,12 +458,12 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
         onToggleAllHosts={handleToggleAll}
       />
 
-      {matchingHostIds.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-900/60 px-3.5 py-2.5 text-xs text-slate-400">
-        <span>显示第 <strong className="tabular-nums text-slate-200">{currentHostPage * HOSTS_PER_PAGE + 1}–{Math.min((currentHostPage + 1) * HOSTS_PER_PAGE, matchingHostIds.length)}</strong> 台，共 <strong className="tabular-nums text-slate-200">{matchingHostIds.length}</strong> 台匹配主机</span>
+      {matchingHostIds.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-400/20 bg-[#031d3d]/90 px-3.5 py-2.5 text-xs text-slate-300">
+        <span>显示第 <strong className="tabular-nums text-white">{currentHostPage * HOSTS_PER_PAGE + 1}–{Math.min((currentHostPage + 1) * HOSTS_PER_PAGE, matchingHostIds.length)}</strong> 台，共 <strong className="tabular-nums text-white">{matchingHostIds.length}</strong> 台匹配主机</span>
         <div className="flex items-center gap-2">
-          <button type="button" onClick={() => setHostPage((page) => Math.max(0, page - 1))} disabled={currentHostPage === 0} aria-label="上一页主机" className="inline-flex h-9 items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/80 px-2.5 font-medium text-slate-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" />上一页</button>
-          <span className="tabular-nums px-1 font-medium text-slate-300">{currentHostPage + 1} / {hostPageCount}</span>
-          <button type="button" onClick={() => setHostPage((page) => Math.min(hostPageCount - 1, page + 1))} disabled={currentHostPage >= hostPageCount - 1} aria-label="下一页主机" className="inline-flex h-9 items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/80 px-2.5 font-medium text-slate-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" /></button>
+          <button type="button" onClick={() => setHostPage((page) => Math.max(0, page - 1))} disabled={currentHostPage === 0} aria-label="上一页主机" className="inline-flex h-9 items-center gap-1 rounded-lg border border-sky-400/25 bg-[#02182f] px-2.5 font-medium text-slate-200 transition-colors hover:border-[#087bff]/60 hover:bg-[#072647] disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft className="h-3.5 w-3.5" />上一页</button>
+          <span className="tabular-nums px-1 font-medium text-sky-200">{currentHostPage + 1} / {hostPageCount}</span>
+          <button type="button" onClick={() => setHostPage((page) => Math.min(hostPageCount - 1, page + 1))} disabled={currentHostPage >= hostPageCount - 1} aria-label="下一页主机" className="inline-flex h-9 items-center gap-1 rounded-lg border border-sky-400/25 bg-[#02182f] px-2.5 font-medium text-slate-200 transition-colors hover:border-[#087bff]/60 hover:bg-[#072647] disabled:cursor-not-allowed disabled:opacity-40">下一页<ChevronRight className="h-3.5 w-3.5" /></button>
         </div>
       </div>}
 
@@ -529,10 +529,10 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
           return (
             <div
               key={hostId}
-              className={`ui-contain-card relative rounded-xl border border-l-4 transition-all overflow-hidden ${hostStatusAccent} ${
+              className={`ui-contain-card relative rounded-xl border border-l-4 transition-colors overflow-hidden ${hostStatusAccent} ${
                 hostRiskyCount > 0
-                  ? 'border-slate-800 bg-slate-900/95'
-                  : 'border-slate-800 bg-slate-900/80 hover:border-slate-700/90'
+                  ? 'border-rose-500/40 bg-[#041e3c]/95'
+                  : 'border-sky-400/20 bg-[#041e3c]/95 hover:border-[#087bff]/60'
               }`}
             >
               {/* Host Accordion Master Bar */}
@@ -541,7 +541,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                 onClick={() => toggleHost(hostId)}
                 aria-expanded={isExpanded}
                 aria-controls={`host-containers-${hostId}`}
-                className="flex w-full flex-col gap-2 p-3 text-left transition-colors hover:bg-slate-800/40 focus:outline-hidden focus:ring-2 focus:ring-inset focus:ring-sky-400 sm:flex-row sm:items-center sm:justify-between data-[expanded=true]:border-b data-[expanded=true]:border-slate-800/80"
+                className="flex w-full flex-col gap-2 bg-[#031d3d]/90 p-3 text-left transition-colors hover:bg-[#072647]/80 focus:outline-hidden focus:ring-2 focus:ring-inset focus:ring-[#00b6ec] sm:flex-row sm:items-center sm:justify-between data-[expanded=true]:border-b data-[expanded=true]:border-sky-400/15"
                 data-expanded={isExpanded}
               >
                 {/* Left: Host Identification & Node Specs */}
@@ -591,7 +591,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                 {/* Right: Aggregate Telemetry & Badges */}
                 <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-1 sm:pt-0 border-t border-slate-800/40 sm:border-t-0">
                   {/* Host Aggregate Throughput */}
-                  <div className="flex items-center gap-2 text-[11px] font-mono bg-slate-950/60 rounded-lg px-2 py-1 border border-slate-800">
+                  <div className="flex items-center gap-2 text-[11px] font-mono bg-[#02182f]/85 rounded-lg px-2.5 py-1 border border-sky-400/15 tabular-nums">
                     <span className="flex items-center text-emerald-400 font-semibold" title={`母鸡总聚合入栈: ${sumRx === null ? '数据不可用' : `${fmtMbps(sumRx)} Mbps`}`}>
                       <ArrowDownLeft className="h-3 w-3 mr-0.5" />
                       {sumRxLabel}
@@ -628,7 +628,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
 
               {/* Sub-container Canvas Area */}
               {isExpanded && (
-                <div id={`host-containers-${hostId}`} className="bg-slate-950/70 p-3">
+                <div id={`host-containers-${hostId}`} className="bg-[#02182f]/75 p-3">
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <p className="text-[11px] text-slate-400">先看主机汇总；需要时展开容器明细或设置本机限速。</p>
                     <button type="button" onClick={() => setBandwidthOpenHosts((current) => ({ ...current, [hostId]: !current[hostId] }))} aria-expanded={Boolean(bandwidthOpenHosts[hostId])} className="min-h-9 rounded-lg border border-sky-800 bg-sky-950/40 px-3 text-xs text-sky-200 hover:bg-sky-900/50">{bandwidthOpenHosts[hostId] ? '收起限速配置' : '主机 / 容器限速'}</button>
@@ -691,19 +691,19 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                         const key = `${c.host_id}-${c.runtime}-${c.project || ''}-${c.container_name}`;
 
                         let cardStyle =
-                          'border-slate-800 bg-slate-900/90 hover:border-sky-500/50 shadow-xs';
+                          'border-sky-400/20 bg-[#041e3c]/95 hover:border-[#087bff]/60 shadow-[0_6px_18px_-6px_rgba(2,10,24,0.65)]';
                         if (risk.isCritical || hasResourceGuardFailure) {
                           cardStyle =
-                            'border-rose-500/70 bg-linear-to-b from-rose-950/30 via-slate-900/90 to-slate-900/95 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
+                            'border-rose-500/70 bg-linear-to-b from-[#2b101d]/75 via-[#041e3c]/95 to-[#041e3c] shadow-[0_0_15px_rgba(244,63,94,0.14)] hover:border-rose-400';
                         } else if (risk.isWarning || hasResourceAlert || hasProtocolGuardNeedsReview) {
                           cardStyle =
-                            'border-amber-500/50 bg-linear-to-b from-amber-950/20 via-slate-900/90 to-slate-900/95 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
+                            'border-[#ff7900]/55 bg-linear-to-b from-[#281508]/60 via-[#041e3c]/95 to-[#041e3c] shadow-[0_0_12px_rgba(255,121,0,0.1)] hover:border-[#ff7900]';
                         }
 
                         return (
                           <div
                             key={key}
-                            className={`group relative rounded-xl border p-3.5 transition-all flex flex-col justify-between ${cardStyle}`}
+                            className={`group relative rounded-xl border p-3.5 transition-colors flex flex-col justify-between ${cardStyle}`}
                           >
                             {/* Card Content Top */}
                             <div>
@@ -822,7 +822,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                 {/* Bandwidth & Conns Block */}
                                 <AdmissionStatus data={sec.admission} stale={Boolean(c.alerts?.stale)} compact />
                                 <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
-                                  <div className="rounded-lg bg-slate-950/70 p-2 border border-slate-800/80">
+                                  <div className="rounded-lg bg-[#02182f]/80 p-2 border border-sky-400/15">
                                     <div className="flex items-center justify-between text-slate-500 text-[10px]">
                                       <span className="flex items-center gap-1">
                                         <Activity className="h-2.5 w-2.5 text-sky-400" /> 带宽
@@ -857,7 +857,7 @@ export const HostContainerList: React.FC<HostContainerListProps> = ({
                                     </div>
                                   </div>
 
-                                  <div className="rounded-lg bg-slate-950/70 p-2 border border-slate-800/80">
+                                  <div className="rounded-lg bg-[#02182f]/80 p-2 border border-sky-400/15">
                                     <span className="text-slate-500 flex items-center gap-1 text-[10px]">
                                       <Layers className="h-2.5 w-2.5 text-amber-400" /> 连接/进程
                                     </span>

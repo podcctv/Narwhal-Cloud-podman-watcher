@@ -175,34 +175,34 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
     alert_id: risk.actionableAlert?.id,
   };
 
-  // Card theme based on risk severity
-  let cardBorder = 'border-slate-800/90 bg-slate-900/90 hover:border-sky-500/60 shadow-xs';
-  let accentBar = 'bg-slate-700';
+  // Card theme based on risk severity (RackNerd 2-tier midnight spec-card)
+  let cardBorder = 'border-sky-400/20 bg-[#041e3c]/95 hover:border-[#087bff]/60 shadow-[0_6px_18px_-6px_rgba(2,10,24,0.65)]';
+  let accentBar = 'bg-slate-600';
 
   if (risk.isCritical || hasResourceGuardFailure) {
     cardBorder =
-      'border-rose-500/60 bg-linear-to-b from-rose-950/30 via-slate-900/95 to-slate-900 shadow-[0_0_15px_rgba(244,63,94,0.12)] hover:border-rose-400';
+      'border-rose-500/60 bg-linear-to-b from-[#2b101d]/75 via-[#041e3c]/95 to-[#041e3c] shadow-[0_0_15px_rgba(244,63,94,0.14)] hover:border-rose-400';
     accentBar = 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.6)]';
   } else if (!isStale && (risk.isWarning || hasResourceAlert || hasProtocolGuardNeedsReview)) {
     cardBorder =
-      'border-amber-500/50 bg-linear-to-b from-amber-950/20 via-slate-900/95 to-slate-900 shadow-[0_0_12px_rgba(245,158,11,0.08)] hover:border-amber-400';
-    accentBar = 'bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.5)]';
+      'border-[#ff7900]/50 bg-linear-to-b from-[#281508]/60 via-[#041e3c]/95 to-[#041e3c] shadow-[0_0_12px_rgba(255,121,0,0.1)] hover:border-[#ff7900]';
+    accentBar = 'bg-[#ff7900] shadow-[0_0_6px_rgba(255,121,0,0.5)]';
   } else if (!isStale && hasProtectionState) {
-    cardBorder = 'border-sky-500/40 bg-linear-to-b from-sky-950/20 via-slate-900/95 to-slate-900 hover:border-sky-400';
-    accentBar = 'bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.45)]';
+    cardBorder = 'border-[#087bff]/45 bg-linear-to-b from-[#072647]/80 via-[#041e3c]/95 to-[#041e3c] hover:border-[#00b6ec]/70';
+    accentBar = 'bg-[#00b6ec] shadow-[0_0_6px_rgba(0,182,236,0.45)]';
   } else if (!isStale) {
-    accentBar = 'bg-emerald-500/80';
+    accentBar = 'bg-emerald-500/85';
   }
 
   return (
     <article
-      className={`group relative flex flex-col justify-between rounded-xl border p-3 transition-all overflow-hidden ${cardBorder}`}
+      className={`group relative flex flex-col justify-between rounded-xl border transition-colors overflow-hidden ${cardBorder}`}
     >
       {/* Top Left Accent Health Pill */}
       <div className={`absolute left-0 top-0 bottom-0 w-1 ${accentBar} transition-colors`} />
 
-      {/* Section 1: Card Header */}
-      <div className="pl-1">
+      {/* Section 1: Midnight Header Strip */}
+      <div className="pl-3 pr-3 pt-2.5 pb-2 border-b border-sky-400/15 bg-[#031d3d]/90">
         <div className="flex items-center justify-between gap-1.5 min-w-0">
           {/* Title & Runtime */}
           <div className="flex items-center gap-1.5 min-w-0 flex-1">
@@ -300,24 +300,25 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           </div>
         </div>
 
-      <ContainerStateBadges container={c} activeAlerts={activeAlerts} maxVisible={4} className="mb-2 pl-1" />
+      <div className="p-3 pt-2 pl-3.5 space-y-2">
+      <ContainerStateBadges container={c} activeAlerts={activeAlerts} maxVisible={4} />
       {risk.reasons.length > 0 && (
-        <p className="mb-2 truncate pl-1 text-[10px] text-slate-300" title={risk.reasons.join(' · ')}>
+        <p className="truncate text-[10px] text-slate-300" title={risk.reasons.join(' · ')}>
           {risk.reasons.slice(0, 2).join(' · ')}{risk.reasons.length > 2 ? ` · +${risk.reasons.length - 2} 项` : ''}
         </p>
       )}
 
-        {/* Section 2: Dual CPU & Memory Meter */}
-        <div className="mt-2.5 grid grid-cols-2 gap-2 text-[10px] font-mono">
+        {/* Section 2: Recessed Dual CPU & Memory Spec Cells */}
+        <div className="grid grid-cols-2 divide-x divide-sky-400/15 rounded-lg border border-sky-400/15 bg-[#02182f]/70 text-[10px] font-mono">
           {/* CPU Meter */}
-          <div>
-            <div className="flex items-center justify-between text-slate-400 mb-0.5">
-              <span className="flex items-center gap-0.5">
-                <Cpu className="h-2.5 w-2.5 text-slate-500" /> CPU
+          <div className="p-2">
+            <div className="flex items-center justify-between text-slate-400 mb-1">
+              <span className="flex items-center gap-0.5 uppercase tracking-wider">
+                <Cpu className="h-2.5 w-2.5 text-[#00b6ec]" /> CPU
               </span>
               <span
                 className={`font-bold tabular-nums ${
-                  cpu !== null && cpu > 80 ? 'text-rose-400' : 'text-slate-200'
+                  cpu !== null && cpu > 80 ? 'text-rose-400' : 'text-slate-100'
                 }`}
               >
                 {cpu === null ? '—' : `${cpu.toFixed(1)}%`}
@@ -326,7 +327,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
             <div className="h-1 w-full rounded-full bg-slate-800/80 overflow-hidden">
               <div
                 className={`h-full transition-all duration-300 ${
-                  cpu === null ? 'bg-slate-700' : cpu > 80 ? 'bg-rose-500' : 'bg-sky-400'
+                  cpu === null ? 'bg-slate-700' : cpu > 80 ? 'bg-rose-500' : 'bg-[#00b6ec]'
                 }`}
                 style={{ width: `${Math.min(100, Math.max(0, cpu ?? 0))}%` }}
               />
@@ -334,14 +335,14 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           </div>
 
           {/* RAM Meter */}
-          <div>
-            <div className="flex items-center justify-between text-slate-400 mb-0.5">
-              <span className="flex items-center gap-0.5">
-                <HardDrive className="h-2.5 w-2.5 text-slate-500" /> 内存
+          <div className="p-2">
+            <div className="flex items-center justify-between text-slate-400 mb-1">
+              <span className="flex items-center gap-0.5 uppercase tracking-wider">
+                <HardDrive className="h-2.5 w-2.5 text-emerald-400" /> RAM
               </span>
               <span
                 className={`font-bold tabular-nums ${
-                  mem !== null && mem > 90 ? 'text-amber-400' : 'text-slate-200'
+                  mem !== null && mem > 90 ? 'text-amber-400' : 'text-slate-100'
                 }`}
                 title={`${memUsed} / ${memLimit}`}
               >
@@ -359,8 +360,8 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           </div>
         </div>
 
-        {/* Section 3: Bandwidth & Protocol Split */}
-        <div className="mt-2 rounded-lg bg-slate-950/70 border border-slate-800/80 px-2 py-1 font-mono text-[10px]">
+        {/* Section 3: Recessed Bandwidth & Protocol Split */}
+        <div className="rounded-lg bg-[#02182f]/70 border border-sky-400/15 px-2 py-1.5 font-mono text-[10px]">
           <div className="flex items-center justify-between tabular-nums">
             {/* Download RX */}
             <span
@@ -398,7 +399,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
         </div>
 
         {/* Service inventory: process-owned listener ports, with conservative protocol labels. */}
-        <div className="mt-1.5 rounded-lg border border-slate-800/80 bg-slate-950/50 px-2 py-1.5">
+        <div className="rounded-lg border border-sky-400/15 bg-[#02182f]/70 px-2 py-1.5">
           <button
             type="button"
             aria-expanded={servicesExpanded}
@@ -491,7 +492,7 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
 
       {/* Section 4: Card Footer (Risk Indicator or Timestamp + Actions) */}
       <AdmissionStatus data={sec.admission} stale={isStale} compact />
-      <div className="pl-1 mt-2 pt-1.5 border-t border-slate-800/70 flex items-center justify-between gap-1 text-[10px]">
+      <div className="mt-2 pt-2 border-t border-sky-400/15 flex items-center justify-between gap-1 text-[10px]">
         {/* Left: Risk Summary or Timestamp */}
         <div className="min-w-0 flex-1">
           {risk.hasRisk && risk.reasons.length > 0 ? (
@@ -540,13 +541,14 @@ export const ContainerCardCompact: React.FC<ContainerCardCompactProps> = ({
           <button
             type="button"
             onClick={() => onSelect(identity)}
-            className="flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 font-medium text-[10px] bg-slate-800/90 text-sky-300 border border-slate-700/70 hover:bg-slate-750 hover:text-sky-200 transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
+            className="flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 font-medium text-[10px] bg-[#072647] text-sky-300 border border-sky-400/25 hover:border-[#087bff]/60 hover:text-white transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400"
             title="查看容器深度诊断面板"
           >
-            <Sparkles className="h-2.5 w-2.5 text-sky-400" />
+            <Sparkles className="h-2.5 w-2.5 text-[#00b6ec]" />
             <span>排查</span>
           </button>
         </div>
+      </div>
       </div>
     </article>
   );

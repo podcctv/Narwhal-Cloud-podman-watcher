@@ -159,13 +159,14 @@ export const TelemetrySection: React.FC<TelemetrySectionProps> = ({ telemetry, o
   const gfwBlockedCount = telemetry.filter(item => item.gfw_reachability?.status === 'blocked' && !item.gfw_reachability.stale).length;
   const auditNeedsAttention = telemetry.filter(item => ['warning', 'critical'].includes(hostAuditLevel(item))).length;
   const auditUnknown = telemetry.filter(item => hostAuditLevel(item) === 'unknown').length;
-  return <section className="ui-surface-card mb-6 min-w-0">
-    <header className="flex flex-col gap-3 border-b border-slate-800/90 px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-5">
+  return <section className="ui-surface-card mb-6 min-w-0 overflow-hidden rounded-xl border border-sky-400/20 bg-[#041e3c]/95 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)]">
+    <header className="flex flex-col gap-3 border-b border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647] px-4 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:px-5">
       <div className="flex min-w-0 items-start gap-3">
-        <div className="mt-0.5 rounded-xl border border-sky-500/30 bg-sky-950/60 p-2 text-sky-400 shrink-0">
+        <div className="mt-0.5 rounded-lg border border-[#087bff]/40 bg-[#087bff]/15 p-2 text-[#00b6ec] shrink-0">
           <Activity className="h-4 w-4" />
         </div>
         <div className="min-w-0">
+          <span className="block text-[10px] font-bold uppercase tracking-wider text-[#00b6ec]">HOST TELEMETRY</span>
           <h2 className="text-sm font-bold text-slate-100">主机网络与安全遥测</h2>
           <p className="mt-1 text-xs leading-5 text-slate-300">主机状态摘要；展开后按名称筛选，每页查看 {pageSize} 台的网络证据与修复建议。</p>
           <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">

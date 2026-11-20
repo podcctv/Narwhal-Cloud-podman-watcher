@@ -580,11 +580,11 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
 
       {/* Slide-over Drawer Panel */}
       <div className="absolute inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10">
-        <div ref={drawerPanelRef} tabIndex={-1} className="min-w-0 w-screen max-w-2xl transform bg-slate-900 border-l border-slate-800 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
+        <div ref={drawerPanelRef} tabIndex={-1} className="min-w-0 w-screen max-w-2xl transform bg-[#041e3c] border-l border-sky-400/25 shadow-2xl transition-transform animate-in slide-in-from-right duration-250 flex flex-col">
           {/* Drawer Header */}
-          <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/90 px-4 py-3.5 sm:px-6 sm:py-4">
+          <div className="flex items-center justify-between border-b border-sky-400/15 bg-linear-to-r from-[#031d3d] to-[#072647] px-4 py-3.5 sm:px-6 sm:py-4">
             <div className="flex items-center gap-3 min-w-0">
-              <div className="rounded-xl bg-sky-950/80 p-2.5 text-sky-400 border border-sky-500/30 shrink-0">
+              <div className="rounded-xl bg-[#087bff]/15 p-2.5 text-[#00b6ec] border border-[#087bff]/40 shrink-0">
                 <Box className="h-5 w-5" />
               </div>
               <div className="min-w-0">
@@ -735,43 +735,49 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
             )}
             {/* Quick KPI Cards Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3 font-mono text-xs">
-              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-                <span className="text-slate-400 flex items-center gap-1 text-[11px] mb-1">
-                  <Cpu className="h-3.5 w-3.5 text-sky-400" /> CPU 占用
-                </span>
-                <span className="text-lg font-bold text-slate-100 tabular-nums">
-                  {formatMetricPercent(container?.cpu_percent)}
-                </span>
+              <div className="overflow-hidden rounded-xl border border-sky-400/20 bg-[#02182f]/80">
+                <div className="flex items-center gap-1.5 border-b border-sky-400/15 bg-[#031d3d] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-sky-300">
+                  <Cpu className="h-3.5 w-3.5 text-[#00b6ec]" /> CPU 占用
+                </div>
+                <div className="p-3">
+                  <span className="text-lg font-bold text-white tabular-nums">
+                    {formatMetricPercent(container?.cpu_percent)}
+                  </span>
+                </div>
               </div>
 
-              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-                <span className="text-slate-400 flex items-center gap-1 text-[11px] mb-1">
+              <div className="overflow-hidden rounded-xl border border-sky-400/20 bg-[#02182f]/80">
+                <div className="flex items-center gap-1.5 border-b border-sky-400/15 bg-[#031d3d] px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-emerald-300">
                   <HardDrive className="h-3.5 w-3.5 text-emerald-400" /> 内存使用
-                </span>
-                <span className="text-lg font-bold text-slate-100 tabular-nums">
-                  {formatMetricPercent(container?.mem_percent)}
-                </span>
-                <span className="text-[10px] text-slate-500 block truncate">
-                  {formatMetricBytes(container?.mem_bytes)} / {formatMetricBytes(container?.mem_limit_bytes)}
-                </span>
+                </div>
+                <div className="p-3">
+                  <span className="text-lg font-bold text-white tabular-nums">
+                    {formatMetricPercent(container?.mem_percent)}
+                  </span>
+                  <span className="text-[10px] text-slate-400 block truncate tabular-nums">
+                    {formatMetricBytes(container?.mem_bytes)} / {formatMetricBytes(container?.mem_limit_bytes)}
+                  </span>
+                </div>
               </div>
 
               <div
-                className={`rounded-xl border p-3 ${
+                className={`overflow-hidden rounded-xl border ${
                   inIpAlert
-                    ? 'border-rose-500/40 bg-rose-950/30 text-rose-300'
-                    : 'border-slate-800 bg-slate-950/60'
+                    ? 'border-rose-500/45 bg-rose-950/30 text-rose-300'
+                    : 'border-sky-400/20 bg-[#02182f]/80'
                 }`}
               >
-                <span className="text-slate-400 flex items-center gap-1 text-[11px] mb-1">
-                  <Network className="h-3.5 w-3.5 text-amber-400" /> 入站去重 IP
-                </span>
-                <span className={`text-lg font-bold tabular-nums ${inIpAlert ? 'text-rose-400' : 'text-slate-100'}`}>
-                  {inIps ?? (sec.communication_detail_available === false ? '不可用' : '—')}
-                </span>
-                <span className="text-[10px] text-slate-500 block">
-                  阈值：{inThresh} IPs
-                </span>
+                <div className={`flex items-center gap-1.5 border-b px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${inIpAlert ? 'border-rose-500/25 bg-rose-950/60 text-rose-300' : 'border-sky-400/15 bg-[#031d3d] text-amber-300'}`}>
+                  <Network className="h-3.5 w-3.5 text-[#ff7900]" /> 入站去重 IP
+                </div>
+                <div className="p-3">
+                  <span className={`text-lg font-bold tabular-nums ${inIpAlert ? 'text-rose-400' : 'text-white'}`}>
+                    {inIps ?? (sec.communication_detail_available === false ? '不可用' : '—')}
+                  </span>
+                  <span className="text-[10px] text-slate-400 block tabular-nums">
+                    阈值：{inThresh} IPs
+                  </span>
+                </div>
               </div>
             </div>
 

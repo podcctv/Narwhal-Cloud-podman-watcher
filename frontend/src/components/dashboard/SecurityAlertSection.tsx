@@ -132,7 +132,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   );
 
   const healthStripNode = hasHealthStrip && nodeHealth ? (
-    <div className="mb-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 text-xs text-slate-300 shadow-xs">
+    <div className="mb-4 overflow-hidden rounded-xl border border-sky-400/20 bg-[#031d3d]/95 text-xs text-slate-300 shadow-[0_6px_18px_-6px_rgba(2,10,24,0.65)]">
       <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 sm:px-5">
         {(nodeHealth.sni_violations?.total || 0) > 0 && (
           <button
@@ -163,7 +163,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
         )}
       </div>
       {showSniDetails && (nodeHealth.sni_violations?.items?.length || 0) > 0 && (
-        <div className="border-t border-slate-800/80 bg-slate-950/60 px-4 py-2.5 sm:px-5 space-y-1.5 max-h-60 overflow-y-auto">
+        <div className="border-t border-sky-400/15 bg-[#02182f]/80 px-4 py-2.5 sm:px-5 space-y-1.5 max-h-60 overflow-y-auto">
           {nodeHealth.sni_violations!.items!.slice(0, 20).map((item) => (
             <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-[11px] border-b border-slate-800/50 pb-1 last:border-b-0 last:pb-0">
               <div className="flex flex-wrap items-center gap-2 min-w-0">
@@ -191,7 +191,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
     return (
       <>
         {healthStripNode}
-        <section className="mb-6 rounded-2xl border border-emerald-500/25 bg-emerald-950/20 p-4 backdrop-blur-xs sm:p-5">
+        <section className="mb-6 rounded-xl border border-emerald-400/30 bg-[#041e3c]/95 p-4 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.65)] sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-emerald-400">
@@ -223,11 +223,11 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   return (
     <>
       {healthStripNode}
-      <section className="mb-6 overflow-hidden rounded-2xl border border-rose-500/35 bg-slate-900/92 shadow-xl backdrop-blur-xs">
+      <section className="mb-6 overflow-hidden rounded-xl border border-rose-500/40 bg-[#041e3c]/95 shadow-[0_10px_28px_-8px_rgba(244,63,94,0.2)]">
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/75 px-4 py-3.5 sm:px-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-500/25 bg-linear-to-r from-[#2b0f1b] via-[#1a1632] to-[#031d3d] px-4 py-3 sm:px-5">
         <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-          <div className="rounded-lg border border-rose-500/40 bg-rose-950/80 p-1.5 text-rose-400">
+          <div className="rounded-lg border border-rose-500/40 bg-rose-500/15 p-1.5 text-rose-400">
             <ShieldAlert className="h-4 w-4" />
           </div>
           <h2 className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-100">
@@ -236,7 +236,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
               {alerts.length} 项安全提醒
             </span>
             {protectionOnlyCount > 0 && (
-              <span className="rounded-full border border-sky-500/35 bg-sky-950/55 px-2 py-0.5 text-[10px] font-medium text-sky-200 tabular-nums">
+              <span className="rounded-full border border-sky-400/35 bg-[#02182f] px-2 py-0.5 text-[10px] font-medium text-sky-200 tabular-nums">
                 {protectionOnlyCount} 项仅保护 · 不计用户滥用
               </span>
             )}
@@ -246,7 +246,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
         <button
           type="button"
           onClick={onViewAllHistory}
-          className="flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-950/35 px-3 py-1.5 text-xs font-semibold text-sky-300 transition-colors hover:border-sky-400/50 hover:bg-sky-950/60 hover:text-sky-200"
+          className="flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-400/30 bg-[#02182f] px-3 py-1.5 text-xs font-semibold text-[#00b6ec] transition-colors hover:border-[#087bff]/60 hover:bg-[#072647] hover:text-white"
         >
           <span>查看全部告警记录</span>
           <ExternalLink className="h-3.5 w-3.5" />
@@ -254,7 +254,7 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
       </div>
 
       {/* Alert List */}
-      <div className="divide-y divide-slate-800/80">
+      <div className="divide-y divide-sky-400/15">
         {alerts.map((alert) => {
           const isProcessing = submittingId === alert.id;
           const protectionOnly = isProtectionOnlySignal(alert);

@@ -15,14 +15,14 @@ export const AdmissionStatus: React.FC<{ data?: ContainerSecurity['admission']; 
   const probationSources = data.probation_sources ?? sources.filter(x => x.confirmed === false);
   const confirmedCount = confirmedSources.length;
   const displaySources = isModernEnforced ? confirmedSources : sources;
-  const tone = !verified ? 'border-amber-500/30 text-amber-300' : sourceLimitEnforced && blocked.length ? 'border-rose-500/40 text-rose-300' : data.limited ? 'border-amber-500/30 text-amber-300' : 'border-emerald-500/30 text-emerald-300';
+  const tone = !verified ? 'border-amber-500/35 text-amber-300' : sourceLimitEnforced && blocked.length ? 'border-rose-500/45 text-rose-300' : data.limited ? 'border-amber-500/35 text-amber-300' : 'border-sky-400/25 text-emerald-300';
   const minutes = Math.max(0, Math.ceil(((data.review_at || 0) - now) / 60));
-  return <section aria-label="容器网络准入保护" className={`min-w-0 rounded-lg border bg-slate-950/50 p-2 text-xs ${tone}`}>
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-1 font-medium">
-      <span>{verified ? isModernEnforced ? `业务入站准入 ${confirmedCount}/${sourceLimit} IP` : sourceLimitEnforced ? `旧版入站准入 ${sources.length}/5` : `入站来源观测 ${sources.length} 个样本` : '准入保护未确认'}</span>
-      <span>{verified && sourceLimitEnforced && blocked.length > 0 ? (isModernEnforced ? `已拦截 ${blocked.length} 个超限来源` : `旧版规则已拦 ${blocked.length} 个来源`) : verified && data.limited ? 'TCP 上限 500' : ''}</span>
+  return <section aria-label="容器网络准入保护" className={`min-w-0 overflow-hidden rounded-xl border bg-[#02182f]/80 text-xs ${tone}`}>
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-1 border-b border-sky-400/15 bg-[#031d3d]/90 px-3 py-2 font-semibold">
+      <span className="tabular-nums">{verified ? isModernEnforced ? `业务入站准入 ${confirmedCount}/${sourceLimit} IP` : sourceLimitEnforced ? `旧版入站准入 ${sources.length}/5` : `入站来源观测 ${sources.length} 个样本` : '准入保护未确认'}</span>
+      <span className="tabular-nums">{verified && sourceLimitEnforced && blocked.length > 0 ? (isModernEnforced ? `已拦截 ${blocked.length} 个超限来源` : `旧版规则已拦 ${blocked.length} 个来源`) : verified && data.limited ? 'TCP 上限 500' : ''}</span>
     </div>
-    {!compact && <div className="mt-2 space-y-2 text-slate-300">
+    {!compact && <div className="space-y-2.5 p-3 text-slate-300">
       <p>{verified ? isModernEnforced ? `默认限制单容器最多保持 ${sourceLimit} 个已建连业务 IP（仅统计容器监听端口上已完成 TCP 三次握手进入 ESTABLISHED 状态的真实客户端 IP，未建连 SYN 扫描探针不计入且 15 秒自动清理）。超过上限的新来源连接已被自动阻断；已确认来源断开后空闲 120 秒自动释放名额。` : sourceLimitEnforced ? '该节点 Agent 仍在按旧版前 5 个来源限制新连接；来源 IP 不等于真实用户数，扫描流量可能占用名额。请升级 Agent。' : '当前节点未开启来源 IP 数量限制（观察模式）。下方最多显示已建立连接来源样本。' : data.error || '采样已过期或执行未验证，不能确认当前保护状态。'}</p>
       {data.limited && <p>TCP 当前 {data.tcp_connections ?? '未知'} 条；{minutes > 0 ? `${minutes} 分钟后复查` : '等待有效采样复查'}，已追加 {data.extensions || 0} 次。已有连接自然回落。</p>}
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">

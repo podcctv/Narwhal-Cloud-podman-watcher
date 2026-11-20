@@ -57,12 +57,12 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
   return (
     <div className="mb-4 space-y-2.5">
       {/* Primary Toolbar Bar */}
-      <div className="ui-toolbar-bar flex flex-col gap-3 p-3 lg:flex-row lg:items-center lg:justify-between">
+      <div className="ui-toolbar-bar flex flex-col gap-3 rounded-xl border border-sky-400/20 bg-[#031d3d]/95 p-3 shadow-[0_8px_24px_-6px_rgba(2,10,24,0.7)] lg:flex-row lg:items-center lg:justify-between">
         {/* Left: Search & Filter Chips */}
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           {/* Quick Search Input */}
           <div className="relative min-w-[210px] flex-1 sm:max-w-xs">
-            <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-[#00b6ec]" />
             <input
               type="search"
               name="container-search"
@@ -70,7 +70,7 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               placeholder="搜索容器名 / 主机 / 运行时…"
-              className="h-8 w-full rounded-lg border border-slate-750 bg-slate-950/80 pl-8 pr-7 text-xs text-slate-200 placeholder-slate-500 transition-colors focus:border-sky-500 focus:outline-hidden focus:ring-1 focus:ring-sky-500"
+              className="h-9 w-full rounded-lg border border-sky-400/25 bg-[#02182f]/90 pl-8 pr-7 text-xs text-slate-100 placeholder-slate-500 transition-colors focus:border-[#087bff] focus:outline-hidden focus:ring-1 focus:ring-[#087bff]"
             />
             {searchQuery && (
               <button
@@ -262,13 +262,13 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
           </button>
 
           {/* View Mode Segmented Control */}
-          <div className="flex items-center rounded-lg border border-slate-700 bg-slate-950/90 p-0.5" role="group" aria-label="视图模式">
+          <div className="flex items-center rounded-lg border border-sky-400/25 bg-[#02182f] p-0.5" role="group" aria-label="视图模式">
             <button
               type="button"
               aria-pressed={viewMode === 'grid'}
               onClick={() => onViewModeChange('grid')}
-              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${viewMode === 'grid'
-                ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
+              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-[#00b6ec] ${viewMode === 'grid'
+                ? 'bg-[#087bff] font-bold text-white shadow-xs'
                 : 'text-slate-400 hover:text-slate-200'
                 }`}
               title="高密网格 (Pro Grid · 紧凑卡片)"
@@ -281,8 +281,8 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={viewMode === 'table'}
               onClick={() => onViewModeChange('table')}
-              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${viewMode === 'table'
-                ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
+              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-[#00b6ec] ${viewMode === 'table'
+                ? 'bg-[#087bff] font-bold text-white shadow-xs'
                 : 'text-slate-400 hover:text-slate-200'
                 }`}
               title="数据表格 (Data Table · 超高密度列表)"
@@ -295,8 +295,8 @@ export const DashboardToolbar: React.FC<DashboardToolbarProps> = ({
               type="button"
               aria-pressed={viewMode === 'detailed'}
               onClick={() => onViewModeChange('detailed')}
-              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sky-400 ${viewMode === 'detailed'
-                ? 'bg-sky-400 font-bold text-slate-950 shadow-xs'
+              className={`flex h-8 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-[#00b6ec] ${viewMode === 'detailed'
+                ? 'bg-[#087bff] font-bold text-white shadow-xs'
                 : 'text-slate-400 hover:text-slate-200'
                 }`}
               title="拓扑卡片 (Detailed · 宽体卡片)"
