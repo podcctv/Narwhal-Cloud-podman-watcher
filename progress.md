@@ -2,6 +2,12 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 26：阶段三/四 `tc-guard` 单测拆分、动态策略集成单测与文档对齐（v1.9.31）
+
+- **`rust/crates/tc-guard/src/tests.rs`**：从 6,687 行的 `tc-guard/src/lib.rs` 拆出 1,347 行单元测试模块至独立 `tests.rs`。
+- **`rust/crates/agent-core/src/tests.rs`**：新增 `test_dynamic_security_policy_hot_reload_and_service_audit`，覆盖动态 SNI 白名单热覆盖、`block_cn_missing_sni` 与 `disallowed_protocols` 解析联动。
+- **`project.md`**：更新 `Client Agent` 架构说明，准确反映 Rust `narwhal-agent` 主线实现。
+
 ## Phase 25：阶段二（P1）动态安全策略热下发与前端容器服务配置画像（v1.9.30）
 
 - **动态安全策略中心（`server/security_routes.py`、`server/app.py`）**：

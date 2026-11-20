@@ -967,3 +967,30 @@ fn test_build_ssh_banner_install_script_and_motd_render() {
     assert!(upd_json.contains("\"deployed_commit\":\"abc123\""));
     let _ = fs::remove_dir_all(&upd_dir);
 }
+
+#[test]
+fn test_dynamic_security_policy_hot_reload_and_service_audit() {
+    let mut state = AgentState::new(&Config::default());
+    let policy_val = runtime_drivers::JsonVal::parse(
+        r#"{"sni_enforcement":true,"block_cn_missing_sni":false,"sni_whitelist":["custom.example.org"],"service_audit_enabled":true,"disallowed_protocols":["vmess","shadowsocks"]}"#,
+    )
+    .unwrap();
+    state.apply_dynamic_security_policy(&policy_val);
+    assert_eq!(
+        state.sni_whitelist.as_deref(),
+        Some(&["custom.example.org".to_string()][..])
+    );
+    assert!(state.service_audit_enabled);
+    assert_eq!(
+        state.disallowed_protocols.as_deref(),
+        Some(&["vmess".to_string(), "shadowsocks".to_string()][..])
+    );
+    assert!(admission_guard::sni::is_allowed_sni_with_override(
+        "custom.example.org",
+        state.sni_whitelist.as_deref()
+    ));
+    assert!(!admission_guard::sni::is_allowed_sni_with_override(
+        "crates.io",
+        state.sni_whitelist.as_deref()
+    ));
+}

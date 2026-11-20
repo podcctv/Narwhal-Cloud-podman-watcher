@@ -15,7 +15,7 @@ Watcher 还把 Runman 接入 Admission：先验证当前实例代次、init PID�
 | 组件 | 主要入口 | 职责 |
 |---|---|---|
 | Server | `server/app.py`、`server/` | FastAPI API、身份与权限、SQLite 状态、告警/运维/策略/升级协调；由 `server/Dockerfile` 打包运行。 |
-| Client Agent | `client/agent.py`、`client/` | 安装在节点主机上的 Python Agent，采集运行时、资源、安全和网络证据，接收并执行受限动作。安装与升级脚本位于 `scripts/`。 |
+| Client Agent | `rust/crates/agent-core`（主线 `narwhal-agent`）、`client/`（兼容层） | 安装在节点主机上的纯 Rust 守护进程（含纯 Rust Netlink NFQUEUE、SNI 白名单、服务配置审计、资源/网络守卫），采集运行时、资源、安全和网络证据并执行受限动作。安装与升级脚本位于 `scripts/`。 |
 | Web UI | `frontend/src/` | React、TypeScript、Vite 前端。`frontend/vite.config.ts` 将构建产物写入 `server/static/`，Server 镜像使用这些静态文件。 |
 | 发布与检查 | `.github/workflows/`、`tests/` | 构建 GHCR 多架构镜像、前端构建、Python 单元/兼容性测试和浏览器回归。CI 定义以工作流文件为准。 |
 
