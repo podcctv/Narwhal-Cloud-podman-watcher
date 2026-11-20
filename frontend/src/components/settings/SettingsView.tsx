@@ -58,6 +58,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   const [proxyScheme, setProxyScheme] = useState('');
   const [savingBot, setSavingBot] = useState(false);
   const [showBotToken, setShowBotToken] = useState(false);
+
+  // Dynamic Security Policy state
+  const [secPolicy, setSecPolicy] = useState({
+    sni_enforcement: true,
+    block_cn_missing_sni: true,
+    service_audit_enabled: true,
+  });
+  const [sniText, setSniText] = useState('');
+  const [disallowedProtosText, setDisallowedProtosText] = useState('vmess, trojan');
+  const [savingSecPolicy, setSavingSecPolicy] = useState(false);
   const [deletingBot, setDeletingBot] = useState<NotificationBot | null>(null);
   const [deletingBotId, setDeletingBotId] = useState<number | null>(null);
   const [botForm, setBotForm] = useState({
@@ -71,10 +81,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   const loadSettings = useCallback(async () => {
     try {
       setLoadingPush(true);
-      const [pushData, botData, ipReputationData] = await Promise.all([
+      const [pushData, botData, ipReputationData, secPolicyData] = await Promise.all([
         api.getPushSettings(),
         api.getNotificationBots(),
         api.getIPReputationSettings(),
+        api.getSecurityPolicy().catch(() => null),
       ]);
 
       setPushSettings(pushData);
@@ -94,6 +105,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       setProxyScheme(botData.proxy_scheme || '');
       setIpReputationConfigured(Boolean(ipReputationData.configured));
       setIpReputationSettings(ipReputationData);
+      if (secPolicyData) {
+        setSecPolicy({
+          sni_enforcement: secPolicyData.sni_enforcement !== false,
+          block_cn_missing_sni: secPolicyData.block_cn_missing_sni !== false,
+          service_audit_enabled: secPolicyData.service_audit_enabled !== false,
+        });
+        setSniText((secPolicyData.sni_whitelist || []).join('\n'));
+        setDisallowedProtosText((secPolicyData.disallowed_protocols || []).join(', '));
+      }
     } catch (err: any) {
       onToast('error', `加载设置失败：${err.message || err}`);
     } finally {
@@ -130,6 +150,38 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
       onToast('error', `保存失败：${err.message || err}`);
     } finally {
       setSavingPush(false);
+    }
+  };
+
+  // Save Dynamic Security Policy
+  const handleSaveSecurityPolicy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingSecPolicy(true);
+    try {
+      const sni_whitelist = sniText
+        .split(/[\n,]+/)
+        .map(s => s.trim().toLowerCase())
+        .filter(Boolean);
+      const disallowed_protocols = disallowedProtosText
+        .split(/[,\n]+/)
+        .map(s => s.trim().toLowerCase())
+        .filter(Boolean);
+      const res = await api.saveSecurityPolicy({
+        sni_enforcement: secPolicy.sni_enforcement,
+        block_cn_missing_sni: secPolicy.block_cn_missing_sni,
+        service_audit_enabled: secPolicy.service_audit_enabled,
+        sni_whitelist,
+        disallowed_protocols,
+      });
+      if (res?.policy) {
+        setSniText((res.policy.sni_whitelist || []).join('\n'));
+        setDisallowedProtosText((res.policy.disallowed_protocols || []).join(', '));
+      }
+      onToast('success', '动态安全策略已保存，节点将在下次心跳自动热更新生效');
+    } catch (err: any) {
+      onToast('error', `保存动态安全策略失败：${err.message || err}`);
+    } finally {
+      setSavingSecPolicy(false);
     }
   };
 
@@ -783,6 +835,112 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               </div>
             )}
           </div>
+        </section>
+
+        {/* =========================================================================
+            CARD C: 动态安全策略中心（SNI 白名单 & 服务合规热下发）
+           ========================================================================= */}
+        <section className="lg:col-span-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 sm:p-6 shadow-lg space-y-5">
+          <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/10">
+                <Settings className="h-5 w-5 text-emerald-400" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-slate-100">动态安全策略中心（SNI 白名单 &amp; 服务合规）</h3>
+                <p className="text-xs text-slate-400">
+                  无需重启或重编节点 Agent，保存后随心跳实时热下发至所有在线宿主机
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={handleSaveSecurityPolicy} className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <label className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/60 p-3 cursor-pointer hover:border-slate-700 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={secPolicy.sni_enforcement}
+                  onChange={e => setSecPolicy(p => ({ ...p, sni_enforcement: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-400"
+                />
+                <div className="text-xs">
+                  <div className="font-semibold text-slate-200">启用 SNI 白名单阻断</div>
+                  <div className="text-slate-400 mt-0.5">对入站 TLS 握手校验 SNI 白名单</div>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/60 p-3 cursor-pointer hover:border-slate-700 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={secPolicy.block_cn_missing_sni}
+                  onChange={e => setSecPolicy(p => ({ ...p, block_cn_missing_sni: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-400"
+                />
+                <div className="text-xs">
+                  <div className="font-semibold text-slate-200">阻断 CN 无 SNI 流量</div>
+                  <div className="text-slate-400 mt-0.5">拦截来自中国大陆但缺失 SNI 的 TLS/QUIC 包</div>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/60 p-3 cursor-pointer hover:border-slate-700 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={secPolicy.service_audit_enabled}
+                  onChange={e => setSecPolicy(p => ({ ...p, service_audit_enabled: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-400"
+                />
+                <div className="text-xs">
+                  <div className="font-semibold text-slate-200">启用容器服务配置审计</div>
+                  <div className="text-slate-400 mt-0.5">脱敏采集容器代理配置并核验违规协议/开放代理</div>
+                </div>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  SNI 允许白名单域名（每行或逗号分隔，支持主域及子域）
+                </label>
+                <textarea
+                  rows={5}
+                  value={sniText}
+                  onChange={e => setSniText(e.target.value)}
+                  placeholder="crates.io&#10;github.com&#10;pypi.org"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-slate-100 placeholder-slate-600 focus:border-emerald-500 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                    受限/违规服务协议（逗号分隔）
+                  </label>
+                  <input
+                    type="text"
+                    value={disallowedProtosText}
+                    onChange={e => setDisallowedProtosText(e.target.value)}
+                    placeholder="vmess, trojan"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-slate-100 placeholder-slate-600 focus:border-emerald-500 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    匹配容器内正在运行的代理入站协议时触发 <code className="text-slate-300">service_disallowed_protocol</code> 告警。
+                  </p>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="submit"
+                    disabled={savingSecPolicy || loadingPush}
+                    className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-emerald-400 transition-colors focus:outline-hidden focus:ring-2 focus:ring-emerald-400 disabled:opacity-60 shadow-xs"
+                  >
+                    <Save className="h-4 w-4" />
+                    {savingSecPolicy ? '下发中…' : '保存并热下发安全策略'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </form>
         </section>
       </div>
 

@@ -737,6 +737,11 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
                 if boundary:
                     same = " AND ".join(f"newer.{column}={table}.{column}" for column in identity)
                     progress += prune(table, f"id < ? AND EXISTS (SELECT 1 FROM {table} newer WHERE {same} AND newer.id > {table}.id)", (boundary[0],))
+            if disk_pressure:
+                for aux_table in ("ops_rollups", "gfw_probe_results"):
+                    aux_boundary = conn.execute(f"SELECT rowid FROM {aux_table} ORDER BY rowid DESC LIMIT 1 OFFSET 49999").fetchone()
+                    if aux_boundary:
+                        progress += prune(aux_table, "rowid < ?", (aux_boundary[0],))
             # Drain offline hosts in batches before removing their identity.
             offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.host_id=hosts.host_id AND q.status NOT IN ('released','replaced')) LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
             for host in offline:

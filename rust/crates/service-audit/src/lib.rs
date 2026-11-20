@@ -171,6 +171,9 @@ pub fn detect_engine_from_cmd(comm: &str, argv: &[String]) -> Option<&'static st
         if cand == "frps" || cand == "frpc" {
             return Some(if cand == "frps" { "frps" } else { "frpc" });
         }
+        if cand.contains("3x-ui") || cand == "x-ui" || cand.contains("marzban") {
+            return Some("proxy-panel");
+        }
     }
     None
 }
@@ -179,7 +182,7 @@ pub fn extract_config_path_from_argv(engine: &str, argv: &[String]) -> Option<St
     let mut i = 1usize;
     while i < argv.len() {
         let arg = argv[i].as_str();
-        if matches!(arg, "-c" | "--config" | "-config" | "-conf" | "-C") {
+        if matches!(arg, "-c" | "--config" | "-config" | "-conf" | "-C" | "-confdir" | "-D") {
             if let Some(next) = argv.get(i + 1) {
                 if !next.is_empty() && !next.starts_with('-') {
                     return Some(next.clone());
@@ -188,6 +191,7 @@ pub fn extract_config_path_from_argv(engine: &str, argv: &[String]) -> Option<St
         } else if let Some(rest) = arg
             .strip_prefix("--config=")
             .or_else(|| arg.strip_prefix("-config="))
+            .or_else(|| arg.strip_prefix("-confdir="))
             .or_else(|| arg.strip_prefix("-c="))
         {
             if !rest.is_empty() {
@@ -583,7 +587,24 @@ pub fn audit_container_services_with_policy(
         let mut inbounds = Vec::new();
         if let Some(cfg_path) = extract_config_path_from_argv(engine, &argv) {
             if let Some(safe_path) = resolve_contained_path(&root_dir, &cwd, &cfg_path) {
-                if let Some(raw_cfg) = read_bounded_utf8(&safe_path) {
+                if safe_path.is_dir() {
+                    if let Ok(entries) = fs::read_dir(&safe_path) {
+                        for entry in entries.flatten().take(16) {
+                            let ep = entry.path();
+                            let ext = ep.extension().and_then(|s| s.to_str()).unwrap_or("");
+                            if !matches!(ext, "json" | "yaml" | "yml") {
+                                continue;
+                            }
+                            if let Some(raw_cfg) = read_bounded_utf8(&ep) {
+                                if raw_cfg.trim_start().starts_with('{') {
+                                    inbounds.extend(parse_json_service_inbounds(engine, &raw_cfg));
+                                } else {
+                                    inbounds.extend(parse_yaml_service_inbounds(engine, &raw_cfg));
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(raw_cfg) = read_bounded_utf8(&safe_path) {
                     if raw_cfg.trim_start().starts_with('{') {
                         inbounds = parse_json_service_inbounds(engine, &raw_cfg);
                     } else {
@@ -764,6 +785,66 @@ mod tests {
         assert_eq!(audit.violations[0].code, "service_disallowed_sni");
         assert_eq!(audit.violations[0].sni.as_deref(), Some("bad.example.org"));
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_confdir_and_proxy_panel_detection() {
+        let argv = vec![
+            "/usr/local/bin/xray".to_string(),
+            "run".to_string(),
+            "-confdir".to_string(),
+            "/etc/xray/conf.d".to_string(),
+        ];
+        assert_eq!(
+            extract_config_path_from_argv("xray", &argv).as_deref(),
+            Some("/etc/xray/conf.d")
+        );
+        assert_eq!(
+            detect_engine_from_cmd("x-ui", &[]),
+            Some("proxy-panel")
+        );
+        assert_eq!(
+            detect_engine_from_cmd("3x-ui", &[]),
+            Some("proxy-panel")
+        );
+        assert_eq!(
+            detect_engine_from_cmd("marzban", &[]),
+            Some("proxy-panel")
+        );
+
+        let base = std::env::temp_dir().join(format!("narwhal_confdir_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let proc_dir = base.join("proc");
+        let root_dir = proc_dir.join("100").join("root");
+        let conf_d = root_dir.join("etc").join("xray").join("conf.d");
+        fs::create_dir_all(&conf_d).unwrap();
+        fs::write(
+            conf_d.join("01_inbounds.json"),
+            r#"{"inbounds":[{"protocol":"vmess","port":10086,"settings":{"clients":[{"id":"SECRET"}]}}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            conf_d.join("02_tls.json"),
+            r#"{"inbounds":[{"protocol":"vless","port":443,"streamSettings":{"tlsSettings":{"serverName":"evil.example.com"}}}]}"#,
+        )
+        .unwrap();
+
+        let p_xray = proc_dir.join("202");
+        fs::create_dir_all(&p_xray).unwrap();
+        fs::write(p_xray.join("comm"), "xray\n").unwrap();
+        fs::write(
+            p_xray.join("cmdline"),
+            b"/usr/local/bin/xray\0run\0-confdir\0/etc/xray/conf.d\0",
+        )
+        .unwrap();
+
+        let audit = audit_container_services(&proc_dir, &[202], Some(100));
+        assert_eq!(audit.services.len(), 1);
+        assert_eq!(audit.services[0].inbounds.len(), 2);
+        let codes: Vec<&str> = audit.violations.iter().map(|v| v.code).collect();
+        assert!(codes.contains(&"service_disallowed_protocol"));
+        assert!(codes.contains(&"service_disallowed_sni"));
         let _ = fs::remove_dir_all(&base);
     }
 }

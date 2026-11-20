@@ -2,6 +2,17 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 27：动态安全策略前端控制台、`service-audit` 目录扫描与数据库高频表裁剪（v1.9.32）
+
+- **动态安全策略前端控制台（`frontend/src/components/settings/SettingsView.tsx`、`frontend/src/api/client.ts`）**：
+  - 在系统设置页新增「动态安全策略中心（SNI 白名单 & 服务合规）」卡片，支持可视化配置 `sni_enforcement`、`block_cn_missing_sni`、`service_audit_enabled`、`sni_whitelist` 与 `disallowed_protocols`，保存后随心跳实时热下发。
+- **`service-audit` v2 目录配置与面板进程识别（`rust/crates/service-audit/src/lib.rs`）**：
+  - 支持 `-confdir` / `-D` / `-C` 目录型配置扫描（单目录最多 16 个 `.json`/`.yaml`/`.yml` 文件）及 `x-ui`/`3x-ui`/`marzban` 代理面板进程识别，并补充对应单测。
+- **`net-guard` 单测拆分（`rust/crates/net-guard/src/lib.rs`、`rust/crates/net-guard/src/tests.rs`）**：
+  - 将 `net-guard` 单元测试模块拆出至独立 `tests.rs`。
+- **高频历史表容量兜底（`server/app.py`）**：
+  - 在 `cleanup_old_reports` 的 `disk_pressure` 模式下增加对 `ops_rollups` 与 `gfw_probe_results` 的 50,000 行上限裁剪，防止 `/data` 磁盘持续增长。
+
 ## Phase 26：阶段三/四 `tc-guard` 单测拆分、动态策略集成单测与文档对齐（v1.9.31）
 
 - **`rust/crates/tc-guard/src/tests.rs`**：从 6,687 行的 `tc-guard/src/lib.rs` 拆出 1,347 行单元测试模块至独立 `tests.rs`。

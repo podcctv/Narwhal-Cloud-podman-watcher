@@ -373,6 +373,21 @@ export const api = {
     rfw_unhealthy_hosts: { host_id: string; status: string; reason: string; remediation: string }[];
     auto_update_issues: { host_id: string; agent_version: string; expected_version: string; auto_update?: { has_error?: boolean; last_error?: string } }[];
   }>('/api/v1/security/sni-and-node-health'),
+  getSecurityPolicy: () => request<{
+    sni_enforcement: boolean;
+    block_cn_missing_sni: boolean;
+    sni_whitelist: string[];
+    service_audit_enabled: boolean;
+    disallowed_protocols: string[];
+    updated_at?: number;
+  }>('/api/v1/security/policy'),
+  saveSecurityPolicy: (payload: {
+    sni_enforcement?: boolean;
+    block_cn_missing_sni?: boolean;
+    sni_whitelist?: string[];
+    service_audit_enabled?: boolean;
+    disallowed_protocols?: string[];
+  }) => request<{ ok: boolean; policy: any }>('/api/v1/security/policy', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 // Utilities for visual formatting
