@@ -66,5 +66,9 @@ use std::{
 #[allow(unused_imports)]
 use runtime_drivers::ContainerSample;
 
+#[cfg(all(test, unix))]
+#[allow(unused_imports)]
+use std::os::unix::fs::PermissionsExt;
+
 #[cfg(test)]
 mod tests;
