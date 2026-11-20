@@ -661,7 +661,26 @@ pub fn extract_quic_initial_sni(udp_payload: &[u8]) -> SniParse {
     parse_tls_handshake_client_hello_sni(&assembled)
 }
 
+pub fn is_allowed_sni_with_override(raw: &str, allowed_override: Option<&[String]>) -> bool {
+    let Some(norm) = normalize_sni(raw) else {
+        return false;
+    };
+    if let Some(list) = allowed_override {
+        return list.iter().any(|allowed| norm == *allowed);
+    }
+    SNI_WHITELIST.iter().any(|&allowed| norm == allowed)
+}
+
 pub fn evaluate_inbound_sni(raw_ip_packet: &[u8], is_cn_src: bool) -> SniDecision {
+    evaluate_inbound_sni_with_policy(raw_ip_packet, is_cn_src, None, true)
+}
+
+pub fn evaluate_inbound_sni_with_policy(
+    raw_ip_packet: &[u8],
+    is_cn_src: bool,
+    allowed_override: Option<&[String]>,
+    block_cn_missing_sni: bool,
+) -> SniDecision {
     let Some(l4) = extract_l4_payload(raw_ip_packet) else {
         return SniDecision::Allow;
     };
@@ -675,7 +694,7 @@ pub fn evaluate_inbound_sni(raw_ip_packet: &[u8], is_cn_src: bool) -> SniDecisio
     };
     match parsed {
         SniParse::Found(sni) => {
-            if is_allowed_sni(&sni) {
+            if is_allowed_sni_with_override(&sni, allowed_override) {
                 SniDecision::Allow
             } else {
                 SniDecision::Block {
@@ -688,7 +707,7 @@ pub fn evaluate_inbound_sni(raw_ip_packet: &[u8], is_cn_src: bool) -> SniDecisio
             }
         }
         SniParse::MissingSni | SniParse::Malformed => {
-            if is_cn_src {
+            if is_cn_src && block_cn_missing_sni {
                 SniDecision::Block {
                     reason: "missing_or_invalid_sni_cn",
                     sni: None,

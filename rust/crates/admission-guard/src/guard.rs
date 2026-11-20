@@ -20,7 +20,7 @@ use crate::observe::{
     parse_stat_start_ticks, ContainerDescriptor, ContainerSnapshot,
 };
 use crate::policy::{self, current_unix_ts_i64, Policy};
-use crate::sni::{evaluate_inbound_sni, extract_l4_payload, SniDecision};
+use crate::sni::{evaluate_inbound_sni_with_policy, extract_l4_payload, SniDecision};
 use crate::AdmissionError;
 
 pub const DEFAULT_ADMISSION_JOURNAL: &str = "/var/lib/narwhal-monitor/admission.json";
@@ -445,6 +445,8 @@ pub struct GuardState<R: NftRunner = LiveNftRunner> {
     pub results: BTreeMap<(String, String, String), BTreeMap<String, JsonVal>>,
     pub notifications: BTreeMap<NotificationSignature, i64>,
     pub sni_enforcement: bool,
+    pub block_cn_missing_sni: bool,
+    pub sni_whitelist: Option<Vec<String>>,
     pub cn_lookup: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
     pub sni_violations: Vec<SniViolationEvent>,
     pub sni_dedup: BTreeMap<(String, u16, String, String), i64>,
@@ -530,6 +532,8 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
                 results: BTreeMap::new(),
                 notifications: BTreeMap::new(),
                 sni_enforcement: true,
+                block_cn_missing_sni: true,
+                sni_whitelist: None,
                 cn_lookup: None,
                 sni_violations: Vec::new(),
                 sni_dedup: BTreeMap::new(),
@@ -593,6 +597,19 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
         });
     }
 
+    pub fn update_sni_policy(
+        &self,
+        enabled: bool,
+        whitelist: Option<Vec<String>>,
+        block_cn_missing_sni: bool,
+    ) {
+        self.with_inner(|inner| {
+            inner.sni_enforcement = enabled;
+            inner.sni_whitelist = whitelist;
+            inner.block_cn_missing_sni = block_cn_missing_sni;
+        });
+    }
+
     pub fn drain_sni_violations(&self) -> Vec<SniViolationEvent> {
         self.with_inner(|inner| std::mem::take(&mut inner.sni_violations))
     }
@@ -646,7 +663,12 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
                         proto: vproto,
                         dport: vdport,
                         src_ip,
-                    } = evaluate_inbound_sni(raw, is_cn_src)
+                    } = evaluate_inbound_sni_with_policy(
+                        raw,
+                        is_cn_src,
+                        inner.sni_whitelist.as_deref(),
+                        inner.block_cn_missing_sni,
+                    )
                     {
                         let dedup_key = (
                             key.clone(),

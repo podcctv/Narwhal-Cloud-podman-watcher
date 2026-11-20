@@ -2,6 +2,16 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 25：阶段二（P1）动态安全策略热下发与前端容器服务配置画像（v1.9.30）
+
+- **动态安全策略中心（`server/security_routes.py`、`server/app.py`）**：
+  - 新增 `GET / POST /api/v1/security/policy`，将 `sni_enforcement`、`block_cn_missing_sni`、`sni_whitelist`、`service_audit_enabled`、`disallowed_protocols` 持久化到 `system_settings` 并随 `POST /api/v1/report` 响应实时下发至节点。
+- **Rust 端热更新联动（`admission-guard`、`service-audit`、`agent-core`）**：
+  - `Guard::update_sni_policy` 与 `evaluate_inbound_sni_with_policy` 支持动态白名单与 CN 无 SNI 开关热切换，无需重编或重启 `narwhal-agent`；
+  - `service-audit` 同步读取动态白名单与受限协议列表；`AgentState::apply_dynamic_security_policy` 在上报回包后即时生效。
+- **前端容器抽屉「服务配置画像」（`frontend/src/components/container/ContainerDrawer.tsx`）**：
+  - 展示已脱敏的容器运行引擎、PID、监听协议/端口、SNI 与认证配置状态，并重新构建 `server/static/`。
+
 ## Phase 24：阶段一（P0）数据库容量自适应治理与 `admission` 失败细节透传（v1.9.29）
 
 - **主控数据库磁盘压力自适应裁剪（`server/app.py`）**：

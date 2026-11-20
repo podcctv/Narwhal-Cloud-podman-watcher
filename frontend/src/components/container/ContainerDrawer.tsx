@@ -635,6 +635,43 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
           {/* Drawer Scrollable Body */}
           <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 sm:space-y-6">
             <AdmissionStatus data={sec.admission} stale={container?.alerts?.stale} />
+            {Array.isArray(sec.service_audit?.services) && sec.service_audit.services.length > 0 && (
+              <section className="rounded-xl border border-indigo-500/30 bg-indigo-950/20 p-4 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-indigo-200">容器服务配置画像（已脱敏）</h3>
+                  {(sec.service_audit.violations_count || 0) > 0 ? (
+                    <span className="rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-semibold text-rose-200 tabular-nums">
+                      {sec.service_audit.violations_count} 项违规配置
+                    </span>
+                  ) : (
+                    <span className="rounded-full border border-emerald-500/35 bg-emerald-950/50 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
+                      配置合规
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  {sec.service_audit.services.map((svc: any, idx: number) => (
+                    <div key={`${svc.engine}-${svc.pid}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-900/75 px-3 py-2 text-xs text-slate-300 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono font-semibold text-indigo-300">{svc.engine}</span>
+                        <span className="text-[11px] text-slate-500 tabular-nums">PID {svc.pid}</span>
+                      </div>
+                      {Array.isArray(svc.inbounds) && svc.inbounds.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {svc.inbounds.map((inb: any, j: number) => (
+                            <span key={j} className="rounded border border-slate-700 bg-slate-950/80 px-1.5 py-0.5 font-mono text-[11px] text-slate-200">
+                              {inb.protocol}:{inb.port || 0}
+                              {Array.isArray(inb.sni_list) && inb.sni_list.length > 0 ? ` · SNI=${inb.sni_list.join(',')}` : ''}
+                              {!inb.auth_configured ? ' · 无认证' : ''}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
             {(identity.runtime === 'incus' || identity.runtime === 'podman' || identity.runtime === 'runman') && (
               <section className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-4 space-y-3">
                 <div className="flex items-start gap-3">

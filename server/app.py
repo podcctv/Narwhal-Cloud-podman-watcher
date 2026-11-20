@@ -4054,6 +4054,7 @@ async def report(
     conn = db()
     try:
         motd_states = buyer_notifications.banner_states(conn, host_id)
+        security_policy = security_routes.get_dynamic_security_policy(conn)
     finally:
         conn.close()
     return {
@@ -4066,6 +4067,7 @@ async def report(
         "automatic_stops_queued": automatic_stops_queued,
         "narwhal_buyer_push": {"owner": "server", "enabled": False},
         "motd_states": motd_states,
+        "security_policy": security_policy,
     }
 
 
@@ -6893,6 +6895,7 @@ operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup
 disk_cleanup.attach(app,db)
 commerce.attach(app, db, lambda: DB_PATH, lambda: (DASHBOARD_USERNAME, DASHBOARD_PASSWORD), broadcast_commerce_telegram)
 tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
+security_routes.attach(app, db, STALE_SECONDS, lambda: APP_VERSION)
 gfw_monitor.attach(app, db, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)
 admission_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, buyer_notifications.reconcile)
@@ -6937,7 +6940,6 @@ def security_alerts(active_only: bool = True, limit: int = 200) -> JSONResponse:
     return JSONResponse(content={"items": items, "active_count": active_count})
 
 
-@app.get("/api/v1/security/sni-and-node-health")
 def sni_and_node_health(limit: int = 100) -> JSONResponse:
     conn = db()
     try:

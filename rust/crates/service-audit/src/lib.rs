@@ -15,7 +15,7 @@ use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
-use admission_guard::sni::{is_allowed_sni, normalize_sni};
+use admission_guard::sni::{is_allowed_sni_with_override, normalize_sni};
 use proc_probe::json_escape;
 use runtime_drivers::JsonVal;
 
@@ -457,6 +457,14 @@ pub fn parse_yaml_service_inbounds(engine: &str, raw: &str) -> Vec<ServiceInboun
 }
 
 pub fn evaluate_service_violations(svc: &ServiceConfigSummary) -> Vec<ServiceViolation> {
+    evaluate_service_violations_with_policy(svc, None, None)
+}
+
+pub fn evaluate_service_violations_with_policy(
+    svc: &ServiceConfigSummary,
+    allowed_snis: Option<&[String]>,
+    disallowed_protocols: Option<&[String]>,
+) -> Vec<ServiceViolation> {
     let mut out = Vec::new();
     if matches!(svc.engine.as_str(), "frps" | "frpc") {
         out.push(ServiceViolation {
@@ -475,7 +483,11 @@ pub fn evaluate_service_violations(svc: &ServiceConfigSummary) -> Vec<ServiceVio
     }
 
     for inb in &svc.inbounds {
-        if matches!(inb.protocol.as_str(), "vmess" | "trojan") {
+        let proto_disallowed = match disallowed_protocols {
+            Some(list) => list.iter().any(|p| p.eq_ignore_ascii_case(&inb.protocol)),
+            None => matches!(inb.protocol.as_str(), "vmess" | "trojan"),
+        };
+        if proto_disallowed {
             out.push(ServiceViolation {
                 code: "service_disallowed_protocol",
                 severity: "warning",
@@ -506,7 +518,7 @@ pub fn evaluate_service_violations(svc: &ServiceConfigSummary) -> Vec<ServiceVio
             });
         }
         for sni in &inb.sni_list {
-            if !is_allowed_sni(sni) {
+            if !is_allowed_sni_with_override(sni, allowed_snis) {
                 out.push(ServiceViolation {
                     code: "service_disallowed_sni",
                     severity: "warning",
@@ -516,7 +528,7 @@ pub fn evaluate_service_violations(svc: &ServiceConfigSummary) -> Vec<ServiceVio
                     sni: Some(sni.clone()),
                     title: "容器服务配置了非白名单 SNI".to_string(),
                     message: format!(
-                        "检测到 {}（{}/{}）配置的伪装域名 SNI（{}）不在平台 9 个白名单内，入站连接将被直接阻断，请尽快更换。",
+                        "检测到 {}（{}/{}）配置的伪装域名 SNI（{}）不在平台白名单内，入站连接将被直接阻断，请尽快更换。",
                         svc.engine, inb.protocol, inb.port, sni
                     ),
                 });
@@ -530,6 +542,16 @@ pub fn audit_container_services(
     proc_root: &Path,
     pids: &[u32],
     container_init_pid: Option<u32>,
+) -> ContainerServiceAudit {
+    audit_container_services_with_policy(proc_root, pids, container_init_pid, None, None)
+}
+
+pub fn audit_container_services_with_policy(
+    proc_root: &Path,
+    pids: &[u32],
+    container_init_pid: Option<u32>,
+    allowed_snis: Option<&[String]>,
+    disallowed_protocols: Option<&[String]>,
 ) -> ContainerServiceAudit {
     let mut audit = ContainerServiceAudit::default();
     let Some(init_pid) = container_init_pid.filter(|&p| p > 0) else {
@@ -575,7 +597,8 @@ pub fn audit_container_services(
             pid,
             inbounds,
         };
-        let mut viols = evaluate_service_violations(&svc);
+        let mut viols =
+            evaluate_service_violations_with_policy(&svc, allowed_snis, disallowed_protocols);
         audit.violations.append(&mut viols);
         audit.services.push(svc);
     }
@@ -609,11 +632,27 @@ pub fn audit_container_with_pid_ns(
     pid_ns_map: &HashMap<String, Vec<u32>>,
     container_init_pid: Option<u32>,
 ) -> ContainerServiceAudit {
+    audit_container_with_pid_ns_policy(proc_root, pid_ns_map, container_init_pid, None, None)
+}
+
+pub fn audit_container_with_pid_ns_policy(
+    proc_root: &Path,
+    pid_ns_map: &HashMap<String, Vec<u32>>,
+    container_init_pid: Option<u32>,
+    allowed_snis: Option<&[String]>,
+    disallowed_protocols: Option<&[String]>,
+) -> ContainerServiceAudit {
     let Some(init_pid) = container_init_pid.filter(|&p| p > 0) else {
         return ContainerServiceAudit::default();
     };
     let Ok(ns) = fs::read_link(proc_root.join(init_pid.to_string()).join("ns").join("pid")) else {
-        return audit_container_services(proc_root, &[init_pid], Some(init_pid));
+        return audit_container_services_with_policy(
+            proc_root,
+            &[init_pid],
+            Some(init_pid),
+            allowed_snis,
+            disallowed_protocols,
+        );
     };
     let ns_key = ns.to_string_lossy();
     let fallback = [init_pid];
@@ -621,7 +660,13 @@ pub fn audit_container_with_pid_ns(
         .get(ns_key.as_ref())
         .map(Vec::as_slice)
         .unwrap_or(&fallback);
-    audit_container_services(proc_root, pids, Some(init_pid))
+    audit_container_services_with_policy(
+        proc_root,
+        pids,
+        Some(init_pid),
+        allowed_snis,
+        disallowed_protocols,
+    )
 }
 
 #[cfg(test)]

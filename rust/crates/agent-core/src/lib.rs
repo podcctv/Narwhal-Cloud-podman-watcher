@@ -458,6 +458,9 @@ pub struct AgentState {
     #[cfg_attr(not(unix), allow(dead_code))]
     last_alerts_json: String,
     motd_deliveries: HashMap<(String, String, String), MotdDeliveryState>,
+    sni_whitelist: Option<Vec<String>>,
+    service_audit_enabled: bool,
+    disallowed_protocols: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -598,6 +601,9 @@ impl AgentState {
             motd_states: Vec::new(),
             last_alerts_json: "[]".to_string(),
             motd_deliveries: HashMap::new(),
+            sni_whitelist: None,
+            service_audit_enabled: true,
+            disallowed_protocols: None,
         }
     }
 
@@ -612,9 +618,53 @@ impl AgentState {
                     Arc::new(move |ip| geoip_probe::is_country_ip(&p, ip, "CN"));
                 cb
             });
-            ctrl.guard.set_sni_enforcement(sni_enabled, cn_lookup);
+        ctrl.guard.set_sni_enforcement(sni_enabled, cn_lookup);
         }
         self
+    }
+
+    pub fn apply_dynamic_security_policy(&mut self, policy: &runtime_drivers::JsonVal) {
+        let sni_env_enabled = std::env::var("NARWHAL_SNI_WHITELIST_ENABLED")
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
+        let sni_enabled = sni_env_enabled
+            && policy
+                .get("sni_enforcement")
+                .and_then(runtime_drivers::JsonVal::as_bool)
+                .unwrap_or(true);
+        let block_cn_missing = policy
+            .get("block_cn_missing_sni")
+            .and_then(runtime_drivers::JsonVal::as_bool)
+            .unwrap_or(true);
+        let whitelist = policy
+            .get("sni_whitelist")
+            .and_then(runtime_drivers::JsonVal::as_arr)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(runtime_drivers::JsonVal::as_str)
+                    .filter_map(admission_guard::sni::normalize_sni)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty());
+        self.sni_whitelist = whitelist.clone();
+        self.service_audit_enabled = policy
+            .get("service_audit_enabled")
+            .and_then(runtime_drivers::JsonVal::as_bool)
+            .unwrap_or(true);
+        self.disallowed_protocols = policy
+            .get("disallowed_protocols")
+            .and_then(runtime_drivers::JsonVal::as_arr)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(runtime_drivers::JsonVal::as_str)
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            });
+        if let Some(ref ctrl) = self.admission_controller {
+            ctrl.guard
+                .update_sni_policy(sni_enabled, whitelist, block_cn_missing);
+        }
     }
 
     pub fn lookup_geoip_json(&self, ips: &[String]) -> String {
@@ -2440,9 +2490,17 @@ impl AgentState {
                 .unwrap_or_default();
 
             // 10. service config audit (sanitized metadata only, never secrets/raw config)
-            let service_audit_field = if supported_rt && c.status.eq_ignore_ascii_case("running") {
-                let svc_audit =
-                    service_audit::audit_container_with_pid_ns(&self.proc_root, &pid_ns_map, c.pid);
+            let service_audit_field = if self.service_audit_enabled
+                && supported_rt
+                && c.status.eq_ignore_ascii_case("running")
+            {
+                let svc_audit = service_audit::audit_container_with_pid_ns_policy(
+                    &self.proc_root,
+                    &pid_ns_map,
+                    c.pid,
+                    self.sni_whitelist.as_deref(),
+                    self.disallowed_protocols.as_deref(),
+                );
                 for item in svc_audit.alerts_to_json_items(&rt, &c.project, &c.name, &inst_id) {
                     alert_jsons.push(item);
                 }
@@ -4591,6 +4649,9 @@ pub fn run_with_config(
                     if let Ok(parsed) = runtime_drivers::JsonVal::parse(body_str.trim()) {
                         if let Some(arr) = parsed.get("motd_states").and_then(|v| v.as_arr()) {
                             state.motd_states = arr.to_vec();
+                        }
+                        if let Some(sp) = parsed.get("security_policy") {
+                            state.apply_dynamic_security_policy(sp);
                         }
                     }
                 }

@@ -199,6 +199,9 @@ class ServerRuntimeTests(unittest.TestCase):
             server.SHARED_SECRET.encode(), body + timestamp.encode(), hashlib.sha256
         ).hexdigest()
         result = asyncio.run(server.report(Request(), timestamp, signature))
+        self.assertIn("security_policy", result)
+        sp = result.pop("security_policy")
+        self.assertTrue(sp.get("sni_enforcement"))
         self.assertEqual(
             result,
             {
