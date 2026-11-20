@@ -2,6 +2,17 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 30：`tc-guard` 全量模块拆解、`server/db_maintenance.py` 抽离与合规联动修复（v1.9.35）
+
+- **`tc-guard` 模块化拆分（`rust/crates/tc-guard/src/`）**：
+  - 将原 5,340 行单文件 `lib.rs` 拆分为 `types`、`json`、`policy`、`filter`、`runner`、`verify`、`tc_ops`、`auto_throttle`、`state`、`reconcile` 共 10 个内聚子模块，`lib.rs` 保留公共导出。
+- **`protocol-guard` 单测拆分（`rust/crates/protocol-guard/src/speedtest_tests.rs`）**：
+  - 将 `speedtest.rs` 内联单元测试拆出至独立 `speedtest_tests.rs`。
+- **服务端数据库清理模块抽离（`server/db_maintenance.py`、`server/app.py`）**：
+  - 将 `cleanup_old_reports` 核心保留与容量裁剪逻辑拆入独立模块 `server/db_maintenance.py`，`app.py` 保留向后兼容封装。
+- **动态策略持久化 SQLite 契约修复与单测补充（`server/security_routes.py`、`tests/test_server_runtime.py`）**：
+  - 修复 `save_dynamic_security_policy` 写入 `system_settings` 缺少 `updated_at` 及 `maybe_enqueue_auto_compliance_connlimit` 写入 `security_actions` 缺少 `alert_id=0` / `status='queued'` / `updated_at` 的约束问题，并补充对应集成测试。
+
 ## Phase 29：违规服务自动限流策略、`service-audit` TOML/INI 解析与 `actions`/`vmess` 单测拆分（v1.9.34）
 
 - **违规服务自动合规限流联动（`server/security_routes.py`、`server/app.py`、`SettingsView.tsx`）**：
