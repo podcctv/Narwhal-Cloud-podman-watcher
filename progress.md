@@ -1,6 +1,14 @@
 # 当前进展与待办
 
-更新时间：2026-11-18（Asia/Shanghai）
+更新时间：2026-11-19（Asia/Shanghai）
+
+## Phase 24：阶段一（P0）数据库容量自适应治理与 `admission` 失败细节透传（v1.9.29）
+
+- **主控数据库磁盘压力自适应裁剪（`server/app.py`）**：
+  - 在 `cleanup_old_reports` 新增 `/data` 磁盘水位检测（可用空间 `< 15%` 或 `< 2 GiB` 时自动收紧 `reports` 上限至 `15,000`、`host_security` 上限至 `8,000` 及原始保留窗口至 48 小时，仍严格保留每个容器/主机的最新一条采样）；
+  - 补充 `ops_rollups`（按 `bucket`）、`host_reachability_history`（14 天）与孤立 `gfw_probe_results` 的分批清理任务，并将 `incremental_vacuum` 步长提升至 `2048` 页。
+- **`admission_states` 透传 `failure_detail`（`server/admission_api.py`）**：
+  - 在 `normalized_alert` 中保留节点上报的截断 `failure_detail`（最长 200 字符），便于直接从服务端定位剩余 `unsupported_network` / `sample_failed` 根因。
 
 ## Phase 23：容器服务配置安全审计与合规判定（`service-audit`，v1.9.28）
 

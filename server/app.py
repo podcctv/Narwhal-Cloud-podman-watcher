@@ -11,6 +11,7 @@ import logging
 import os
 import posixpath
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -696,11 +697,25 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
                 removed_reports += count
             return count
 
+        disk_pressure = False
+        try:
+            du = shutil.disk_usage(Path(DB_PATH).resolve().parent)
+            free_pct = (du.free / du.total * 100.0) if du.total > 0 else 100.0
+            disk_pressure = free_pct < 15.0 or du.free < 2 * 1024 * 1024 * 1024
+        except OSError:
+            disk_pressure = False
+        effective_report_cap = min(REPORT_MAX_ROWS, 15000) if disk_pressure else REPORT_MAX_ROWS
+        effective_host_sec_cap = min(HOST_SECURITY_MAX_ROWS, 8000) if disk_pressure else HOST_SECURITY_MAX_ROWS
+        effective_raw_cutoff = max(raw_cutoff, now - 48 * 3600) if disk_pressure else raw_cutoff
+
         for _ in range(20):
             progress = 0
             jobs = [
-                ("reports", "ts < ?", (raw_cutoff,)),
-                ("host_security", "ts < ?", (raw_cutoff,)),
+                ("reports", "ts < ?", (effective_raw_cutoff,)),
+                ("host_security", "ts < ?", (effective_raw_cutoff,)),
+                ("ops_rollups", "bucket < ?", (cutoff,)),
+                ("host_reachability_history", "checked_at < ?", (now - min(PURGE_SECONDS, 14 * 86400),)),
+                ("gfw_probe_results", "NOT EXISTS (SELECT 1 FROM gfw_probe_jobs j WHERE j.id=gfw_probe_results.job_id)", ()),
                 ("host_collection_health_hourly", "bucket_start < ?", (now - 30 * 86400,)),
                 ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status NOT IN ('released','replaced'))", (cutoff,)),
                 ("security_actions", "status IN ('succeeded','failed','cancelled') AND updated_at < ?", (cutoff,)),
@@ -715,8 +730,8 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
             # A row budget also bounds high-frequency raw history within the
             # retention period. Preserve each identity's newest sample.
             for table, cap, identity in (
-                ("reports", REPORT_MAX_ROWS, ("host_id", "runtime", "project", "container_name")),
-                ("host_security", HOST_SECURITY_MAX_ROWS, ("host_id",)),
+                ("reports", effective_report_cap, ("host_id", "runtime", "project", "container_name")),
+                ("host_security", effective_host_sec_cap, ("host_id",)),
             ):
                 boundary = conn.execute(f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?", (cap - 1,)).fetchone()
                 if boundary:
@@ -738,9 +753,9 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
         # Incremental mode is enabled for new DBs and by the explicit recovery
         # command for old DBs. Never run a full VACUUM in this online loop.
         if int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]) == 2:
-            conn.execute("PRAGMA incremental_vacuum(512)").fetchall()
+            conn.execute("PRAGMA incremental_vacuum(2048)").fetchall()
         conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
-        _cleanup_status.update(last_success=now, removed_rows=removed_total, backlog=backlog, error=None)
+        _cleanup_status.update(last_success=now, removed_rows=removed_total, backlog=backlog, disk_pressure=disk_pressure, error=None)
         _next_cleanup_monotonic = time.monotonic() + (5 if backlog else REPORT_CLEANUP_INTERVAL_SECONDS)
         return removed_reports
     except Exception as exc:

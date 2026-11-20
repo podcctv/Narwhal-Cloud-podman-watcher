@@ -67,6 +67,9 @@ def normalized_alert(value):
         stage=source.get('failure_stage')
         data['failure_code']=code if code in ADMISSION_FAILURES else 'unknown'
         data['failure_stage']=stage if stage in ADMISSION_STAGES else 'unknown'
+        detail=str(source.get('failure_detail') or '').strip()[:200]
+        if detail:
+            data['failure_detail']=detail
         data['error']=f"{ADMISSION_STAGES[data['failure_stage']]}未通过：{ADMISSION_FAILURES[data['failure_code']]}"
     source_limit_enforced = source.get('source_limit_enforced') is not False
     raw_limit = source.get('source_limit')
