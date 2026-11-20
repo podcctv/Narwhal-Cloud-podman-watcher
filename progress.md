@@ -2,7 +2,7 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
-## Phase 30：`tc-guard` 全量模块拆解、`server/db_maintenance.py` 抽离与合规联动修复（v1.9.35）
+## Phase 30：`tc-guard` 全量模块拆解、`server/db_maintenance.py` 抽离与合规联动修复（v1.9.35 / v1.9.36）
 
 - **`tc-guard` 模块化拆分（`rust/crates/tc-guard/src/`）**：
   - 将原 5,340 行单文件 `lib.rs` 拆分为 `types`、`json`、`policy`、`filter`、`runner`、`verify`、`tc_ops`、`auto_throttle`、`state`、`reconcile` 共 10 个内聚子模块，`lib.rs` 保留公共导出。
