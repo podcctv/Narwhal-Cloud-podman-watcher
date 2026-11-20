@@ -369,6 +369,20 @@ export const api = {
       total: number;
       cn_missing_sni_count: number;
       top_disallowed_snis: { sni: string; count: number }[];
+      items?: {
+        id: number;
+        host_id: string;
+        runtime: string;
+        project: string;
+        container_name: string;
+        severity: string;
+        status: string;
+        last_seen: number;
+        sni: string;
+        dst_port?: number;
+        proto?: string;
+        reason?: string;
+      }[];
     };
     rfw_unhealthy_hosts: { host_id: string; status: string; reason: string; remediation: string }[];
     auto_update_issues: { host_id: string; agent_version: string; expected_version: string; auto_update?: { has_error?: boolean; last_error?: string } }[];

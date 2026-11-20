@@ -171,11 +171,57 @@ impl BlockedEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SniBlockedDomain {
+    pub sni: String,
+    pub reason: String,
+    pub dst_port: u16,
+    pub proto: String,
+    pub count: u64,
+    pub last_seen: i64,
+}
+
+impl SniBlockedDomain {
+    pub fn to_json_val(&self) -> JsonVal {
+        let mut map = BTreeMap::new();
+        map.insert("sni".to_string(), JsonVal::Str(self.sni.clone()));
+        map.insert("reason".to_string(), JsonVal::Str(self.reason.clone()));
+        map.insert("dst_port".to_string(), JsonVal::Num(self.dst_port as f64));
+        map.insert("proto".to_string(), JsonVal::Str(self.proto.clone()));
+        map.insert("count".to_string(), JsonVal::Num(self.count as f64));
+        map.insert("last_seen".to_string(), JsonVal::Num(self.last_seen as f64));
+        JsonVal::Obj(map)
+    }
+
+    pub fn from_json_val(val: &JsonVal) -> Option<Self> {
+        let map = val.as_obj()?;
+        Some(Self {
+            sni: map.get("sni").and_then(JsonVal::as_str)?.to_string(),
+            reason: map
+                .get("reason")
+                .and_then(JsonVal::as_str)
+                .unwrap_or("disallowed_sni")
+                .to_string(),
+            dst_port: map.get("dst_port").and_then(JsonVal::as_u64).unwrap_or(443) as u16,
+            proto: map
+                .get("proto")
+                .and_then(JsonVal::as_str)
+                .unwrap_or("tls")
+                .to_string(),
+            count: map.get("count").and_then(JsonVal::as_u64).unwrap_or(1),
+            last_seen: map.get("last_seen").and_then(JsonVal::as_i64).unwrap_or(0),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub sources: Vec<SourceEntry>,
     pub blocked: BTreeMap<String, BlockedEntry>,
     pub blocked_packets: u64,
+    pub sni_blocked_total: u64,
+    pub sni_cn_missing_total: u64,
+    pub sni_recent_blocked: Vec<SniBlockedDomain>,
     pub tcp_denied: u64,
     pub extensions: u64,
     pub seeded: bool,
@@ -213,6 +259,9 @@ impl Policy {
             sources: Vec::new(),
             blocked: BTreeMap::new(),
             blocked_packets: 0,
+            sni_blocked_total: 0,
+            sni_cn_missing_total: 0,
+            sni_recent_blocked: Vec::new(),
             tcp_denied: 0,
             extensions: 0,
             seeded: false,
@@ -255,6 +304,19 @@ impl Policy {
         }
         if let Some(v) = map.get("blocked_packets").and_then(JsonVal::as_u64) {
             self.blocked_packets = v;
+        }
+        if let Some(v) = map.get("sni_blocked_total").and_then(JsonVal::as_u64) {
+            self.sni_blocked_total = v;
+        }
+        if let Some(v) = map.get("sni_cn_missing_total").and_then(JsonVal::as_u64) {
+            self.sni_cn_missing_total = v;
+        }
+        if let Some(arr) = map.get("sni_recent_blocked").and_then(JsonVal::as_arr) {
+            for item in arr.iter().take(16) {
+                if let Some(entry) = SniBlockedDomain::from_json_val(item) {
+                    self.sni_recent_blocked.push(entry);
+                }
+            }
         }
         if let Some(v) = map.get("tcp_denied").and_then(JsonVal::as_u64) {
             self.tcp_denied = v;
@@ -310,6 +372,9 @@ impl Policy {
                 "sources"
                     | "blocked"
                     | "blocked_packets"
+                    | "sni_blocked_total"
+                    | "sni_cn_missing_total"
+                    | "sni_recent_blocked"
                     | "tcp_denied"
                     | "extensions"
                     | "seeded"
@@ -347,6 +412,29 @@ impl Policy {
             "blocked_packets".to_string(),
             JsonVal::Num(self.blocked_packets as f64),
         );
+        if self.sni_blocked_total > 0 {
+            map.insert(
+                "sni_blocked_total".to_string(),
+                JsonVal::Num(self.sni_blocked_total as f64),
+            );
+        }
+        if self.sni_cn_missing_total > 0 {
+            map.insert(
+                "sni_cn_missing_total".to_string(),
+                JsonVal::Num(self.sni_cn_missing_total as f64),
+            );
+        }
+        if !self.sni_recent_blocked.is_empty() {
+            map.insert(
+                "sni_recent_blocked".to_string(),
+                JsonVal::Arr(
+                    self.sni_recent_blocked
+                        .iter()
+                        .map(SniBlockedDomain::to_json_val)
+                        .collect(),
+                ),
+            );
+        }
         map.insert(
             "tcp_denied".to_string(),
             JsonVal::Num(self.tcp_denied as f64),
@@ -417,6 +505,47 @@ impl Policy {
             self.source_limit
         } else {
             OBSERVE_SAMPLE
+        }
+    }
+
+    pub fn record_sni_block(
+        &mut self,
+        sni: Option<&str>,
+        reason: &str,
+        dst_port: u16,
+        proto: u8,
+        now: i64,
+    ) {
+        self.sni_blocked_total = self.sni_blocked_total.saturating_add(1);
+        if reason == "missing_or_invalid_sni_cn" {
+            self.sni_cn_missing_total = self.sni_cn_missing_total.saturating_add(1);
+        }
+        let sni_str = sni.unwrap_or("").trim().to_string();
+        let proto_str = if proto == 17 { "quic" } else { "tls" };
+        if let Some(existing) = self.sni_recent_blocked.iter_mut().find(|e| {
+            e.sni == sni_str && e.reason == reason && e.dst_port == dst_port && e.proto == proto_str
+        }) {
+            existing.count = existing.count.saturating_add(1);
+            existing.last_seen = now;
+        } else {
+            if self.sni_recent_blocked.len() >= 16 {
+                if let Some((oldest_idx, _)) = self
+                    .sni_recent_blocked
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, e)| e.last_seen)
+                {
+                    self.sni_recent_blocked.remove(oldest_idx);
+                }
+            }
+            self.sni_recent_blocked.push(SniBlockedDomain {
+                sni: sni_str,
+                reason: reason.to_string(),
+                dst_port,
+                proto: proto_str.to_string(),
+                count: 1,
+                last_seen: now,
+            });
         }
     }
 

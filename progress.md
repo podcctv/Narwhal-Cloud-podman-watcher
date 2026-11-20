@@ -2,6 +2,17 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 28：SNI 白名单阻断全链路可见性与 `guard-core` 单测拆分（v1.9.33）
+
+- **Dashboard SNI 拦截统计常驻与明细展开（`frontend/src/components/dashboard/SecurityAlertSection.tsx`、`frontend/src/api/client.ts`）**：
+  - 将 `nodeHealth`（SNI 拦截总数、CN 无 SNI 数、Top 非白名单域名、RFW 异常节点、待更新节点）移至 `alerts.length === 0` 分支之外，确保即使当前无活动告警也始终可见；
+  - 新增可点击展开的近期 SNI 拦截明细面板，展示历史已自动 `resolved` 的阻断记录（域名/原因、协议/端口、节点与容器、阻断时间）。
+- **容器准入状态累计 SNI 拦截计数（`rust/crates/admission-guard/src/policy.rs`、`guard.rs`、`frontend/src/components/container/AdmissionStatus.tsx`、`types.ts`）**：
+  - 在 `Policy` 与 `admission_states` 快照中持久化 `sni_blocked_total`、`sni_cn_missing_total` 与最多 16 条 `sni_recent_blocked` 域名聚合记录；
+  - 容器详情抽屉的「容器网络准入保护」卡片同步回显累计 SNI 拦截次数与近期被拦域名/端口标签。
+- **`guard-core` 单测拆分（`rust/crates/guard-core/src/lib.rs`、`rust/crates/guard-core/src/tests.rs`）**：
+  - 将原 `guard-core/src/lib.rs` 内的单元测试模块拆出至独立 `tests.rs`。
+
 ## Phase 27：动态安全策略前端控制台、`service-audit` 目录扫描与数据库高频表裁剪（v1.9.32）
 
 - **动态安全策略前端控制台（`frontend/src/components/settings/SettingsView.tsx`、`frontend/src/api/client.ts`）**：

@@ -1075,4 +1075,23 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_policy_sni_blocked_counters_roundtrip() {
+        let mut p = Policy::new(None, 10);
+        p.record_sni_block(Some("bad.example.com"), "disallowed_sni", 443, 6, 1000);
+        p.record_sni_block(Some("bad.example.com"), "disallowed_sni", 443, 6, 1005);
+        p.record_sni_block(None, "missing_or_invalid_sni_cn", 8443, 17, 1010);
+        assert_eq!(p.sni_blocked_total, 3);
+        assert_eq!(p.sni_cn_missing_total, 1);
+        assert_eq!(p.sni_recent_blocked.len(), 2);
+
+        let val = p.to_json_val();
+        let restored = Policy::new(Some(&val), 10);
+        assert_eq!(restored.sni_blocked_total, 3);
+        assert_eq!(restored.sni_cn_missing_total, 1);
+        assert_eq!(restored.sni_recent_blocked.len(), 2);
+        assert_eq!(restored.sni_recent_blocked[0].count, 2);
+        assert_eq!(restored.sni_recent_blocked[1].proto, "quic");
+    }
 }

@@ -694,11 +694,16 @@ impl<R: NftRunner, Q: QueueBackend> Guard<R, Q> {
                                 src_ip: src_ip.to_string(),
                                 dst_port: vdport,
                                 proto: vproto,
-                                sni,
+                                sni: sni.clone(),
                                 reason: reason.to_string(),
                                 ts: now,
                             });
                         }
+                        let st = inner
+                            .states
+                            .entry(key.clone())
+                            .or_insert_with(|| Policy::new(None, inner.source_limit));
+                        st.record_sni_block(sni.as_deref(), reason, vdport, vproto, now);
                         return Ok(false);
                     }
                     // Established TCP handshake payload packets queued for SNI inspection
@@ -1922,6 +1927,8 @@ pub fn normalized_alert(value: &JsonVal, now: i64) -> Result<JsonVal, String> {
         "sampled_at",
         "observed_at",
         "blocked_packets",
+        "sni_blocked_total",
+        "sni_cn_missing_total",
         "tcp_denied",
         "limited_since",
         "review_at",

@@ -38,8 +38,24 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
   onSelectContainer,
 }) => {
   const [submittingId, setSubmittingId] = useState<number | null>(null);
+  const [showSniDetails, setShowSniDetails] = useState(false);
   const [nodeHealth, setNodeHealth] = useState<{
-    sni_violations?: { total: number; cn_missing_sni_count: number; top_disallowed_snis: { sni: string; count: number }[] };
+    sni_violations?: {
+      total: number;
+      cn_missing_sni_count: number;
+      top_disallowed_snis: { sni: string; count: number }[];
+      items?: {
+        id: number;
+        host_id: string;
+        container_name: string;
+        status: string;
+        last_seen: number;
+        sni: string;
+        dst_port?: number;
+        proto?: string;
+        reason?: string;
+      }[];
+    };
     rfw_unhealthy_hosts?: { host_id: string; status: string; reason: string }[];
     auto_update_issues?: { host_id: string; agent_version: string; expected_version: string; auto_update?: { has_error?: boolean; last_error?: string } }[];
   } | null>(null);
@@ -108,9 +124,74 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
     ? { title: '确认标记为已解决？', description: '该告警将从活动列表移入历史记录；后续再次检测到同类风险时仍会重新告警。', confirmLabel: '标记已解决', tone: 'primary' as const }
     : { title: '确认跳过本次告警？', description: '仅隐藏当前这一轮活动告警。风险仍会被持续采集，并在后续异常状态变化时再次提示。', confirmLabel: '确认跳过本次', tone: 'primary' as const };
 
+  const hasHealthStrip = Boolean(
+    nodeHealth &&
+      ((nodeHealth.sni_violations?.total || 0) > 0 ||
+        (nodeHealth.rfw_unhealthy_hosts?.length || 0) > 0 ||
+        (nodeHealth.auto_update_issues?.length || 0) > 0)
+  );
+
+  const healthStripNode = hasHealthStrip && nodeHealth ? (
+    <div className="mb-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 text-xs text-slate-300 shadow-xs">
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 sm:px-5">
+        {(nodeHealth.sni_violations?.total || 0) > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowSniDetails(v => !v)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-950/50 px-2.5 py-1 text-amber-200 hover:bg-amber-900/50 transition-colors tabular-nums"
+          >
+            <span>
+              SNI 白名单拦截 {nodeHealth.sni_violations?.total} 次（CN 无 SNI {nodeHealth.sni_violations?.cn_missing_sni_count || 0}）
+              {nodeHealth.sni_violations?.top_disallowed_snis?.length
+                ? ` · ${nodeHealth.sni_violations.top_disallowed_snis.slice(0, 3).map((x) => `${x.sni}:${x.count}`).join(', ')}`
+                : ''}
+            </span>
+            <span className="text-[10px] text-amber-300/80 underline">
+              {showSniDetails ? '收起明细' : '查看明细'}
+            </span>
+          </button>
+        )}
+        {(nodeHealth.rfw_unhealthy_hosts?.length || 0) > 0 && (
+          <span className="rounded-md border border-rose-500/35 bg-rose-950/50 px-2 py-1 text-rose-200">
+            RFW 异常：{nodeHealth.rfw_unhealthy_hosts?.map((h) => `${h.host_id}(${h.status})`).join('、')}
+          </span>
+        )}
+        {(nodeHealth.auto_update_issues?.length || 0) > 0 && (
+          <span className="rounded-md border border-sky-500/35 bg-sky-950/50 px-2 py-1 text-sky-200 tabular-nums">
+            待更新/更新异常节点：{nodeHealth.auto_update_issues?.length} 台
+          </span>
+        )}
+      </div>
+      {showSniDetails && (nodeHealth.sni_violations?.items?.length || 0) > 0 && (
+        <div className="border-t border-slate-800/80 bg-slate-950/60 px-4 py-2.5 sm:px-5 space-y-1.5 max-h-60 overflow-y-auto">
+          {nodeHealth.sni_violations!.items!.slice(0, 20).map((item) => (
+            <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-[11px] border-b border-slate-800/50 pb-1 last:border-b-0 last:pb-0">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-mono text-amber-300">
+                  {item.sni || (item.reason === 'missing_or_invalid_sni_cn' ? 'CN 无有效 SNI' : '未知 SNI')}
+                </span>
+                <span className="font-mono text-slate-400">
+                  {(item.proto || 'tls').toUpperCase()}/{item.dst_port ?? '-'}
+                </span>
+                <span className="text-slate-300 truncate max-w-[220px]" title={`${item.host_id} / ${item.container_name}`}>
+                  {item.host_id} · {item.container_name.slice(0, 12)}
+                </span>
+              </div>
+              <span className="text-slate-500 tabular-nums">
+                已阻断 · {new Date(item.last_seen * 1000).toLocaleString('zh-CN')}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  ) : null;
+
   if (alerts.length === 0) {
     return (
-      <section className="mb-6 rounded-2xl border border-emerald-500/25 bg-emerald-950/20 p-4 backdrop-blur-xs sm:p-5">
+      <>
+        {healthStripNode}
+        <section className="mb-6 rounded-2xl border border-emerald-500/25 bg-emerald-950/20 p-4 backdrop-blur-xs sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-emerald-400">
@@ -135,11 +216,14 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           </button>
         </div>
       </section>
+      </>
     );
   }
 
   return (
-    <section className="mb-6 overflow-hidden rounded-2xl border border-rose-500/35 bg-slate-900/92 shadow-xl backdrop-blur-xs">
+    <>
+      {healthStripNode}
+      <section className="mb-6 overflow-hidden rounded-2xl border border-rose-500/35 bg-slate-900/92 shadow-xl backdrop-blur-xs">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/75 px-4 py-3.5 sm:px-5">
         <div className="flex min-w-0 flex-wrap items-center gap-2.5">
@@ -168,28 +252,6 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
           <ExternalLink className="h-3.5 w-3.5" />
         </button>
       </div>
-
-      {/* SNI Whitelist & Node Health Strip */}
-      {nodeHealth && ((nodeHealth.sni_violations?.total || 0) > 0 || (nodeHealth.rfw_unhealthy_hosts?.length || 0) > 0 || (nodeHealth.auto_update_issues?.length || 0) > 0) && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950/55 px-4 py-2.5 text-xs text-slate-300 sm:px-5">
-          {(nodeHealth.sni_violations?.total || 0) > 0 && (
-            <span className="rounded-md border border-amber-500/35 bg-amber-950/50 px-2 py-0.5 text-amber-200 tabular-nums">
-              SNI 拦截 {nodeHealth.sni_violations?.total}（CN 无 SNI {nodeHealth.sni_violations?.cn_missing_sni_count || 0}）
-              {nodeHealth.sni_violations?.top_disallowed_snis?.slice(0, 3).map((x) => `${x.sni}:${x.count}`).join(', ')}
-            </span>
-          )}
-          {(nodeHealth.rfw_unhealthy_hosts?.length || 0) > 0 && (
-            <span className="rounded-md border border-rose-500/35 bg-rose-950/50 px-2 py-0.5 text-rose-200">
-              RFW 异常：{nodeHealth.rfw_unhealthy_hosts?.map((h) => `${h.host_id}(${h.status})`).join('、')}
-            </span>
-          )}
-          {(nodeHealth.auto_update_issues?.length || 0) > 0 && (
-            <span className="rounded-md border border-sky-500/35 bg-sky-950/50 px-2 py-0.5 text-sky-200 tabular-nums">
-              待更新/更新异常节点：{nodeHealth.auto_update_issues?.length} 台
-            </span>
-          )}
-        </div>
-      )}
 
       {/* Alert List */}
       <div className="divide-y divide-slate-800/80">
@@ -470,5 +532,6 @@ export const SecurityAlertSection: React.FC<SecurityAlertSectionProps> = ({
         }}
       />
     </section>
+    </>
   );
 };

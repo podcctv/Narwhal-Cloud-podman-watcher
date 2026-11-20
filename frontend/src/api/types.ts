@@ -213,6 +213,16 @@ export interface ContainerSecurity {
     review_at?: number;
     extensions?: number;
     blocked_packets?: number;
+    sni_blocked_total?: number;
+    sni_cn_missing_total?: number;
+    sni_recent_blocked?: {
+      sni?: string;
+      reason?: string;
+      dst_port?: number;
+      proto?: string;
+      count: number;
+      last_seen: number;
+    }[];
     tcp_denied?: number;
   };
   process_count?: number;

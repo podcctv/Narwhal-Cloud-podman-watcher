@@ -46,6 +46,22 @@ export const AdmissionStatus: React.FC<{ data?: ContainerSecurity['admission']; 
         <div><div className="mb-1 font-medium text-amber-300">{isModernEnforced ? '近两分钟超限阻断来源' : sourceLimitEnforced ? '近两分钟旧版拒绝记录' : '历史拒绝记录（旧版规则）'}</div>{blocked.length ? blocked.map(([ip, x]) => <div key={ip} className="break-all font-mono text-[11px]">{ip}<span className="ml-2 font-sans text-slate-400">阻断 {x.packets} 包</span></div>) : <p className="text-slate-400">未记录到拒绝事件</p>}</div>
       </div>
       <p className="text-[11px] text-slate-400">TCP 并发统计已建立连接：超过 1000 持续 2 分钟后，新 TCP 连接上限为 500，至少 30 分钟；复查仍 ≥500 会追加 30 分钟。持续低于 500 且有效采样满 2 分钟、当前期限已到才解除。缺数据不会当成恢复。</p>
+      {(data.sni_blocked_total || 0) > 0 && (
+        <div className="rounded border border-amber-500/30 bg-amber-950/20 p-2 text-[11px] text-amber-200 space-y-1">
+          <div className="font-medium">
+            SNI 白名单阻断：累计 {data.sni_blocked_total} 次（CN 无 SNI {data.sni_cn_missing_total || 0} 次）
+          </div>
+          {data.sni_recent_blocked && data.sni_recent_blocked.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {data.sni_recent_blocked.slice(0, 6).map((item, idx) => (
+                <span key={idx} className="rounded bg-amber-950/60 px-1.5 py-0.5 font-mono text-[10px]">
+                  {item.sni || 'CN-NO-SNI'} ({(item.proto || 'tls').toUpperCase()}/{item.dst_port ?? '-'}) ×{item.count}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>}
   </section>;
 };
