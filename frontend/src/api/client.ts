@@ -393,6 +393,7 @@ export const api = {
     sni_whitelist: string[];
     service_audit_enabled: boolean;
     disallowed_protocols: string[];
+    auto_block_disallowed_service?: boolean;
     updated_at?: number;
   }>('/api/v1/security/policy'),
   saveSecurityPolicy: (payload: {
@@ -401,6 +402,7 @@ export const api = {
     sni_whitelist?: string[];
     service_audit_enabled?: boolean;
     disallowed_protocols?: string[];
+    auto_block_disallowed_service?: boolean;
   }) => request<{ ok: boolean; policy: any }>('/api/v1/security/policy', { method: 'POST', body: JSON.stringify(payload) }),
 };
 

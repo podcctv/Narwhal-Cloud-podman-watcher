@@ -460,6 +460,84 @@ pub fn parse_yaml_service_inbounds(engine: &str, raw: &str) -> Vec<ServiceInboun
     }]
 }
 
+pub fn parse_toml_or_ini_service_inbounds(engine: &str, raw: &str) -> Vec<ServiceInboundSummary> {
+    let mut port: u16 = 0;
+    let mut protocol = engine.to_string();
+    let mut tls_enabled = false;
+    let mut sni_list = Vec::new();
+    let mut seen_sni = BTreeSet::new();
+    let mut auth_configured = false;
+
+    for raw_line in raw.lines().take(512) {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() || line.starts_with('[') || line.starts_with(';') {
+            continue;
+        }
+        let Some((k_raw, v_raw)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k_raw.trim().to_ascii_lowercase();
+        let val = v_raw.trim().trim_matches('"').trim_matches('\'').trim();
+        if val.is_empty() {
+            continue;
+        }
+        if matches!(
+            key.as_str(),
+            "bindport" | "bind_port" | "serverport" | "server_port" | "port" | "listen_port"
+        ) {
+            if let Ok(p) = val.parse::<u16>() {
+                port = p;
+            }
+        } else if key == "listen" {
+            if let Some(p) = val
+                .rsplit(':')
+                .next()
+                .and_then(|s| s.trim().parse::<u16>().ok())
+            {
+                port = p;
+            }
+        } else if matches!(key.as_str(), "type" | "protocol") {
+            let lower = val.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "vmess" | "trojan" | "vless" | "socks" | "socks5" | "http" | "mixed" | "shadowsocks"
+            ) {
+                protocol = if lower == "socks5" {
+                    "socks".to_string()
+                } else {
+                    lower
+                };
+            }
+        } else if matches!(
+            key.as_str(),
+            "sni" | "servername" | "server_name" | "custom_domains"
+        ) {
+            for part in val.split(',') {
+                push_unique_sni(&mut sni_list, &mut seen_sni, part.trim());
+            }
+            if !sni_list.is_empty() {
+                tls_enabled = true;
+            }
+        } else if matches!(
+            key.as_str(),
+            "auth.token" | "token" | "password" | "auth_password" | "user" | "username"
+        ) {
+            auth_configured = true;
+        } else if key == "tls" && val.eq_ignore_ascii_case("true") {
+            tls_enabled = true;
+        }
+    }
+
+    let is_open_proto = matches!(protocol.as_str(), "socks" | "http" | "mixed");
+    vec![ServiceInboundSummary {
+        protocol,
+        port,
+        tls_enabled,
+        sni_list,
+        auth_configured: auth_configured || !is_open_proto,
+    }]
+}
+
 pub fn evaluate_service_violations(svc: &ServiceConfigSummary) -> Vec<ServiceViolation> {
     evaluate_service_violations_with_policy(svc, None, None)
 }
@@ -592,12 +670,14 @@ pub fn audit_container_services_with_policy(
                         for entry in entries.flatten().take(16) {
                             let ep = entry.path();
                             let ext = ep.extension().and_then(|s| s.to_str()).unwrap_or("");
-                            if !matches!(ext, "json" | "yaml" | "yml") {
+                            if !matches!(ext, "json" | "yaml" | "yml" | "toml" | "ini" | "conf") {
                                 continue;
                             }
                             if let Some(raw_cfg) = read_bounded_utf8(&ep) {
                                 if raw_cfg.trim_start().starts_with('{') {
                                     inbounds.extend(parse_json_service_inbounds(engine, &raw_cfg));
+                                } else if matches!(ext, "toml" | "ini" | "conf") {
+                                    inbounds.extend(parse_toml_or_ini_service_inbounds(engine, &raw_cfg));
                                 } else {
                                     inbounds.extend(parse_yaml_service_inbounds(engine, &raw_cfg));
                                 }
@@ -605,8 +685,11 @@ pub fn audit_container_services_with_policy(
                         }
                     }
                 } else if let Some(raw_cfg) = read_bounded_utf8(&safe_path) {
+                    let ext = safe_path.extension().and_then(|s| s.to_str()).unwrap_or("");
                     if raw_cfg.trim_start().starts_with('{') {
                         inbounds = parse_json_service_inbounds(engine, &raw_cfg);
+                    } else if matches!(ext, "toml" | "ini" | "conf") {
+                        inbounds = parse_toml_or_ini_service_inbounds(engine, &raw_cfg);
                     } else {
                         inbounds = parse_yaml_service_inbounds(engine, &raw_cfg);
                     }
@@ -846,5 +929,21 @@ mod tests {
         assert!(codes.contains(&"service_disallowed_protocol"));
         assert!(codes.contains(&"service_disallowed_sni"));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_toml_and_ini_service_audit() {
+        let frp_toml = "bindPort = 7000\nauth.token = \"SECRET_FRP_TOKEN\"\n";
+        let inbounds = parse_toml_or_ini_service_inbounds("frps", frp_toml);
+        assert_eq!(inbounds.len(), 1);
+        assert_eq!(inbounds[0].port, 7000);
+        assert!(inbounds[0].auth_configured);
+
+        let socks_ini = "type = socks5\nlisten = 0.0.0.0:1080\n";
+        let s_inb = parse_toml_or_ini_service_inbounds("gost", socks_ini);
+        assert_eq!(s_inb.len(), 1);
+        assert_eq!(s_inb[0].protocol, "socks");
+        assert_eq!(s_inb[0].port, 1080);
+        assert!(!s_inb[0].auth_configured);
     }
 }

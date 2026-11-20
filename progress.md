@@ -2,6 +2,15 @@
 
 更新时间：2026-11-19（Asia/Shanghai）
 
+## Phase 29：违规服务自动限流策略、`service-audit` TOML/INI 解析与 `actions`/`vmess` 单测拆分（v1.9.34）
+
+- **违规服务自动合规限流联动（`server/security_routes.py`、`server/app.py`、`SettingsView.tsx`）**：
+  - 在动态安全策略中心新增 `auto_block_disallowed_service` 开关（默认关闭，安全按需启用）；开启后当节点上报 `service_disallowed_protocol` 或 `service_tunnel_relay` 时，主控自动为对应 Incus/Runman 容器排队下发 30 分钟 `500` 并发 TCP 限额（带 30 分钟去重防抖）。
+- **`service-audit` TOML/INI 配置解析（`rust/crates/service-audit/src/lib.rs`）**：
+  - 新增 `parse_toml_or_ini_service_inbounds` 并扩展目录扫描支持 `.toml`/`.ini`/`.conf`，覆盖 `frps.toml`/`frpc.toml`/`gost` 等服务配置脱敏审计。
+- **剩余大文件单测拆分（`agent-core/src/actions_tests.rs`、`protocol-guard/src/vmess_tests.rs`）**：
+  - 从 `agent-core/src/actions.rs`（3,526 行）与 `protocol-guard/src/vmess.rs`（4,313 行）拆出独立单元测试文件。
+
 ## Phase 28：SNI 白名单阻断全链路可见性与 `guard-core` 单测拆分（v1.9.33）
 
 - **Dashboard SNI 拦截统计常驻与明细展开（`frontend/src/components/dashboard/SecurityAlertSection.tsx`、`frontend/src/api/client.ts`）**：

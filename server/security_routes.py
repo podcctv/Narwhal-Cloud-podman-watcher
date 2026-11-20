@@ -29,6 +29,7 @@ def _default_policy() -> Dict[str, Any]:
         "sni_whitelist": list(DEFAULT_SNI_WHITELIST),
         "service_audit_enabled": True,
         "disallowed_protocols": list(DEFAULT_DISALLOWED_PROTOCOLS),
+        "auto_block_disallowed_service": False,
         "updated_at": 0,
     }
 
@@ -53,6 +54,8 @@ def get_dynamic_security_policy(conn: Any) -> Dict[str, Any]:
         base["block_cn_missing_sni"] = stored["block_cn_missing_sni"]
     if isinstance(stored.get("service_audit_enabled"), bool):
         base["service_audit_enabled"] = stored["service_audit_enabled"]
+    if isinstance(stored.get("auto_block_disallowed_service"), bool):
+        base["auto_block_disallowed_service"] = stored["auto_block_disallowed_service"]
     if isinstance(stored.get("sni_whitelist"), list) and stored["sni_whitelist"]:
         base["sni_whitelist"] = [str(x).strip().lower() for x in stored["sni_whitelist"] if str(x).strip()]
     if isinstance(stored.get("disallowed_protocols"), list):
@@ -72,6 +75,8 @@ def save_dynamic_security_policy(conn: Any, payload: Dict[str, Any]) -> Dict[str
         current["block_cn_missing_sni"] = bool(payload["block_cn_missing_sni"])
     if "service_audit_enabled" in payload:
         current["service_audit_enabled"] = bool(payload["service_audit_enabled"])
+    if "auto_block_disallowed_service" in payload:
+        current["auto_block_disallowed_service"] = bool(payload["auto_block_disallowed_service"])
     if "sni_whitelist" in payload:
         raw_list = payload["sni_whitelist"]
         if not isinstance(raw_list, list) or not raw_list or len(raw_list) > 256:
@@ -103,6 +108,58 @@ def save_dynamic_security_policy(conn: Any, payload: Dict[str, Any]) -> Dict[str
     )
     conn.commit()
     return current
+
+
+def maybe_enqueue_auto_compliance_connlimit(
+    conn: Any,
+    host_id: str,
+    now: int,
+    alerts: List[Dict[str, Any]],
+) -> int:
+    """When auto_block_disallowed_service is enabled, apply a 30m 500-conn cap on violating containers."""
+    policy = get_dynamic_security_policy(conn)
+    if not policy.get("auto_block_disallowed_service"):
+        return 0
+    enqueued = 0
+    for alert in alerts or []:
+        if not isinstance(alert, dict):
+            continue
+        atype = str(alert.get("type") or "")
+        if atype not in {"service_disallowed_protocol", "service_tunnel_relay"}:
+            continue
+        runtime = str(alert.get("runtime") or "").strip().lower()
+        if runtime not in {"incus", "runman"}:
+            continue
+        project = str(alert.get("project") or "default").strip() or "default"
+        cname = str(alert.get("container_name") or "").strip()
+        if not cname:
+            continue
+        recent = conn.execute(
+            """
+            SELECT id FROM security_actions
+            WHERE host_id=? AND runtime=? AND project=? AND container_name=?
+              AND action_type='apply_container_connlimit'
+              AND (status IN ('pending','dispatched') OR created_at >= ?)
+            LIMIT 1
+            """,
+            (host_id, runtime, project, cname, now - 1800),
+        ).fetchone()
+        if recent:
+            continue
+        params = json.dumps({"max_connections": 500, "duration_seconds": 1800}, ensure_ascii=False)
+        conn.execute(
+            """
+            INSERT INTO security_actions(
+                alert_id, host_id, runtime, project, container_name, action_type,
+                params_json, status, requested_by, created_at
+            ) VALUES(NULL, ?, ?, ?, ?, 'apply_container_connlimit', ?, 'pending', 'auto_compliance_policy', ?)
+            """,
+            (host_id, runtime, project, cname, params, now),
+        )
+        enqueued += 1
+    if enqueued:
+        conn.commit()
+    return enqueued
 
 
 def collect_sni_and_node_health(

@@ -3997,6 +3997,7 @@ async def report(
                     preserve_active_types=preserve_types,
                 )
                 buyer_notifications.observe(conn, host_id, ts, containers, combined_alerts)
+                security_routes.maybe_enqueue_auto_compliance_connlimit(conn, host_id, ts, combined_alerts)
             elif ts > previous_sample and incus_runtime_health is not None:
                 runtime_alerts = [
                     alert for alert in security_alerts

@@ -64,6 +64,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
     sni_enforcement: true,
     block_cn_missing_sni: true,
     service_audit_enabled: true,
+    auto_block_disallowed_service: false,
   });
   const [sniText, setSniText] = useState('');
   const [disallowedProtosText, setDisallowedProtosText] = useState('vmess, trojan');
@@ -110,6 +111,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
           sni_enforcement: secPolicyData.sni_enforcement !== false,
           block_cn_missing_sni: secPolicyData.block_cn_missing_sni !== false,
           service_audit_enabled: secPolicyData.service_audit_enabled !== false,
+          auto_block_disallowed_service: Boolean(secPolicyData.auto_block_disallowed_service),
         });
         setSniText((secPolicyData.sni_whitelist || []).join('\n'));
         setDisallowedProtosText((secPolicyData.disallowed_protocols || []).join(', '));
@@ -170,6 +172,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
         sni_enforcement: secPolicy.sni_enforcement,
         block_cn_missing_sni: secPolicy.block_cn_missing_sni,
         service_audit_enabled: secPolicy.service_audit_enabled,
+        auto_block_disallowed_service: secPolicy.auto_block_disallowed_service,
         sni_whitelist,
         disallowed_protocols,
       });
@@ -856,7 +859,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
           </div>
 
           <form onSubmit={handleSaveSecurityPolicy} className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
               <label className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/60 p-3 cursor-pointer hover:border-slate-700 transition-colors">
                 <input
                   type="checkbox"
@@ -893,6 +896,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 <div className="text-xs">
                   <div className="font-semibold text-slate-200">启用容器服务配置审计</div>
                   <div className="text-slate-400 mt-0.5">脱敏采集容器代理配置并核验违规协议/开放代理</div>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 cursor-pointer hover:border-amber-500/50 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={secPolicy.auto_block_disallowed_service}
+                  onChange={e => setSecPolicy(p => ({ ...p, auto_block_disallowed_service: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-slate-600 bg-slate-900 text-amber-500 focus:ring-amber-400"
+                />
+                <div className="text-xs">
+                  <div className="font-semibold text-amber-200">违规服务自动限流</div>
+                  <div className="text-amber-300/80 mt-0.5">检测到受限协议/穿透服务时自动下发 30 分钟 500 并发上限</div>
                 </div>
               </label>
             </div>
