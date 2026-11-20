@@ -103,8 +103,9 @@ def save_dynamic_security_policy(conn: Any, payload: Dict[str, Any]) -> Dict[str
         current["disallowed_protocols"] = cleaned_p
     current["updated_at"] = int(time.time())
     conn.execute(
-        "INSERT INTO system_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (_POLICY_KEY, json.dumps(current, ensure_ascii=False)),
+        "INSERT INTO system_settings(key, value, updated_at) VALUES(?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (_POLICY_KEY, json.dumps(current, ensure_ascii=False), current["updated_at"]),
     )
     conn.commit()
     return current
@@ -139,7 +140,7 @@ def maybe_enqueue_auto_compliance_connlimit(
             SELECT id FROM security_actions
             WHERE host_id=? AND runtime=? AND project=? AND container_name=?
               AND action_type='apply_container_connlimit'
-              AND (status IN ('pending','dispatched') OR created_at >= ?)
+              AND (status IN ('queued','dispatched') OR created_at >= ?)
             LIMIT 1
             """,
             (host_id, runtime, project, cname, now - 1800),
@@ -151,10 +152,10 @@ def maybe_enqueue_auto_compliance_connlimit(
             """
             INSERT INTO security_actions(
                 alert_id, host_id, runtime, project, container_name, action_type,
-                params_json, status, requested_by, created_at
-            ) VALUES(NULL, ?, ?, ?, ?, 'apply_container_connlimit', ?, 'pending', 'auto_compliance_policy', ?)
+                params_json, status, requested_by, created_at, updated_at
+            ) VALUES(0, ?, ?, ?, ?, 'apply_container_connlimit', ?, 'queued', 'auto_compliance_policy', ?, ?)
             """,
-            (host_id, runtime, project, cname, params, now),
+            (host_id, runtime, project, cname, params, now, now),
         )
         enqueued += 1
     if enqueued:

@@ -141,7 +141,7 @@ def report_agent_version(payload_json: str | None) -> str:
 app = FastAPI(title="Narwhal Container Monitor")
 
 try:
-    from server import operations, operations_api, security_routes, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, resource_overload_policy, ip_reputation, inbound_assessment, database_telemetry, control_reconciliation
+    from server import operations, operations_api, security_routes, buyer_notifications, investigation, dashboard_auth, commerce, tcping, gfw_monitor, disk_cleanup, connection_policy, resource_overload_policy, ip_reputation, inbound_assessment, database_telemetry, control_reconciliation, db_maintenance
 except ImportError:
     import operations
     import connection_policy
@@ -159,6 +159,7 @@ except ImportError:
     import inbound_assessment
     import database_telemetry
     import control_reconciliation
+    import db_maintenance
 
 try:
     from server import abuse_api, admission_api, reach_monitor
@@ -667,112 +668,26 @@ def cleanup_old_reports(now_ts: int | None = None, force: bool = False) -> int:
         return 0
     if not _cleanup_lock.acquire(blocking=not scheduled):
         return 0
-    conn = None
-    removed_reports = 0
-    removed_total = 0
-    backlog = False
     try:
         if scheduled and time.monotonic() < _next_cleanup_monotonic:
             return 0
-        now = int(time.time()) if now_ts is None else now_ts
-        cutoff = now - PURGE_SECONDS
-        raw_cutoff = now - min(PURGE_SECONDS, RAW_RETENTION_SECONDS)
-        deadline = time.monotonic() + CLEANUP_TIME_BUDGET_SECONDS
-        conn = db()
-        investigation.maintain(conn, now)
-        conn.commit()
-        # Complete this small transaction before starting the next; never hold
-        # the API writer lock across a whole retention backlog.
-        def prune(table: str, predicate: str, params: tuple = ()) -> int:
-            nonlocal removed_reports, removed_total
-            cur = conn.execute(
-                f"DELETE FROM {table} WHERE rowid IN "
-                f"(SELECT rowid FROM {table} WHERE {predicate} LIMIT ?)",
-                (*params, REPORT_CLEANUP_BATCH_SIZE),
-            )
-            count = max(0, cur.rowcount)
-            conn.commit()
-            removed_total += count
-            if table == "reports":
-                removed_reports += count
-            return count
-
-        disk_pressure = False
-        try:
-            du = shutil.disk_usage(Path(DB_PATH).resolve().parent)
-            free_pct = (du.free / du.total * 100.0) if du.total > 0 else 100.0
-            disk_pressure = free_pct < 15.0 or du.free < 2 * 1024 * 1024 * 1024
-        except OSError:
-            disk_pressure = False
-        effective_report_cap = min(REPORT_MAX_ROWS, 15000) if disk_pressure else REPORT_MAX_ROWS
-        effective_host_sec_cap = min(HOST_SECURITY_MAX_ROWS, 8000) if disk_pressure else HOST_SECURITY_MAX_ROWS
-        effective_raw_cutoff = max(raw_cutoff, now - 48 * 3600) if disk_pressure else raw_cutoff
-
-        for _ in range(20):
-            progress = 0
-            jobs = [
-                ("reports", "ts < ?", (effective_raw_cutoff,)),
-                ("host_security", "ts < ?", (effective_raw_cutoff,)),
-                ("ops_rollups", "bucket < ?", (cutoff,)),
-                ("host_reachability_history", "checked_at < ?", (now - min(PURGE_SECONDS, 14 * 86400),)),
-                ("gfw_probe_results", "NOT EXISTS (SELECT 1 FROM gfw_probe_jobs j WHERE j.id=gfw_probe_results.job_id)", ()),
-                ("host_collection_health_hourly", "bucket_start < ?", (now - 30 * 86400,)),
-                ("security_alerts", "status IN ('resolved','remediated','dismissed','suppressed') AND last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status NOT IN ('released','replaced'))", (cutoff,)),
-                ("security_actions", "status IN ('succeeded','failed','cancelled') AND updated_at < ?", (cutoff,)),
-                ("security_alert_decisions", "created_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
-                ("security_alert_evidence", "captured_at < ? OR NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", (cutoff,)),
-                ("telegram_alert_messages", "NOT EXISTS (SELECT 1 FROM security_alerts a WHERE a.id=alert_id)", ()),
-                ("network_quarantines", "status IN ('released','replaced') AND updated_at < ?", (cutoff,)),
-                ("connection_overloads", "last_seen < ?", (now - OFFLINE_HOST_PURGE_SECONDS,)),
-            ]
-            for table, predicate, params in jobs:
-                progress += prune(table, predicate, params)
-            # A row budget also bounds high-frequency raw history within the
-            # retention period. Preserve each identity's newest sample.
-            for table, cap, identity in (
-                ("reports", effective_report_cap, ("host_id", "runtime", "project", "container_name")),
-                ("host_security", effective_host_sec_cap, ("host_id",)),
-            ):
-                boundary = conn.execute(f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?", (cap - 1,)).fetchone()
-                if boundary:
-                    same = " AND ".join(f"newer.{column}={table}.{column}" for column in identity)
-                    progress += prune(table, f"id < ? AND EXISTS (SELECT 1 FROM {table} newer WHERE {same} AND newer.id > {table}.id)", (boundary[0],))
-            if disk_pressure:
-                for aux_table in ("ops_rollups", "gfw_probe_results"):
-                    aux_boundary = conn.execute(f"SELECT rowid FROM {aux_table} ORDER BY rowid DESC LIMIT 1 OFFSET 49999").fetchone()
-                    if aux_boundary:
-                        progress += prune(aux_table, "rowid < ?", (aux_boundary[0],))
-            # Drain offline hosts in batches before removing their identity.
-            offline = conn.execute("SELECT host_id FROM hosts WHERE last_seen < ? AND NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.host_id=hosts.host_id AND q.status NOT IN ('released','replaced')) LIMIT 25", (now - OFFLINE_HOST_PURGE_SECONDS,)).fetchall()
-            for host in offline:
-                for table in ("reports", "host_security", "host_collection_health_hourly", "security_actions", "security_alerts", "connection_overloads", "host_firewall_readbacks"):
-                    progress += prune(table, "host_id=?", (host[0],))
-                remains = any(conn.execute(f"SELECT 1 FROM {table} WHERE host_id=? LIMIT 1", (host[0],)).fetchone()
-                              for table in ("reports", "host_security", "host_collection_health_hourly", "security_actions", "security_alerts"))
-                if not remains:
-                    conn.execute("DELETE FROM hosts WHERE host_id=?", (host[0],))
-                    conn.commit()
-            backlog = progress > 0
-            if not backlog or time.monotonic() >= deadline:
-                break
-        # Incremental mode is enabled for new DBs and by the explicit recovery
-        # command for old DBs. Never run a full VACUUM in this online loop.
-        if int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]) == 2:
-            conn.execute("PRAGMA incremental_vacuum(2048)").fetchall()
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
-        _cleanup_status.update(last_success=now, removed_rows=removed_total, backlog=backlog, disk_pressure=disk_pressure, error=None)
+        removed_reports, backlog = db_maintenance.run_cleanup(
+            db_fn=db,
+            db_path=DB_PATH,
+            investigation_maintain_fn=investigation.maintain,
+            cleanup_status=_cleanup_status,
+            purge_seconds=PURGE_SECONDS,
+            raw_retention_seconds=RAW_RETENTION_SECONDS,
+            offline_host_purge_seconds=OFFLINE_HOST_PURGE_SECONDS,
+            report_cleanup_batch_size=REPORT_CLEANUP_BATCH_SIZE,
+            report_max_rows=REPORT_MAX_ROWS,
+            host_security_max_rows=HOST_SECURITY_MAX_ROWS,
+            cleanup_time_budget_seconds=CLEANUP_TIME_BUDGET_SECONDS,
+            now_ts=now_ts,
+        )
         _next_cleanup_monotonic = time.monotonic() + (5 if backlog else REPORT_CLEANUP_INTERVAL_SECONDS)
         return removed_reports
-    except Exception as exc:
-        if conn is not None:
-            conn.rollback()
-        _cleanup_status.update(error=str(exc), last_failure=int(time.time()), backlog=True)
-        logging.exception("Database cleanup failed; will retry")
-        _next_cleanup_monotonic = time.monotonic() + 5
-        return removed_reports
     finally:
-        if conn is not None:
-            conn.close()
         _cleanup_lock.release()
 
 

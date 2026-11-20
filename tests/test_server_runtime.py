@@ -2742,6 +2742,95 @@ class ServerRuntimeTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row[0], now)
 
+    def test_security_policy_auto_block_disallowed_service_get_and_post(self):
+        original_username = server.DASHBOARD_USERNAME
+        original_password = server.DASHBOARD_PASSWORD
+        server.DASHBOARD_USERNAME = "policy-admin"
+        server.DASHBOARD_PASSWORD = "policy-test-password"
+        client = TestClient(server.app, base_url="https://testserver")
+        try:
+            get_resp = client.get(
+                "/api/v1/security/policy",
+                auth=(server.DASHBOARD_USERNAME, server.DASHBOARD_PASSWORD),
+            )
+            self.assertEqual(get_resp.status_code, 200, get_resp.text)
+            self.assertFalse(get_resp.json()["auto_block_disallowed_service"])
+
+            post_resp = client.post(
+                "/api/v1/security/policy",
+                json={"auto_block_disallowed_service": True},
+                auth=(server.DASHBOARD_USERNAME, server.DASHBOARD_PASSWORD),
+            )
+            self.assertEqual(post_resp.status_code, 200, post_resp.text)
+            post_body = post_resp.json()
+            self.assertTrue(post_body["ok"])
+            self.assertTrue(post_body["policy"]["auto_block_disallowed_service"])
+
+            get_after = client.get(
+                "/api/v1/security/policy",
+                auth=(server.DASHBOARD_USERNAME, server.DASHBOARD_PASSWORD),
+            )
+            self.assertEqual(get_after.status_code, 200, get_after.text)
+            self.assertTrue(get_after.json()["auto_block_disallowed_service"])
+        finally:
+            client.close()
+            server.DASHBOARD_USERNAME = original_username
+            server.DASHBOARD_PASSWORD = original_password
+
+    def test_auto_compliance_connlimit_enqueues_and_dedups_1800s(self):
+        now = int(time.time())
+        alerts = [
+            {"type": "service_disallowed_protocol", "runtime": "incus", "project": "default", "container_name": "c-vmess"},
+            {"type": "service_tunnel_relay", "runtime": "runman", "project": "default", "container_name": "c-relay"},
+            {"type": "service_disallowed_protocol", "runtime": "docker", "project": "default", "container_name": "c-docker"},
+            {"type": "other_alert", "runtime": "incus", "project": "default", "container_name": "c-other"},
+        ]
+        conn = server.db()
+        try:
+            # Disabled by default -> no actions enqueued.
+            self.assertEqual(
+                server.security_routes.maybe_enqueue_auto_compliance_connlimit(conn, "host-1", now, alerts),
+                0,
+            )
+
+            server.security_routes.save_dynamic_security_policy(conn, {"auto_block_disallowed_service": True})
+            enqueued = server.security_routes.maybe_enqueue_auto_compliance_connlimit(conn, "host-1", now, alerts)
+            self.assertEqual(enqueued, 2)
+
+            rows = conn.execute(
+                "SELECT runtime, container_name, action_type, params_json, status, requested_by, created_at "
+                "FROM security_actions ORDER BY id"
+            ).fetchall()
+            self.assertEqual(len(rows), 2)
+            for row in rows:
+                self.assertEqual(row["action_type"], "apply_container_connlimit")
+                self.assertEqual(json.loads(row["params_json"]), {"max_connections": 500, "duration_seconds": 1800})
+                self.assertEqual(row["status"], "queued")
+                self.assertEqual(row["requested_by"], "auto_compliance_policy")
+                self.assertEqual(row["created_at"], now)
+
+            # Still pending/within 1800s -> deduplicated.
+            self.assertEqual(
+                server.security_routes.maybe_enqueue_auto_compliance_connlimit(conn, "host-1", now + 600, alerts),
+                0,
+            )
+
+            # Even after completion, calls within 1800s are deduplicated.
+            conn.execute("UPDATE security_actions SET status='succeeded'")
+            conn.commit()
+            self.assertEqual(
+                server.security_routes.maybe_enqueue_auto_compliance_connlimit(conn, "host-1", now + 1799, alerts),
+                0,
+            )
+
+            # Past 1800s window -> enqueues again.
+            self.assertEqual(
+                server.security_routes.maybe_enqueue_auto_compliance_connlimit(conn, "host-1", now + 1801, alerts),
+                2,
+            )
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
