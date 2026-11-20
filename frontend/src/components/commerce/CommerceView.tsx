@@ -28,9 +28,9 @@ const label = (kind: string) => labels[kind] || kind;
 const kindColors: Record<string, string> = { purchase: '#38bdf8', refund: '#fb7185', renew: '#34d399', renewal: '#34d399', escrow_in: '#a78bfa', escrow_renew: '#c4b5fd', escrow_deduct: '#fbbf24', topup: '#2dd4bf' };
 const usd = (value: Money | number | undefined) => value == null ? '未提供' : new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', maximumFractionDigits: 4 }).format(Number(value));
 const date = (value: number) => new Date(value * 1000).toLocaleString('zh-CN', { timeZone: 'UTC', hour12: false });
-const panel = 'ui-surface-card p-4 sm:p-6';
+const panel = 'ui-surface-card border-sky-400/20 bg-[#031b36]/85 p-4 sm:p-6';
 const input = 'ui-input';
-const button = 'min-h-11 rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-medium text-slate-200 transition-colors hover:border-sky-400/70 hover:bg-slate-800 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-50 disabled:cursor-not-allowed';
+const button = 'min-h-11 rounded-xl border border-sky-400/25 bg-[#031d3d]/80 px-4 py-2 text-sm font-medium text-slate-200 transition-colors hover:border-[#00b6ec]/60 hover:bg-[#087bff]/20 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-50 disabled:cursor-not-allowed';
 
 function Trend({ rows }: { rows: History['trend'] }) {
   const target = useRef<HTMLDivElement>(null);
@@ -347,9 +347,10 @@ export function CommerceView() {
 
   return (
     <div className="space-y-6 text-slate-200 [&_button]:min-h-11 [&_button]:cursor-pointer">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="ui-surface-card flex flex-wrap items-center justify-between gap-3 border-sky-400/20 bg-[#031d3d]/90 p-4 sm:p-5">
         <div>
-          <h2 className="text-xl font-bold">经营分析与运营中台</h2>
+          <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#00b6ec]">Commerce &amp; Revenue · Operations Hub</span>
+          <h2 className="mt-0.5 text-xl font-bold text-slate-100">经营分析与运营中台</h2>
           <p className="mt-1 text-sm text-slate-400">母鸡出租现状 · 智能买退风控 · 用户忠诚度评估 · 实时 Telegram 经营通知</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -391,7 +392,7 @@ export function CommerceView() {
               {settings?.configured ? '新的个人 API Key' : '配置个人 API Key'}
               <input id="commerce-key" type="password" autoComplete="off" autoFocus={editingKey} spellCheck={false} maxLength={512} value={apiKey} onChange={e => setApiKey(e.target.value)} className={input + ' mt-2'} placeholder="输入 Narwhal 平台个人 API Key" aria-describedby="key-help" />
             </label>
-            <button type="submit" className={button + ' bg-sky-500 text-slate-950 hover:bg-sky-400'} disabled={!!busy || !apiKey.trim()}>
+            <button type="submit" className="min-h-11 rounded-xl bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-5 py-2 text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50" disabled={!!busy || !apiKey.trim()}>
               {busy === 'save' ? '校验并保存…' : settings?.configured ? '保存新密钥并同步' : '保存并同步'}
             </button>
             {editingKey && <button type="button" className={button} disabled={!!busy} onClick={() => { setApiKey(''); setEditingKey(false); }}>取消更换</button>}
@@ -401,7 +402,7 @@ export function CommerceView() {
       )}
 
       {/* Tabs Bar */}
-      <div className="flex overflow-x-auto border-b border-slate-800 gap-2 pb-1 text-sm">
+      <div className="flex overflow-x-auto border-b border-sky-400/20 gap-2 pb-1 text-sm">
         {[
           { key: 'overview', label: '📊 概览与走势', badge: null },
           { key: 'analytics', label: '📅 日度与月度经营', badge: null },
@@ -415,7 +416,7 @@ export function CommerceView() {
             type="button"
             className={`whitespace-nowrap px-4 py-2 font-medium transition-colors border-b-2 -mb-[2px] flex items-center gap-2 ${
               tab === t.key
-                ? 'border-sky-400 text-sky-300 bg-sky-950/30 rounded-t-lg'
+                ? 'border-[#00b6ec] text-sky-100 bg-[#087bff]/20 rounded-t-lg'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
             onClick={() => setTab(t.key as any)}
@@ -460,7 +461,7 @@ export function CommerceView() {
                   {overview.last_error || (autoSyncSettings?.auto_sync ? '快照数据超过 15 分钟未刷新，后台正在等待下个轮询周期自动重试，也可点击上方“立即手动同步”。' : '数据已超过 15 分钟，请手动同步获取最新情况或至“同步与推送设置”开启自动定时同步。')} 当前仍展示上次成功快照。
                 </p>
               )}
-              <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5" aria-label="当前账号快照">
+              <section className="grid divide-y sm:divide-y-0 sm:divide-x divide-sky-400/15 overflow-hidden rounded-2xl border border-sky-400/20 bg-[#02182f]/75 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5" aria-label="当前账号快照">
                 {[
                   ['母鸡 / 当前售出小鸡', `${machines.length} / ${totalSold}`, '售出指当前归属其他用户的小鸡；不是累计销量'],
                   ['可用余额（不可提现）', usd(overview.profile?.available_balance), '用于平台消费，不属于可提现的托管资金'],
@@ -468,8 +469,8 @@ export function CommerceView() {
                   ['托管可用余额', usd(overview.profile?.escrow_available_balance), '托管总余额减去冻结金额；提现以平台规则为准'],
                   ['托管冻结金额', usd(overview.profile?.escrow_locked_value), '尚未解冻，暂不可提现']
                 ].map(([title, value, hint]) => (
-                  <div key={title} role="group" aria-label={title} className={panel}>
-                    <p className="text-sm text-slate-400">{title}</p>
+                  <div key={title} role="group" aria-label={title} className="p-4 sm:p-5">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{title}</p>
                     <p className="mt-2 wrap-break-word font-mono tabular-nums text-2xl font-semibold text-slate-100">{value}</p>
                     <p className="mt-2 text-xs leading-5 text-slate-400">{hint}</p>
                   </div>
@@ -592,25 +593,25 @@ export function CommerceView() {
       {tab === 'analytics' && (
         <div className="space-y-6">
           {dailyData?.today_summary && (
-            <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4" aria-label="今日经营指标">
-              <div className={panel}>
-                <p className="text-sm text-slate-400">今日总销售额 (GMV)</p>
-                <p className="mt-2 font-mono text-2xl font-bold text-sky-400">{usd(dailyData.today_summary.gmv)}</p>
-                <p className="mt-1 text-xs text-slate-400">共 {dailyData.today_summary.orders_count} 笔订单 · 昨日 {usd(dailyData.today_summary.yesterday_gmv)}</p>
+            <section className="grid divide-y sm:divide-y-0 sm:divide-x divide-sky-400/15 overflow-hidden rounded-2xl border border-sky-400/20 bg-[#02182f]/75 sm:grid-cols-2 lg:grid-cols-4" aria-label="今日经营指标">
+              <div className="p-4 sm:p-5">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">今日总销售额 (GMV)</p>
+                <p className="mt-2 font-mono tabular-nums text-2xl font-bold text-[#00b6ec]">{usd(dailyData.today_summary.gmv)}</p>
+                <p className="mt-1 font-mono tabular-nums text-xs text-slate-400">共 {dailyData.today_summary.orders_count} 笔订单 · 昨日 {usd(dailyData.today_summary.yesterday_gmv)}</p>
               </div>
-              <div className={panel}>
-                <p className="text-sm text-slate-400">今日退款支出</p>
-                <p className="mt-2 font-mono text-2xl font-bold text-rose-400">-{usd(dailyData.today_summary.refunds_amount)}</p>
-                <p className="mt-1 text-xs text-slate-400">{dailyData.today_summary.refunds_count} 笔退款</p>
+              <div className="p-4 sm:p-5">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">今日退款支出</p>
+                <p className="mt-2 font-mono tabular-nums text-2xl font-bold text-rose-400">-{usd(dailyData.today_summary.refunds_amount)}</p>
+                <p className="mt-1 font-mono tabular-nums text-xs text-slate-400">{dailyData.today_summary.refunds_count} 笔退款</p>
               </div>
-              <div className={panel}>
-                <p className="text-sm text-slate-400">今日净收益</p>
-                <p className="mt-2 font-mono text-2xl font-bold text-emerald-400">{usd(dailyData.today_summary.net_revenue)}</p>
-                <p className="mt-1 text-xs text-slate-400">昨日净收益 {usd(dailyData.today_summary.yesterday_net)}</p>
+              <div className="p-4 sm:p-5">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">今日净收益</p>
+                <p className="mt-2 font-mono tabular-nums text-2xl font-bold text-emerald-400">{usd(dailyData.today_summary.net_revenue)}</p>
+                <p className="mt-1 font-mono tabular-nums text-xs text-slate-400">昨日净收益 {usd(dailyData.today_summary.yesterday_net)}</p>
               </div>
-              <div className={panel}>
-                <p className="text-sm text-slate-400">今日退款率</p>
-                <p className="mt-2 font-mono text-2xl font-bold text-slate-200">
+              <div className="p-4 sm:p-5">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">今日退款率</p>
+                <p className="mt-2 font-mono tabular-nums text-2xl font-bold text-slate-200">
                   {dailyData.today_summary.orders_count + dailyData.today_summary.refunds_count > 0
                     ? ((dailyData.today_summary.refunds_count / (dailyData.today_summary.orders_count + dailyData.today_summary.refunds_count)) * 100).toFixed(1)
                     : 0}%
@@ -945,7 +946,7 @@ export function CommerceView() {
                   {settings.configured ? '新的个人 API Key' : '配置个人 API Key'}
                   <input id="commerce-key" type="password" autoComplete="off" autoFocus={editingKey} spellCheck={false} maxLength={512} value={apiKey} onChange={e => setApiKey(e.target.value)} className={input + ' mt-2'} placeholder="输入 Narwhal 平台个人 API Key" />
                 </label>
-                <button type="submit" className={button + ' bg-sky-500 text-slate-950 hover:bg-sky-400'} disabled={!!busy || !apiKey.trim()}>
+                <button type="submit" className="min-h-11 rounded-xl bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-5 py-2 text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50" disabled={!!busy || !apiKey.trim()}>
                   {busy === 'save' ? '校验并保存…' : settings.configured ? '保存新密钥并同步' : '保存并同步'}
                 </button>
                 {editingKey && <button type="button" className={button} disabled={!!busy} onClick={() => { setApiKey(''); setEditingKey(false); }}>取消更换</button>}
@@ -1139,7 +1140,7 @@ export function CommerceView() {
               </button>
               <button
                 type="button"
-                className={button + ' bg-sky-500 text-slate-950 hover:bg-sky-400 font-semibold'}
+                className="min-h-11 rounded-xl bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-5 py-2 text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={compensateModal.busy || !compensateModal.days}
                 onClick={executeCompensate}
               >

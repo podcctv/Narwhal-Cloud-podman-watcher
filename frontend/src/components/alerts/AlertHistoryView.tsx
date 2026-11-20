@@ -206,13 +206,16 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner */}
-      <div className="ui-surface-card flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 sm:p-5">
+      <div className="ui-surface-card flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-sky-400/20 bg-[#031d3d]/90 p-4 sm:p-5">
         <div className="flex items-center gap-3">
           <div className="rounded-xl bg-amber-950/80 p-2.5 text-amber-400 border border-amber-500/30 shrink-0">
             <ShieldAlert className="h-5 w-5" />
           </div>
           <div>
-            <h2 className="text-base font-bold text-slate-100">
+            <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#00b6ec]">
+              Security Audit · Alert History
+            </span>
+            <h2 className="mt-0.5 text-base font-bold text-slate-100">
               安全告警与处置审计历史
             </h2>
             <p className="mt-0.5 text-xs text-slate-400">
@@ -232,7 +235,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
       </div>
 
       {/* Filter Panel */}
-      <div className="ui-surface-card p-4 sm:p-5 space-y-4">
+      <div className="ui-surface-card border-sky-400/20 bg-[#031b36]/85 p-4 sm:p-5 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-bold text-slate-200">
             <Filter className="h-4 w-4 text-sky-400" />
@@ -309,13 +312,13 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
               <Search aria-hidden="true" className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
             </div>
           </div>
-          <button type="submit" className="inline-flex min-h-11 items-center justify-center gap-2 self-end rounded-lg border border-sky-500/40 bg-sky-500/10 px-4 text-sm font-semibold text-sky-200 transition-colors hover:bg-sky-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300">
+          <button type="submit" className="inline-flex min-h-11 items-center justify-center gap-2 self-end rounded-lg bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-4 text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400">
             <Search aria-hidden="true" className="h-4 w-4" />搜索
           </button>
         </form>
 
         {/* Status Tabs */}
-        <div className="flex flex-wrap items-center gap-1.5 pt-3 border-t border-slate-800/80">
+        <div className="flex flex-wrap items-center gap-1.5 pt-3 border-t border-sky-400/15">
           {['all', 'active', 'suppressed', 'dismissed', 'remediated', 'resolved'].map((s) => (
             <button
               key={s}
@@ -324,12 +327,12 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
               aria-pressed={statusTab === s}
               className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all shrink-0 focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${
                 statusTab === s
-                  ? 'border-sky-500/60 bg-sky-950/90 text-sky-200 shadow-xs'
-                  : 'border-slate-800 bg-slate-950/70 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                  ? 'border-[#00b6ec]/60 bg-[#087bff]/25 text-sky-100 shadow-[0_0_12px_rgba(8,123,255,0.22)]'
+                  : 'border-sky-400/15 bg-[#02182f]/75 text-slate-400 hover:text-slate-200 hover:border-sky-400/35'
               }`}
             >
               <span>{statusLabels[s] || s}</span>
-              <span className="rounded-full bg-slate-800/90 px-1.5 py-0.2 font-mono text-[10px] tabular-nums">
+              <span className="rounded-full bg-[#031d3d] px-1.5 py-0.2 font-mono text-[10px] tabular-nums">
                 {counts[s] || 0}
               </span>
             </button>
@@ -367,7 +370,7 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
             return (
               <div
                 key={alert.id}
-                className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 shadow-xs hover:border-slate-700 transition-colors space-y-3"
+                className="rounded-xl border border-sky-400/20 bg-[#031b36]/85 p-4 shadow-xs hover:border-sky-400/35 transition-colors space-y-3"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1 min-w-0">
@@ -432,26 +435,26 @@ export const AlertHistoryView: React.FC<AlertHistoryViewProps> = ({
                 </div>
 
                 {alert.deep_evidence && (
-                  <details className="rounded-xl border border-sky-900/70 bg-sky-950/20 p-3">
+                  <details className="rounded-xl border border-sky-400/20 bg-[#02182f]/75 p-3">
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold text-sky-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400 rounded-md">
                       <span className="flex items-center gap-2">
-                        <Network className="h-4 w-4 text-sky-400" />
+                        <Network className="h-4 w-4 text-[#00b6ec]" />
                         自动深度取证 · {alert.deep_evidence.captured_at_utc8 || '已采集'}
                       </span>
-                      <span className="font-mono text-[11px] text-slate-400">
+                      <span className="font-mono text-[11px] tabular-nums text-slate-400">
                         入站 {formatConnectionEvidenceCount(alert.deep_evidence.inbound_unique_ips, attributionUnavailable && inboundEvidence.length === 0)} IP / {formatConnectionEvidenceCount(alert.deep_evidence.inbound_process_count, attributionUnavailable)} 进程　
                         出站 {formatConnectionEvidenceCount(alert.deep_evidence.outbound_unique_ips, attributionUnavailable && outboundEvidence.length === 0)} IP / {formatConnectionEvidenceCount(alert.deep_evidence.outbound_process_count, attributionUnavailable)} 进程
                       </span>
                     </summary>
-                    <div className="mt-3 border-t border-sky-900/50 pt-3">
+                    <div className="mt-3 border-t border-sky-400/15 pt-3">
                       {attribution && (
-                        <section className="mb-3 rounded-lg border border-sky-900/70 bg-slate-950/60 p-3">
-                          <h4 className="text-xs font-semibold text-sky-200">连接发起方核验</h4>
-                          <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] tabular-nums sm:grid-cols-4">
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 已确认</span><strong className="text-sky-300">{formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)}</strong></div>
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">本机进程发起 · 推定</span><strong className="text-amber-300">{formatConnectionEvidenceCount(attribution.probable_local_initiated, attributionUnavailable)}</strong></div>
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">外部远端发起 · 已确认</span><strong className="text-emerald-300">{formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)}</strong></div>
-                            <div className="rounded-md bg-slate-900 p-2"><span className="block text-slate-500">方向未知</span><strong className="text-slate-300">{formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}</strong></div>
+                        <section className="mb-3 rounded-lg border border-sky-400/20 bg-[#031b36]/80 p-3">
+                          <h4 className="text-xs font-semibold text-[#00b6ec]">连接发起方核验</h4>
+                          <div className="mt-2 grid grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-sky-400/15 overflow-hidden rounded-lg border border-sky-400/15 bg-[#02182f]/80 text-[11px] tabular-nums sm:grid-cols-4">
+                            <div className="p-2.5"><span className="block text-slate-400">本机进程发起 · 已确认</span><strong className="font-mono text-[#00b6ec]">{formatConnectionEvidenceCount(attribution.confirmed_local_initiated, attributionUnavailable)}</strong></div>
+                            <div className="p-2.5"><span className="block text-slate-400">本机进程发起 · 推定</span><strong className="font-mono text-amber-300">{formatConnectionEvidenceCount(attribution.probable_local_initiated, attributionUnavailable)}</strong></div>
+                            <div className="p-2.5"><span className="block text-slate-400">外部远端发起 · 已确认</span><strong className="font-mono text-emerald-300">{formatConnectionEvidenceCount(attribution.confirmed_remote_initiated, attributionUnavailable)}</strong></div>
+                            <div className="p-2.5"><span className="block text-slate-400">方向未知</span><strong className="font-mono text-slate-300">{formatConnectionEvidenceCount(attribution.unknown_direction, attributionUnavailable)}</strong></div>
                           </div>
                           <p className="mt-2 text-[10px] leading-4 text-slate-500">
                             {attributionUnavailable

@@ -11,7 +11,7 @@ const categoryName = (kind: string) => ({ security: '安全配置风险', securi
 const actionName = (kind: string) => ({ enforce_socks_auth: '关闭不安全代理', remediate_panel_pairing: '清理未授权面板', remediate_malicious_process: '清理恶意进程', stop_container: '停止容器', restart_container: '重启容器', apply_udp_throttle: '限制 UDP 流量', release_udp_throttle: '解除 UDP 限速', release_socks_auth: '解除代理保护', allow_panel_domains: '放行面板域名', disallow_panel_domains: '取消面板放行' }[kind] || kind);
 const receiptName = (kind: string) => ({ process: '停止进程', stop_service: '停止服务', service: '删除服务', config: '删除配置', binary: '删除程序', startup: '删除自启项' }[kind] || kind);
 const control = 'ui-input';
-const panel = 'ui-surface-card';
+const panel = 'ui-surface-card border-sky-400/20 bg-[#031b36]/90';
 
 export const UserInvestigationView: React.FC = () => {
   const [host, setHost] = useState('');
@@ -82,59 +82,62 @@ export const UserInvestigationView: React.FC = () => {
   const latest = (detailsReady ? data?.items || [] : []).filter((i, index, items) => items.findIndex(other => other.identity_key === i.identity_key) === index);
 
   return <section className="pb-8" aria-busy={busy}>
-    <h2 className="text-3xl font-bold text-slate-100">用户与容器排查</h2>
-    <p className="mt-2 text-sm text-slate-300">查看已确认的容器安全问题与处置记录。没有账号认证等用户归因证据的网络、连接数和扫描信号只作保护提醒，不计入用户异常或滥用统计。</p>
-    <form className="my-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_180px_1.2fr_auto]" onSubmit={e => { e.preventDefault(); setQuery(draft.trim()); setUser(undefined); setOffset(0); setRefresh(n => n + 1); }}>
-      <label className="grid gap-1 text-xs text-slate-300 lg:flex lg:items-center lg:gap-3">母鸡主机<select className={`${control} flex-1`} value={host} onChange={e => { changeScope(); setHost(e.target.value); }}>
-        {data?.hosts.length ? data.hosts.map(h => <option key={h.host_id} value={h.host_id}>{h.host_id}</option>) : <option value={host}>{host || '等待主机数据'}</option>}
-      </select></label>
-      <label className="grid gap-1 text-xs text-slate-300 lg:flex lg:items-center lg:gap-3">时间范围<select className={`${control} flex-1`} value={days} onChange={e => { changeScope(); setDays(Number(e.target.value)); }}><option value={7}>最近 7 天</option><option value={30}>最近 30 天</option><option value={90}>最近 90 天</option></select></label>
-      <label className="grid gap-1 text-xs text-slate-300 lg:flex lg:items-center lg:gap-3">用户 / 容器<input className={`${control} flex-1`} value={draft} onChange={e => setDraft(e.target.value)} placeholder="输入用户标识、容器名或异常名称" /></label>
-      <button disabled={busy} className="mt-auto flex min-h-11 items-center justify-center gap-2 rounded-lg bg-sky-400 px-5 text-sm font-semibold text-slate-950 disabled:opacity-50"><Search size={16} />{busy ? '查询中…' : '查询 / 刷新'}</button>
-    </form>
-    {error && <p role="alert" className="mb-4 rounded-lg border border-red-800 p-4 text-sm text-red-300">{error}，请点击查询重试。</p>}
+    <div className="rounded-2xl border border-sky-400/20 bg-[#031d3d]/90 p-5 shadow-lg">
+      <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#00b6ec]">Investigation · User &amp; Container</span>
+      <h2 className="mt-1 text-2xl font-bold text-slate-100">用户与容器排查</h2>
+      <p className="mt-1.5 text-sm text-slate-300">查看已确认的容器安全问题与处置记录。没有账号认证等用户归因证据的网络、连接数和扫描信号只作保护提醒，不计入用户异常或滥用统计。</p>
+      <form className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_180px_1.2fr_auto]" onSubmit={e => { e.preventDefault(); setQuery(draft.trim()); setUser(undefined); setOffset(0); setRefresh(n => n + 1); }}>
+        <label className="grid gap-1 text-xs text-slate-300 lg:flex lg:items-center lg:gap-3">母鸡主机<select className={`${control} flex-1`} value={host} onChange={e => { changeScope(); setHost(e.target.value); }}>
+          {data?.hosts.length ? data.hosts.map(h => <option key={h.host_id} value={h.host_id}>{h.host_id}</option>) : <option value={host}>{host || '等待主机数据'}</option>}
+        </select></label>
+        <label className="grid gap-1 text-xs text-slate-300 lg:flex lg:items-center lg:gap-3">时间范围<select className={`${control} flex-1`} value={days} onChange={e => { changeScope(); setDays(Number(e.target.value)); }}><option value={7}>最近 7 天</option><option value={30}>最近 30 天</option><option value={90}>最近 90 天</option></select></label>
+        <label className="grid gap-1 text-xs text-slate-300 lg:flex lg:items-center lg:gap-3">用户 / 容器<input className={`${control} flex-1`} value={draft} onChange={e => setDraft(e.target.value)} placeholder="输入用户标识、容器名或异常名称" /></label>
+        <button disabled={busy} className="mt-auto flex min-h-11 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-5 text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 disabled:opacity-50"><Search size={16} />{busy ? '查询中…' : '查询 / 刷新'}</button>
+      </form>
+    </div>
+    {error && <p role="alert" className="my-4 rounded-lg border border-red-800 bg-rose-950/30 p-4 text-sm text-red-300">{error}，请点击查询重试。</p>}
     {!data && !error && <p className="py-12 text-center text-slate-300">{busy ? '正在核对母鸡、容器和用户历史…' : '尚无历史数据，等待 Client 上报。'}</p>}
     {data && <>
-      <div className={`${panel} grid grid-cols-2 divide-slate-700 sm:grid-cols-3 lg:grid-cols-5`}>
-        {([{ label: '已监测容器', value: data.summary.observed, icon: Box, color: 'text-sky-400' }, { label: '异常容器', value: data.summary.affected, icon: ShieldAlert, color: 'text-red-300' }, { label: '保护提醒 · 不计滥用', value: data.summary.protection_signals, icon: ShieldAlert, color: 'text-amber-300' }, { label: '涉及用户', value: data.summary.users, icon: Users, color: 'text-sky-400' }, { label: '未知归属', value: data.summary.unknown, icon: HelpCircle, color: 'text-slate-300' }]).map(k => <div key={k.label} className="flex items-center gap-3 p-4"><k.icon className={`h-6 w-6 shrink-0 ${k.color}`} /><div><div className="text-xs text-slate-300">{k.label}</div><div className="mt-1 text-2xl font-semibold tabular-nums">{k.value}</div></div></div>)}
+      <div className="mt-4 grid grid-cols-2 divide-y divide-sky-400/15 overflow-hidden rounded-2xl border border-sky-400/20 bg-[#02182f]/75 sm:grid-cols-3 sm:divide-x sm:divide-y-0 lg:grid-cols-5">
+        {([{ label: '已监测容器', value: data.summary.observed, icon: Box, color: 'text-[#00b6ec]' }, { label: '异常容器', value: data.summary.affected, icon: ShieldAlert, color: 'text-red-300' }, { label: '保护提醒 · 不计滥用', value: data.summary.protection_signals, icon: ShieldAlert, color: 'text-amber-300' }, { label: '涉及用户', value: data.summary.users, icon: Users, color: 'text-[#00b6ec]' }, { label: '未知归属', value: data.summary.unknown, icon: HelpCircle, color: 'text-slate-300' }]).map(k => <div key={k.label} className="flex items-center gap-3 p-4"><k.icon className={`h-6 w-6 shrink-0 ${k.color}`} /><div><div className="text-[11px] font-medium uppercase tracking-wider text-slate-400">{k.label}</div><div className="mt-1 font-mono text-2xl font-bold tabular-nums text-slate-100">{k.value}</div></div></div>)}
       </div>
-      <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-3 text-sm">
+      <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-amber-500/30 bg-amber-950/35 px-4 py-3 text-sm">
         <AlertTriangle className="h-5 w-5 shrink-0 text-amber-300" /><span className="font-semibold text-amber-200">{leading ? `异常集中线索：${ownerName(leading.user_id)} 有 ${leading.affected} / ${leading.observed} 个容器出现异常` : '暂无可归属用户的异常集中线索'}</span>
         <span className="text-xs text-slate-300">{leading ? `占已归属异常容器 ${leading.share}%（${leading.affected} / ${data.summary.attributed}）；` : ''}不是用户违规结论</span>
       </div>
       <p className="my-2 text-xs leading-5 text-slate-300">历史有效范围起点：{time(data.coverage.from)}（北京时间）。{!data.coverage.complete_window && '所选时间范围数据不完整。'}{data.summary.legacy > 0 && ` ${data.summary.legacy} 条旧告警缺少完整事件/归属证据，不计入独立事件数。`}仅统计已有观测，不编造持续时长。</p>
-      <div className={panel}>
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 px-4 py-3"><h3 className="font-semibold">按容器映射用户查看</h3><span className="text-xs text-slate-300">网络保护提醒单独展示、不计用户异常；重复上报不增加独立事件数</span></div>
-        <div className="hidden grid-cols-[1.6fr_1fr_1.4fr_.8fr_.8fr_auto] gap-4 border-b border-slate-700 px-5 py-3 text-xs text-slate-300 lg:grid"><span>容器映射用户</span><span>异常 / 已监测容器</span><span>映射内异常率</span><span>独立事件</span><span>待核实事件</span><span>操作</span></div>
+      <div className={`${panel} overflow-hidden`}>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-400/20 bg-[#031d3d]/90 px-4 py-3"><h3 className="font-semibold text-slate-100">按容器映射用户查看</h3><span className="text-xs text-slate-300">网络保护提醒单独展示、不计用户异常；重复上报不增加独立事件数</span></div>
+        <div className="hidden grid-cols-[1.6fr_1fr_1.4fr_.8fr_.8fr_auto] gap-4 border-b border-sky-400/15 bg-[#02182f]/75 px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400 lg:grid"><span>容器映射用户</span><span>异常 / 已监测容器</span><span>映射内异常率</span><span>独立事件</span><span>待核实事件</span><span>操作</span></div>
         {!data.users.length && <p className="p-8 text-center text-slate-300">没有符合条件的用户或容器记录。</p>}
-        {data.users.map(g => <button type="button" disabled={busy} key={g.user_id} aria-pressed={user === g.user_id} onClick={() => { setUser(g.user_id); setOffset(0); setExpanded(false); }} className={`grid w-full grid-cols-2 items-center gap-3 border-b border-slate-800 px-5 py-3 text-left text-sm last:border-0 sm:grid-cols-3 lg:grid-cols-[1.6fr_1fr_1.4fr_.8fr_.8fr_auto] lg:gap-4 ${user === g.user_id ? 'bg-sky-500/15' : 'hover:bg-slate-800/70'} disabled:opacity-60`}>
-          <span className="break-all font-medium text-sky-300">{ownerName(g.user_id)}</span><span className="tabular-nums">{g.affected} / {g.observed}{g.protection_signals > 0 && <span className="mt-1 block text-xs text-amber-200">另有 {g.protection_signals} 条保护提醒，不计用户异常</span>}</span>
-          <span className="flex items-center gap-3 tabular-nums">{g.rate === null ? (g.user_id ? `${g.unassessed}个容器未评估` : '未知归属不计算占比') : <><span className="min-w-12">{g.rate.toFixed(1)}%</span><progress aria-label={`${ownerName(g.user_id)}异常容器占比`} max={100} value={g.rate} className="hidden h-2 w-24 min-w-0 accent-sky-400 xl:block" /></>}{g.user_id && g.observed < 3 && <span className="text-xs text-slate-400">小样本</span>}</span>
-          <span className="tabular-nums"><span className="mr-2 text-xs text-slate-300 lg:hidden">独立事件</span>{g.episodes}</span><span className="tabular-nums"><span className="mr-2 text-xs text-slate-300 lg:hidden">待核实</span>{g.pending}</span>
-          <span className="flex items-center gap-1 text-sky-300">查看容器<ArrowRight size={14} /></span>
+        {data.users.map(g => <button type="button" disabled={busy} key={g.user_id} aria-pressed={user === g.user_id} onClick={() => { setUser(g.user_id); setOffset(0); setExpanded(false); }} className={`grid w-full grid-cols-2 items-center gap-3 border-b border-sky-400/10 px-5 py-3 text-left text-sm last:border-0 sm:grid-cols-3 lg:grid-cols-[1.6fr_1fr_1.4fr_.8fr_.8fr_auto] lg:gap-4 ${user === g.user_id ? 'bg-[#087bff]/20 border-l-2 border-l-[#00b6ec]' : 'hover:bg-[#031d3d]/60'} disabled:opacity-60`}>
+          <span className="break-all font-medium text-[#00b6ec]">{ownerName(g.user_id)}</span><span className="font-mono tabular-nums">{g.affected} / {g.observed}{g.protection_signals > 0 && <span className="mt-1 block font-sans text-xs text-amber-200">另有 {g.protection_signals} 条保护提醒，不计用户异常</span>}</span>
+          <span className="flex items-center gap-3 font-mono tabular-nums">{g.rate === null ? (g.user_id ? `${g.unassessed}个容器未评估` : '未知归属不计算占比') : <><span className="min-w-12">{g.rate.toFixed(1)}%</span><progress aria-label={`${ownerName(g.user_id)}异常容器占比`} max={100} value={g.rate} className="hidden h-2 w-24 min-w-0 accent-[#087bff] xl:block" /></>}{g.user_id && g.observed < 3 && <span className="font-sans text-xs text-slate-400">小样本</span>}</span>
+          <span className="font-mono tabular-nums"><span className="mr-2 font-sans text-xs text-slate-300 lg:hidden">独立事件</span>{g.episodes}</span><span className="font-mono tabular-nums"><span className="mr-2 font-sans text-xs text-slate-300 lg:hidden">待核实</span>{g.pending}</span>
+          <span className="flex items-center gap-1 text-[#00b6ec]">查看容器<ArrowRight size={14} /></span>
         </button>)}
       </div>
-      <div className={`${panel} mt-4`}>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700 px-4 py-3"><h3 className="font-semibold">{user === undefined ? '请选择用户' : ownerName(user)} · 容器历史</h3><span className="text-xs text-slate-300">{selectedUser?.episodes || 0} 个独立事件 · 归属按事件发生时记录</span></div>
-        <div className="hidden grid-cols-[1.3fr_1.5fr_1.2fr_1.5fr_auto] gap-4 border-b border-slate-700 px-5 py-3 text-xs text-slate-300 lg:grid"><span>容器 / 运行时 / 项目</span><span>最近异常</span><span>最近异常采样</span><span>处置与复查</span><span>历史</span></div>
-        {(expanded ? latest : latest.slice(0, 4)).map(i => <div key={i.identity_key} className="grid gap-3 border-b border-slate-800 px-5 py-3 text-sm last:border-0 sm:grid-cols-2 lg:grid-cols-[1.3fr_1.5fr_1.2fr_1.5fr_auto] lg:items-center lg:gap-4 lg:py-2">
+      <div className={`${panel} mt-4 overflow-hidden`}>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-sky-400/20 bg-[#031d3d]/90 px-4 py-3"><h3 className="font-semibold text-slate-100">{user === undefined ? '请选择用户' : ownerName(user)} · 容器历史</h3><span className="font-mono text-xs tabular-nums text-slate-300">{selectedUser?.episodes || 0} 个独立事件 · 归属按事件发生时记录</span></div>
+        <div className="hidden grid-cols-[1.3fr_1.5fr_1.2fr_1.5fr_auto] gap-4 border-b border-sky-400/15 bg-[#02182f]/75 px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400 lg:grid"><span>容器 / 运行时 / 项目</span><span>最近异常</span><span>最近异常采样</span><span>处置与复查</span><span>历史</span></div>
+        {(expanded ? latest : latest.slice(0, 4)).map(i => <div key={i.identity_key} className="grid gap-3 border-b border-sky-400/10 px-5 py-3 text-sm last:border-0 sm:grid-cols-2 lg:grid-cols-[1.3fr_1.5fr_1.2fr_1.5fr_auto] lg:items-center lg:gap-4 lg:py-2">
           <div className="min-w-0 break-all font-medium lg:flex lg:flex-wrap lg:items-center lg:gap-x-3">{i.container_name}<div className="mt-1 text-xs font-normal text-slate-300 lg:mt-0">{i.runtime} / {i.project || '默认项目'}</div></div>
           <div className={i.category === 'protection_signal' ? 'text-amber-200' : i.severity === 'critical' ? 'text-red-300' : 'text-amber-300'}>{i.title}<div className="mt-1 text-xs text-slate-300 lg:ml-2 lg:mt-0 lg:inline">{categoryName(i.category)}{i.legacy ? ' · 历史不完整' : ''}</div></div>
-          <div className="text-xs tabular-nums text-slate-300">{time(i.last_anomaly)}</div>
+          <div className="font-mono text-xs tabular-nums text-slate-300">{time(i.last_anomaly)}</div>
           <div className={`flex items-center gap-2 ${stateColor(i.state)}`}>{i.state === 'verified' ? <CheckCircle2 size={16} /> : <Clock3 size={16} />}{states[i.state] || '待核实'}</div>
-          <button type="button" className="min-h-11 text-left text-sky-300 hover:text-sky-200 lg:min-h-8" onClick={() => setSelected(i)}>查看历史<ArrowRight className="ml-1 inline" size={14} /></button>
+          <button type="button" className="min-h-11 text-left text-[#00b6ec] hover:text-sky-200 lg:min-h-8" onClick={() => setSelected(i)}>查看历史<ArrowRight className="ml-1 inline" size={14} /></button>
         </div>)}
         {!detailsReady && <p className="p-8 text-center text-slate-300">正在核对所选用户的容器历史…</p>}
         {detailsReady && !latest.length && <p className="p-8 text-center text-slate-300">该用户在所选母鸡和时间范围内没有匹配的告警事件。</p>}
-        {latest.length > 4 && <button className="min-h-11 px-5 text-sm text-sky-300" onClick={() => setExpanded(value => !value)}>{expanded ? '收起容器明细' : `展开本页其余 ${latest.length - 4} 个容器`}</button>}
-        {data.total > 30 && <div className="flex items-center justify-between p-4 text-xs text-slate-300"><button disabled={busy || offset === 0} className="min-h-11 text-sky-300 disabled:text-slate-500" onClick={() => setOffset(n => Math.max(0, n - 30))}>上一页事件</button><span>事件 {offset + 1}–{Math.min(offset + 30, data.total)} / {data.total}</span><button disabled={busy || offset + 30 >= data.total} className="min-h-11 text-sky-300 disabled:text-slate-500" onClick={() => setOffset(n => n + 30)}>下一页事件</button></div>}
+        {latest.length > 4 && <button className="min-h-11 px-5 text-sm text-[#00b6ec]" onClick={() => setExpanded(value => !value)}>{expanded ? '收起容器明细' : `展开本页其余 ${latest.length - 4} 个容器`}</button>}
+        {data.total > 30 && <div className="flex items-center justify-between p-4 text-xs text-slate-300"><button disabled={busy || offset === 0} className="min-h-11 text-[#00b6ec] disabled:text-slate-500" onClick={() => setOffset(n => Math.max(0, n - 30))}>上一页事件</button><span className="font-mono tabular-nums">事件 {offset + 1}–{Math.min(offset + 30, data.total)} / {data.total}</span><button disabled={busy || offset + 30 >= data.total} className="min-h-11 text-[#00b6ec] disabled:text-slate-500" onClick={() => setOffset(n => n + 30)}>下一页事件</button></div>}
       </div>
       {data.public_total > 0 && <details className={`${panel} mt-4 p-4`}><summary className="cursor-pointer text-sm text-amber-200">母鸡公共告警 {data.public_total} 个事件 · 不归属用户</summary><div className="mt-3 space-y-3">{data.public_items.map(i => <div key={i.id} className="text-sm text-slate-300">{i.title} · {time(i.last_anomaly)} · {states[i.state] || '待核实'}</div>)}</div></details>}
       <p className="mt-4 text-xs leading-5 text-slate-300">用户字段仅表示容器映射关系，不代表网络行为由该用户发起。有效异常归属覆盖：{data.summary.attributed} / {data.summary.affected} 个异常容器。{data.coverage.note} 本页手动查询，不随实时轮询重排。</p>
     </>}
-    {selected && <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/70" onClick={() => setSelected(null)}>
-      <aside ref={drawerRef} role="dialog" aria-modal="true" aria-labelledby="investigation-history-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key !== 'Tab') return; const controls = drawerRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'); if (!controls?.length) return; const first = controls[0], last = controls[controls.length - 1]; if ((e.shiftKey && document.activeElement === first) || (!e.shiftKey && document.activeElement === last)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); } }} className="h-full w-full max-w-2xl overflow-y-auto border-l border-slate-700 bg-slate-950 p-5 sm:p-7">
-        <div className="flex items-start justify-between gap-3"><h3 id="investigation-history-title" className="break-all text-lg font-semibold">{selected.container_name} · 历史告警</h3><button ref={closeRef} aria-label="关闭历史面板" className="min-h-11 min-w-11 shrink-0 rounded-lg border border-slate-700 p-3" onClick={() => setSelected(null)}><X size={18} /></button></div>
+    {selected && <div className="fixed inset-0 z-50 flex justify-end bg-[#021124]/80 backdrop-blur-xs" onClick={() => setSelected(null)}>
+      <aside ref={drawerRef} role="dialog" aria-modal="true" aria-labelledby="investigation-history-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key !== 'Tab') return; const controls = drawerRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'); if (!controls?.length) return; const first = controls[0], last = controls[controls.length - 1]; if ((e.shiftKey && document.activeElement === first) || (!e.shiftKey && document.activeElement === last)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); } }} className="h-full w-full max-w-2xl overflow-y-auto border-l border-sky-400/20 bg-[#02182f] p-5 sm:p-7">
+        <div className="flex items-start justify-between gap-3 border-b border-sky-400/20 pb-4"><h3 id="investigation-history-title" className="break-all text-lg font-semibold text-slate-100">{selected.container_name} · 历史告警</h3><button ref={closeRef} aria-label="关闭历史面板" className="min-h-11 min-w-11 shrink-0 rounded-lg border border-sky-400/25 bg-[#031d3d] p-3 text-slate-200 hover:border-sky-400/50" onClick={() => setSelected(null)}><X size={18} /></button></div>
         <p className="mt-2 break-all text-xs text-slate-300">{host} · {selected.runtime} / {selected.project} · {ownerName(selected.user_id)} · 最近 {days} 天</p>
         <p className="mt-3 text-xs leading-5 text-slate-300">这里的用户仅表示事件发生时容器的映射关系，不单独证明行为来源。网络保护提醒不会计入用户异常；转售前记录不会归到当前映射用户。同名重建有实例 ID / 创建时间证据时分开；没有证据时不声称已区分。检测与处置时间均为北京时间。</p>
         {historyBusy && <p className="py-8 text-slate-300">加载容器历史…</p>}{historyError && <p role="alert" className="py-8 text-red-300">{historyError}</p>}

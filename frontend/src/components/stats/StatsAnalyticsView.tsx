@@ -73,13 +73,16 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="ui-surface-card flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-4 sm:p-5">
+      <div className="ui-surface-card flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-sky-400/20 bg-[#031d3d]/90 p-4 sm:p-5">
         <div className="flex items-center gap-3">
-          <div className="rounded-xl bg-sky-950/80 p-2.5 text-sky-400 border border-sky-500/30 shrink-0">
+          <div className="rounded-xl bg-[#087bff]/15 p-2.5 text-[#00b6ec] border border-sky-400/30 shrink-0">
             <BarChart3 className="h-5 w-5" />
           </div>
           <div>
-            <h2 className="text-base font-bold text-slate-100">
+            <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#00b6ec]">
+              Telemetry Analytics · Top Consumers
+            </span>
+            <h2 className="mt-0.5 text-base font-bold text-slate-100">
               数据统计与综合排行分析
             </h2>
             <p className="mt-0.5 text-xs text-slate-400">
@@ -90,7 +93,7 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
 
         {/* Time window selector & buttons */}
         <div className="flex items-center gap-2.5 flex-wrap">
-          <div className="flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-950/80 p-1" role="group" aria-label="快捷时间窗口">
+          <div className="flex items-center gap-1 rounded-xl border border-sky-400/20 bg-[#02182f]/80 p-1" role="group" aria-label="快捷时间窗口">
             {presets.map((preset) => (
               <button
                 key={preset.value}
@@ -98,10 +101,10 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
                 onClick={() => void loadWithMinutes(preset.value)}
                 disabled={loading}
                 aria-pressed={minutes === preset.value}
-                className={`h-8 rounded-lg px-2.5 text-xs font-mono font-semibold transition-all ${
+                className={`h-8 rounded-lg px-2.5 text-xs font-mono font-semibold tabular-nums transition-all ${
                   minutes === preset.value
-                    ? 'bg-sky-600/30 text-sky-200 border border-sky-500/40'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                    ? 'bg-[#087bff]/25 text-sky-100 border border-[#00b6ec]/60 shadow-[0_0_12px_rgba(8,123,255,0.22)]'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-[#031d3d]/80'
                 }`}
               >
                 {preset.label}
@@ -156,28 +159,28 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
           <button type="button" onClick={() => void loadData()} disabled={loading} className="min-h-11 shrink-0 rounded-lg border border-rose-500/40 px-3 text-sm font-medium text-rose-100 hover:bg-rose-900/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-wait disabled:opacity-50">{loading ? '正在重试…' : '重试'}</button>
         </section>
       )}
-      {loading && !stats && <p role="status" aria-live="polite" className="rounded-xl border border-slate-800 bg-slate-900/60 p-6 text-sm text-slate-300"><LoaderCircle className="mr-2 inline h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />正在读取统计数据…</p>}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs">
-        <div className="ui-surface-card p-4">
-          <span className="text-slate-400 block text-[11px]">统计容器数</span>
+      {loading && !stats && <p role="status" aria-live="polite" className="rounded-xl border border-sky-400/20 bg-[#031b36]/80 p-6 text-sm text-slate-300"><LoaderCircle className="mr-2 inline h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />正在读取统计数据…</p>}
+      <div className="grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-sky-400/15 overflow-hidden rounded-2xl border border-sky-400/20 bg-[#02182f]/75 font-mono text-xs">
+        <div className="p-4">
+          <span className="text-slate-400 block text-[10px] font-bold uppercase tracking-wider">统计容器数</span>
           <span className="text-xl sm:text-2xl font-extrabold text-slate-100 mt-1 block tabular-nums">
             {stats ? stats.containers_count : '—'}
           </span>
         </div>
-        <div className="ui-surface-card p-4">
-          <span className="text-slate-400 block text-[11px]">累计样本数</span>
+        <div className="p-4">
+          <span className="text-slate-400 block text-[10px] font-bold uppercase tracking-wider">累计样本数</span>
           <span className="text-xl sm:text-2xl font-extrabold text-slate-100 mt-1 block tabular-nums">
             {stats ? stats.samples_count : '—'}
           </span>
         </div>
-        <div className="ui-surface-card p-4">
-          <span className="text-slate-400 block text-[11px]">建议采样间隔</span>
-          <span className="text-xl sm:text-2xl font-extrabold text-sky-400 mt-1 block tabular-nums">
+        <div className="p-4">
+          <span className="text-slate-400 block text-[10px] font-bold uppercase tracking-wider">建议采样间隔</span>
+          <span className="text-xl sm:text-2xl font-extrabold text-[#00b6ec] mt-1 block tabular-nums">
             {stats?.sample_interval_seconds ? `${stats.sample_interval_seconds}s` : '--'}
           </span>
         </div>
-        <div className="ui-surface-card p-4">
-          <span className="text-slate-400 block text-[11px]">有效统计窗口</span>
+        <div className="p-4">
+          <span className="text-slate-400 block text-[10px] font-bold uppercase tracking-wider">有效统计窗口</span>
           <span className="text-xl sm:text-2xl font-extrabold text-emerald-400 mt-1 block tabular-nums">
             {stats?.window_minutes ? `${stats.window_minutes}m` : '--'}
           </span>
@@ -185,14 +188,14 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
       </div>
 
       {/* Top 10 CPU Table */}
-      <div className="ui-surface-card overflow-hidden">
-        <div className="flex items-center gap-2 border-b border-slate-800 bg-slate-900/80 px-5 py-3.5">
-          <Cpu className="h-4 w-4 text-sky-400" />
+      <div className="ui-surface-card overflow-hidden border-sky-400/20 bg-[#031b36]/85">
+        <div className="flex items-center gap-2 border-b border-sky-400/20 bg-[#031d3d]/90 px-5 py-3.5">
+          <Cpu className="h-4 w-4 text-[#00b6ec]" />
           <h3 className="text-sm font-bold text-slate-100">Top 10：平均 CPU 消耗</h3>
         </div>
         <div tabIndex={0} role="region" aria-label="Top 10 平均 CPU 消耗表格" className="hidden md:block overflow-x-auto focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400">
           <table className="w-full text-left text-xs text-slate-300">
-            <thead className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold text-slate-400 uppercase">
+            <thead className="border-b border-sky-400/15 bg-[#02182f]/75 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
               <tr>
                 <th className="px-5 py-2.5">主机</th>
                 <th className="px-5 py-2.5">运行时</th>
@@ -246,14 +249,14 @@ export const StatsAnalyticsView: React.FC<StatsAnalyticsViewProps> = ({
       </div>
 
       {/* Top 10 Traffic Table */}
-      <div className="ui-surface-card overflow-hidden">
-        <div className="flex items-center gap-2 border-b border-slate-800 bg-slate-900/80 px-5 py-3.5">
+      <div className="ui-surface-card overflow-hidden border-sky-400/20 bg-[#031b36]/85">
+        <div className="flex items-center gap-2 border-b border-sky-400/20 bg-[#031d3d]/90 px-5 py-3.5">
           <Network className="h-4 w-4 text-emerald-400" />
           <h3 className="text-sm font-bold text-slate-100">Top 10：累计流量消耗</h3>
         </div>
         <div tabIndex={0} role="region" aria-label="Top 10 累计流量消耗表格" className="hidden md:block overflow-x-auto focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-400">
           <table className="w-full text-left text-xs text-slate-300">
-            <thead className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold text-slate-400 uppercase">
+            <thead className="border-b border-sky-400/15 bg-[#02182f]/75 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
               <tr>
                 <th className="px-5 py-2.5">主机</th>
                 <th className="px-5 py-2.5">运行时</th>

@@ -319,16 +319,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
   return (
     <div className="space-y-6">
       {/* Settings Top Overview Banner */}
-      <section className="ui-surface-card bg-linear-to-br from-slate-900 via-slate-950 to-slate-900 p-5 sm:p-6">
+      <section className="ui-surface-card border-sky-400/20 bg-[#031d3d]/90 p-5 sm:p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-start gap-3.5">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-sky-500/30 bg-sky-500/10 shadow-inner">
-              <Settings className="h-6 w-6 text-sky-400" />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-[#00b6ec]/35 bg-[#087bff]/15 shadow-inner">
+              <Settings className="h-6 w-6 text-[#00b6ec]" />
             </div>
             <div>
-              <div className="flex items-center gap-2.5 flex-wrap">
+              <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#00b6ec]">
+                System Configuration · Integrations &amp; Policy
+              </span>
+              <div className="mt-0.5 flex items-center gap-2.5 flex-wrap">
                 <h2 className="text-xl font-bold text-slate-100 tracking-tight">系统设置</h2>
-                <span className="rounded-md border border-slate-700 bg-slate-800/80 px-2 py-0.5 font-mono text-xs text-slate-300">
+                <span className="rounded-md border border-sky-400/25 bg-[#02182f]/80 px-2 py-0.5 font-mono text-xs text-sky-200">
                   推送与 API 集成
                 </span>
               </div>
@@ -376,7 +379,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
 
       {/* Grid: Card 1 (Narwhal Cloud Buyer API) & Card 2 (Telegram Bots) */}
       <BuyerNotificationsView onToast={onToast} />
-      <section className="ui-surface-card p-5 sm:p-6" aria-labelledby="ip-reputation-heading">
+      <section className="ui-surface-card border-sky-400/20 bg-[#031b36]/85 p-5 sm:p-6" aria-labelledby="ip-reputation-heading">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-2xl">
             <div className="flex flex-wrap items-center gap-2">
@@ -420,7 +423,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
             <button type="button" onClick={handleTestIpReputation} disabled={!ipReputationConfigured || testingIpReputation || savingIpReputationKey} className="min-h-11 shrink-0 rounded-lg border border-sky-700/60 bg-sky-950/30 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-900/50 disabled:cursor-not-allowed disabled:opacity-50">
               {testingIpReputation ? '测试中…' : '测试连通性'}
             </button>
-            <button type="submit" disabled={savingIpReputationKey || !ipReputationKey.trim()} className="min-h-11 shrink-0 rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="submit" disabled={savingIpReputationKey || !ipReputationKey.trim()} className="min-h-11 shrink-0 rounded-lg bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-4 py-2 text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50">
               {savingIpReputationKey ? '加密保存中…' : ipReputationConfigured ? '替换密钥' : '加密保存'}
             </button>
           </form>
@@ -442,14 +445,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
         {/* =========================================================================
             CARD A: Narwhal Cloud 买家告警推送配置
            ========================================================================= */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 sm:p-6 shadow-lg flex flex-col justify-between">
+        <section className="overflow-hidden rounded-2xl border border-sky-400/20 bg-[#031b36]/85 shadow-lg flex flex-col justify-between">
           <div>
-            <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+            <div className="flex items-center justify-between gap-3 border-b border-sky-400/20 bg-[#031d3d]/90 px-5 py-4 sm:px-6">
               <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-sky-500/30 bg-sky-500/10">
-                  <Cloud className="h-5 w-5 text-sky-400" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-[#00b6ec]/35 bg-[#087bff]/15">
+                  <Cloud className="h-5 w-5 text-[#00b6ec]" />
                 </div>
                 <div>
+                  <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-[#00b6ec]">Buyer Push API</span>
                   <h3 className="text-base font-semibold text-slate-100">Narwhal Cloud 买家推送配置</h3>
                   <p className="text-xs text-slate-400">
                     向购买该机器容器的租户直接推送严重违规/安全预警通知
@@ -468,9 +472,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   onChange={e => setApiForm({ ...apiForm, buyer_notify_enabled: e.target.checked })}
                   className="sr-only peer"
                 />
-                <div className="relative w-11 h-6 bg-slate-800 peer-focus:outline-hidden rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-sky-500"></div>
+                <div className="relative w-11 h-6 bg-slate-800 peer-focus:outline-hidden rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#087bff]"></div>
               </label>
             </div>
+            <div className="p-5 sm:p-6">
 
             {/* Multi-node cluster note */}
             <div className="mt-4 rounded-xl border border-sky-500/20 bg-sky-950/40 p-3.5 text-xs text-sky-200 flex items-start gap-2.5">
@@ -613,7 +618,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 <button
                   type="submit"
                   disabled={savingPush || loadingPush}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-sky-400 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-60 shadow-xs"
+                  className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-4 py-2 text-xs sm:text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 focus:outline-hidden focus:ring-2 focus:ring-orange-400 disabled:opacity-60"
                 >
                   <Save className="h-4 w-4" />
                   {savingPush ? '保存中…' : '保存 API 配置'}
@@ -630,26 +635,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                 </button>
               </div>
 
-              <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[11px] text-slate-400 flex items-start gap-2">
-                <CheckCircle2 className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
+              <div className="rounded-lg border border-sky-400/15 bg-[#02182f]/75 p-3 text-[11px] text-slate-400 flex items-start gap-2">
+                <CheckCircle2 className="h-4 w-4 text-[#00b6ec] shrink-0 mt-0.5" />
                 <span>
                   <strong>频控机制保护：</strong>同一母鸡机器 24 小时内向买家发送一条预警通知，以避免短时间内重复骚扰用户。
                 </span>
               </div>
             </form>
+            </div>
           </div>
         </section>
 
         {/* =========================================================================
             CARD B: Telegram 告警机器人配置
            ========================================================================= */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 sm:p-6 shadow-lg space-y-5">
-          <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+        <section className="overflow-hidden rounded-2xl border border-sky-400/20 bg-[#031b36]/85 shadow-lg">
+          <div className="flex items-center justify-between gap-3 border-b border-sky-400/20 bg-[#031d3d]/90 px-5 py-4 sm:px-6">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-sky-500/30 bg-sky-500/10">
-                <Bot className="h-5 w-5 text-sky-400" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-[#00b6ec]/35 bg-[#087bff]/15">
+                <Bot className="h-5 w-5 text-[#00b6ec]" />
               </div>
               <div>
+                <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-[#00b6ec]">Telegram Bot</span>
                 <h3 className="text-base font-semibold text-slate-100">Telegram 告警机器人</h3>
                 <p className="text-xs text-slate-400">
                   推送运维告警至管理员群组，支持动态刷新与控制台操作
@@ -670,6 +677,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
             </span>
           </div>
 
+          <div className="p-5 sm:p-6 space-y-5">
           {!callbackReady && (
             <div className="rounded-lg border border-amber-700/60 bg-amber-950/40 p-3 text-xs text-amber-200 flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
@@ -755,7 +763,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               <button
                 type="submit"
                 disabled={savingBot}
-                className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-sky-400 transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-60"
+                className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-4 py-2 text-xs sm:text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 focus:outline-hidden focus:ring-2 focus:ring-orange-400 disabled:opacity-60"
               >
                 <Bot className="h-4 w-4" />
                 {savingBot ? '保存中…' : '添加机器人并验证'}
@@ -838,18 +846,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
               </div>
             )}
           </div>
+          </div>
         </section>
 
         {/* =========================================================================
             CARD C: 动态安全策略中心（SNI 白名单 & 服务合规热下发）
            ========================================================================= */}
-        <section className="lg:col-span-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 sm:p-6 shadow-lg space-y-5">
-          <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+        <section className="lg:col-span-2 overflow-hidden rounded-2xl border border-sky-400/20 bg-[#031b36]/85 shadow-lg">
+          <div className="flex items-center justify-between gap-3 border-b border-sky-400/20 bg-[#031d3d]/90 px-5 py-4 sm:px-6">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/10">
                 <Settings className="h-5 w-5 text-emerald-400" />
               </div>
               <div>
+                <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-[#00b6ec]">Dynamic Security Policy · Hot Reload</span>
                 <h3 className="text-base font-semibold text-slate-100">动态安全策略中心（SNI 白名单 &amp; 服务合规）</h3>
                 <p className="text-xs text-slate-400">
                   无需重启或重编节点 Agent，保存后随心跳实时热下发至所有在线宿主机
@@ -858,7 +868,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
             </div>
           </div>
 
-          <form onSubmit={handleSaveSecurityPolicy} className="space-y-4">
+          <form onSubmit={handleSaveSecurityPolicy} className="space-y-4 p-5 sm:p-6">
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
               <label className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/60 p-3 cursor-pointer hover:border-slate-700 transition-colors">
                 <input
@@ -948,7 +958,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onToast }) => {
                   <button
                     type="submit"
                     disabled={savingSecPolicy || loadingPush}
-                    className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-xs sm:text-sm font-bold text-slate-950 hover:bg-emerald-400 transition-colors focus:outline-hidden focus:ring-2 focus:ring-emerald-400 disabled:opacity-60 shadow-xs"
+                    className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-4 py-2 text-xs sm:text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 focus:outline-hidden focus:ring-2 focus:ring-orange-400 disabled:opacity-60"
                   >
                     <Save className="h-4 w-4" />
                     {savingSecPolicy ? '下发中…' : '保存并热下发安全策略'}

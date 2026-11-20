@@ -833,11 +833,12 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
   const enabledAbuse = ((abuse.service_runtimes || []).length > 0 ? (abuse.services || []).length : 0) + Number(abuse.mining) + Number(abuse.bt);
 
   return <div className="mx-auto mt-6 w-full space-y-5 pb-8">
-    <header className="ui-surface-card flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+    <header className="ui-surface-card flex flex-col gap-4 border-sky-400/20 bg-[#031d3d]/90 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
       <div className="flex min-w-0 items-start gap-3">
-        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-sky-700/60 bg-sky-950/50 text-sky-300"><Shield className="h-5 w-5" aria-hidden="true" /></span>
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#00b6ec]/35 bg-[#087bff]/15 text-[#00b6ec]"><Shield className="h-5 w-5" aria-hidden="true" /></span>
         <div className="min-w-0">
-          <h2 className="text-lg font-bold text-slate-100">母机防火墙策略</h2>
+          <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#00b6ec]">Host &amp; Fleet Firewall · RFW Policy</span>
+          <h2 className="mt-0.5 text-lg font-bold text-slate-100">母机防火墙策略</h2>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">RFW 主机规则由 Watcher 经 Runman 受限接口应用；测速服务保护由 Agent 在所选 Incus / Podman / Runman 容器内应用。</p>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">8792 是 Agent 面板端口；RFW API 默认仅监听 127.0.0.1:7734（地址可配置）。Watcher 通过 Agent 受限控制通道读回和同步，不需要将 RFW API 暴露到公网。</p>
         </div>
@@ -847,21 +848,21 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       </button>
     </header>
 
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-2" aria-label="选择防火墙配置范围">
+    <section className="rounded-2xl border border-sky-400/20 bg-[#02182f]/80 p-2" aria-label="选择防火墙配置范围">
       <div className="grid gap-2 sm:grid-cols-2" role="tablist" aria-label="防火墙配置范围">
         {([
           ['host', '单台母鸡', '只改当前选中的节点', Server],
           ['fleet', '全体母鸡', '按每台节点的运行时自动匹配网卡', Layers],
-        ] as const).map(([key, title, description, Icon]) => <button key={key} type="button" role="tab" disabled={mutationBusy} aria-selected={scope === key} onClick={() => requestScopeChange(key)} className={`flex min-h-16 items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${scope === key ? 'border-sky-600 bg-sky-950/50' : 'border-transparent bg-slate-950/40 hover:border-slate-700'}`}>
-          <Icon className={`h-5 w-5 shrink-0 ${scope === key ? 'text-sky-300' : 'text-slate-500'}`} aria-hidden="true" />
+        ] as const).map(([key, title, description, Icon]) => <button key={key} type="button" role="tab" disabled={mutationBusy} aria-selected={scope === key} onClick={() => requestScopeChange(key)} className={`flex min-h-16 items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 ${scope === key ? 'border-[#00b6ec]/60 bg-[#087bff]/20 shadow-[0_0_16px_rgba(8,123,255,0.18)]' : 'border-transparent bg-[#031b36]/60 hover:border-sky-400/30'}`}>
+          <Icon className={`h-5 w-5 shrink-0 ${scope === key ? 'text-[#00b6ec]' : 'text-slate-500'}`} aria-hidden="true" />
           <span className="min-w-0"><span className="block text-sm font-semibold text-slate-100">{title}</span><span className="mt-0.5 block text-xs leading-4 text-slate-400">{description}</span></span>
-          {scope === key && <Check className="ml-auto h-4 w-4 shrink-0 text-sky-300" aria-hidden="true" />}
+          {scope === key && <Check className="ml-auto h-4 w-4 shrink-0 text-[#00b6ec]" aria-hidden="true" />}
         </button>)}
       </div>
     </section>
 
     {scope === 'host' && <section className="grid gap-4 lg:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.2fr)]">
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+      <div className="rounded-2xl border border-sky-400/20 bg-[#031b36]/85 p-4">
         <fieldset disabled={mutationBusy} className="min-w-0">
         <FirewallNodePicker
           hosts={hosts}
@@ -912,28 +913,28 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       </div>
     </section>}
 
-    {scope === 'fleet' && <section className="rounded-2xl border border-sky-800/60 bg-slate-900/70 p-4 sm:p-5">
+    {scope === 'fleet' && <section className="rounded-2xl border border-sky-400/20 bg-[#031b36]/85 p-4 sm:p-5">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
-          <h3 className="text-sm font-bold text-slate-100">全局策略模板 <span className="ml-2 font-normal text-slate-400">版本 #{fleetSnapshot?.revision ?? 0}</span></h3>
+          <h3 className="text-sm font-bold text-slate-100">全局策略模板 <span className="ml-2 font-mono font-normal text-[#00b6ec]">版本 #{fleetSnapshot?.revision ?? 0}</span></h3>
           <p className="mt-1 text-xs leading-5 text-slate-400">固定端口模板支持 Incus / Podman / Runman bridge；每台母机按自己的最新网卡清单解析。测速服务保护可单独选择 Incus / Podman / Runman，不依赖 RFW 网桥。</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void loadFleetPolicy()} disabled={fleetLoading} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">{fleetLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}刷新全局状态</button>
+          <button type="button" onClick={() => void loadFleetPolicy()} disabled={fleetLoading} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-sky-400/25 bg-[#031d3d] px-3 text-xs text-slate-200 hover:border-[#00b6ec]/50 disabled:opacity-50">{fleetLoading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}刷新全局状态</button>
           {fleetSnapshot && fleetSnapshot.revision > 0
-            ? <button type="button" onClick={loadFleetDraft} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700">重新载入已保存模板</button>
-            : <button type="button" onClick={() => void copyHostDraftToFleet()} disabled={!snapshotMatchesHost || mutationBusy} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50">从所选母鸡复制规则</button>}
+            ? <button type="button" onClick={loadFleetDraft} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-sky-400/25 bg-[#031d3d] px-3 text-xs text-slate-200 hover:border-[#00b6ec]/50">重新载入已保存模板</button>
+            : <button type="button" onClick={() => void copyHostDraftToFleet()} disabled={!snapshotMatchesHost || mutationBusy} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-sky-400/25 bg-[#031d3d] px-3 text-xs text-slate-200 hover:border-[#00b6ec]/50 disabled:opacity-50">从所选母鸡复制规则</button>}
         </div>
       </div>
       {fleetSnapshot?.automatic_speedtest_default && <p className="mt-3 rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-3 text-xs leading-5 text-emerald-100/80">当前尚未保存全局模板。无单机自定义策略的 Incus / Podman 节点会在上报时自动启用默认测速保护；已有单机策略保持不变。需要设定不同的全局范围时，再保存全局模板。</p>}
-      {fleetSnapshot && <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {fleetSnapshot && <div className="mt-4 grid grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-sky-400/15 overflow-hidden rounded-xl border border-sky-400/20 bg-[#02182f]/75 sm:grid-cols-4">
         {[
           ['管理节点', fleetSnapshot.counts.total],
           ['RFW 已核验', `${fleetRfwVerifiedCount}/${fleetRfwConfiguredCount}`],
           ['容器保护已核验', `${fleetProtectionActiveCount}/${fleetProtectionConfiguredCount}`],
           ['需关注', fleetAttentionCount],
-        ].map(([label, value]) => <div key={String(label)} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-          <div className="text-[10px] text-slate-500">{label}</div><div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">{value}</div>
+        ].map(([label, value]) => <div key={String(label)} className="p-3">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</div><div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">{value}</div>
         </div>)}
       </div>}
       {fleetSnapshot && <details className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
@@ -1029,8 +1030,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       <p className="mt-4 rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-[11px] leading-5 text-amber-100/80">实时读回来自节点运行中 RFW 的规则 API，并与平台管理的期望规则逐项比对；它不是直接读取 eBPF 内核 map。手工规则只能在新鲜读回后逐条确认删除；平台规则从期望列表移除并应用，避免被自动同步重新创建。MTProto 策略仅下发给能力明确支持的节点。</p>
     </section>}
 
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/70">
-      <div className="flex flex-col gap-2 border-b border-slate-800 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+    <section className="overflow-hidden rounded-2xl border border-sky-400/20 bg-[#031b36]/85">
+      <div className="flex flex-col gap-2 border-b border-sky-400/20 bg-[#031d3d]/90 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
         <div>
           <h3 className="text-sm font-bold text-slate-100">所选母机的 RFW 实际规则</h3>
           <p className="mt-1 text-xs leading-5 text-slate-400">读取母机 RFW 当前规则；平台规则从期望列表移除后应用，手工规则可在新鲜读回并确认后单条删除。</p>
@@ -1063,8 +1064,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
     </section>
 
     <fieldset disabled={!canEdit} className="min-w-0 space-y-5" aria-label="防火墙策略编辑器">
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/70">
-      <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
+    <section className="overflow-hidden rounded-2xl border border-sky-400/20 bg-[#031b36]/85">
+      <div className="border-b border-sky-400/20 bg-[#031d3d]/90 px-4 py-4 sm:px-5">
         <div>
           <h3 className="text-sm font-bold text-slate-100">CN 危险协议策略 <span className="ml-2 font-normal text-slate-400">生成草稿，不会立即生效</span></h3>
         </div>
@@ -1127,8 +1128,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
       </div>
     </section>
 
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/70">
-      <div className="border-b border-slate-800 px-4 py-4 sm:px-5">
+    <section className="overflow-hidden rounded-2xl border border-sky-400/20 bg-[#031b36]/85">
+      <div className="border-b border-sky-400/20 bg-[#031d3d]/90 px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-bold text-slate-100">测速目标与容器服务保护</h3>
           <span className="rounded-full border border-emerald-800 bg-emerald-950/30 px-2 py-0.5 text-[10px] text-emerald-200">默认自动应用 · Incus / Podman</span>
@@ -1272,7 +1273,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
 
 
 
-    <section className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+    <section className="flex flex-col gap-3 rounded-2xl border border-sky-400/20 bg-[#031d3d]/90 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
       <div className="min-w-0">
         {scope === 'host' ? <>
           <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-100">
@@ -1298,7 +1299,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ containers, telemetr
         </>}
         {dirty && <p className="mt-1 text-xs text-amber-200">有未保存的更改</p>}
       </div>
-      <button type="button" onClick={() => scope === 'host' ? setConfirmOpen(true) : setFleetConfirmOpen(true)} disabled={!dirty || !canEdit || (scope === 'host' ? saving : fleetSaving)} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-rose-700/70 bg-rose-950/50 px-4 text-sm font-semibold text-rose-100 transition-colors hover:bg-rose-900/60 focus:outline-hidden focus:ring-2 focus:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-45">{(scope === 'host' ? saving : fleetSaving) && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}{scope === 'host' ? '保存并应用到这台母鸡' : '保存并同步全体母鸡'}</button>
+      <button type="button" onClick={() => scope === 'host' ? setConfirmOpen(true) : setFleetConfirmOpen(true)} disabled={!dirty || !canEdit || (scope === 'host' ? saving : fleetSaving)} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-[#ff6b00] to-[#ff8100] px-5 text-sm font-bold text-white shadow-[0_6px_20px_rgba(255,107,0,0.28)] transition-all hover:brightness-110 focus:outline-hidden focus:ring-2 focus:ring-orange-400 disabled:cursor-not-allowed disabled:opacity-45">{(scope === 'host' ? saving : fleetSaving) && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}{scope === 'host' ? '保存并应用到这台母鸡' : '保存并同步全体母鸡'}</button>
     </section>
 
     <ConfirmDialog open={scopeConfirmOpen} title="切换配置范围？" description="当前草稿尚未保存。切换后会放弃这份草稿，并载入目标范围的已保存策略。" confirmLabel="放弃草稿并切换" tone="primary" onConfirm={() => { if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); setScopeConfirmOpen(false); }} onCancel={() => { setPendingScope(null); setScopeConfirmOpen(false); }} />
