@@ -8,6 +8,6 @@ const TcpingManage = lazy(() => import('./components/tcping/TcpingManage').then(
 
 export const App: React.FC = () => window.location.pathname === '/login'
   ? <LoginPage />
-  : <Suspense fallback={<main className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-300" role="status">正在载入页面…</main>}>
+  : <Suspense fallback={<main className="flex min-h-screen items-center justify-center bg-[#f2f7ff] text-[#31485e]" role="status">正在载入页面…</main>}>
       {window.location.pathname === '/tcping' ? <TcpingPage /> : window.location.pathname === '/tcping/manage' ? <TcpingManage /> : <Dashboard />}
     </Suspense>;

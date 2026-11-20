@@ -43,7 +43,9 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         return;
       }
       if (event.key !== 'Tab') return;
-      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])');
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
+      );
       if (!focusable?.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -65,11 +67,14 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   if (!open) return null;
 
   const confirmClasses = tone === 'danger'
-    ? 'border-rose-500/60 bg-rose-950 text-rose-100 hover:bg-rose-900 hover:border-rose-400'
-    : 'border-sky-500/60 bg-sky-950 text-sky-100 hover:bg-sky-900 hover:border-sky-400';
+    ? 'border-[#b91c1c] bg-linear-to-r from-[#dc2626] to-[#be123c] text-white shadow-[0_4px_12px_rgba(220,38,38,0.28)] hover:from-[#b91c1c] hover:to-[#9f1239] focus-visible:ring-[#dc2626]'
+    : 'border-[#ea5e00] bg-linear-to-r from-[#ff6b00] to-[#ff8100] text-white shadow-[0_4px_12px_rgba(255,107,0,0.32)] hover:from-[#e05b00] hover:to-[#f06e00] focus-visible:ring-[#ff6b00]';
 
   return createPortal(
-    <div className="fixed inset-0 z-200 flex items-end bg-slate-950/80 p-3 backdrop-blur-xs sm:items-center sm:justify-center sm:p-4" role="presentation">
+    <div
+      className="fixed inset-0 z-200 flex items-end bg-[#02182f]/68 p-3 backdrop-blur-xs sm:items-center sm:justify-center sm:p-4"
+      role="presentation"
+    >
       <button
         type="button"
         className="absolute inset-0 cursor-default"
@@ -83,39 +88,58 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-description"
-        className="relative max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-700/90 bg-slate-900 p-5 shadow-2xl"
+        className="relative max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-[14px] border border-[#cedae7] bg-white text-[#0b1636] shadow-[0_24px_60px_rgba(3,24,46,0.38)]"
       >
-        <div className="flex gap-3.5">
-          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${tone === 'danger' ? 'border-rose-500/40 bg-rose-950/70 text-rose-300' : 'border-sky-500/40 bg-sky-950/70 text-sky-300'}`}>
-            <AlertTriangle className="h-5 w-5" aria-hidden="true" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 id="confirm-dialog-title" className="text-base font-semibold text-slate-100">{title}</h2>
-            <p id="confirm-dialog-description" className="mt-2 wrap-break-word text-sm leading-6 text-slate-300">{description}</p>
+        <div className={`rn2-card-head ${tone === 'primary' ? 'rn2-card-head-blue' : ''}`}>
+          <div className="flex min-w-0 items-center gap-3">
+            <div
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border ${
+                tone === 'danger'
+                  ? 'border-rose-400/45 bg-rose-500/20 text-rose-200'
+                  : 'border-[#54c7ff]/45 bg-[#087bff]/25 text-[#b8e6ff]'
+              }`}
+            >
+              <AlertTriangle className="h-4.5 w-4.5" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <span className="rn2-eyebrow block text-[10px] text-[#54c7ff]">
+                {tone === 'danger' ? 'CRITICAL CONFIRMATION' : 'ACTION CONFIRMATION'}
+              </span>
+              <h2 id="confirm-dialog-title" className="mt-0.5 text-base font-bold leading-snug text-white">
+                {title}
+              </h2>
+            </div>
           </div>
         </div>
-        {children}
-        <div className="mt-5 flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
-          <button
-            ref={cancelRef}
-            type="button"
-            disabled={isSubmitting}
-            onClick={onCancel}
-            className="min-h-11 rounded-xl border border-slate-700 bg-slate-800/90 px-4 text-sm font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-700 focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            disabled={isSubmitting}
-            onClick={onConfirm}
-            className={`min-h-11 rounded-xl border px-4 text-sm font-semibold transition-colors focus:outline-hidden focus:ring-2 focus:ring-sky-400 disabled:opacity-50 ${confirmClasses}`}
-          >
-            {isSubmitting && <LoaderCircle className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" />}
-            {isSubmitting ? '处理中…' : confirmLabel}
-          </button>
+
+        <div className="p-5">
+          <p id="confirm-dialog-description" className="wrap-break-word text-sm leading-6 text-[#31485e]">
+            {description}
+          </p>
+          {children}
+          <div className="mt-5 flex flex-col-reverse gap-2.5 border-t border-[#dce5ef] pt-4 sm:flex-row sm:justify-end">
+            <button
+              ref={cancelRef}
+              type="button"
+              disabled={isSubmitting}
+              onClick={onCancel}
+              className="min-h-11 rounded-[10px] border border-[#cedae7] bg-white px-4 text-sm font-semibold text-[#0b1636] transition-colors hover:border-[#087bff] hover:bg-[#f4f8fd] hover:text-[#08458c] focus:outline-hidden focus-visible:ring-2 focus-visible:ring-[#087bff] disabled:opacity-50"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={onConfirm}
+              className={`inline-flex min-h-11 items-center justify-center rounded-[10px] border px-4 text-sm font-bold transition-colors focus:outline-hidden focus-visible:ring-2 disabled:opacity-50 ${confirmClasses}`}
+            >
+              {isSubmitting && <LoaderCircle className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" />}
+              {isSubmitting ? '处理中…' : confirmLabel}
+            </button>
+          </div>
         </div>
       </section>
-    </div>, document.body
+    </div>,
+    document.body
   );
 };
