@@ -457,10 +457,11 @@
     padding: 6px 2px;
     gap: 3px;
   }
-  .app-nav-full {
+  .app-primary-nav > button > .app-nav-full,
+  .app-primary-nav > a > .app-nav-full {
     display: none;
   }
-  .app-nav-short {
+  .app-primary-nav > a > .app-nav-short {
     display: inline;
     font-size: 10.5px;
   }

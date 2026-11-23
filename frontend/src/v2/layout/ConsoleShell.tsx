@@ -47,14 +47,14 @@ export interface ConsoleShellProps {
 }
 
 const NAVIGATION = [
-  { tab: 'dashboard', label: '总览看板', short: '总览', group: 'monitor', icon: LayoutDashboard },
-  { tab: 'alerts', label: '安全告警', short: '告警', group: 'monitor', icon: ShieldAlert },
-  { tab: 'investigation', label: '用户排查', short: '排查', group: 'monitor', icon: Users },
-  { tab: 'stats', label: '数据统计', short: '统计', group: 'monitor', icon: BarChart3 },
-  { tab: 'commerce', label: '经营分析', short: '经营', group: 'ops', icon: BriefcaseBusiness },
-  { tab: 'operations', label: '运维中心', short: '运维', group: 'ops', icon: Wrench },
-  { tab: 'firewall', label: '母机防火墙', short: '防火墙', group: 'ops', icon: ShieldCheck },
-  { tab: 'settings', label: '系统设置', short: '设置', group: 'ops', icon: Settings },
+  { tab: 'dashboard', label: '总览看板', group: 'monitor', icon: LayoutDashboard },
+  { tab: 'alerts', label: '安全告警', group: 'monitor', icon: ShieldAlert },
+  { tab: 'investigation', label: '用户排查', group: 'monitor', icon: Users },
+  { tab: 'stats', label: '数据统计', group: 'monitor', icon: BarChart3 },
+  { tab: 'commerce', label: '经营分析', group: 'ops', icon: BriefcaseBusiness },
+  { tab: 'operations', label: '运维中心', group: 'ops', icon: Wrench },
+  { tab: 'firewall', label: '母机防火墙', group: 'ops', icon: ShieldCheck },
+  { tab: 'settings', label: '系统设置', group: 'ops', icon: Settings },
 ] as const;
 
 const TAB_BREADCRUMBS: Record<ConsoleTab, { section: string; title: string; subtitle: string }> = {
@@ -99,7 +99,7 @@ export const ConsoleSidebar: React.FC<ConsoleSidebarProps> = ({
     </div>
 
     <nav aria-label="主导航" className="app-primary-nav">
-      {NAVIGATION.map(({ tab, label, short, group, icon: Icon }, idx) => {
+      {NAVIGATION.map(({ tab, label, group, icon: Icon }, idx) => {
         const selected =
           activeTab === tab ||
           (tab === 'settings' && activeTab === 'notifications');
@@ -126,8 +126,7 @@ export const ConsoleSidebar: React.FC<ConsoleSidebarProps> = ({
               aria-current={selected ? 'page' : undefined}
             >
               <Icon aria-hidden="true" size={17} />
-              <span className="app-nav-full">{label}</span>
-              <span className="app-nav-short">{short}</span>
+              <span>{label}</span>
               {showAlertCount && (
                 <span
                   className={`app-alert-count${
