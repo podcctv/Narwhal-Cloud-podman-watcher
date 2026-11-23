@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import time
 from pathlib import Path
@@ -175,6 +176,146 @@ def _compact_aged_payloads(
     return compacted
 
 
+def _safe_int(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return int(value) if isinstance(value, bool) else 0
+    try:
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return float(int(value)) if isinstance(value, bool) else 0.0
+    try:
+        num = float(value)
+        return num if math.isfinite(num) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _table_columns(conn: Any, table: str) -> set[str]:
+    return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _has_missing_peak_columns(conn: Any) -> bool:
+    report_cols = _table_columns(conn, "reports")
+    if {"inbound_unique_ips", "outbound_unique_ips"} <= report_cols:
+        if conn.execute(
+            "SELECT 1 FROM reports WHERE inbound_unique_ips IS NULL OR outbound_unique_ips IS NULL LIMIT 1"
+        ).fetchone():
+            return True
+    hs_cols = _table_columns(conn, "host_security")
+    if {"total_rx_bps", "total_tx_bps"} <= hs_cols:
+        if conn.execute(
+            "SELECT 1 FROM host_security WHERE total_rx_bps IS NULL OR total_tx_bps IS NULL LIMIT 1"
+        ).fetchone():
+            return True
+    return False
+
+
+def _backfill_missing_peak_columns(
+    conn: Any,
+    batch_size: int = 5000,
+    deadline: float | None = None,
+) -> int:
+    """Backfill legacy NULL peak columns in reports and host_security within budget."""
+    budget = max(0, int(batch_size))
+    if budget <= 0:
+        return 0
+    if deadline is None:
+        deadline = time.monotonic() + 5.0
+    if time.monotonic() >= deadline:
+        return 0
+
+    report_cols = _table_columns(conn, "reports")
+    hs_cols = _table_columns(conn, "host_security")
+    can_reports = {"inbound_unique_ips", "outbound_unique_ips"} <= report_cols
+    can_hs = {"total_rx_bps", "total_tx_bps"} <= hs_cols
+    updated_total = 0
+
+    def backfill_host_security(limit: int) -> int:
+        if not can_hs or limit <= 0:
+            return 0
+        done = 0
+        while done < limit and time.monotonic() < deadline:
+            chunk_limit = min(limit - done, 250)
+            rows = conn.execute(
+                "SELECT id, payload_json, total_rx_bps, total_tx_bps "
+                "FROM host_security "
+                "WHERE total_rx_bps IS NULL OR total_tx_bps IS NULL "
+                "LIMIT ?",
+                (chunk_limit,),
+            ).fetchall()
+            if not rows:
+                break
+            updates = []
+            for row in rows:
+                try:
+                    payload = json.loads(row[1] or "")
+                except (TypeError, ValueError):
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                rx_bps = row[2] if row[2] is not None else _safe_float(payload.get("total_rx_bps"))
+                tx_bps = row[3] if row[3] is not None else _safe_float(payload.get("total_tx_bps"))
+                updates.append((rx_bps, tx_bps, row[0]))
+            conn.executemany(
+                "UPDATE host_security SET total_rx_bps=?, total_tx_bps=? WHERE id=?",
+                updates,
+            )
+            conn.commit()
+            done += len(updates)
+        return done
+
+    def backfill_reports(limit: int) -> int:
+        if not can_reports or limit <= 0:
+            return 0
+        done = 0
+        while done < limit and time.monotonic() < deadline:
+            chunk_limit = min(limit - done, 250)
+            rows = conn.execute(
+                "SELECT id, payload_json, inbound_unique_ips, outbound_unique_ips "
+                "FROM reports "
+                "WHERE inbound_unique_ips IS NULL OR outbound_unique_ips IS NULL "
+                "LIMIT ?",
+                (chunk_limit,),
+            ).fetchall()
+            if not rows:
+                break
+            updates = []
+            for row in rows:
+                try:
+                    payload = json.loads(row[1] or "")
+                except (TypeError, ValueError):
+                    payload = {}
+                sec = payload.get("security") if isinstance(payload, dict) else None
+                if not isinstance(sec, dict):
+                    sec = {}
+                in_ips = row[2] if row[2] is not None else _safe_int(sec.get("inbound_unique_ips"))
+                out_ips = row[3] if row[3] is not None else _safe_int(sec.get("outbound_unique_ips"))
+                updates.append((in_ips, out_ips, row[0]))
+            conn.executemany(
+                "UPDATE reports SET inbound_unique_ips=?, outbound_unique_ips=? WHERE id=?",
+                updates,
+            )
+            conn.commit()
+            done += len(updates)
+        return done
+
+    hs_first_limit = budget // 2 if can_reports and budget >= 2 else budget
+    hs_done = backfill_host_security(hs_first_limit)
+    updated_total += hs_done
+    reports_done = backfill_reports(budget - updated_total)
+    updated_total += reports_done
+    if updated_total < budget and can_hs and hs_done == hs_first_limit and time.monotonic() < deadline:
+        updated_total += backfill_host_security(budget - updated_total)
+    return updated_total
+
+
 def run_cleanup(
     *,
     db_fn: Callable[[], Any],
@@ -304,6 +445,13 @@ def run_cleanup(
                 batch_size=report_cleanup_batch_size,
                 deadline=deadline,
             )
+        backfilled_peak_rows = _backfill_missing_peak_columns(
+            conn,
+            batch_size=report_cleanup_batch_size,
+            deadline=deadline,
+        )
+        if not backlog and _has_missing_peak_columns(conn):
+            backlog = True
         # Incremental mode is enabled for new DBs and by the explicit recovery
         # command for old DBs. Never run a full VACUUM in this online loop.
         if int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]) == 2:
@@ -313,6 +461,7 @@ def run_cleanup(
             last_success=now,
             removed_rows=removed_total,
             compacted_rows=compacted_rows,
+            backfilled_peak_rows=backfilled_peak_rows,
             backlog=backlog,
             disk_pressure=disk_pressure,
             error=None,

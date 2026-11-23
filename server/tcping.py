@@ -778,8 +778,15 @@ def attach(app, db, static_dir, verify_signature, signed_response):
     def job(job_id: str):
         conn = db()
         try:
-            expire(conn, int(time.time()))
-            conn.commit()
+            now = int(time.time())
+            row = conn.execute(
+                "SELECT j.status, j.deadline_at FROM tcp_jobs j JOIN tcp_sources s ON s.id=j.source_id "
+                "WHERE j.id=? AND s.enabled=1",
+                (job_id,),
+            ).fetchone()
+            if row and row[0] in ACTIVE and row[1] <= now:
+                expire_active(conn, now)
+                conn.commit()
             return JSONResponse(public_job_payload(get_job(conn, job_id)), headers={"Cache-Control": "no-store"})
         finally:
             conn.close()

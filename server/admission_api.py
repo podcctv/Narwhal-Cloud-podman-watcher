@@ -11,6 +11,10 @@ from fastapi import Header, HTTPException, Request
 HEARTBEAT_WRITE_INTERVAL_SECONDS = max(
     0, min(120, int(os.getenv("POLL_HEARTBEAT_WRITE_INTERVAL_SECONDS", "25")))
 )
+ADMISSION_UNCHANGED_WRITE_INTERVAL_SECONDS = max(
+    0, min(300, int(os.getenv("ADMISSION_UNCHANGED_WRITE_INTERVAL_SECONDS", "25")))
+)
+_VOLATILE_ADMISSION_KEYS = frozenset({"observed_at", "sampled_at"})
 _heartbeat_lock = threading.Lock()
 _heartbeat_by_db: dict[tuple[str, str], tuple[int, str]] = {}
 
@@ -27,6 +31,20 @@ def _db_file_key(conn) -> str:
         return str(row[2] or "") if row else ""
     except Exception:
         return ""
+
+
+def _parse_admission_payload(raw_payload) -> dict | None:
+    if not raw_payload:
+        return None
+    try:
+        parsed = json.loads(raw_payload)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _semantic_admission_payload(data: dict) -> dict:
+    return {k: v for k, v in data.items() if k not in _VOLATILE_ADMISSION_KEYS}
 
 KINDS={'inbound_source_blocked','tcp_concurrency_limited','admission_unverified','pasarguard_node_removed'}
 ADMISSION_FAILURES={
@@ -149,13 +167,17 @@ def _write_admission_status(db, host_id, node_id, client_ip, items, now, on_metr
         if not host or not node_id or host['node_id'] != node_id:
             raise HTTPException(403, 'wrong node identity')
         existing_rows = conn.execute(
-            'SELECT runtime, project, container_name, observed_at FROM admission_states WHERE host_id=?',
+            'SELECT runtime, project, container_name, instance_id, observed_at, payload '
+            'FROM admission_states WHERE host_id=?',
             (host_id,),
         ).fetchall()
-        existing_observed = {
-            (row['runtime'], row['project'], row['container_name']): row['observed_at']
+        existing_by_key = {
+            (row['runtime'], row['project'], row['container_name']): row
             for row in existing_rows
         }
+        db_file = _db_file_key(conn)
+        is_persistent_db = bool(db_file) and db_file != ':memory:'
+        unchanged_interval = ADMISSION_UNCHANGED_WRITE_INTERVAL_SECONDS
         items_to_write = []
         for value in items:
             data = value['admission']
@@ -163,15 +185,32 @@ def _write_admission_status(db, host_id, node_id, client_ip, items, now, on_metr
             if not isinstance(stamp, int) or isinstance(stamp, bool) or not now - 90 <= stamp <= now + 30:
                 continue
             key = (value['runtime'], value['project'], value['container_name'])
-            prev_observed = existing_observed.get(key)
-            if prev_observed is None or stamp > int(prev_observed):
+            prev = existing_by_key.get(key)
+            if prev is None or prev['observed_at'] is None:
                 items_to_write.append((value, data, stamp))
+                continue
+            prev_observed = int(prev['observed_at'])
+            if stamp > prev_observed:
+                skip_unchanged = False
+                if (
+                    is_persistent_db
+                    and unchanged_interval > 0
+                    and 0 <= stamp - prev_observed < unchanged_interval
+                    and str(prev['instance_id'] or '') == str(value['instance_id'] or '')
+                ):
+                    prev_payload = _parse_admission_payload(prev['payload'])
+                    if (
+                        prev_payload is not None
+                        and _semantic_admission_payload(prev_payload) == _semantic_admission_payload(data)
+                    ):
+                        skip_unchanged = True
+                if not skip_unchanged:
+                    items_to_write.append((value, data, stamp))
         has_active = conn.execute(
             "SELECT 1 FROM security_alerts WHERE host_id=? AND alert_type='admission_unverified' AND status='active' LIMIT 1",
             (host_id,),
         ).fetchone()
-        db_file = _db_file_key(conn)
-        if db_file == '' or HEARTBEAT_WRITE_INTERVAL_SECONDS == 0:
+        if not is_persistent_db or HEARTBEAT_WRITE_INTERVAL_SECONDS == 0:
             need_heartbeat = True
         else:
             with _heartbeat_lock:

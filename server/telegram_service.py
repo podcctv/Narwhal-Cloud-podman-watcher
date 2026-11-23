@@ -873,6 +873,7 @@ class TelegramService:
     ) -> None:
         """Create or refresh one Telegram status card per alert, retaining recovery history."""
         now = int(time.time())
+        pending_ops: List[Dict[str, Any]] = []
         conn = self._app.db()
         try:
             bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
@@ -892,15 +893,23 @@ class TelegramService:
                 ).fetchall()
             else:
                 alerts = []
+            if not alerts:
+                return
+
             severity_rank = self._app._SEVERITY_RANK
+            rendered_cards: Dict[int, tuple[int, str, Dict[str, Any], str]] = {}
             for bot in bots:
                 bot_id = int(bot["id"])
+                bot_token = str(bot["token"])
+                bot_min_sev = str(bot["min_severity"])
                 chat_target, thread_id = self._app._parse_telegram_target(str(bot["target"] or ""))
                 for alert in alerts:
+                    aid = int(alert["id"])
+                    alert_status = str(alert["status"])
                     severity = str(alert["severity"])
                     mapping = conn.execute(
                         "SELECT * FROM telegram_alert_messages WHERE bot_id=? AND alert_id=?",
-                        (bot_id, int(alert["id"])),
+                        (bot_id, aid),
                     ).fetchone()
                     pending_quarantine = (
                         alert["alert_type"] == "prohibited_activity"
@@ -911,30 +920,34 @@ class TelegramService:
                     )
                     if (
                         mapping is None
-                        and str(alert["status"]) in ("suppressed", "dismissed", "resolved")
+                        and alert_status in ("suppressed", "dismissed", "resolved")
                         and not pending_quarantine
                     ):
                         continue
-                    if mapping is None and severity_rank.get(severity, 1) < severity_rank.get(
-                        str(bot["min_severity"]), 2
-                    ):
+                    if mapping is None and severity_rank.get(severity, 1) < severity_rank.get(bot_min_sev, 2):
                         continue
-                    evidence_row = conn.execute(
-                        "SELECT action_id,evidence_json FROM security_alert_evidence WHERE alert_id=? ORDER BY captured_at DESC,id DESC LIMIT 1",
-                        (int(alert["id"]),),
-                    ).fetchone()
-                    deep_evidence = (
-                        self._app._alert_details(evidence_row["evidence_json"])
-                        if evidence_row is not None
-                        else None
-                    )
-                    evidence_action_id = int(evidence_row["action_id"]) if evidence_row is not None else 0
-                    text, keyboard = self._app._telegram_alert_status_card(alert, now, deep_evidence)
-                    content_hash = hashlib.sha256(
-                        (text + json.dumps(keyboard, sort_keys=True, ensure_ascii=False)).encode()
-                    ).hexdigest()
+                    card = rendered_cards.get(aid)
+                    if card is None:
+                        evidence_row = conn.execute(
+                            "SELECT action_id,evidence_json FROM security_alert_evidence WHERE alert_id=? ORDER BY captured_at DESC,id DESC LIMIT 1",
+                            (aid,),
+                        ).fetchone()
+                        deep_evidence = (
+                            self._app._alert_details(evidence_row["evidence_json"])
+                            if evidence_row is not None
+                            else None
+                        )
+                        evidence_action_id = int(evidence_row["action_id"]) if evidence_row is not None else 0
+                        text, keyboard = self._app._telegram_alert_status_card(alert, now, deep_evidence)
+                        content_hash = hashlib.sha256(
+                            (text + json.dumps(keyboard, sort_keys=True, ensure_ascii=False)).encode()
+                        ).hexdigest()
+                        card = (evidence_action_id, text, keyboard, content_hash)
+                        rendered_cards[aid] = card
+                    else:
+                        evidence_action_id, text, keyboard, content_hash = card
                     if mapping is not None:
-                        status_changed = str(mapping["last_status"]) != str(alert["status"])
+                        status_changed = str(mapping["last_status"]) != alert_status
                         severity_changed = str(mapping["last_severity"]) != severity
                         evidence_changed = int(mapping["last_evidence_action_id"]) != evidence_action_id
                         if (
@@ -946,107 +959,169 @@ class TelegramService:
                             continue
                         if str(mapping["content_hash"]) == content_hash:
                             continue
-                    try:
-                        if mapping is None:
-                            send_payload: Dict[str, Any] = {
-                                "chat_id": chat_target,
-                                "text": text,
-                                "parse_mode": "HTML",
-                                "reply_markup": keyboard,
-                                "disable_web_page_preview": True,
-                            }
-                            if thread_id is not None:
-                                send_payload["message_thread_id"] = thread_id
-                            result = self._app._telegram_api(str(bot["token"]), "sendMessage", send_payload)
-                            message_id = int((result.get("result") or {}).get("message_id") or 0)
-                            if message_id <= 0:
-                                raise RuntimeError("Telegram did not return a message id")
-                            conn.execute(
-                                "INSERT INTO telegram_alert_messages(bot_id,alert_id,chat_id,message_id,last_status,last_severity,last_evidence_action_id,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                                (
-                                    bot_id,
-                                    int(alert["id"]),
-                                    chat_target,
-                                    message_id,
-                                    str(alert["status"]),
-                                    severity,
-                                    evidence_action_id,
-                                    content_hash,
-                                    now,
-                                ),
-                            )
-                        else:
-                            edit_chat_id, _ = self._app._parse_telegram_target(str(mapping["chat_id"]))
-                            try:
-                                self._app._telegram_api(
-                                    str(bot["token"]),
-                                    "editMessageText",
-                                    {
-                                        "chat_id": edit_chat_id,
-                                        "message_id": int(mapping["message_id"]),
-                                        "text": text,
-                                        "parse_mode": "HTML",
-                                        "reply_markup": keyboard,
-                                        "disable_web_page_preview": True,
-                                    },
-                                )
-                            except RuntimeError as edit_exc:
-                                err_str = str(edit_exc).lower()
-                                if "message is not modified" in err_str:
-                                    pass
-                                elif "message to edit not found" in err_str or "message can't be edited" in err_str:
-                                    send_payload = {
-                                        "chat_id": chat_target,
-                                        "text": text,
-                                        "parse_mode": "HTML",
-                                        "reply_markup": keyboard,
-                                        "disable_web_page_preview": True,
-                                    }
-                                    if thread_id is not None:
-                                        send_payload["message_thread_id"] = thread_id
-                                    resend_res = self._app._telegram_api(
-                                        str(bot["token"]), "sendMessage", send_payload
-                                    )
-                                    new_msg_id = int((resend_res.get("result") or {}).get("message_id") or 0)
-                                    if new_msg_id > 0:
-                                        conn.execute(
-                                            "UPDATE telegram_alert_messages SET message_id=?,chat_id=?,last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
-                                            (
-                                                new_msg_id,
-                                                chat_target,
-                                                str(alert["status"]),
-                                                severity,
-                                                evidence_action_id,
-                                                content_hash,
-                                                now,
-                                                bot_id,
-                                                int(alert["id"]),
-                                            ),
-                                        )
-                                        conn.commit()
-                                        self._app._record_bot_delivery(bot_id, True)
-                                        continue
-                                else:
-                                    raise
-                            conn.execute(
-                                "UPDATE telegram_alert_messages SET last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
-                                (
-                                    str(alert["status"]),
-                                    severity,
-                                    evidence_action_id,
-                                    content_hash,
-                                    now,
-                                    bot_id,
-                                    int(alert["id"]),
-                                ),
-                            )
-                        conn.commit()
-                        self._app._record_bot_delivery(bot_id, True)
-                    except Exception as exc:
-                        self._app._record_bot_delivery(bot_id, False, str(exc))
-                        print(f"telegram dynamic alert {bot_id}/{alert['id']} failed: {exc}")
+                    edit_chat_id = ""
+                    edit_message_id = 0
+                    if mapping is not None:
+                        edit_chat_id, _ = self._app._parse_telegram_target(str(mapping["chat_id"]))
+                        edit_message_id = int(mapping["message_id"])
+                    pending_ops.append(
+                        {
+                            "bot_id": bot_id,
+                            "token": bot_token,
+                            "chat_target": chat_target,
+                            "thread_id": thread_id,
+                            "alert_id": aid,
+                            "alert_status": alert_status,
+                            "severity": severity,
+                            "evidence_action_id": evidence_action_id,
+                            "text": text,
+                            "keyboard": keyboard,
+                            "content_hash": content_hash,
+                            "is_new": mapping is None,
+                            "edit_chat_id": edit_chat_id,
+                            "edit_message_id": edit_message_id,
+                        }
+                    )
         finally:
             conn.close()
+
+        if not pending_ops:
+            return
+
+        ops_to_persist: List[tuple[str, Dict[str, Any], int]] = []
+        delivery_by_bot: Dict[int, tuple[bool, str]] = {}
+        for op in pending_ops:
+            bot_id = op["bot_id"]
+            aid = op["alert_id"]
+            try:
+                if op["is_new"]:
+                    send_payload: Dict[str, Any] = {
+                        "chat_id": op["chat_target"],
+                        "text": op["text"],
+                        "parse_mode": "HTML",
+                        "reply_markup": op["keyboard"],
+                        "disable_web_page_preview": True,
+                    }
+                    if op["thread_id"] is not None:
+                        send_payload["message_thread_id"] = op["thread_id"]
+                    result = self._app._telegram_api(op["token"], "sendMessage", send_payload)
+                    message_id = int((result.get("result") or {}).get("message_id") or 0)
+                    if message_id <= 0:
+                        raise RuntimeError("Telegram did not return a message id")
+                    ops_to_persist.append(("insert", op, message_id))
+                else:
+                    resent_msg_id = 0
+                    try:
+                        self._app._telegram_api(
+                            op["token"],
+                            "editMessageText",
+                            {
+                                "chat_id": op["edit_chat_id"],
+                                "message_id": op["edit_message_id"],
+                                "text": op["text"],
+                                "parse_mode": "HTML",
+                                "reply_markup": op["keyboard"],
+                                "disable_web_page_preview": True,
+                            },
+                        )
+                    except RuntimeError as edit_exc:
+                        err_str = str(edit_exc).lower()
+                        if "message is not modified" in err_str:
+                            pass
+                        elif "message to edit not found" in err_str or "message can't be edited" in err_str:
+                            send_payload = {
+                                "chat_id": op["chat_target"],
+                                "text": op["text"],
+                                "parse_mode": "HTML",
+                                "reply_markup": op["keyboard"],
+                                "disable_web_page_preview": True,
+                            }
+                            if op["thread_id"] is not None:
+                                send_payload["message_thread_id"] = op["thread_id"]
+                            resend_res = self._app._telegram_api(op["token"], "sendMessage", send_payload)
+                            resent_msg_id = int((resend_res.get("result") or {}).get("message_id") or 0)
+                        else:
+                            raise
+                    if resent_msg_id > 0:
+                        ops_to_persist.append(("update_message_id", op, resent_msg_id))
+                    else:
+                        ops_to_persist.append(("update", op, 0))
+                delivery_by_bot[bot_id] = (True, "")
+            except Exception as exc:
+                delivery_by_bot[bot_id] = (False, str(exc))
+                print(f"telegram dynamic alert {bot_id}/{aid} failed: {exc}")
+
+        if ops_to_persist:
+            conn = self._app.db()
+            try:
+                for op_kind, op, new_msg_id in ops_to_persist:
+                    if op_kind == "insert":
+                        conn.execute(
+                            """
+                            INSERT INTO telegram_alert_messages(
+                                bot_id,alert_id,chat_id,message_id,last_status,last_severity,
+                                last_evidence_action_id,content_hash,updated_at
+                            ) VALUES(?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(bot_id,alert_id) DO UPDATE SET
+                                chat_id=excluded.chat_id,
+                                message_id=excluded.message_id,
+                                last_status=excluded.last_status,
+                                last_severity=excluded.last_severity,
+                                last_evidence_action_id=excluded.last_evidence_action_id,
+                                content_hash=excluded.content_hash,
+                                updated_at=excluded.updated_at
+                            """,
+                            (
+                                op["bot_id"],
+                                op["alert_id"],
+                                op["chat_target"],
+                                new_msg_id,
+                                op["alert_status"],
+                                op["severity"],
+                                op["evidence_action_id"],
+                                op["content_hash"],
+                                now,
+                            ),
+                        )
+                    elif op_kind == "update_message_id":
+                        conn.execute(
+                            "UPDATE telegram_alert_messages SET message_id=?,chat_id=?,last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
+                            (
+                                new_msg_id,
+                                op["chat_target"],
+                                op["alert_status"],
+                                op["severity"],
+                                op["evidence_action_id"],
+                                op["content_hash"],
+                                now,
+                                op["bot_id"],
+                                op["alert_id"],
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE telegram_alert_messages SET last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
+                            (
+                                op["alert_status"],
+                                op["severity"],
+                                op["evidence_action_id"],
+                                op["content_hash"],
+                                now,
+                                op["bot_id"],
+                                op["alert_id"],
+                            ),
+                        )
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                for _, op, _ in ops_to_persist:
+                    delivery_by_bot[op["bot_id"]] = (False, str(exc))
+                    print(f"telegram dynamic alert {op['bot_id']}/{op['alert_id']} failed: {exc}")
+            finally:
+                conn.close()
+
+        for bot_id, (succeeded, error) in delivery_by_bot.items():
+            self._app._record_bot_delivery(bot_id, succeeded, error)
 
     def notification_bots(self) -> JSONResponse:
         conn = self._app.db()

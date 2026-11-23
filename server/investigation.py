@@ -21,6 +21,25 @@ OBSERVATION_CAP = 100000
 TRANSITION_CAP = 60000
 IDENTITY = ("runtime", "project", "container_name")
 UTC8 = timezone(timedelta(hours=8))
+_ROW_COUNT_TABLES = frozenset({
+    "investigation_incidents",
+    "investigation_transitions",
+    "investigation_observations",
+})
+
+
+def _approx_row_count(conn, table, cap):
+    if table not in _ROW_COUNT_TABLES:
+        raise ValueError(f"unsupported table: {table}")
+    max_rowid = int(conn.execute(f"SELECT COALESCE(MAX(rowid), 0) FROM {table}").fetchone()[0] or 0)
+    if max_rowid < cap:
+        return max_rowid
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
+
+
+def _approx_below_cap(conn, table, cap):
+    """Short-circuit cap checks via MAX(rowid) when below cap, using COUNT(*) only near/above cap."""
+    return _approx_row_count(conn, table, cap) < cap
 
 
 def initialize(conn):
@@ -131,14 +150,48 @@ def _action(conn, alert):
     return json.dumps(result, ensure_ascii=False)
 
 
+class _CapTracker:
+    """Lazy row-cap tracker using MAX(rowid) fast-path before falling back to COUNT(*)."""
+
+    def __init__(self, conn, table, cap):
+        self._conn = conn
+        self._table = table
+        self._cap = cap
+        self._count = None
+        self._exact = False
+
+    def allow_insert(self):
+        if self._count is None:
+            max_rowid = int(
+                self._conn.execute(f"SELECT COALESCE(MAX(rowid), 0) FROM {self._table}").fetchone()[0] or 0
+            )
+            if max_rowid < self._cap:
+                self._count = max_rowid
+            else:
+                self._count = int(self._conn.execute(f"SELECT COUNT(*) FROM {self._table}").fetchone()[0] or 0)
+                self._exact = True
+        if self._count >= self._cap and not self._exact:
+            self._count = int(self._conn.execute(f"SELECT COUNT(*) FROM {self._table}").fetchone()[0] or 0)
+            self._exact = True
+        return self._count < self._cap
+
+    def note_inserted(self):
+        if self._count is not None:
+            self._count += 1
+
+    def note_deleted(self, deleted):
+        if deleted and self._count is not None:
+            self._count = max(0, self._count - deleted)
+
+
 def sync_states(conn, host, ts, containers=None, present=None, host_key=None, alert_id=None):
     """Record incident boundaries and status transitions; keep original owner immutable."""
     containers = containers or []
     lookup = {(c.get("runtime", "podman"), c.get("project", ""), c.get("name")): c for c in containers}
     host_row = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host,)).fetchone()
     host_key = host_key or (host_row[0] if host_row and host_row[0] else "host:" + host)
-    incident_count = conn.execute("SELECT COUNT(*) FROM investigation_incidents").fetchone()[0]
-    transition_count = conn.execute("SELECT COUNT(*) FROM investigation_transitions").fetchone()[0]
+    incidents = _CapTracker(conn, "investigation_incidents", INCIDENT_CAP)
+    transitions = _CapTracker(conn, "investigation_transitions", TRANSITION_CAP)
     # Explicit action callbacks may arrive after a node has been offline for days.
     # Scope those to the exact alert instead of applying the live-sampling cutoff.
     predicate, params = ("id=?", (host, alert_id)) if alert_id is not None else ("last_seen>=?", (host, ts - 86400))
@@ -161,7 +214,7 @@ def sync_states(conn, host, ts, containers=None, present=None, host_key=None, al
             state = 'awaiting_verification'  # A clean sample alone does not mean a stop was executed.
         hit = present is not None and alert["fingerprint"] in present
         if not old:
-            if incident_count >= INCIDENT_CAP:
+            if not incidents.allow_insert():
                 conn.execute("UPDATE investigation_storage SET trimmed_through=MAX(trimmed_through,?) WHERE id=1", (ts,))
                 continue  # Never allow ingestion to outgrow a slower cleanup worker.
             # Legacy first_seen is not evidence that today's owner owned the instance then.
@@ -180,7 +233,7 @@ def sync_states(conn, host, ts, containers=None, present=None, host_key=None, al
             if not cur.rowcount:
                 continue
             incident_id = cur.lastrowid
-            incident_count += 1
+            incidents.note_inserted()
             changed = True
         else:
             incident_id = old["id"]
@@ -189,17 +242,18 @@ def sync_states(conn, host, ts, containers=None, present=None, host_key=None, al
                          "evidence_json=?,action_json=?,updated_at=?,last_anomaly=CASE WHEN ? THEN ? ELSE last_anomaly END WHERE id=?",
                          (alert["status"], state, alert["severity"], alert["value"], alert["threshold"], evidence,
                           action, ts, hit, ts, incident_id))
-        if changed and transition_count >= TRANSITION_CAP:
+        if changed and not transitions.allow_insert():
             conn.execute("UPDATE investigation_storage SET trimmed_through=MAX(trimmed_through,?) WHERE id=1", (ts,))
         elif changed:
             conn.execute("INSERT INTO investigation_transitions(incident_id,ts,status,state,severity,value,threshold,evidence_json,action_json) VALUES(?,?,?,?,?,?,?,?,?)",
                          (incident_id, ts, alert["status"], state, alert["severity"], alert["value"], alert["threshold"], evidence, action))
-            transition_count += 1
+            transitions.note_inserted()
             # Retain first transition and the last nineteen, not unlimited flapping.
-            conn.execute("DELETE FROM investigation_transitions WHERE incident_id=? AND id NOT IN "
+            del_cur = conn.execute("DELETE FROM investigation_transitions WHERE incident_id=? AND id NOT IN "
                          "(SELECT id FROM investigation_transitions WHERE incident_id=? ORDER BY id DESC LIMIT 19) "
                          "AND id<>(SELECT MIN(id) FROM investigation_transitions WHERE incident_id=?)",
                          (incident_id, incident_id, incident_id))
+            transitions.note_deleted(max(0, del_cur.rowcount))
 
 
 def observe(conn, host, node, ts, containers, fingerprints):
@@ -210,7 +264,7 @@ def observe(conn, host, node, ts, containers, fingerprints):
     day = datetime.fromtimestamp(ts, UTC8).date().isoformat()
     conn.execute("INSERT INTO investigation_hosts VALUES(?,?,?,?) ON CONFLICT(host_key) DO UPDATE SET "
                  "host_id=excluded.host_id,last_sample=excluded.last_sample", (host_key, host, ts, ts))
-    observation_count = conn.execute("SELECT COUNT(*) FROM investigation_observations").fetchone()[0]
+    observations = _CapTracker(conn, "investigation_observations", OBSERVATION_CAP)
     for c in containers:
         identity = {"runtime": str(c.get("runtime") or "podman"), "project": str(c.get("project") or ""),
                     "container_name": str(c.get("name") or "")}
@@ -219,13 +273,14 @@ def observe(conn, host, node, ts, containers, fingerprints):
         owner, _ = _owner(conn, host, identity, ts)
         key = _key(host_key, identity, c)
         exists = conn.execute("SELECT 1 FROM investigation_observations WHERE identity_key=? AND user_id=? AND day=?", (key, owner, day)).fetchone()
-        if not exists and observation_count >= OBSERVATION_CAP:
+        if not exists and not observations.allow_insert():
             conn.execute("UPDATE investigation_storage SET trimmed_through=MAX(trimmed_through,?) WHERE id=1", (ts,))
             continue
         conn.execute("INSERT INTO investigation_observations VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(identity_key,user_id,day) "
                      "DO UPDATE SET last_sample=MAX(last_sample,excluded.last_sample),assessed=MAX(assessed,excluded.assessed)",
                      (key, owner, day, host_key, host, *(identity[k] for k in IDENTITY), ts, ts, fingerprints is not None))
-        observation_count += not bool(exists)
+        if not exists:
+            observations.note_inserted()
     if fingerprints is not None:
         sync_states(conn, host, ts, containers, fingerprints, host_key)
 
@@ -241,13 +296,13 @@ def maintain(conn, now):
     for table, cap, column in (("investigation_incidents", INCIDENT_CAP, "last_anomaly"),
                                ("investigation_observations", OBSERVATION_CAP, "last_sample")):
         prune(table, column, f"{column}<?", (cutoff,))
-        excess = max(0, conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] - cap)
+        excess = max(0, _approx_row_count(conn, table, cap) - cap)
         if excess:
             # Avoid deleting more than the current excess, in bounded batches.
             prune(table, column, f"rowid IN (SELECT rowid FROM {table} ORDER BY {column},rowid LIMIT ?)", (min(excess, 2000),))
     conn.execute("DELETE FROM investigation_transitions WHERE id IN (SELECT t.id FROM investigation_transitions t "
                  "WHERE NOT EXISTS(SELECT 1 FROM investigation_incidents i WHERE i.id=t.incident_id) LIMIT 40000)")
-    excess = max(0, conn.execute("SELECT COUNT(*) FROM investigation_transitions").fetchone()[0] - TRANSITION_CAP)
+    excess = max(0, _approx_row_count(conn, "investigation_transitions", TRANSITION_CAP) - TRANSITION_CAP)
     if excess:
         prune("investigation_transitions", "ts", "id IN (SELECT id FROM investigation_transitions ORDER BY id LIMIT ?)", (min(excess, 2000),))
     conn.execute("DELETE FROM investigation_hosts WHERE last_sample<?", (cutoff,))

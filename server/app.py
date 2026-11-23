@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import binascii
+from collections import OrderedDict
+import gzip
 import hashlib
 import hmac
 import html
@@ -304,11 +306,9 @@ def db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    global _latest_cache, _latest_cache_time
     # Tests and administrative recovery may point DB_PATH at a fresh database.
     # Never serve a short-lived snapshot from the previous database in that case.
-    _latest_cache = None
-    _latest_cache_time = 0.0
+    invalidate_latest_caches()
     invalidate_security_status_cache()
     with _poll_heartbeat_lock:
         _poll_heartbeat_by_db.clear()
@@ -608,6 +608,14 @@ def init_db() -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_host_security_ts_peaks "
         "ON host_security(ts, host_id, total_rx_bps, total_tx_bps)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reports_null_peaks "
+        "ON reports(ts) WHERE inbound_unique_ips IS NULL OR outbound_unique_ips IS NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_host_security_null_peaks "
+        "ON host_security(ts) WHERE total_rx_bps IS NULL OR total_tx_bps IS NULL"
     )
     conn.execute(
         """
@@ -1169,13 +1177,96 @@ def process_connection_overloads(
         runtime_health=incus_runtime_health)
 
 
-_latest_cache: Dict[str, Any] | None = None
-_latest_cache_time = 0.0
+_REPORT_PAYLOAD_CACHE_MAX = 1024
+_report_payload_cache: OrderedDict[int, tuple[str, bytes, Dict[str, Any]]] = OrderedDict()
+_report_payload_cache_lock = threading.Lock()
+
+_LATEST_RESPONSE_CACHE_MAX = 4
+_LATEST_RESPONSE_CACHE_TTL_SECONDS = 2.0
+_latest_response_cache: OrderedDict[tuple[str, str], tuple[float, bytes, bytes]] = OrderedDict()
+_latest_response_cache_lock = threading.Lock()
+
 _security_status_cache: Dict[str, Any] | None = None
 _security_status_cache_time = 0.0
 _security_status_etag = ""
 _security_status_cache_lock = threading.Lock()
 _security_status_compute_lock = threading.Lock()
+
+
+def invalidate_latest_caches() -> None:
+    with _report_payload_cache_lock:
+        _report_payload_cache.clear()
+    with _latest_response_cache_lock:
+        _latest_response_cache.clear()
+
+
+def _report_payload_digest(report_id: Any, raw: Any) -> bytes:
+    if not raw:
+        return b""
+    raw_str = raw if isinstance(raw, str) else str(raw)
+    try:
+        rid = int(report_id)
+    except (TypeError, ValueError):
+        rid = 0
+    if rid > 0:
+        with _report_payload_cache_lock:
+            entry = _report_payload_cache.get(rid)
+            if entry is not None and entry[0] == raw_str:
+                return entry[1]
+    return hashlib.blake2b(raw_str.encode("utf-8"), digest_size=8).digest()
+
+
+def _parse_report_payload(report_id: Any, raw: Any) -> Dict[str, Any]:
+    """Return cached parsed report payload only when report_id and exact raw JSON match.
+
+    Callers must never mutate the returned dict or any nested container in place.
+    """
+    if not raw:
+        return {}
+    raw_str = raw if isinstance(raw, str) else str(raw)
+    try:
+        rid = int(report_id)
+    except (TypeError, ValueError):
+        rid = 0
+    if rid > 0:
+        with _report_payload_cache_lock:
+            entry = _report_payload_cache.get(rid)
+            if entry is not None and entry[0] == raw_str:
+                _report_payload_cache.move_to_end(rid)
+                return entry[2]
+    try:
+        parsed = json.loads(raw_str)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    digest = hashlib.blake2b(raw_str.encode("utf-8"), digest_size=8).digest()
+    if rid > 0:
+        with _report_payload_cache_lock:
+            _report_payload_cache[rid] = (raw_str, digest, parsed)
+            _report_payload_cache.move_to_end(rid)
+            while len(_report_payload_cache) > _REPORT_PAYLOAD_CACHE_MAX:
+                _report_payload_cache.popitem(last=False)
+    return parsed
+
+
+def _accepts_gzip(request: Request | None) -> bool:
+    if request is None:
+        return False
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return False
+    raw = str(headers.get("accept-encoding") or "").lower()
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        coding, _, params = token.partition(";")
+        if coding.strip() == "gzip":
+            if "q=0" in params.replace(" ", "") and not re.search(r"q=0\.[0-9]*[1-9]", params):
+                return False
+            return True
+    return False
 
 
 def invalidate_security_status_cache() -> None:
@@ -1474,6 +1565,9 @@ def dispatch_buyer_notifications_for_alerts(host_id: str, alerts: list) -> None:
         conn.close()
 
 
+_DEFAULT_DISPATCH_BUYER_NOTIFICATIONS = dispatch_buyer_notifications_for_alerts
+
+
 def _process_report_sync(data: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
     host_id = str(data.get("host_id") or "unknown")[:200]
     node_id = str(data.get("node_id") or "")[:128]
@@ -1680,6 +1774,11 @@ def _process_report_sync(data: Dict[str, Any], client_ip: str) -> Dict[str, Any]
             fingerprints = {r[0] for r in conn.execute("SELECT fingerprint FROM security_alerts WHERE host_id=? AND last_seen=? AND status<>'resolved'", (host_id, ts))}
         investigation.observe(conn, host_id, node_id, ts, containers, fingerprints)
         conn.commit()
+        motd_states = buyer_notifications.banner_states(conn, host_id)
+        security_policy = security_routes.get_dynamic_security_policy(conn)
+        if dispatch_buyer_notifications_for_alerts is _DEFAULT_DISPATCH_BUYER_NOTIFICATIONS:
+            buyer_notifications.reconcile(conn, host_id, int(time.time()))
+            conn.commit()
     finally:
         conn.close()
     invalidate_security_status_cache()
@@ -1688,13 +1787,8 @@ def _process_report_sync(data: Dict[str, Any], client_ip: str) -> Dict[str, Any]
     for alert in notifications:
         send_alert_webhook(alert)
     sync_configured_bot_alert_messages(host_id, ts)
-    dispatch_buyer_notifications_for_alerts(host_id, notifications)
-    conn = db()
-    try:
-        motd_states = buyer_notifications.banner_states(conn, host_id)
-        security_policy = security_routes.get_dynamic_security_policy(conn)
-    finally:
-        conn.close()
+    if dispatch_buyer_notifications_for_alerts is not _DEFAULT_DISPATCH_BUYER_NOTIFICATIONS:
+        dispatch_buyer_notifications_for_alerts(host_id, notifications)
     return {
         "ok": True,
         "server_version": APP_VERSION,
@@ -1788,13 +1882,78 @@ def _buyer_mapping_issue(conn, identity, container_id="", now=None):
     return ""
 
 
+def _compute_latest_early_etag(
+    *,
+    rows: List[sqlite3.Row],
+    host_heartbeats: Dict[str, int],
+    admission_rows: Dict[tuple[str, str, str, str], Dict[str, Any]],
+    container_notes: Dict[tuple[str, str, str, str, str], Dict[str, Any]],
+    buyer_email_mapping_states: Dict[tuple[str, str, str, str, str], tuple[str, int, int, str]],
+    buyer_email_issues: Dict[tuple[str, str, str, str], str],
+    include_stale: bool,
+    can_view_user_notes: bool,
+    now: int,
+    mapped_after: int,
+    imbalance_min_bps: float,
+    imbalance_warn_ratio: float,
+) -> str:
+    hasher = hashlib.sha256()
+    header_part = (
+        f"{APP_VERSION}|{int(bool(include_stale))}|{int(bool(can_view_user_notes))}|"
+        f"{ALERT_DISK_THRESHOLD_PERCENT}|{ALERT_CPU_THRESHOLD_PERCENT}|"
+        f"{ALERT_CONN_WARNING_THRESHOLD}|{ALERT_CONN_CRITICAL_THRESHOLD}|"
+        f"{STALE_SECONDS}|{OFFLINE_HIDE_SECONDS}|{imbalance_min_bps}|{imbalance_warn_ratio}"
+    )
+    hasher.update(header_part.encode("utf-8"))
+    for r in rows:
+        hid = str(r["host_id"])
+        r_ts = int(r["ts"])
+        stale_seconds = max(0, now - r_ts)
+        hidden_offline = stale_seconds > OFFLINE_HIDE_SECONDS
+        host_last_seen = host_heartbeats.get(hid, r_ts)
+        host_stale = now - host_last_seen > STALE_SECONDS
+        stale = stale_seconds > STALE_SECONDS
+        offline_hours = stale_seconds // 3600
+        row_meta = (
+            f"\nR|{r['id']}|{hid}|{r['runtime']}|{r['project']}|{r['container_name']}|{r_ts}|"
+            f"{r['cpu_percent']}|{r['mem_bytes']}|{r['mem_percent']}|"
+            f"{r['net_rx_bps']}|{r['net_tx_bps']}|{r['conn_count']}|"
+            f"{r['disk_file']}|{r['disk_size_bytes']}|{r['disk_used_percent']}|"
+            f"{r['podman_network_ok_v4']}|{r['podman_network_ok_v6']}|"
+            f"{int(hidden_offline)}|{int(host_stale)}|{int(stale)}|{offline_hours}|{host_last_seen}|"
+        )
+        hasher.update(row_meta.encode("utf-8"))
+        hasher.update(_report_payload_digest(r["id"], r["payload_json"]))
+    for key in sorted(admission_rows):
+        adm = admission_rows[key]
+        adm_part = f"\nA|{key}|{adm.get('instance_id')}|{adm.get('observed_at')}|{adm.get('payload')}"
+        hasher.update(adm_part.encode("utf-8"))
+    for key in sorted(container_notes):
+        note = container_notes[key]
+        note_part = f"\nN|{key}|{note.get('user_email')}|{note.get('user_note')}"
+        hasher.update(note_part.encode("utf-8"))
+    if can_view_user_notes:
+        for key in sorted(buyer_email_mapping_states):
+            email_val, verified_at, enabled_val, uname_val = buyer_email_mapping_states[key]
+            is_active = int(enabled_val == 1 and email_val != "" and verified_at >= mapped_after)
+            is_expired = int(verified_at < mapped_after)
+            buyer_part = f"\nB|{key}|{email_val}|{enabled_val}|{uname_val}|{is_active}|{is_expired}"
+            hasher.update(buyer_part.encode("utf-8"))
+        for key in sorted(buyer_email_issues):
+            issue_part = f"\nI|{key}|{buyer_email_issues[key]}"
+            hasher.update(issue_part.encode("utf-8"))
+    return f'W/"{hasher.hexdigest()[:24]}"'
+
+
 @app.get("/api/v1/latest")
 def latest(include_stale: bool = False, request: Request = None) -> Response:
-    global _latest_cache, _latest_cache_time
     can_view_user_notes = request is None or getattr(request.state, "dashboard_role", "admin") in {"admin", "operator"}
+    now = int(time.time())
+    mapped_after = now - buyer_notifications.buyer_mapping.TTL
 
     conn = db()
     try:
+        db_file = _db_file_key(conn)
         admission_rows={(r['host_id'],r['runtime'],r['project'],r['container_name']):dict(r)
                         for r in conn.execute('SELECT * FROM admission_states')}
         container_notes = {
@@ -1804,7 +1963,6 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
         buyer_emails = {}
         buyer_email_issues = {}
         buyer_email_mapping_states = {}
-        mapped_after = int(time.time()) - buyer_notifications.buyer_mapping.TTL
         if can_view_user_notes:
             for r in conn.execute(
                 """
@@ -1851,11 +2009,63 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
                 GROUP BY host_id, runtime, project, container_name
             ) m ON r.host_id=m.host_id AND r.runtime=m.runtime AND r.project=m.project
                 AND r.container_name=m.container_name AND r.ts=m.max_ts
-            ORDER BY r.host_id, r.runtime, r.project, r.container_name
+            ORDER BY r.host_id, r.runtime, r.project, r.container_name, r.id
             """
         ).fetchall()
     finally:
         conn.close()
+
+    imbalance_min_bps = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_MIN_BPS", "2097152"))
+    imbalance_warn_ratio = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_RATIO_WARN", "10.0"))
+
+    etag = _compute_latest_early_etag(
+        rows=rows,
+        host_heartbeats=host_heartbeats,
+        admission_rows=admission_rows,
+        container_notes=container_notes,
+        buyer_email_mapping_states=buyer_email_mapping_states,
+        buyer_email_issues=buyer_email_issues,
+        include_stale=include_stale,
+        can_view_user_notes=can_view_user_notes,
+        now=now,
+        mapped_after=mapped_after,
+        imbalance_min_bps=imbalance_min_bps,
+        imbalance_warn_ratio=imbalance_warn_ratio,
+    )
+    if _if_none_match_matches(request, etag):
+        server_metrics.metrics.inc("etag_304_hits")
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Vary": "Accept-Encoding", "Cache-Control": "no-store"},
+        )
+
+    accepts_gzip = _accepts_gzip(request)
+    use_response_cache = bool(db_file) and db_file != ":memory:"
+    if use_response_cache:
+        cache_key = (db_file, etag)
+        now_mono = time.monotonic()
+        with _latest_response_cache_lock:
+            cached_entry = _latest_response_cache.get(cache_key)
+            if cached_entry is not None:
+                cached_mono, cached_json_bytes, cached_gzip_bytes = cached_entry
+                if now_mono - cached_mono < _LATEST_RESPONSE_CACHE_TTL_SECONDS:
+                    _latest_response_cache.move_to_end(cache_key)
+                    if accepts_gzip:
+                        return Response(
+                            content=cached_gzip_bytes,
+                            media_type="application/json",
+                            headers={
+                                "ETag": etag,
+                                "Content-Encoding": "gzip",
+                                "Vary": "Accept-Encoding",
+                            },
+                        )
+                    return Response(
+                        content=cached_json_bytes,
+                        media_type="application/json",
+                        headers={"ETag": etag, "Vary": "Accept-Encoding"},
+                    )
+                _latest_response_cache.pop(cache_key, None)
 
     host_report_timestamps: Dict[str, int] = {}
     for r in rows:
@@ -1864,10 +2074,6 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
         if r_ts > host_report_timestamps.get(hid, -1):
             host_report_timestamps[hid] = r_ts
 
-    imbalance_min_bps = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_MIN_BPS", "2097152"))
-    imbalance_warn_ratio = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_RATIO_WARN", "10.0"))
-
-    now = int(time.time())
     host_disk_map: Dict[str, Dict[str, Any]] = {}
     parsed_rows = []
     for r in rows:
@@ -1879,12 +2085,12 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
         is_latest_host_row = int(r["ts"]) == host_report_timestamps.get(hid, -1)
         if hidden_offline or (host_stale and not include_stale):
             if is_latest_host_row and hid not in host_disk_map:
-                payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+                payload = _parse_report_payload(r["id"], r["payload_json"])
                 candidate_disk = payload.get("disk", {})
                 if isinstance(candidate_disk, dict) and candidate_disk.get("root_total_bytes"):
                     host_disk_map[hid] = candidate_disk
             continue
-        payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+        payload = _parse_report_payload(r["id"], r["payload_json"])
         if is_latest_host_row:
             candidate_disk = payload.get("disk", {})
             if isinstance(candidate_disk, dict) and candidate_disk.get("root_total_bytes"):
@@ -1920,12 +2126,20 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
                     mapping_issue = f"上游已匹配此实例（买家账号：{mapped_name}），但 API 未提供有效邮箱；可手工补充邮箱。"
                 else:
                     mapping_issue = "上游已匹配此实例，但 API 未提供有效邮箱；可手工补充邮箱。"
-        admission=admission_rows.get((r['host_id'],r['runtime'],r['project'],r['container_name']))
-        reported_identity=(payload.get('security') or {}).get('admission',{}).get('instance_id') or payload.get('stable_id') or payload.get('id') or ''
-        if admission and (not admission['instance_id'] or (len(reported_identity)>=12 and admission['instance_id'].startswith(reported_identity))):
-            security=payload.setdefault('security',{})
-            if admission['observed_at']>security.get('admission',{}).get('observed_at',0):
-                security['admission']=json.loads(admission['payload'])
+        admission = admission_rows.get((r["host_id"], r["runtime"], r["project"], r["container_name"]))
+        raw_sec = payload.get("security")
+        sec_dict = raw_sec if isinstance(raw_sec, dict) else {}
+        adm_dict = sec_dict.get("admission") if isinstance(sec_dict.get("admission"), dict) else {}
+        reported_identity = adm_dict.get("instance_id") or payload.get("stable_id") or payload.get("id") or ""
+        out_security: Any = dict(raw_sec) if isinstance(raw_sec, dict) else ({} if "security" not in payload else raw_sec)
+        if admission and (
+            not admission["instance_id"]
+            or (len(reported_identity) >= 12 and admission["instance_id"].startswith(reported_identity))
+        ):
+            if admission["observed_at"] > adm_dict.get("observed_at", 0):
+                sec_copy = dict(sec_dict)
+                sec_copy["admission"] = json.loads(admission["payload"])
+                out_security = sec_copy
         disk = payload.get("disk") if isinstance(payload.get("disk"), dict) else {}
         host_disk = host_disk_map.get(r["host_id"], {})
         alert_disk = (r["disk_used_percent"] or 0) >= ALERT_DISK_THRESHOLD_PERCENT
@@ -1998,7 +2212,7 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
         traffic_imbalance = max_bps >= imbalance_min_bps and imb_ratio >= imbalance_warn_ratio
         traffic_direction = "outbound_heavy" if tx_bps > rx_bps else "inbound_heavy" if rx_bps > tx_bps else "balanced"
 
-        sec_data = payload.get("security", {})
+        sec_data = out_security
         hy2_data = sec_data.get("hy2_protocol", {}) if isinstance(sec_data, dict) else {}
         hy2_detected = bool(hy2_data.get("detected"))
         hy2_concurrency = int(hy2_data.get("udp_concurrency") or 0)
@@ -2037,7 +2251,7 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
             "conn_count": conn_count,
             "tcp_country_stats": payload.get("tcp_country_stats", []),
             "udp_country_stats": payload.get("udp_country_stats", []),
-            "security": payload.get("security", {}),
+            "security": out_security,
             "disk_file": r["disk_file"],
             "disk_used_percent": r["disk_used_percent"],
             "disk_root_device": host_disk.get("root_device") or disk.get("root_device", ""),
@@ -2108,18 +2322,33 @@ def latest(include_stale: bool = False, request: Request = None) -> Response:
             },
         })
     res_content = {"server_version": APP_VERSION, "items": out}
-    etag = _compute_etag(
-        res_content,
-        salt=f"{int(bool(include_stale))}:{int(bool(can_view_user_notes))}",
-        volatile_keys=("offline_seconds", "host_offline_seconds", "last_seen_age_seconds"),
-    )
-    if _if_none_match_matches(request, etag):
-        server_metrics.metrics.inc("etag_304_hits")
+    json_bytes = json.dumps(
+        res_content, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    gzip_bytes = gzip.compress(json_bytes, compresslevel=5)
+    if use_response_cache:
+        cache_key = (db_file, etag)
+        now_mono = time.monotonic()
+        with _latest_response_cache_lock:
+            _latest_response_cache[cache_key] = (now_mono, json_bytes, gzip_bytes)
+            _latest_response_cache.move_to_end(cache_key)
+            while len(_latest_response_cache) > _LATEST_RESPONSE_CACHE_MAX:
+                _latest_response_cache.popitem(last=False)
+    if accepts_gzip:
         return Response(
-            status_code=304,
-            headers={"ETag": etag, "Vary": "Accept-Encoding", "Cache-Control": "no-store"},
+            content=gzip_bytes,
+            media_type="application/json",
+            headers={
+                "ETag": etag,
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding",
+            },
         )
-    return JSONResponse(content=res_content, headers={"ETag": etag})
+    return Response(
+        content=json_bytes,
+        media_type="application/json",
+        headers={"ETag": etag, "Vary": "Accept-Encoding"},
+    )
 
 
 @app.get("/api/v1/containers/user-note")
@@ -3359,6 +3588,75 @@ def security_status(request: Request = None) -> Response:
         return JSONResponse(content=res_content, headers={"ETag": etag})
 
 
+def _query_peaks_with_index_fallback(
+    conn: sqlite3.Connection,
+    sql_indexed: str,
+    sql_plain: str,
+    params: tuple[Any, ...],
+) -> List[sqlite3.Row]:
+    try:
+        return conn.execute(sql_indexed, params).fetchall()
+    except sqlite3.OperationalError:
+        return conn.execute(sql_plain, params).fetchall()
+
+
+def _aggregate_container_peaks_from_ts(
+    non_null_ts_rows: List[sqlite3.Row],
+    null_ts_rows: List[sqlite3.Row],
+) -> Dict[str, Dict[str, Any]]:
+    by_host_ts: Dict[tuple[str, int], list[Any]] = {}
+    for r in non_null_ts_rows:
+        key = (str(r["host_id"]), int(r["ts"]))
+        by_host_ts[key] = [
+            float(r["sum_conn"] or 0),
+            float(r["max_conn"] or 0),
+            float(r["sum_rx"] or 0.0),
+            float(r["sum_tx"] or 0.0),
+            int(r["max_inbound_ips"] or 0),
+            int(r["max_outbound_ips"] or 0),
+        ]
+    for r in null_ts_rows:
+        key = (str(r["host_id"]), int(r["ts"]))
+        cur = by_host_ts.get(key)
+        if cur is None:
+            by_host_ts[key] = [
+                float(r["sum_conn"] or 0),
+                float(r["max_conn"] or 0),
+                float(r["sum_rx"] or 0.0),
+                float(r["sum_tx"] or 0.0),
+                int(r["max_inbound_ips"] or 0),
+                int(r["max_outbound_ips"] or 0),
+            ]
+        else:
+            cur[0] += float(r["sum_conn"] or 0)
+            cur[1] = max(cur[1], float(r["max_conn"] or 0))
+            cur[2] += float(r["sum_rx"] or 0.0)
+            cur[3] += float(r["sum_tx"] or 0.0)
+            cur[4] = max(cur[4], int(r["max_inbound_ips"] or 0))
+            cur[5] = max(cur[5], int(r["max_outbound_ips"] or 0))
+
+    peaks_by_host: Dict[str, Dict[str, Any]] = {}
+    for (hid, _ts), vals in by_host_ts.items():
+        existing = peaks_by_host.get(hid)
+        if existing is None:
+            peaks_by_host[hid] = {
+                "peak_conn_count": int(vals[0]),
+                "peak_container_conn_count": int(vals[1]),
+                "peak_rx_bps": float(vals[2]),
+                "peak_tx_bps": float(vals[3]),
+                "peak_inbound_ips": int(vals[4]),
+                "peak_outbound_ips": int(vals[5]),
+            }
+        else:
+            existing["peak_conn_count"] = max(existing["peak_conn_count"], int(vals[0]))
+            existing["peak_container_conn_count"] = max(existing["peak_container_conn_count"], int(vals[1]))
+            existing["peak_rx_bps"] = max(existing["peak_rx_bps"], float(vals[2]))
+            existing["peak_tx_bps"] = max(existing["peak_tx_bps"], float(vals[3]))
+            existing["peak_inbound_ips"] = max(existing["peak_inbound_ips"], int(vals[4]))
+            existing["peak_outbound_ips"] = max(existing["peak_outbound_ips"], int(vals[5]))
+    return peaks_by_host
+
+
 def _compute_security_status() -> Dict[str, Any]:
     conn = db()
     try:
@@ -3393,17 +3691,99 @@ def _compute_security_status() -> Dict[str, Any]:
                 """
             ).fetchall()
 
-        container_peaks_rows = conn.execute(
+        null_container_ts_rows = _query_peaks_with_index_fallback(
+            conn,
             """
             SELECT
                 host_id,
-                MAX(sum_conn) AS peak_conn_count,
-                MAX(max_conn) AS peak_container_conn_count,
-                MAX(sum_rx) AS peak_rx_bps,
-                MAX(sum_tx) AS peak_tx_bps,
-                MAX(max_inbound_ips) AS peak_inbound_ips,
-                MAX(max_outbound_ips) AS peak_outbound_ips
-            FROM (
+                ts,
+                SUM(conn_count) AS sum_conn,
+                MAX(conn_count) AS max_conn,
+                SUM(net_rx_bps) AS sum_rx,
+                SUM(net_tx_bps) AS sum_tx,
+                MAX(COALESCE(inbound_unique_ips, CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips,
+                MAX(COALESCE(outbound_unique_ips, CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS max_outbound_ips
+            FROM reports INDEXED BY idx_reports_null_peaks
+            WHERE ts >= ? AND (inbound_unique_ips IS NULL OR outbound_unique_ips IS NULL)
+            GROUP BY host_id, ts
+            """,
+            """
+            SELECT
+                host_id,
+                ts,
+                SUM(conn_count) AS sum_conn,
+                MAX(conn_count) AS max_conn,
+                SUM(net_rx_bps) AS sum_rx,
+                SUM(net_tx_bps) AS sum_tx,
+                MAX(COALESCE(inbound_unique_ips, CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips,
+                MAX(COALESCE(outbound_unique_ips, CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS max_outbound_ips
+            FROM reports
+            WHERE ts >= ? AND (inbound_unique_ips IS NULL OR outbound_unique_ips IS NULL)
+            GROUP BY host_id, ts
+            """,
+            (today_start_ts,),
+        )
+        if not null_container_ts_rows:
+            container_peaks_rows = _query_peaks_with_index_fallback(
+                conn,
+                """
+                SELECT
+                    host_id,
+                    MAX(sum_conn) AS peak_conn_count,
+                    MAX(max_conn) AS peak_container_conn_count,
+                    MAX(sum_rx) AS peak_rx_bps,
+                    MAX(sum_tx) AS peak_tx_bps,
+                    MAX(max_inbound_ips) AS peak_inbound_ips,
+                    MAX(max_outbound_ips) AS peak_outbound_ips
+                FROM (
+                    SELECT
+                        host_id,
+                        ts,
+                        SUM(conn_count) AS sum_conn,
+                        MAX(conn_count) AS max_conn,
+                        SUM(net_rx_bps) AS sum_rx,
+                        SUM(net_tx_bps) AS sum_tx,
+                        MAX(inbound_unique_ips) AS max_inbound_ips,
+                        MAX(outbound_unique_ips) AS max_outbound_ips
+                    FROM reports INDEXED BY idx_reports_ts_host_peaks
+                    WHERE ts >= ? AND inbound_unique_ips IS NOT NULL AND outbound_unique_ips IS NOT NULL
+                    GROUP BY host_id, ts
+                )
+                GROUP BY host_id
+                """,
+                """
+                SELECT
+                    host_id,
+                    MAX(sum_conn) AS peak_conn_count,
+                    MAX(max_conn) AS peak_container_conn_count,
+                    MAX(sum_rx) AS peak_rx_bps,
+                    MAX(sum_tx) AS peak_tx_bps,
+                    MAX(max_inbound_ips) AS peak_inbound_ips,
+                    MAX(max_outbound_ips) AS peak_outbound_ips
+                FROM (
+                    SELECT
+                        host_id,
+                        ts,
+                        SUM(conn_count) AS sum_conn,
+                        MAX(conn_count) AS max_conn,
+                        SUM(net_rx_bps) AS sum_rx,
+                        SUM(net_tx_bps) AS sum_tx,
+                        MAX(inbound_unique_ips) AS max_inbound_ips,
+                        MAX(outbound_unique_ips) AS max_outbound_ips
+                    FROM reports
+                    WHERE ts >= ? AND inbound_unique_ips IS NOT NULL AND outbound_unique_ips IS NOT NULL
+                    GROUP BY host_id, ts
+                )
+                GROUP BY host_id
+                """,
+                (today_start_ts,),
+            )
+            non_null_container_ts_rows: List[sqlite3.Row] = []
+        else:
+            container_peaks_rows = []
+            non_null_container_ts_rows = _query_peaks_with_index_fallback(
+                conn,
+                """
                 SELECT
                     host_id,
                     ts,
@@ -3411,29 +3791,74 @@ def _compute_security_status() -> Dict[str, Any]:
                     MAX(conn_count) AS max_conn,
                     SUM(net_rx_bps) AS sum_rx,
                     SUM(net_tx_bps) AS sum_tx,
-                    MAX(COALESCE(inbound_unique_ips, CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips,
-                    MAX(COALESCE(outbound_unique_ips, CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS max_outbound_ips
-                FROM reports
-                WHERE ts >= ?
+                    MAX(inbound_unique_ips) AS max_inbound_ips,
+                    MAX(outbound_unique_ips) AS max_outbound_ips
+                FROM reports INDEXED BY idx_reports_ts_host_peaks
+                WHERE ts >= ? AND inbound_unique_ips IS NOT NULL AND outbound_unique_ips IS NOT NULL
                 GROUP BY host_id, ts
+                """,
+                """
+                SELECT
+                    host_id,
+                    ts,
+                    SUM(conn_count) AS sum_conn,
+                    MAX(conn_count) AS max_conn,
+                    SUM(net_rx_bps) AS sum_rx,
+                    SUM(net_tx_bps) AS sum_tx,
+                    MAX(inbound_unique_ips) AS max_inbound_ips,
+                    MAX(outbound_unique_ips) AS max_outbound_ips
+                FROM reports
+                WHERE ts >= ? AND inbound_unique_ips IS NOT NULL AND outbound_unique_ips IS NOT NULL
+                GROUP BY host_id, ts
+                """,
+                (today_start_ts,),
             )
+
+        host_sec_covering_rows = _query_peaks_with_index_fallback(
+            conn,
+            """
+            SELECT
+                host_id,
+                MAX(total_rx_bps) AS peak_rx_bps,
+                MAX(total_tx_bps) AS peak_tx_bps
+            FROM host_security INDEXED BY idx_host_security_ts_peaks
+            WHERE ts >= ? AND total_rx_bps IS NOT NULL AND total_tx_bps IS NOT NULL
+            GROUP BY host_id
+            """,
+            """
+            SELECT
+                host_id,
+                MAX(total_rx_bps) AS peak_rx_bps,
+                MAX(total_tx_bps) AS peak_tx_bps
+            FROM host_security
+            WHERE ts >= ? AND total_rx_bps IS NOT NULL AND total_tx_bps IS NOT NULL
             GROUP BY host_id
             """,
             (today_start_ts,),
-        ).fetchall()
-
-        host_sec_peaks_rows = conn.execute(
+        )
+        host_sec_null_rows = _query_peaks_with_index_fallback(
+            conn,
+            """
+            SELECT
+                host_id,
+                MAX(COALESCE(total_rx_bps, CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
+                MAX(COALESCE(total_tx_bps, CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps
+            FROM host_security INDEXED BY idx_host_security_null_peaks
+            WHERE ts >= ? AND (total_rx_bps IS NULL OR total_tx_bps IS NULL)
+            GROUP BY host_id
+            """,
             """
             SELECT
                 host_id,
                 MAX(COALESCE(total_rx_bps, CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
                 MAX(COALESCE(total_tx_bps, CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps
             FROM host_security
-            WHERE ts >= ?
+            WHERE ts >= ? AND (total_rx_bps IS NULL OR total_tx_bps IS NULL)
             GROUP BY host_id
             """,
             (today_start_ts,),
-        ).fetchall()
+        )
+        host_sec_peaks_rows = host_sec_covering_rows + host_sec_null_rows
         health_now = int(time.time())
         health_cutoff = health_now - 86400
         health_bucket_cutoff = health_cutoff - (health_cutoff % 3600)
@@ -3447,8 +3872,8 @@ def _compute_security_status() -> Dict[str, Any]:
         ).fetchall()
         gfw_by_host = gfw_monitor.status_map(conn, health_now)
         latest_container_rows = conn.execute(
-            """SELECT host_id,runtime,project,container_name,ts,payload_json FROM (
-                   SELECT host_id,runtime,project,container_name,ts,payload_json,
+            """SELECT id,host_id,runtime,project,container_name,ts,payload_json FROM (
+                   SELECT id,host_id,runtime,project,container_name,ts,payload_json,
                           ROW_NUMBER() OVER (PARTITION BY host_id,runtime,project,container_name ORDER BY ts DESC,id DESC) AS row_number
                    FROM reports WHERE ts>=?
                ) WHERE row_number=1""",
@@ -3456,14 +3881,12 @@ def _compute_security_status() -> Dict[str, Any]:
         ).fetchall()
         container_controls_by_host: Dict[str, List[Dict[str, Any]]] = {}
         for report_row in latest_container_rows:
-            try:
-                container_payload = json.loads(report_row["payload_json"] or "{}")
-            except (TypeError, ValueError):
-                container_payload = {}
+            container_payload = _parse_report_payload(report_row["id"], report_row["payload_json"])
+            raw_sec = container_payload.get("security")
             container_controls_by_host.setdefault(str(report_row["host_id"]), []).append({
                 "runtime": str(report_row["runtime"] or ""), "project": str(report_row["project"] or ""),
                 "container_name": str(report_row["container_name"] or ""), "ts": int(report_row["ts"] or 0),
-                "security": container_payload.get("security") if isinstance(container_payload.get("security"), dict) else {},
+                "security": raw_sec if isinstance(raw_sec, dict) else {},
             })
         firewall_policy_by_host = {}
         for policy_row in conn.execute("SELECT host_id,revision,policy_json FROM host_firewall_policies"):
@@ -3495,16 +3918,19 @@ def _compute_security_status() -> Dict[str, Any]:
     finally:
         conn.close()
 
-    peaks_by_host: Dict[str, Dict[str, Any]] = {}
-    for r in container_peaks_rows:
-        peaks_by_host[r["host_id"]] = {
-            "peak_conn_count": int(r["peak_conn_count"] or 0),
-            "peak_container_conn_count": int(r["peak_container_conn_count"] or 0),
-            "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
-            "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
-            "peak_inbound_ips": int(r["peak_inbound_ips"] or 0),
-            "peak_outbound_ips": int(r["peak_outbound_ips"] or 0),
-        }
+    if not null_container_ts_rows:
+        peaks_by_host: Dict[str, Dict[str, Any]] = {}
+        for r in container_peaks_rows:
+            peaks_by_host[r["host_id"]] = {
+                "peak_conn_count": int(r["peak_conn_count"] or 0),
+                "peak_container_conn_count": int(r["peak_container_conn_count"] or 0),
+                "peak_rx_bps": float(r["peak_rx_bps"] or 0.0),
+                "peak_tx_bps": float(r["peak_tx_bps"] or 0.0),
+                "peak_inbound_ips": int(r["peak_inbound_ips"] or 0),
+                "peak_outbound_ips": int(r["peak_outbound_ips"] or 0),
+            }
+    else:
+        peaks_by_host = _aggregate_container_peaks_from_ts(non_null_container_ts_rows, null_container_ts_rows)
 
     for r in host_sec_peaks_rows:
         h = r["host_id"]
@@ -3787,7 +4213,7 @@ legacy_pages.attach(app, lambda: STATIC_DIR)
 live_events.attach(app, server_metrics.metrics)
 app.add_middleware(
     server_metrics.SelectiveGZipMiddleware,
-    excluded_paths=set(_AGENT_ONLY_PATHS) | {"/api/v1/events/stream"},
+    excluded_paths=set(_AGENT_ONLY_PATHS) | {"/api/v1/events/stream", "/api/v1/latest"},
     minimum_size=1024,
     compresslevel=5,
 )

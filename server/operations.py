@@ -49,6 +49,7 @@ def initialize(conn):
     CREATE TABLE IF NOT EXISTS ops_policies(entity TEXT PRIMARY KEY,profile TEXT,payload TEXT,updated_at INTEGER);
     CREATE TABLE IF NOT EXISTS ops_incidents(id INTEGER PRIMARY KEY,entity TEXT,kind TEXT,status TEXT,opened_at INTEGER,last_seen INTEGER,payload TEXT);
     CREATE INDEX IF NOT EXISTS idx_ops_incidents_entity ON ops_incidents(entity,last_seen);
+    CREATE INDEX IF NOT EXISTS idx_ops_incidents_open ON ops_incidents(entity,kind) WHERE status='open';
     CREATE TABLE IF NOT EXISTS ops_events(id INTEGER PRIMARY KEY,incident_id INTEGER,ts INTEGER,kind TEXT,payload TEXT);
     CREATE INDEX IF NOT EXISTS idx_ops_events_incident ON ops_events(incident_id,ts);
     CREATE TABLE IF NOT EXISTS ops_rechecks(action_id INTEGER PRIMARY KEY,entity TEXT,alert_type TEXT,status TEXT,
@@ -848,11 +849,13 @@ def backup(database_path, retention=7):
         destination = None
         try:
             destination = sqlite3.connect(target)
-            deadline = time.monotonic()+120
+            deadline = time.monotonic() + max(
+                180, min(900, int(estimated_bytes / (4 * 1024 * 1024)) + 120)
+            )
             def progress(status, remaining, total):
                 if time.monotonic() > deadline:
                     raise TimeoutError("backup time budget exceeded")
-            source.backup(destination, pages=256, progress=progress, sleep=.05)
+            source.backup(destination, pages=1024, progress=progress, sleep=0.01)
             if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise ValueError("backup integrity check failed")
         finally:

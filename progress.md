@@ -2,6 +2,17 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 38：服务端热点路径、SQLite 锁释放与历史峰值回填深度优化（v2.2.0）
+
+- **Slice 1 数据库 I/O 节流、索引补全与历史峰值在线回填（`server/admission_api.py`、`server/tcping.py`、`server/operations.py`、`server/buyer_notifications.py`、`server/investigation.py`、`server/db_maintenance.py`）**：
+  - `admission_api._write_admission_status` 新增 `ADMISSION_UNCHANGED_WRITE_INTERVAL_SECONDS`（默认 `25`s），通过 `_semantic_admission_payload` 忽略 `observed_at` / `sampled_at` 时间戳抖动，在状态未变化且位于时间窗内时跳过 `admission_states` 写入并计入 `admission_readonly_hits`；`tcping` 的 `GET /api/public/tcping/jobs/{job_id}` 先只读检查任务状态与 `deadline_at`，仅在目标活跃任务已过期时才执行 `expire_active` 与 `commit()`。
+  - `db_maintenance.run_cleanup` 在 `PRAGMA incremental_vacuum(2048)` 前调用有界批处理 `_backfill_missing_peak_columns`，按 `batch_size` 与时间预算回填 `reports`（`inbound_unique_ips`、`outbound_unique_ips`）与 `host_security`（`total_rx_bps`、`total_tx_bps`）历史 `NULL` 峰值列并记录 `cleanup_status['backfilled_peak_rows']` 与 `backlog`；`operations.initialize` 新增 `idx_ops_incidents_open` 部分索引，`operations.backup` 动态按库大小计算超时上限并将增量页数提升至 `1024`（`sleep=0.01`）。
+  - `buyer_notifications.initialize` 新增 `idx_buyer_outbox_alert_status` 与 `idx_buyer_user_notices_alert_status`，`reconcile()` 通过 `_preload_reconcile_state` 批量预加载待发送/待处理记录与活跃计数以消除 N+1 查询；`investigation` 新增 `_approx_row_count` / `_approx_below_cap` / `_CapTracker`，在 `MAX(rowid)` 低于上限时短路 `COUNT(*)` 全表扫描。
+- **Slice 2 热点缓存、早期 ETag/单遍压缩、覆盖索引拆分与 Telegram 锁隔离（`server/app.py`、`server/telegram_service.py`、`tests/test_server_perf_v2.py`）**：
+  - `server/app.py` 新增内容校验 LRU `_report_payload_cache`（`_parse_report_payload` 校验 `report_id` 与原始 JSON 字符串完全一致以防 SQL 原地更新脏读并避免调用方就地修改缓存对象）；`latest()` 新增 `_compute_latest_early_etag` 在解析与序列化前提前返回 `304 Not Modified`，并对非 304 响应启用单遍 JSON + gzip 预压缩 `_latest_response_cache`（同时将 `/api/v1/latest` 加入 `SelectiveGZipMiddleware` 排除列表，避免重复 `Vary` 与忽略 `gzip;q=0`）。
+  - `init_db()` 新增 `idx_reports_null_peaks` 与 `idx_host_security_null_peaks` 部分索引并清理缓存；`_compute_security_status` 将峰值窗口查询拆分为覆盖索引快路径（含 `OperationalError` 兼容回退）与 `NULL` 峰值部分索引回退路径；`_process_report_sync` 将提交后状态同步合并至单 SQLite 连接（保留 `dispatch_buyer_notifications_for_alerts` 测试兼容入口）。
+  - `telegram_service.sync_configured_bot_alert_messages` 重构为「短读释放连接 -> 无锁执行 Telegram HTTP API -> 短写持久化与投递状态」三阶段；新增 `tests/test_server_perf_v2.py`（11 项测试）覆盖全部 Slice 1/2 性能优化与正确性边界。
+
 ## Phase 37：零写入轮询、响应压缩/ETag 缓存、核心服务模块化与 SSE 自观测（v2.1.0）
 
 - **P0 轮询零写入快路径、历史压缩与网络传输优化（`server/gfw_monitor.py`、`server/tcping.py`、`server/db_maintenance.py`、`server/admission_api.py`、`server/app.py`）**：

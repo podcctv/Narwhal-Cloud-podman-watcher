@@ -61,6 +61,7 @@ def initialize(conn):
       attempts INTEGER DEFAULT 0,due_at INTEGER,created_at INTEGER,updated_at INTEGER,
       http_status INTEGER DEFAULT 0,last_error TEXT DEFAULT '',batch_id TEXT DEFAULT '');
     CREATE INDEX IF NOT EXISTS idx_buyer_due ON buyer_outbox(status,due_at);
+    CREATE INDEX IF NOT EXISTS idx_buyer_outbox_alert_status ON buyer_outbox(alert_id,status,created_at);
     CREATE TABLE IF NOT EXISTS buyer_cooldowns(machine_id TEXT PRIMARY KEY,next_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS buyer_checks(alert_id INTEGER PRIMARY KEY,episode INTEGER,clean_samples INTEGER DEFAULT 0,last_sample INTEGER,state TEXT);
     CREATE TABLE IF NOT EXISTS buyer_user_notices(
@@ -69,6 +70,7 @@ def initialize(conn):
       telegram_status TEXT,banner_status TEXT DEFAULT 'queued',last_error TEXT DEFAULT '',updated_at INTEGER,
       attempts INTEGER DEFAULT 0,due_at INTEGER DEFAULT 0);
     CREATE INDEX IF NOT EXISTS idx_user_notices_host ON buyer_user_notices(host_id,expires_at);
+    CREATE INDEX IF NOT EXISTS idx_buyer_user_notices_alert_status ON buyer_user_notices(alert_id,telegram_status);
     CREATE TABLE IF NOT EXISTS buyer_user_notice_events(
       id INTEGER PRIMARY KEY,notice_id TEXT NOT NULL,channel TEXT NOT NULL,status TEXT NOT NULL,
       attempt INTEGER NOT NULL DEFAULT 0,ts INTEGER NOT NULL,detail TEXT NOT NULL DEFAULT '');
@@ -164,7 +166,98 @@ def _protocol_alert_matches_live_container(conn, alert):
     return _vmess_alert_matches_live_container(conn, alert)
 
 
-def _reconcile_protocol_policy_notice(conn, alert, now, cfg, protocol):
+def _preload_reconcile_state(conn, alerts):
+    alert_ids = [int(a["id"]) for a in alerts]
+    pending_outbox = {}
+    pending_user_notices = set()
+    for start in range(0, len(alert_ids), 200):
+        chunk = alert_ids[start : start + 200]
+        placeholders = ",".join("?" for _ in chunk)
+        for row in conn.execute(
+            f"SELECT alert_id, event_key, state, severity FROM buyer_outbox "
+            f"WHERE alert_id IN ({placeholders}) AND status IN ('queued','retrying','blocked')",
+            chunk,
+        ):
+            pending_outbox.setdefault(int(row["alert_id"]), []).append(
+                (row["event_key"], row["state"], row["severity"])
+            )
+        for row in conn.execute(
+            f"SELECT DISTINCT alert_id FROM buyer_user_notices "
+            f"WHERE alert_id IN ({placeholders}) AND telegram_status IN ('queued','blocked','retrying') "
+            f"AND requested_by<>'system:connection-guard'",
+            chunk,
+        ):
+            pending_user_notices.add(int(row["alert_id"]))
+    active_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')"
+        ).fetchone()[0]
+    )
+    return {
+        "pending_outbox": pending_outbox,
+        "pending_user_notices": pending_user_notices,
+        "active_count": active_count,
+    }
+
+
+def _cancel_pending_outbox(conn, state_cache, alert_id, now, reason, exclude_event_key=None):
+    aid = int(alert_id)
+    if state_cache is not None:
+        rows = state_cache["pending_outbox"].get(aid)
+        if not rows:
+            return
+        if exclude_event_key is not None and not any(
+            ek is not None and ek != exclude_event_key for ek, _, _ in rows
+        ):
+            return
+    if exclude_event_key is None:
+        cur = conn.execute(
+            "UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error=? "
+            "WHERE alert_id=? AND status IN ('queued','retrying','blocked')",
+            (now, reason, aid),
+        )
+        if state_cache is not None:
+            state_cache["pending_outbox"].pop(aid, None)
+    else:
+        cur = conn.execute(
+            "UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error=? "
+            "WHERE alert_id=? AND event_key<>? AND status IN ('queued','retrying','blocked')",
+            (now, reason, aid, exclude_event_key),
+        )
+        if state_cache is not None:
+            remaining = [
+                item for item in state_cache["pending_outbox"].get(aid, ())
+                if item[0] is None or item[0] == exclude_event_key
+            ]
+            if remaining:
+                state_cache["pending_outbox"][aid] = remaining
+            else:
+                state_cache["pending_outbox"].pop(aid, None)
+    if state_cache is not None:
+        state_cache["active_count"] = max(0, state_cache["active_count"] - max(0, cur.rowcount))
+
+
+def _active_outbox_count(conn, state_cache):
+    if state_cache is not None:
+        return state_cache["active_count"]
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')"
+        ).fetchone()[0]
+    )
+
+
+def _insert_outbox_row(conn, state_cache, values):
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO buyer_outbox(event_key,alert_id,host_id,runtime,project,container_name,state,severity,subject,message,machine_id,user_id,scope,status,due_at,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        values,
+    )
+    if state_cache is not None and cur.rowcount > 0:
+        state_cache["active_count"] += cur.rowcount
+
+
+def _reconcile_protocol_policy_notice(conn, alert, now, cfg, protocol, state_cache=None):
     """Queue a protocol-policy advisory only to a live, exact user mapping."""
     event_key = f"{alert['id']}:{alert['first_seen']}:{protocol}-policy"
     evidence = _confirmed_protocol_policy_evidence(alert, protocol)
@@ -185,14 +278,17 @@ def _reconcile_protocol_policy_notice(conn, alert, now, cfg, protocol):
     )
     if not eligible:
         reason = f"{protocol.upper()} 策略通知要求新鲜封禁证据和精确的单用户收件映射；未广播"
-        conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error=? WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, reason, alert["id"]))
+        _cancel_pending_outbox(conn, state_cache, alert["id"], now, reason)
         return
-    conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error=? WHERE alert_id=? AND event_key<>? AND status IN ('queued','retrying','blocked')", (now, f"{protocol.upper()} 策略通知快照已更新", alert["id"], event_key))
-    if conn.execute("SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')").fetchone()[0] >= 10000:
+    _cancel_pending_outbox(
+        conn, state_cache, alert["id"], now, f"{protocol.upper()} 策略通知快照已更新", exclude_event_key=event_key
+    )
+    if _active_outbox_count(conn, state_cache) >= 10000:
         return
     subject, message = render(alert, state, t["node_name"], conn)
-    conn.execute(
-        "INSERT OR IGNORE INTO buyer_outbox(event_key,alert_id,host_id,runtime,project,container_name,state,severity,subject,message,machine_id,user_id,scope,status,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    _insert_outbox_row(
+        conn,
+        state_cache,
         (event_key, alert["id"], *(alert[k] for k in ("host_id", "runtime", "project", "container_name")), state,
          alert["severity"], subject, message, t["machine_id"], t["user_id"], "user", "queued", now, now, now),
     )
@@ -240,7 +336,7 @@ def _speedtest_attempt_evidence(alert):
     return sorted(results)
 
 
-def _reconcile_speedtest_attempt_notice(conn, alert, now, cfg):
+def _reconcile_speedtest_attempt_notice(conn, alert, now, cfg, state_cache=None):
     """Deliver a blocked test attempt only to the exactly mapped container user."""
     event_key = f"{alert['id']}:{alert['first_seen']}:speedtest-attempt"
     evidence = _speedtest_attempt_evidence(alert)
@@ -259,20 +355,28 @@ def _reconcile_speedtest_attempt_notice(conn, alert, now, cfg):
         and mapped and mapped["scope"] == "user" and mapped["user_id"]
     )
     if not eligible:
-        conn.execute(
-            "UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='测速拦截提醒要求新鲜命中计数和精确的单用户容器映射；未广播' WHERE alert_id=? AND status IN ('queued','retrying','blocked')",
-            (now, alert["id"]),
+        _cancel_pending_outbox(
+            conn,
+            state_cache,
+            alert["id"],
+            now,
+            "测速拦截提醒要求新鲜命中计数和精确的单用户容器映射；未广播",
         )
         return
-    conn.execute(
-        "UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='测速拦截提醒收件快照已更新' WHERE alert_id=? AND event_key<>? AND status IN ('queued','retrying','blocked')",
-        (now, alert["id"], event_key),
+    _cancel_pending_outbox(
+        conn,
+        state_cache,
+        alert["id"],
+        now,
+        "测速拦截提醒收件快照已更新",
+        exclude_event_key=event_key,
     )
-    if conn.execute("SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')").fetchone()[0] >= 10000:
+    if _active_outbox_count(conn, state_cache) >= 10000:
         return
     subject, message = render(alert, state, mapped["node_name"], conn)
-    conn.execute(
-        "INSERT OR IGNORE INTO buyer_outbox(event_key,alert_id,host_id,runtime,project,container_name,state,severity,subject,message,machine_id,user_id,scope,status,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    _insert_outbox_row(
+        conn,
+        state_cache,
         (event_key, alert["id"], *(alert[k] for k in ("host_id", "runtime", "project", "container_name")), state,
          alert["severity"], subject, message, mapped["machine_id"], mapped["user_id"], "user", "queued", now, now, now),
     )
@@ -408,51 +512,97 @@ def recovery(conn, alert):
 
 def reconcile(conn, host, now):
     cfg = config(conn)
-    for alert in conn.execute("SELECT * FROM security_alerts WHERE host_id=? AND last_seen>=? ORDER BY id DESC LIMIT 1000", (host, now-7*86400)).fetchall():
+    alerts = conn.execute(
+        "SELECT * FROM security_alerts WHERE host_id=? AND last_seen>=? ORDER BY id DESC LIMIT 1000",
+        (host, now - 7 * 86400),
+    ).fetchall()
+    if not alerts:
+        return
+    state_cache = _preload_reconcile_state(conn, alerts)
+    pending_outbox = state_cache["pending_outbox"]
+    pending_user_notices = state_cache["pending_user_notices"]
+    for alert in alerts:
+        aid = int(alert["id"])
         if alert['alert_type'] in {'socks_password_review', 'standalone_proxy_panel'}:
             # Pending administrator judgement is not a confirmed customer risk.
             # Only the explicit user-notice workflow may notify the buyer.
-            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='仅提醒管理员，买家通知由管理员明确触发' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
+            _cancel_pending_outbox(conn, state_cache, aid, now, '仅提醒管理员，买家通知由管理员明确触发')
             continue
         if alert["alert_type"] == "ops_traffic_quota":
-            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='流量额度提醒已停用' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
+            _cancel_pending_outbox(conn, state_cache, aid, now, '流量额度提醒已停用')
             continue
         if alert["alert_type"] == "speedtest_attempt_blocked":
-            _reconcile_speedtest_attempt_notice(conn, alert, now, cfg)
+            _reconcile_speedtest_attempt_notice(conn, alert, now, cfg, state_cache=state_cache)
             continue
         if is_protection_only_alert(alert):
             if alert["alert_type"] in {"vmess_port_blocked", "trojan_port_blocked"}:
                 protocol = "vmess" if alert["alert_type"] == "vmess_port_blocked" else "trojan"
-                _reconcile_protocol_policy_notice(conn, alert, now, cfg, protocol)
+                _reconcile_protocol_policy_notice(conn, alert, now, cfg, protocol, state_cache=state_cache)
                 continue
             # Preserve the operator alert and its protection policy, but do not
             # present unattributed network activity as buyer misconduct.
-            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='网络保护信号未关联到用户身份，不作为用户滥用通知' WHERE alert_id=? AND status IN ('queued','retrying','blocked')", (now, alert['id']))
-            conn.execute("UPDATE buyer_user_notices SET telegram_status='cancelled',banner_status=CASE WHEN banner_status IN ('queued','blocked','retrying') THEN 'cancelled' ELSE banner_status END,last_error='网络保护信号未关联到用户身份，不发送用户滥用通知',updated_at=? WHERE alert_id=? AND requested_by<>'system:connection-guard' AND telegram_status IN ('queued','blocked','retrying')", (now, alert['id']))
+            _cancel_pending_outbox(conn, state_cache, aid, now, '网络保护信号未关联到用户身份，不作为用户滥用通知')
+            if aid in pending_user_notices:
+                conn.execute(
+                    "UPDATE buyer_user_notices SET telegram_status='cancelled',"
+                    "banner_status=CASE WHEN banner_status IN ('queued','blocked','retrying') THEN 'cancelled' ELSE banner_status END,"
+                    "last_error='网络保护信号未关联到用户身份，不发送用户滥用通知',updated_at=? "
+                    "WHERE alert_id=? AND requested_by<>'system:connection-guard' AND telegram_status IN ('queued','blocked','retrying')",
+                    (now, aid),
+                )
+                pending_user_notices.discard(aid)
             continue
         state = current_state(conn, alert)
         # Reconcile pending snapshots: never send stale active warnings after recovery.
-        conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='事件状态或等级已变化' WHERE alert_id=? AND (state<>? OR severity<>? OR event_key NOT LIKE ?) AND status IN ('queued','retrying','blocked')", (now, alert["id"], state, alert["severity"], f"{alert['id']}:{alert['first_seen']}:%"))
+        pending_rows = pending_outbox.get(aid, ())
+        key_prefix = f"{aid}:{alert['first_seen']}:"
+        if any(
+            (rs is not None and rs != state)
+            or (rsev is not None and rsev != alert["severity"])
+            or (ek is not None and not str(ek).startswith(key_prefix))
+            for ek, rs, rsev in pending_rows
+        ):
+            cur = conn.execute(
+                "UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='事件状态或等级已变化' "
+                "WHERE alert_id=? AND (state<>? OR severity<>? OR event_key NOT LIKE ?) AND status IN ('queued','retrying','blocked')",
+                (now, aid, state, alert["severity"], f"{key_prefix}%"),
+            )
+            state_cache["active_count"] = max(0, state_cache["active_count"] - max(0, cur.rowcount))
+            remaining = [
+                item for item in pending_rows
+                if (item[1] is None or item[1] == state)
+                and (item[2] is None or item[2] == alert["severity"])
+                and (item[0] is None or str(item[0]).startswith(key_prefix))
+            ]
+            if remaining:
+                pending_outbox[aid] = remaining
+            else:
+                pending_outbox.pop(aid, None)
         if state == "suppressed" or alert["severity"] == "info" or (cfg["min_severity"] == "critical" and alert["severity"] != "critical"):
             continue
-        existing = conn.execute("SELECT 1 FROM buyer_outbox WHERE alert_id=? AND created_at>=? LIMIT 1", (alert["id"], alert["first_seen"])).fetchone()
-        if state in {"verified", "resolved"} and (not cfg["recovery"] or not existing):
-            continue  # No historical recovery flood on migration.
+        if state in {"verified", "resolved"}:
+            if not cfg["recovery"] or not cfg["enabled"]:
+                continue
+            existing = conn.execute("SELECT 1 FROM buyer_outbox WHERE alert_id=? AND created_at>=? LIMIT 1", (aid, alert["first_seen"])).fetchone()
+            if not existing:
+                continue  # No historical recovery flood on migration.
         if not cfg["enabled"]:
             continue
         t = target(conn, alert)
         subject, message = render(alert, state, t["node_name"] if t else "", conn)
-        event_key = f"{alert['id']}:{alert['first_seen']}:{state}:{alert['severity']}"
+        event_key = f"{aid}:{alert['first_seen']}:{state}:{alert['severity']}"
         if alert['alert_type'] == 'container_connection_count' and state in ('active', 'recurring') and buyer_content.loads(alert['details_json']).get('connection_policy', {}).get('escalated'):
             event_key += ':connection-escalated'
-            conn.execute("UPDATE buyer_outbox SET status='cancelled',updated_at=?,last_error='已升级为连续严重超标提醒' WHERE alert_id=? AND event_key<>? AND status IN ('queued','retrying','blocked')", (now,alert['id'],event_key))
+            _cancel_pending_outbox(conn, state_cache, aid, now, '已升级为连续严重超标提醒', exclude_event_key=event_key)
         # Bounded outbox protects the monitoring database from notification growth.
-        count = conn.execute("SELECT COUNT(*) FROM buyer_outbox WHERE status IN ('queued','retrying','blocked','sending')").fetchone()[0]
-        if count >= 10000:
+        if state_cache["active_count"] >= 10000:
             break
-        conn.execute("INSERT OR IGNORE INTO buyer_outbox(event_key,alert_id,host_id,runtime,project,container_name,state,severity,subject,message,machine_id,user_id,scope,status,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (event_key, alert["id"], *(alert[k] for k in ("host_id","runtime","project","container_name")), state, alert["severity"], subject, message,
-                      t["machine_id"] if t else "", t["user_id"] if t else "", t["scope"] if t else "user", "queued" if t else "blocked", now, now, now))
+        _insert_outbox_row(
+            conn,
+            state_cache,
+            (event_key, aid, *(alert[k] for k in ("host_id", "runtime", "project", "container_name")), state, alert["severity"], subject, message,
+             t["machine_id"] if t else "", t["user_id"] if t else "", t["scope"] if t else "user", "queued" if t else "blocked", now, now, now),
+        )
 
 
 def banner_states(conn, host):
