@@ -2,6 +2,16 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 39：单核宿主机 Agent CPU 尖峰治理与历史 Python 节点自动切流 Rust 主线（v2.2.1）
+
+- **历史节点自动切流纯 Rust 主线（`scripts/install-client.sh`、`scripts/managed-client-update.sh`）**：
+  - 修复在 v1.8.43–v1.9.8 期间安装或升级的宿主机因 `client.env` 固化 `NARWHAL_AGENT_MODE=python` 而在后续 `install-client.sh update` 中一直停留于 Python `agent.py` + `narwhal-probe` 双进程模式的问题（例如 US-LAX1 / US-LAX4）；`update` 模式下若未显式设置 `NARWHAL_FORCE_PYTHON_MODE=true` 或环境变量 `NARWHAL_AGENT_MODE=python`，自动将 `NARWHAL_AGENT_MODE` 升级为 `rust` 并切换 `ExecStart` 至原生 `narwhal-agent`（彻底消除 `incus exec` 轮询风暴与 `narwhal-probe` 重复派生）。
+  - `scripts/managed-client-update.sh` 回滚清理优先支持 `narwhal-agent --release-admission`，兼容无 Python `.venv` 的纯 Rust 节点。
+- **Rust `narwhal-agent` 单核 CPU 与子进程减负优化（`rust/crates/runtime-drivers`、`rust/crates/agent-core`）**：
+  - **Incus Unix Socket 原生容器发现**：`runtime_drivers::discover_and_sample_containers` 优先通过 `/var/lib/incus/unix.socket` 直连 `GET /1.0/instances?recursion=2&all-projects=true`，并扩展 `parse_incus_list_json` 同时支持 CLI 数组与 REST `{"metadata":[...]}` 包裹结构，避免每 30 秒派生 `incus list` CLI 子进程。
+  - **空策略 `tc-guard` 与无告警 MOTD 零 `exec` 短路**：`configure_operations_bandwidth_and_cleanup` 在 `bandwidth_limits` 策略版本未变、无配置限额且本地无残留 `tc` 状态时跳过每 10 秒一次的 `ip -j address show` 与 `reconcile_live_samples`（存在活动限额时节流至 60 秒对账）；`sync_container_security_banners` 在容器无活动告警/通知且尚未写入过临时提醒时不执行 `incus exec` / `podman exec` 注入空横幅。
+  - **单遍 `/proc` 命名空间扫描与 `PasarGuard` 快照复用**：`build_container_telemetry_and_alerts` 与 `run_security_guard_cycles` 合并 `extract_live_listeners_and_sockets_with_procs` 与 `extract_protocol_configs_with_procs` 的 `scoped_host_processes` 调用，修正容器内 `NSpid` 与宿主机 `host_pid` 在 `/proc/<host_pid>/fd` 及 `/proc/<host_pid>/root` 的映射；`LivePasarBackend::snapshot` 直接复用当轮已采样的 `(pid, instance_id)` 与 `/proc/<pid>` 代次校验，消除每 30 秒重复的容器状态查询。
+
 ## Phase 38：服务端热点路径、SQLite 锁释放与历史峰值回填深度优化（v2.2.0）
 
 - **Slice 1 数据库 I/O 节流、索引补全与历史峰值在线回填（`server/admission_api.py`、`server/tcping.py`、`server/operations.py`、`server/buyer_notifications.py`、`server/investigation.py`、`server/db_maintenance.py`）**：

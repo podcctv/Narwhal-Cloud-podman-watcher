@@ -64,7 +64,9 @@ restore() {
   fi
   [[ -f "$snapshot_client_dir/agent.py" && -f "$snapshot/client.env" ]] || return 1
   systemctl stop narwhal-monitor-client.service || return 1
-  if [[ -f "$app_dir/admission_guard.py" && -x "$app_dir/.venv/bin/python" ]]; then
+  if [[ -x "$app_dir/bin/narwhal-agent" ]]; then
+    "$app_dir/bin/narwhal-agent" --release-admission || return 1
+  elif [[ -f "$app_dir/admission_guard.py" && -x "$app_dir/.venv/bin/python" ]]; then
     "$app_dir/.venv/bin/python" "$app_dir/admission_guard.py" --release-all || return 1
   fi
   shopt -s nullglob

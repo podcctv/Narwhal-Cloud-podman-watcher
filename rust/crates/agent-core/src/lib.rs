@@ -461,6 +461,8 @@ pub struct AgentState {
     sni_whitelist: Option<Vec<String>>,
     service_audit_enabled: bool,
     disallowed_protocols: Option<Vec<String>>,
+    last_bandwidth_reconcile_ts: u64,
+    last_bandwidth_revision: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,6 +606,8 @@ impl AgentState {
             sni_whitelist: None,
             service_audit_enabled: true,
             disallowed_protocols: None,
+            last_bandwidth_reconcile_ts: 0,
+            last_bandwidth_revision: -1,
         }
     }
 
@@ -1563,16 +1567,13 @@ fn build_udp_flood_blackhole_alert_json(
 }
 
 #[cfg(unix)]
-fn build_socket_inode_owner_map(
-    pid: u32,
+fn build_socket_inode_owner_map_from_procs(
+    procs: &[abuse_guard::ScopedHostProcess],
     proc_root: &Path,
 ) -> HashMap<u64, (u32, String)> {
     let mut owners = HashMap::new();
-    let Ok(procs) = abuse_guard::scoped_host_processes(pid, proc_root, 20_000) else {
-        return owners;
-    };
-    for p in procs.into_iter().take(256) {
-        let fd_dir = proc_root.join(p.pid.to_string()).join("fd");
+    for p in procs.iter().take(256) {
+        let fd_dir = proc_root.join(p.host_pid.to_string()).join("fd");
         let Ok(entries) = fs::read_dir(&fd_dir) else {
             continue;
         };
@@ -1596,8 +1597,8 @@ fn build_socket_inode_owner_map(
 }
 
 #[cfg(not(unix))]
-fn build_socket_inode_owner_map(
-    _pid: u32,
+fn build_socket_inode_owner_map_from_procs(
+    _procs: &[abuse_guard::ScopedHostProcess],
     _proc_root: &Path,
 ) -> HashMap<u64, (u32, String)> {
     HashMap::new()
@@ -1614,9 +1615,27 @@ fn map_tcp_state_hex(state_hex: &str) -> &'static str {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn extract_live_listeners_and_sockets(
     c: &ContainerSample,
     proc_root: &Path,
+) -> (
+    Vec<protocol_guard::vmess::ServiceListener>,
+    bool,
+    Vec<abuse_guard::SocketRecord>,
+) {
+    let scoped = c
+        .pid
+        .filter(|&p| p > 1)
+        .and_then(|p| abuse_guard::scoped_host_processes(p, proc_root, 20_000).ok())
+        .unwrap_or_default();
+    extract_live_listeners_and_sockets_with_procs(c, proc_root, &scoped)
+}
+
+fn extract_live_listeners_and_sockets_with_procs(
+    c: &ContainerSample,
+    proc_root: &Path,
+    scoped_procs: &[abuse_guard::ScopedHostProcess],
 ) -> (
     Vec<protocol_guard::vmess::ServiceListener>,
     bool,
@@ -1644,11 +1663,11 @@ fn extract_live_listeners_and_sockets(
     let malformed = val.get_bool("malformed").unwrap_or(true);
     let complete = available && !malformed;
 
-    let inode_owners = c
-        .pid
-        .filter(|&p| p > 1)
-        .map(|p| build_socket_inode_owner_map(p, proc_root))
-        .unwrap_or_default();
+    let inode_owners = if !scoped_procs.is_empty() {
+        build_socket_inode_owner_map_from_procs(scoped_procs, proc_root)
+    } else {
+        HashMap::new()
+    };
 
     let mut listeners = Vec::new();
     let mut sockets = Vec::new();
@@ -1706,23 +1725,23 @@ fn extract_live_listeners_and_sockets(
 }
 
 #[cfg(unix)]
-fn extract_protocol_configs(
+fn extract_protocol_configs_with_procs(
     c: &ContainerSample,
     proc_root: &Path,
+    procs: &[abuse_guard::ScopedHostProcess],
 ) -> (
     Vec<protocol_guard::vmess::ConfiguredProtocol>,
     Vec<protocol_guard::vmess::ProcessScanState>,
     &'static str,
 ) {
-    let Some(container_pid) = c.pid.filter(|&p| p > 1) else {
+    if c.pid.filter(|&p| p > 1).is_none() || procs.is_empty() {
         return (Vec::new(), Vec::new(), "partial");
-    };
-    let Ok(procs) = abuse_guard::scoped_host_processes(container_pid, proc_root, 20_000) else {
-        return (Vec::new(), Vec::new(), "partial");
-    };
+    }
+    let mut host_by_inner: HashMap<u32, u32> = HashMap::new();
     let mut ps_lines = String::new();
     for p in procs.iter().take(256) {
-        let cmdline_raw = fs::read(proc_root.join(p.pid.to_string()).join("cmdline"))
+        host_by_inner.insert(p.pid, p.host_pid);
+        let cmdline_raw = fs::read(proc_root.join(p.host_pid.to_string()).join("cmdline"))
             .unwrap_or_default();
         let cmdline = cmdline_raw
             .split(|&b| b == 0)
@@ -1749,11 +1768,12 @@ fn extract_protocol_configs(
 
     for row in rows {
         let proc_pid = row.get_i64("pid").unwrap_or(0).max(0) as u32;
+        let host_pid = host_by_inner.get(&proc_pid).copied().unwrap_or(proc_pid);
         let process = row.get_str("process").unwrap_or("").to_ascii_lowercase();
         let unparsed = row.get_bool("unparsed").unwrap_or(false);
         let mut config_files = Vec::new();
         let mut proc_complete = !unparsed && proc_pid > 1;
-        let proc_root_dir = proc_root.join(proc_pid.to_string()).join("root");
+        let proc_root_dir = proc_root.join(host_pid.to_string()).join("root");
 
         if let Some(paths) = row.get("paths").and_then(|v| v.as_arr()) {
             for path_val in paths.iter().take(8) {
@@ -1822,7 +1842,7 @@ fn extract_protocol_configs(
             pid: proc_pid,
             process,
             state: if proc_complete { "complete" } else { "partial" }.to_string(),
-            start_ticks: protocol_guard::vmess::pid_epoch_from(proc_root, proc_pid),
+            start_ticks: protocol_guard::vmess::pid_epoch_from(proc_root, host_pid),
             config_files,
             ..Default::default()
         });
@@ -1836,9 +1856,10 @@ fn extract_protocol_configs(
 }
 
 #[cfg(not(unix))]
-fn extract_protocol_configs(
+fn extract_protocol_configs_with_procs(
     _c: &ContainerSample,
     _proc_root: &Path,
+    _procs: &[abuse_guard::ScopedHostProcess],
 ) -> (
     Vec<protocol_guard::vmess::ConfiguredProtocol>,
     Vec<protocol_guard::vmess::ProcessScanState>,
@@ -2116,11 +2137,16 @@ impl AgentState {
             }
             let abuse_json = abuse_res.to_json();
 
-            // 2. vmess_guard & trojan_guard
+            // 2. vmess_guard & trojan_guard (single scoped_host_processes pass per container)
+            let scoped_procs = c
+                .pid
+                .filter(|&p| p > 1)
+                .and_then(|p| abuse_guard::scoped_host_processes(p, &self.proc_root, 20_000).ok())
+                .unwrap_or_default();
             let (listeners, listener_inventory_complete, _) =
-                extract_live_listeners_and_sockets(c, &self.proc_root);
+                extract_live_listeners_and_sockets_with_procs(c, &self.proc_root, &scoped_procs);
             let (configured_protocols, process_scan_states, scan_state) =
-                extract_protocol_configs(c, &self.proc_root);
+                extract_protocol_configs_with_procs(c, &self.proc_root, &scoped_procs);
             let ns_epoch = c
                 .pid
                 .filter(|&p| p > 1)
@@ -2603,11 +2629,18 @@ impl AgentState {
                             } else {
                                 t.id.clone()
                             };
+                            let scoped = abuse_guard::scoped_host_processes(pid, &proc_root, 20_000)?;
                             let sockets = sample_by_key
                                 .get(&(t.runtime.clone(), t.project.clone(), t.name.clone()))
-                                .map(|s| extract_live_listeners_and_sockets(s, &proc_root).2)
+                                .map(|s| {
+                                    extract_live_listeners_and_sockets_with_procs(
+                                        s,
+                                        &proc_root,
+                                        &scoped,
+                                    )
+                                    .2
+                                })
                                 .unwrap_or_default();
-                            let scoped = abuse_guard::scoped_host_processes(pid, &proc_root, 20_000)?;
                             let procs = abuse_guard::collect_host(
                                 &scoped,
                                 &sockets,
@@ -2710,6 +2743,19 @@ impl AgentState {
                         name: c.name.clone(),
                     })
                     .collect();
+                let sample_by_key: HashMap<(String, String, String), ContainerSample> = containers
+                    .iter()
+                    .map(|c| {
+                        (
+                            (
+                                c.runtime.to_ascii_lowercase(),
+                                c.project.clone(),
+                                c.name.clone(),
+                            ),
+                            c.clone(),
+                        )
+                    })
+                    .collect();
                 let runman_instance_ids: HashMap<String, String> = containers
                     .iter()
                     .filter(|c| c.runtime.eq_ignore_ascii_case("runman") && !c.instance_id.is_empty())
@@ -2723,6 +2769,7 @@ impl AgentState {
                     podman_bin: tools.podman_bin.clone(),
                     runtime_bins,
                     runman_instance_ids,
+                    sample_by_key,
                 };
                 self.pasarguard
                     .scan_containers(&pg_targets, &mut backend, timestamp as i64);
@@ -2801,16 +2848,19 @@ impl AgentState {
                 }
             }
             let selected = app_guard::security_banner::select_motd_entries(&entries);
+            let delivery_key = (rt_lower.clone(), c.project.clone(), c.name.clone());
+            if selected.is_empty() && !self.motd_deliveries.contains_key(&delivery_key) {
+                continue;
+            }
             let banner_text = app_guard::security_banner::render_motd_banner_entries(
                 &selected,
                 &opts,
             );
             let banner_hash = fnv1a_hex(&banner_text, &notice_ids);
-            let delivery_key = (rt_lower.clone(), c.project.clone(), c.name.clone());
             if let Some(prev) = self.motd_deliveries.get(&delivery_key) {
                 if prev.banner_hash == banner_hash
                     && prev.status == "written"
-                    && timestamp.saturating_sub(prev.updated_at) < 300
+                    && (selected.is_empty() || timestamp.saturating_sub(prev.updated_at) < 300)
                 {
                     continue;
                 }
@@ -2887,6 +2937,7 @@ struct LivePasarBackend<'a> {
     podman_bin: Option<String>,
     runtime_bins: std::collections::BTreeMap<String, String>,
     runman_instance_ids: HashMap<String, String>,
+    sample_by_key: HashMap<(String, String, String), ContainerSample>,
 }
 
 #[cfg(unix)]
@@ -2895,6 +2946,31 @@ impl<'a> protocol_guard::pasarguard::PasarGuardBackend for LivePasarBackend<'a> 
         &mut self,
         container: &protocol_guard::pasarguard::PasarContainerTarget,
     ) -> Result<protocol_guard::pasarguard::PasarContainerSnapshot, String> {
+        let key = (
+            container.runtime.to_ascii_lowercase(),
+            container.project.clone(),
+            container.name.clone(),
+        );
+        if let Some(sample) = self.sample_by_key.get(&key) {
+            if let Some(pid) = sample.pid.filter(|&p| p > 1) {
+                let inst_id = if sample.runtime.eq_ignore_ascii_case("runman") {
+                    sample.instance_id.clone()
+                } else if !sample.stable_id.is_empty() {
+                    sample.stable_id.clone()
+                } else {
+                    sample.id.clone()
+                };
+                if !inst_id.is_empty() {
+                    if let Ok(epoch) = admission_guard::incarnation(pid) {
+                        return Ok(protocol_guard::pasarguard::PasarContainerSnapshot {
+                            instance_id: inst_id,
+                            epoch,
+                            pid,
+                        });
+                    }
+                }
+            }
+        }
         let desc = admission_guard::ContainerDescriptor {
             runtime: container.runtime.clone(),
             project: container.project.clone(),
@@ -3807,21 +3883,51 @@ impl AgentState {
             }
         }
         if let Some(bw_val) = ops.get("bandwidth_limits") {
-            if bw_val.as_object().is_some() {
+            if let Some(bw_obj) = bw_val.as_object() {
                 let now = current_unix_ts();
-                let bridge_inventory =
-                    collect_tc_bridge_inventory(now, &self.last_containers);
-                let _ = tc_guard::reconcile_live_samples(
-                    &bw_val.to_json(),
-                    &config.host_id,
-                    &config.node_id,
-                    &self.last_containers,
-                    &self.bandwidth_state_path,
-                    &self.last_traffic_samples,
-                    now,
-                    self.last_sample_interval_secs.max(1),
-                    &bridge_inventory,
-                );
+                let rev = bw_obj
+                    .get("revision")
+                    .and_then(actions::JsonValue::as_i64)
+                    .unwrap_or(0);
+                let limits_empty = bw_obj
+                    .get("limits")
+                    .and_then(actions::JsonValue::as_array)
+                    .is_none_or(|a| a.is_empty());
+                let auto_enabled = bw_obj
+                    .get("auto_throttle")
+                    .and_then(actions::JsonValue::as_object)
+                    .and_then(|o| o.get("enabled"))
+                    .and_then(actions::JsonValue::as_bool)
+                    .unwrap_or(false);
+                let rev_changed = rev != self.last_bandwidth_revision;
+                let should_reconcile = if rev_changed {
+                    true
+                } else if limits_empty && !auto_enabled {
+                    let persisted = tc_guard::read_state(&self.bandwidth_state_path);
+                    !persisted.entries.is_empty()
+                } else {
+                    now.saturating_sub(self.last_bandwidth_reconcile_ts) >= 60
+                };
+                if should_reconcile {
+                    let bridge_inventory = if limits_empty && !auto_enabled {
+                        Vec::new()
+                    } else {
+                        collect_tc_bridge_inventory(now, &self.last_containers)
+                    };
+                    let _ = tc_guard::reconcile_live_samples(
+                        &bw_val.to_json(),
+                        &config.host_id,
+                        &config.node_id,
+                        &self.last_containers,
+                        &self.bandwidth_state_path,
+                        &self.last_traffic_samples,
+                        now,
+                        self.last_sample_interval_secs.max(1),
+                        &bridge_inventory,
+                    );
+                    self.last_bandwidth_revision = rev;
+                    self.last_bandwidth_reconcile_ts = now;
+                }
             }
         }
     }

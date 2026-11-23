@@ -14,6 +14,7 @@ use std::time::Duration;
 use std::os::unix::net::UnixStream;
 
 pub const RUNMAN_SOCK_PATH: &str = "/run/narwhal-agent/connlimit.sock";
+pub const INCUS_SOCK_PATH: &str = "/var/lib/incus/unix.socket";
 pub const MAX_RUNMAN_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 128;
 #[cfg(unix)]
@@ -698,14 +699,19 @@ pub fn parse_oci_ps_json(runtime: &str, runtime_bin: &str, raw: &str) -> Vec<Con
     items
 }
 
-/// Parse `incus list --format json` output.
+/// Parse `incus list --format json` output or Incus REST API `{"metadata": [...]}` envelope.
 pub fn parse_incus_list_json(runtime_bin: &str, raw: &str) -> Vec<ContainerSample> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Vec::new();
     }
-    let Ok(JsonVal::Arr(arr)) = JsonVal::parse(trimmed) else {
-        return Vec::new();
+    let arr = match JsonVal::parse(trimmed) {
+        Ok(JsonVal::Arr(arr)) => arr,
+        Ok(JsonVal::Obj(map)) => match map.get("metadata") {
+            Some(JsonVal::Arr(arr)) => arr.clone(),
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
     };
 
     let mut items = Vec::new();
@@ -972,18 +978,35 @@ pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample
     }
 
     if enabled.contains("incus") {
-        if let Some(bin) = find_binary_in_path("incus") {
-            if let Some(out) = run_command_stdout(
-                &bin,
-                &[
-                    "list",
-                    "--all-projects",
-                    "type=container",
-                    "status=running",
-                    "--format=json",
-                ],
+        let bin = find_binary_in_path("incus").unwrap_or_else(|| "incus".to_string());
+        let mut incus_loaded = false;
+        if Path::new(INCUS_SOCK_PATH).exists() {
+            if let Ok((200, body)) = runman_request(
+                INCUS_SOCK_PATH,
+                "GET",
+                "/1.0/instances?recursion=2&all-projects=true",
+                None,
             ) {
-                all.extend(parse_incus_list_json(&bin, &out));
+                if let Ok(text) = String::from_utf8(body) {
+                    all.extend(parse_incus_list_json(&bin, &text));
+                    incus_loaded = true;
+                }
+            }
+        }
+        if !incus_loaded {
+            if let Some(real_bin) = find_binary_in_path("incus") {
+                if let Some(out) = run_command_stdout(
+                    &real_bin,
+                    &[
+                        "list",
+                        "--all-projects",
+                        "type=container",
+                        "status=running",
+                        "--format=json",
+                    ],
+                ) {
+                    all.extend(parse_incus_list_json(&real_bin, &out));
+                }
             }
         }
     }
@@ -1116,6 +1139,12 @@ mod tests {
         assert_eq!(items[0].image, "Ubuntu 24.04");
         assert_eq!(items[0].pid, Some(9001));
         assert_eq!(items[0].network_addresses, vec!["10.0.0.5".to_string()]);
+
+        let rest_envelope = format!(
+            "{{\"type\":\"sync\",\"status\":\"Success\",\"status_code\":200,\"metadata\":{raw}}}"
+        );
+        let rest_items = parse_incus_list_json("/usr/bin/incus", &rest_envelope);
+        assert_eq!(rest_items, items);
     }
 
     #[test]

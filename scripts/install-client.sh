@@ -486,6 +486,11 @@ fi
 TARGET_ARCH="$(normalize_arch)"
 agent_mode="${NARWHAL_AGENT_MODE:-$(load_kv_from_file "$CLIENT_ENV_FILE" NARWHAL_AGENT_MODE || true)}"
 agent_mode="${agent_mode:-rust}"
+force_python_mode="${NARWHAL_FORCE_PYTHON_MODE:-$(load_kv_from_file "$CLIENT_ENV_FILE" NARWHAL_FORCE_PYTHON_MODE || true)}"
+if [[ "$MODE" == "update" && -z "${NARWHAL_AGENT_MODE:-}" && "$agent_mode" == "python" ]] && ! is_truthy "$force_python_mode"; then
+  echo "[INFO] Migrating legacy NARWHAL_AGENT_MODE=python to mainline rust agent mode."
+  agent_mode="rust"
+fi
 if [[ "$agent_mode" != "rust" && "$agent_mode" != "python" ]]; then
   echo "[WARN] Unsupported NARWHAL_AGENT_MODE=$agent_mode; falling back to python." >&2
   agent_mode="python"

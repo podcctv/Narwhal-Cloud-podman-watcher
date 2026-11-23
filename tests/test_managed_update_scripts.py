@@ -266,6 +266,8 @@ class ProbeDistributionAndChecksumTests(unittest.TestCase):
         self.assertIn('fetch_narwhal_agent "$TARGET_ARCH" "$CLIENT_APP_DIR/bin/narwhal-agent"', installer)
         self.assertIn('agent_mode="${NARWHAL_AGENT_MODE:-$(load_kv_from_file "$CLIENT_ENV_FILE" NARWHAL_AGENT_MODE || true)}"', installer)
         self.assertIn('agent_mode="${agent_mode:-rust}"', installer)
+        self.assertIn('force_python_mode="${NARWHAL_FORCE_PYTHON_MODE:-$(load_kv_from_file "$CLIENT_ENV_FILE" NARWHAL_FORCE_PYTHON_MODE || true)}"', installer)
+        self.assertIn('if [[ "$MODE" == "update" && -z "${NARWHAL_AGENT_MODE:-}" && "$agent_mode" == "python" ]] && ! is_truthy "$force_python_mode"; then', installer)
         self.assertIn('if [[ "$agent_mode" != "rust" && "$agent_mode" != "python" ]]; then', installer)
         self.assertIn("NARWHAL_AGENT_MODE=$agent_mode", installer)
         self.assertIn('if [[ "$agent_mode" == "rust" && -x "$CLIENT_APP_DIR/bin/narwhal-agent" ]]', installer)
@@ -274,7 +276,8 @@ class ProbeDistributionAndChecksumTests(unittest.TestCase):
         self.assertIn('agent_exec_start="$CLIENT_VENV_DIR/bin/python $CLIENT_APP_DIR/agent.py"', installer)
 
         updater = (ROOT / "scripts" / "managed-client-update.sh").read_text(encoding="utf-8")
-        self.assertIn('if [[ -f "$app_dir/admission_guard.py" && -x "$app_dir/.venv/bin/python" ]]; then', updater)
+        self.assertIn('"$app_dir/bin/narwhal-agent" --release-admission', updater)
+        self.assertIn('elif [[ -f "$app_dir/admission_guard.py" && -x "$app_dir/.venv/bin/python" ]]; then', updater)
         self.assertIn('if [[ -x "$app_dir/.venv/bin/pip" ]]; then', updater)
         self.assertIn('python3 -m py_compile "${stage_py_files[@]}"', updater)
 
