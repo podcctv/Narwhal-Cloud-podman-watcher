@@ -6,7 +6,7 @@ import {
   SecurityStatusItem,
   ContainerIdentity,
 } from '../../api/types';
-import { api, request } from '../../api/client';
+import { api, clearEtagCache, request } from '../../api/client';
 import { AppHeader } from '../../components/layout/AppHeader';
 import { ConsoleSidebar } from '../layout/ConsoleShell';
 import { HeroKpiBar, QuickOpsTarget, WorkspaceFocus } from './HeroKpiBar';
@@ -76,6 +76,7 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
     setIsLoggingOut(true);
     try {
       await request('/api/v1/auth/logout', { method: 'POST' });
+      clearEtagCache();
       window.location.replace('/login');
     } catch {
       addToast('error', '退出登录未成功，请重试');
@@ -95,9 +96,17 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
 
   // Polling controls
   const POLL_INTERVAL = 10;
+  const SSE_FALLBACK_POLL_INTERVAL = 30;
   const HIDDEN_POLL_INTERVAL = 60;
+  const SSE_DEBOUNCE_MS = 1500;
   const [isDocumentHidden, setIsDocumentHidden] = useState(() => document.hidden);
-  const effectivePollInterval = isDocumentHidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL;
+  const [sseConnected, setSseConnected] = useState(false);
+  const sseConnectedRef = React.useRef(false);
+  const effectivePollInterval = isDocumentHidden
+    ? HIDDEN_POLL_INTERVAL
+    : sseConnected
+      ? SSE_FALLBACK_POLL_INTERVAL
+      : POLL_INTERVAL;
   const [countdown, setCountdown] = useState(POLL_INTERVAL);
   const [isPaused, setIsPaused] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -172,7 +181,13 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
       setIsRefreshing(false);
       // Always schedule another attempt, including after an error. Read the
       // live visibility state so a tab switch during the request is respected.
-      setCountdown(document.hidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL);
+      setCountdown(
+        document.hidden
+          ? HIDDEN_POLL_INTERVAL
+          : sseConnectedRef.current
+            ? SSE_FALLBACK_POLL_INTERVAL
+            : POLL_INTERVAL
+      );
     }
   }, [addToast]);
 
@@ -271,11 +286,76 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
     const onVisibilityChange = () => {
       const hidden = document.hidden;
       setIsDocumentHidden(hidden);
-      setCountdown(hidden ? HIDDEN_POLL_INTERVAL : POLL_INTERVAL);
+      setCountdown(
+        hidden
+          ? HIDDEN_POLL_INTERVAL
+          : sseConnectedRef.current
+            ? SSE_FALLBACK_POLL_INTERVAL
+            : POLL_INTERVAL
+      );
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, []);
+
+  // Live SSE updates when dashboard tab is active, visible, and unpaused
+  useEffect(() => {
+    if (isPaused || isDocumentHidden || activeTab !== 'dashboard' || typeof EventSource === 'undefined') {
+      sseConnectedRef.current = false;
+      setSseConnected(false);
+      if (!isDocumentHidden) {
+        setCountdown((prev) => Math.min(prev, POLL_INTERVAL));
+      }
+      return;
+    }
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const source = new EventSource('/api/v1/events/stream', { withCredentials: true });
+
+    const onReady = () => {
+      sseConnectedRef.current = true;
+      setSseConnected(true);
+      if (!document.hidden) {
+        setCountdown((prev) => (prev > 0 ? SSE_FALLBACK_POLL_INTERVAL : prev));
+      }
+    };
+
+    const onUpdate = () => {
+      if (debounceTimer !== null) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        if (!isFetchingRef.current) {
+          void fetchAllData();
+        }
+      }, SSE_DEBOUNCE_MS);
+    };
+
+    const onError = () => {
+      sseConnectedRef.current = false;
+      setSseConnected(false);
+      if (!document.hidden) {
+        setCountdown((prev) => Math.min(prev, POLL_INTERVAL));
+      }
+    };
+
+    source.addEventListener('ready', onReady);
+    source.addEventListener('update', onUpdate);
+    source.addEventListener('error', onError);
+
+    return () => {
+      if (debounceTimer !== null) {
+        clearTimeout(debounceTimer);
+      }
+      source.removeEventListener('ready', onReady);
+      source.removeEventListener('update', onUpdate);
+      source.removeEventListener('error', onError);
+      source.close();
+      sseConnectedRef.current = false;
+      setSseConnected(false);
+    };
+  }, [isPaused, isDocumentHidden, activeTab, fetchAllData]);
 
   // Initial load
   useEffect(() => {

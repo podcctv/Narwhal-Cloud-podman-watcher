@@ -1,6 +1,7 @@
 """Database retention, bounded cleanup, and offline host pruning."""
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import time
@@ -12,6 +13,166 @@ try:
 except ImportError:
     import gfw_monitor  # type: ignore[no-redef]
     import tcping  # type: ignore[no-redef]
+
+
+_REPORT_COMPACT_KEYS = (
+    "_agent_version",
+    "id",
+    "stable_id",
+    "instance_id",
+    "name",
+    "runtime",
+    "project",
+    "mem_limit_bytes",
+    "cpu_effective_cpus",
+    "tcp_rx_bps",
+    "tcp_tx_bps",
+    "udp_rx_bps",
+    "udp_tx_bps",
+    "monitor_mode",
+)
+_REPORT_DISK_SCALAR_KEYS = (
+    "root_device",
+    "root_total_bytes",
+    "root_used_percent",
+    "root_avail_bytes",
+    "data_total_bytes",
+    "data_avail_bytes",
+    "data_requested_path",
+    "data_mountpoint",
+    "file",
+    "size_bytes",
+    "used_percent",
+)
+_REPORT_SECURITY_KEYS = (
+    "inbound_unique_ips",
+    "outbound_unique_ips",
+    "udp_throttle",
+    "hy2_protocol",
+)
+_HOST_SECURITY_COMPACT_KEYS = (
+    "enabled",
+    "interval_seconds",
+    "total_rx_bps",
+    "total_tx_bps",
+    "total_rx_pps",
+    "total_tx_pps",
+    "syn_recv_count",
+    "active_alerts_in_sample",
+)
+
+
+def _compact_aged_payloads(
+    conn: Any,
+    now: int,
+    *,
+    aged_cutoff: int,
+    batch_size: int,
+    deadline: float,
+) -> int:
+    """Compact large non-latest JSON payloads older than aged_cutoff within budget."""
+    if batch_size <= 0 or time.monotonic() >= deadline:
+        return 0
+    compacted = 0
+
+    reports_limit = min(int(batch_size), 400)
+    report_rows = conn.execute(
+        "SELECT id, payload_json FROM reports "
+        "WHERE ts < ? AND length(payload_json) > 2048 "
+        "AND payload_json NOT LIKE '%\"_compacted\":true%' "
+        "AND EXISTS (SELECT 1 FROM reports newer WHERE newer.host_id=reports.host_id "
+        "AND newer.runtime=reports.runtime AND newer.project=reports.project "
+        "AND newer.container_name=reports.container_name AND newer.id > reports.id) "
+        "LIMIT ?",
+        (aged_cutoff, reports_limit),
+    ).fetchall()
+    reports_dirty = False
+    for row in report_rows:
+        if time.monotonic() >= deadline:
+            break
+        try:
+            payload = json.loads(row[1] or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        compact: Dict[str, Any] = {"_compacted": True}
+        for key in _REPORT_COMPACT_KEYS:
+            if key in payload:
+                compact[key] = payload[key]
+        raw_disk = payload.get("disk")
+        if isinstance(raw_disk, dict):
+            compact_disk = {
+                key: raw_disk[key]
+                for key in _REPORT_DISK_SCALAR_KEYS
+                if key in raw_disk and (raw_disk[key] is None or isinstance(raw_disk[key], (str, int, float, bool)))
+            }
+            if compact_disk:
+                compact["disk"] = compact_disk
+        raw_sec = payload.get("security")
+        if isinstance(raw_sec, dict):
+            compact_sec = {
+                key: raw_sec[key]
+                for key in _REPORT_SECURITY_KEYS
+                if key in raw_sec
+            }
+            if compact_sec:
+                compact["security"] = compact_sec
+        conn.execute(
+            "UPDATE reports SET payload_json=? WHERE id=?",
+            (json.dumps(compact, ensure_ascii=False, separators=(",", ":")), row[0]),
+        )
+        compacted += 1
+        reports_dirty = True
+    if reports_dirty:
+        conn.commit()
+
+    if time.monotonic() >= deadline:
+        return compacted
+
+    hs_limit = min(int(batch_size), 200)
+    hs_rows = conn.execute(
+        "SELECT id, payload_json FROM host_security "
+        "WHERE ts < ? AND length(payload_json) > 4096 "
+        "AND payload_json NOT LIKE '%\"_compacted\":true%' "
+        "AND EXISTS (SELECT 1 FROM host_security newer WHERE newer.host_id=host_security.host_id "
+        "AND newer.id > host_security.id) "
+        "LIMIT ?",
+        (aged_cutoff, hs_limit),
+    ).fetchall()
+    hs_dirty = False
+    for row in hs_rows:
+        if time.monotonic() >= deadline:
+            break
+        try:
+            payload = json.loads(row[1] or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        compact_hs: Dict[str, Any] = {"_compacted": True}
+        for key in _HOST_SECURITY_COMPACT_KEYS:
+            if key in payload:
+                compact_hs[key] = payload[key]
+        raw_access_log = payload.get("access_log")
+        if isinstance(raw_access_log, dict):
+            compact_access_log = {
+                key: value
+                for key, value in raw_access_log.items()
+                if value is None or isinstance(value, (str, int, float, bool))
+            }
+            if compact_access_log:
+                compact_hs["access_log"] = compact_access_log
+        conn.execute(
+            "UPDATE host_security SET payload_json=? WHERE id=?",
+            (json.dumps(compact_hs, ensure_ascii=False, separators=(",", ":")), row[0]),
+        )
+        compacted += 1
+        hs_dirty = True
+    if hs_dirty:
+        conn.commit()
+
+    return compacted
 
 
 def run_cleanup(
@@ -133,12 +294,29 @@ def run_cleanup(
             if loop_idx == 19 or time.monotonic() >= deadline:
                 backlog = True
                 break
+        compacted_rows = 0
+        if time.monotonic() < deadline:
+            aged_cutoff = now - (24 * 3600 if disk_pressure else 48 * 3600)
+            compacted_rows = _compact_aged_payloads(
+                conn,
+                now,
+                aged_cutoff=aged_cutoff,
+                batch_size=report_cleanup_batch_size,
+                deadline=deadline,
+            )
         # Incremental mode is enabled for new DBs and by the explicit recovery
         # command for old DBs. Never run a full VACUUM in this online loop.
         if int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]) == 2:
             conn.execute("PRAGMA incremental_vacuum(2048)").fetchall()
         conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
-        cleanup_status.update(last_success=now, removed_rows=removed_total, backlog=backlog, disk_pressure=disk_pressure, error=None)
+        cleanup_status.update(
+            last_success=now,
+            removed_rows=removed_total,
+            compacted_rows=compacted_rows,
+            backlog=backlog,
+            disk_pressure=disk_pressure,
+            error=None,
+        )
         return removed_reports, backlog
     except Exception as exc:
         if conn is not None:

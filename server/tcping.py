@@ -568,6 +568,32 @@ def admit(conn, source_id, scope, now):
     return {"job": get_job(conn, job_id), "reused": ""}
 
 
+def has_pending_work(conn, host_id: str, node_id: str, now: int) -> tuple[bool, list[str]]:
+    """Read-only check for whether tcping polling needs a write transaction."""
+    cancelled = [
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM tcp_jobs WHERE host_id=? AND node_id=? AND status='cancelled' AND created_at>? LIMIT 30",
+            (host_id, node_id, now - 3600),
+        )
+    ]
+    needs_write = bool(
+        conn.execute(
+            "SELECT 1 FROM tcp_jobs WHERE status IN ('queued','running') AND deadline_at<=? LIMIT 1",
+            (now,),
+        ).fetchone()
+    )
+    if not needs_write and enabled(conn):
+        needs_write = bool(
+            conn.execute(
+                "SELECT 1 FROM tcp_jobs j JOIN tcp_sources s ON s.id=j.source_id "
+                "WHERE j.host_id=? AND j.node_id=? AND s.enabled=1 AND j.status IN ('queued','running') AND j.started_at=0 LIMIT 1",
+                (host_id, node_id),
+            ).fetchone()
+        )
+    return needs_write, cancelled
+
+
 def lease_jobs(conn, host_id, node_id, now):
     """Called inside the existing signed poll transaction; no security action semantics."""
     expire_active(conn, now)

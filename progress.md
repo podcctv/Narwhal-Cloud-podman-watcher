@@ -2,6 +2,17 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 37：零写入轮询、响应压缩/ETag 缓存、核心服务模块化与 SSE 自观测（v2.1.0）
+
+- **P0 轮询零写入快路径、历史压缩与网络传输优化（`server/gfw_monitor.py`、`server/tcping.py`、`server/db_maintenance.py`、`server/admission_api.py`、`server/app.py`）**：
+  - 将 `GFW_HISTORY_RETENTION_DAYS` 默认值由 `14` 天调整为 `7` 天（`server/gfw_monitor.py`），并在 `server/db_maintenance.py` 新增 `_compact_aged_payloads` 对过期非最新历史 `reports` / `host_security` 大 JSON 载荷执行有界字段裁剪。
+  - `POST /api/v1/actions/poll`（通过 `gfw_monitor.has_pending_work`、`tcping.has_pending_work` 与心跳写入节流）与 `POST /api/v1/admission/status` 在无变更空轮询时走零写入只读快路径，减少 SQLite `BEGIN IMMEDIATE` 写锁竞争。
+  - 挂载 `SelectiveGZipMiddleware`（排除 Agent 路由与 `/api/v1/events/stream`），并为 `/api/v1/latest` 与 `/api/v1/security/status` 增加 `ETag` / `304 Not Modified` 条件缓存支持。
+- **P1 服务模块化拆分、SSE 实时推送与自观测面板（`server/telegram_service.py`、`server/firewall_service.py`、`server/alert_service.py`、`server/live_events.py`、`server/server_metrics.py`、`server/operations_api.py`、`server/Dockerfile`、`frontend/src/`）**：
+  - 从 `server/app.py` 拆出 `telegram_service.py`、`firewall_service.py` 与 `alert_service.py`，`server/app.py` 精简至 3,797 行并同步更新 `server/Dockerfile` 镜像打包清单。
+  - 新增 `server/live_events.py`（`GET /api/v1/events/stream` SSE 实时推送）与 `server/server_metrics.py`（`GET /api/v1/ops/server-metrics` 路由耗时分布、慢请求追踪与只读/304/SSE 指标统计）。
+  - 前端 `DashboardV2.tsx` 接入 `EventSource` SSE 实时推送订阅与断线轮询回退，`OperationsView.tsx` 与 `frontend/src/api/client.ts` 新增服务端性能自观测面板并同步构建 `server/static/`，补充 `tests/test_server_perf_and_modularization.py` 与 `tests/test_admission_ui.cjs` 测试覆盖。
+
 ## Phase 36：生产库离线压缩与 `server/legacy_pages.py` 路由抽离（v2.0.5）
 
 - **生产数据库离线压缩与开启增量回收（`15.204.57.108:8721`）**：

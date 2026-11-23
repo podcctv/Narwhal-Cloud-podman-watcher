@@ -33,6 +33,88 @@ export class ApiError extends Error {
   }
 }
 
+export interface ServerMetricsRoute {
+  method: string;
+  path: string;
+  count: number;
+  error_count: number;
+  status_304_count: number;
+  slow_count: number;
+  p50_ms: number;
+  p95_ms: number;
+  avg_ms: number;
+  max_ms: number;
+}
+
+export interface ServerMetricsSlowItem {
+  ts: number;
+  method: string;
+  path: string;
+  status_code: number;
+  duration_ms: number;
+}
+
+export interface ServerMetricsSnapshot {
+  uptime_seconds: number;
+  started_at: number;
+  slow_threshold_ms: number;
+  total_requests: number;
+  slow_request_count: number;
+  counters: {
+    idle_poll_readonly_hits?: number;
+    idle_poll_write_hits?: number;
+    admission_readonly_hits?: number;
+    admission_write_hits?: number;
+    etag_304_hits?: number;
+    sse_events_published?: number;
+    [key: string]: number | undefined;
+  };
+  gauges: {
+    sse_active_connections?: number;
+    [key: string]: number | undefined;
+  };
+  routes: ServerMetricsRoute[];
+  recent_slow_requests: ServerMetricsSlowItem[];
+}
+
+const ETAG_CACHE_CAP = 16;
+const etagCache = new Map<string, { etag: string; data: unknown }>();
+
+export function clearEtagCache(): void {
+  etagCache.clear();
+}
+
+function setEtagCacheEntry(key: string, etag: string, data: unknown): void {
+  if (etagCache.has(key)) {
+    etagCache.delete(key);
+  } else if (etagCache.size >= ETAG_CACHE_CAP) {
+    const oldestKey = etagCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      etagCache.delete(oldestKey);
+    }
+  }
+  etagCache.set(key, { etag, data });
+}
+
+async function handleErrorResponse(res: Response): Promise<never> {
+  if (res.status === 401) {
+    clearEtagCache();
+    if (window.location.pathname !== '/login') {
+      window.location.replace('/login?next=' + encodeURIComponent(window.location.pathname + window.location.search));
+    }
+    throw new ApiError('Dashboard 认证失败或已过期 (HTTP 401)', 401);
+  }
+
+  let detail = `HTTP ${res.status}`;
+  try {
+    const json = await res.json();
+    if (json.detail) detail = json.detail;
+  } catch {
+    // ignore
+  }
+  throw new ApiError(detail, res.status);
+}
+
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     ...options,
@@ -43,25 +125,47 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
     },
   });
 
-  if (res.status === 401) {
-    if (window.location.pathname !== '/login') {
-      window.location.replace('/login?next=' + encodeURIComponent(window.location.pathname + window.location.search));
-    }
-    throw new ApiError('Dashboard 认证失败或已过期 (HTTP 401)', 401);
-  }
-
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const json = await res.json();
-      if (json.detail) detail = json.detail;
-    } catch {
-      // ignore
-    }
-    throw new ApiError(detail, res.status);
+    await handleErrorResponse(res);
   }
 
   return res.json() as Promise<T>;
+}
+
+export async function requestWithEtag<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const method = (options.method || 'GET').toUpperCase();
+  const cacheKey = `${method}:${path}`;
+  const cached = method === 'GET' ? etagCache.get(cacheKey) : undefined;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> | undefined),
+  };
+  if (cached) {
+    headers['If-None-Match'] = cached.etag;
+  }
+
+  const res = await fetch(path, {
+    ...options,
+    credentials: 'include',
+    headers,
+  });
+
+  if (res.status === 304 && cached) {
+    etagCache.delete(cacheKey);
+    etagCache.set(cacheKey, cached);
+    return cached.data as T;
+  }
+
+  if (!res.ok) {
+    await handleErrorResponse(res);
+  }
+
+  const json = (await res.json()) as T;
+  const etag = res.headers.get('etag');
+  if (method === 'GET' && res.status === 200 && etag) {
+    setEtagCacheEntry(cacheKey, etag, json);
+  }
+  return json;
 }
 
 export const api = {
@@ -98,7 +202,7 @@ export const api = {
   deleteNotificationBot: (id: number) => request<{ ok: boolean }>(`/api/v1/notifications/bots/${id}`, { method: 'DELETE' }),
   testNotificationBot: (id: number) => request<{ ok: boolean; callback_ready: boolean }>(`/api/v1/notifications/bots/${id}/test`, { method: 'POST' }),
   getLatest: (includeStale = true) =>
-    request<LatestResponse>(`/api/v1/latest?include_stale=${includeStale}`),
+    requestWithEtag<LatestResponse>(`/api/v1/latest?include_stale=${includeStale}`),
 
   saveContainerUserNote: (identity: ContainerIdentity, data: { user_email: string; user_note: string }) =>
     request<{ ok: boolean; user_email: string; user_note: string }>('/api/v1/containers/user-note', {
@@ -120,7 +224,7 @@ export const api = {
     request<{ items?: SecurityAlert[]; alerts?: SecurityAlert[]; active_count?: number }>('/api/v1/security/alerts'),
 
   getSecurityStatus: async () => {
-    const raw = await request<{ items: any[] }>('/api/v1/security/status');
+    const raw = await requestWithEtag<{ items: any[] }>('/api/v1/security/status');
     const items: SecurityStatusItem[] = (raw.items || []).map((item) => {
       const access = item.access_log || {};
 
@@ -404,6 +508,7 @@ export const api = {
     disallowed_protocols?: string[];
     auto_block_disallowed_service?: boolean;
   }) => request<{ ok: boolean; policy: any }>('/api/v1/security/policy', { method: 'POST', body: JSON.stringify(payload) }),
+  getServerMetrics: () => request<ServerMetricsSnapshot>('/api/v1/ops/server-metrics'),
 };
 
 // Utilities for visual formatting

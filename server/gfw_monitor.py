@@ -21,11 +21,17 @@ STALE_SECONDS = 900
 SOURCE_NETWORK_STALE_SECONDS = 7 * 86400
 JOB_SECONDS = 600
 MAX_ACTIVE_CYCLES = 30
-GFW_HISTORY_RETENTION_SECONDS = max(3 * 86400, int(os.getenv("GFW_HISTORY_RETENTION_DAYS", "14")) * 86400)
+GFW_HISTORY_RETENTION_SECONDS = max(3 * 86400, int(os.getenv("GFW_HISTORY_RETENTION_DAYS", "7")) * 86400)
 GFW_SCHEDULE_INTERVAL_SECONDS = max(5, min(60, int(os.getenv("GFW_SCHEDULE_INTERVAL_SECONDS", "15"))))
 
 _schedule_throttle_lock = threading.Lock()
 _last_schedule_by_db: dict[str, int] = {}
+
+
+def reset_schedule_throttle() -> None:
+    """Clear per-database GFW scheduler throttle state."""
+    with _schedule_throttle_lock:
+        _last_schedule_by_db.clear()
 PROBE_RESULT_ERROR_CODES = {"", "timeout", "refused", "network_error", "family_unsupported", "no_route", "host_unreachable", "local_policy_block"}
 PROBE_CAPABILITY_STALE_SECONDS = 900
 PROBE_FAILURE_CODES = {
@@ -1413,6 +1419,49 @@ def prune_history(conn, now, batch_size: int = 500) -> int:
         cur_cyc = conn.execute(f"DELETE FROM gfw_cycles WHERE id IN ({placeholders})", cycle_ids)
         removed += max(0, cur_cyc.rowcount)
     return removed
+
+
+def has_pending_work(conn, host_id: str, node_id: str, now: int, capabilities=None) -> bool:
+    """Read-only check returning True if leasing or scheduling a GFW probe job needs writes."""
+    if node_id and isinstance(capabilities, dict):
+        ipv4 = capabilities.get("ipv4_default_route")
+        ipv6 = capabilities.get("ipv6_default_route")
+        if type(ipv4) is bool or type(ipv6) is bool:
+            new_v4 = int(ipv4) if type(ipv4) is bool else None
+            new_v6 = int(ipv6) if type(ipv6) is bool else None
+            existing = conn.execute(
+                "SELECT ipv4_default_route,ipv6_default_route,route_capabilities_updated_at FROM gfw_probe_roles WHERE node_id=?",
+                (node_id,),
+            ).fetchone()
+            if existing and (
+                existing["ipv4_default_route"] != new_v4
+                or existing["ipv6_default_route"] != new_v6
+                or now - int(existing["route_capabilities_updated_at"] or 0) >= 60
+            ):
+                return True
+    db_file = _db_file_key(conn)
+    if not db_file:
+        return True
+    with _schedule_throttle_lock:
+        last_ts = _last_schedule_by_db.get(db_file, 0)
+    if now < last_ts or now - last_ts >= GFW_SCHEDULE_INTERVAL_SECONDS:
+        return True
+    if conn.execute(
+        "SELECT 1 FROM gfw_probe_jobs WHERE status IN ('queued','running') AND deadline_at<=? LIMIT 1",
+        (now,),
+    ).fetchone():
+        return True
+    if conn.execute(
+        "SELECT 1 FROM gfw_cycles WHERE status IN ('queued','running') AND deadline_at<=? LIMIT 1",
+        (now,),
+    ).fetchone():
+        return True
+    if conn.execute(
+        "SELECT 1 FROM gfw_probe_jobs WHERE source_host_id=? AND source_node_id=? AND status='queued' AND deadline_at>? LIMIT 1",
+        (host_id, node_id, now),
+    ).fetchone():
+        return True
+    return False
 
 
 def lease_job(conn, host_id, node_id, now, capabilities=None):

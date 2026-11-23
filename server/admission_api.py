@@ -2,9 +2,31 @@
 import asyncio
 import ipaddress
 import json
+import os
 import re
+import threading
 import time
 from fastapi import Header, HTTPException, Request
+
+HEARTBEAT_WRITE_INTERVAL_SECONDS = max(
+    0, min(120, int(os.getenv("POLL_HEARTBEAT_WRITE_INTERVAL_SECONDS", "25")))
+)
+_heartbeat_lock = threading.Lock()
+_heartbeat_by_db: dict[tuple[str, str], tuple[int, str]] = {}
+
+
+def reset_throttle() -> None:
+    """Clear per-database admission heartbeat throttle cache."""
+    with _heartbeat_lock:
+        _heartbeat_by_db.clear()
+
+
+def _db_file_key(conn) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        return str(row[2] or "") if row else ""
+    except Exception:
+        return ""
 
 KINDS={'inbound_source_blocked','tcp_concurrency_limited','admission_unverified','pasarguard_node_removed'}
 ADMISSION_FAILURES={
@@ -28,6 +50,11 @@ def initialize(conn):
         host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,instance_id TEXT,
         observed_at INTEGER,payload TEXT,PRIMARY KEY(host_id,runtime,project,container_name))''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_admission_states_observed_at ON admission_states(observed_at)')
+    db_file = _db_file_key(conn)
+    if db_file:
+        with _heartbeat_lock:
+            for key in [k for k in _heartbeat_by_db if k[0] == db_file]:
+                _heartbeat_by_db.pop(key, None)
 
 
 def normalized_alert(value):
@@ -115,12 +142,56 @@ def normalized_alert(value):
     return clean
 
 
-def _write_admission_status(db, host_id, node_id, client_ip, items, now):
+def _write_admission_status(db, host_id, node_id, client_ip, items, now, on_metric=None):
     conn = db()
     try:
-        host = conn.execute('SELECT node_id FROM hosts WHERE host_id=?', (host_id,)).fetchone()
+        host = conn.execute('SELECT node_id, last_seen FROM hosts WHERE host_id=?', (host_id,)).fetchone()
         if not host or not node_id or host['node_id'] != node_id:
             raise HTTPException(403, 'wrong node identity')
+        existing_rows = conn.execute(
+            'SELECT runtime, project, container_name, observed_at FROM admission_states WHERE host_id=?',
+            (host_id,),
+        ).fetchall()
+        existing_observed = {
+            (row['runtime'], row['project'], row['container_name']): row['observed_at']
+            for row in existing_rows
+        }
+        items_to_write = []
+        for value in items:
+            data = value['admission']
+            stamp = data.get('observed_at', 0)
+            if not isinstance(stamp, int) or isinstance(stamp, bool) or not now - 90 <= stamp <= now + 30:
+                continue
+            key = (value['runtime'], value['project'], value['container_name'])
+            prev_observed = existing_observed.get(key)
+            if prev_observed is None or stamp > int(prev_observed):
+                items_to_write.append((value, data, stamp))
+        has_active = conn.execute(
+            "SELECT 1 FROM security_alerts WHERE host_id=? AND alert_type='admission_unverified' AND status='active' LIMIT 1",
+            (host_id,),
+        ).fetchone()
+        db_file = _db_file_key(conn)
+        if db_file == '' or HEARTBEAT_WRITE_INTERVAL_SECONDS == 0:
+            need_heartbeat = True
+        else:
+            with _heartbeat_lock:
+                cached = _heartbeat_by_db.get((db_file, host_id))
+            if cached is None:
+                need_heartbeat = True
+            else:
+                last_ts, last_ip = cached
+                need_heartbeat = (
+                    now < last_ts
+                    or now - last_ts >= HEARTBEAT_WRITE_INTERVAL_SECONDS
+                    or (bool(client_ip) and client_ip != last_ip)
+                    or now - int(host['last_seen'] or 0) >= HEARTBEAT_WRITE_INTERVAL_SECONDS
+                )
+        if not need_heartbeat and not items_to_write and not has_active:
+            if callable(on_metric):
+                on_metric('admission_readonly_hits')
+            return
+
+        conn.execute('BEGIN IMMEDIATE')
         conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?', (now, host_id))
         if client_ip:
             try:
@@ -131,11 +202,7 @@ def _write_admission_status(db, host_id, node_id, client_ip, items, now):
                 )
             except Exception:
                 pass
-        for value in items:
-            data = value['admission']
-            stamp = data.get('observed_at', 0)
-            if not now - 90 <= stamp <= now + 30:
-                continue
+        for value, data, stamp in items_to_write:
             conn.execute(
                 '''INSERT INTO admission_states VALUES(?,?,?,?,?,?,?)
                    ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET
@@ -145,10 +212,6 @@ def _write_admission_status(db, host_id, node_id, client_ip, items, now):
             )
         # Legacy Agents may have written protection-health states into the
         # security incident table. Close those rows only when an active row exists.
-        has_active = conn.execute(
-            "SELECT 1 FROM security_alerts WHERE host_id=? AND alert_type='admission_unverified' AND status='active' LIMIT 1",
-            (host_id,),
-        ).fetchone()
         if has_active:
             conn.execute(
                 "UPDATE security_alerts SET status='resolved',last_seen=? "
@@ -156,6 +219,11 @@ def _write_admission_status(db, host_id, node_id, client_ip, items, now):
                 (now, host_id),
             )
         conn.commit()
+        if db_file:
+            with _heartbeat_lock:
+                _heartbeat_by_db[(db_file, host_id)] = (now, client_ip)
+        if callable(on_metric):
+            on_metric('admission_write_hits')
     finally:
         conn.close()
 
@@ -175,7 +243,7 @@ def _write_admission_event(db, host_id, node_id, alert, now, process_alerts, rec
         conn.close()
 
 
-def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reconcile):
+def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reconcile,on_event=None,on_metric=None):
     @app.post('/api/v1/admission/status')
     async def status(request:Request,x_timestamp:str=Header(default=''),x_signature:str=Header(default='')):
         chunks=bytearray()
@@ -192,7 +260,7 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
         now=int(time.time())
         forwarded = request.headers.get('x-forwarded-for')
         client_ip = forwarded.split(',')[0].strip() if forwarded else (request.client.host if request.client else '')
-        await asyncio.to_thread(_write_admission_status, db, host_id, node_id, client_ip, items, now)
+        await asyncio.to_thread(_write_admission_status, db, host_id, node_id, client_ip, items, now, on_metric)
         return signed_response({'ok':True},x_timestamp)
 
     @app.post('/api/v1/admission/events')
@@ -209,6 +277,8 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
         except (ValueError,TypeError,AttributeError):raise HTTPException(400,'invalid event payload')
         now=int(time.time())
         await asyncio.to_thread(_write_admission_event, db, host_id, node_id, alert, now, process_alerts, reconcile)
+        if callable(on_event):
+            on_event('admission', host_id)
         # Delivery may fail without affecting the committed receipt or local rules.
         try:await asyncio.to_thread(sync_bots, host_id, now)
         except Exception:pass

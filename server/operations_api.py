@@ -16,12 +16,14 @@ try:
     from . import buyer_mapping
     from . import inbound_assessment, ip_reputation
     from . import upgrade_health
+    from . import server_metrics
 except ImportError:
     import operations as ops
     import fleet_updates
     import buyer_mapping
     import inbound_assessment, ip_reputation
     import upgrade_health
+    import server_metrics
 
 
 def attach(app, db, database_path, storage, cleanup, version, admin_name):
@@ -1338,5 +1340,10 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
             return {"items":rows(conn,"SELECT * FROM ops_audit WHERE (?=0 OR id<?) ORDER BY id DESC LIMIT 100",(before,before))}
         finally:
             conn.close()
+
+    @router.get("/server-metrics")
+    def server_metrics_snapshot(request: Request):
+        require_operator(request)
+        return server_metrics.metrics.snapshot()
 
     app.include_router(router)

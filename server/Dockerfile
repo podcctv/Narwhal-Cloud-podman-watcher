@@ -19,7 +19,7 @@ COPY inbound_assessment.py .
 COPY database_telemetry.py .
 COPY control_reconciliation.py .
 COPY gfw_monitor.py .
-COPY operations.py operations_api.py security_routes.py db_maintenance.py upgrade_health.py buyer_notifications.py buyer_mapping.py buyer_content.py investigation.py dashboard_auth.py commerce.py tcping.py legacy_pages.py ./
+COPY operations.py operations_api.py security_routes.py db_maintenance.py upgrade_health.py buyer_notifications.py buyer_mapping.py buyer_content.py investigation.py dashboard_auth.py commerce.py tcping.py legacy_pages.py telegram_service.py firewall_service.py alert_service.py live_events.py server_metrics.py ./
 COPY fleet_updates.py ./
 COPY maintain_db.py .
 COPY client_bins/ client_bins/

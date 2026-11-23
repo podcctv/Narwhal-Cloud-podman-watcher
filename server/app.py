@@ -18,6 +18,7 @@ import time
 import secrets
 import socket
 import ssl
+import sys
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -162,12 +163,94 @@ except ImportError:
     import db_maintenance
 
 try:
-    from server import abuse_api, admission_api, legacy_pages, reach_monitor
+    from server import (
+        abuse_api,
+        admission_api,
+        alert_service,
+        firewall_service,
+        legacy_pages,
+        live_events,
+        reach_monitor,
+        server_metrics,
+        telegram_service,
+    )
 except ImportError:
     import abuse_api
     import admission_api
+    import alert_service
+    import firewall_service
     import legacy_pages
+    import live_events
     import reach_monitor
+    import server_metrics
+    import telegram_service
+
+POLL_HEARTBEAT_WRITE_INTERVAL_SECONDS = max(
+    0, min(120, int(os.getenv("POLL_HEARTBEAT_WRITE_INTERVAL_SECONDS", "25")))
+)
+_poll_heartbeat_lock = threading.Lock()
+_poll_heartbeat_by_db: Dict[tuple[str, str], tuple[int, str]] = {}
+
+
+def _db_file_key(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        return str(row[2] or "") if row else ""
+    except Exception:
+        return ""
+
+
+def publish_live_event(topic: str, host_id: str = "", detail: dict | None = None) -> int:
+    seq = live_events.bus.publish(topic, host_id, detail)
+    server_metrics.metrics.inc("sse_events_published")
+    return seq
+
+
+def _strip_volatile_keys(value: Any, volatile_set: frozenset[str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_volatile_keys(item, volatile_set)
+            for key, item in value.items()
+            if key not in volatile_set
+        }
+    if isinstance(value, list):
+        return [_strip_volatile_keys(item, volatile_set) for item in value]
+    return value
+
+
+def _compute_etag(payload: Any, salt: str = "", volatile_keys: tuple[str, ...] = ()) -> str:
+    cleaned = _strip_volatile_keys(payload, frozenset(volatile_keys)) if volatile_keys else payload
+    raw = json.dumps(
+        {"salt": salt, "payload": cleaned} if salt else cleaned,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f'W/"{digest[:24]}"'
+
+
+def _if_none_match_matches(request: Request | None, etag: str) -> bool:
+    if request is None or not etag:
+        return False
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return False
+    raw = headers.get("if-none-match")
+    if not raw:
+        return False
+    target_strong = etag[2:] if etag.startswith("W/") else etag
+    for part in str(raw).split(","):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        if candidate == "*" or candidate == etag:
+            return True
+        candidate_strong = candidate[2:].strip() if candidate.startswith("W/") else candidate
+        if candidate_strong == target_strong:
+            return True
+    return False
 
 _AGENT_ONLY_PATHS = {
     "/api/v1/abuse/events",
@@ -227,6 +310,10 @@ def init_db() -> None:
     _latest_cache = None
     _latest_cache_time = 0.0
     invalidate_security_status_cache()
+    with _poll_heartbeat_lock:
+        _poll_heartbeat_by_db.clear()
+    admission_api.reset_throttle()
+    gfw_monitor.reset_schedule_throttle()
     conn = db()
     # WAL lets dashboard reads coexist with frequent agent writes.  This is
     # especially important once monitor.db contains large JSON payloads.
@@ -780,35 +867,23 @@ _ACTIONABLE_ALERT_TYPES = {
     "malicious_process",
 }
 
+class _ModuleNamespace:
+    """Proxy bound directly to this module's globals dict, even under spec_from_file_location."""
+
+    def __init__(self, ns: Dict[str, Any]) -> None:
+        self.__dict__ = ns
+
+
+_self_mod = sys.modules.get(__name__)
+if _self_mod is None or getattr(_self_mod, "__dict__", None) is not globals():
+    _self_mod = _ModuleNamespace(globals())
+_tg_svc = telegram_service.bind(_self_mod)
+_fw_svc = firewall_service.bind(_self_mod)
+_alert_svc = alert_service.bind(_self_mod)
+
 
 def _alert_fingerprint(host_id: str, alert: Dict[str, Any]) -> str:
-    parts = [
-        host_id,
-        str(alert.get("runtime") or ""),
-        str(alert.get("project") or ""),
-        str(alert.get("container_name") or ""),
-        str(alert.get("type") or "unknown"),
-    ]
-    alert_key = str(alert.get("alert_key") or "").strip()
-    if alert_key:
-        parts.append(alert_key[:240])
-    if alert.get('type') == 'prohibited_activity':
-        parts.append(str(alert.get('instance_id') or ''))
-    if str(alert.get("type") or "") == "unauthorized_panel_pairing":
-        domains = alert.get("unapproved_domains")
-        domain_values = [
-            str(item).strip().lower().rstrip(".")
-            for item in domains if isinstance(item, str) and item.strip()
-        ] if isinstance(domains, list) else []
-        if not domain_values:
-            match = re.search(r"未授权面板域名\s*([^；;]+)", str(alert.get("message") or ""))
-            domain_values = [
-                item.strip().lower().rstrip(".")
-                for item in (match.group(1).split(",") if match else []) if item.strip()
-            ]
-        parts.append(",".join(sorted(set(domain_values))))
-    identity = "|".join(parts)
-    return hashlib.sha256(identity.encode()).hexdigest()
+    return _alert_svc._alert_fingerprint(host_id, alert)
 
 
 def process_security_alerts(
@@ -820,985 +895,98 @@ def process_security_alerts(
     preserve_active_types: Optional[List[str]] = None,
     resolve_types: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    active_fingerprints: List[str] = []
-    notifications: List[Dict[str, Any]] = []
-    for raw_alert in alerts:
-        if not isinstance(raw_alert, dict):
-            continue
-        alert_type = str(raw_alert.get("type") or "unknown")[:80]
-        if alert_type == "ops_traffic_quota":
-            continue  # Usage accounting remains available; never notify quota usage.
-        if alert_type == "admission_unverified":
-            # The current protection state is delivered separately through
-            # /api/v1/admission/status and rendered on each container. It is
-            # not a security incident and should not create active alerts.
-            continue
-        severity = str(raw_alert.get("severity") or "warning").lower()
-        if severity not in _SEVERITY_RANK:
-            severity = "warning"
-        normalized = {
-            "host_id": host_id,
-            "runtime": str(raw_alert.get("runtime") or "")[:40],
-            "project": str(raw_alert.get("project") or "")[:100],
-            "container_name": str(raw_alert.get("container_name") or "")[:200],
-            "type": alert_type,
-            "severity": severity,
-            "title": str(raw_alert.get("title") or alert_type)[:200],
-            "message": str(raw_alert.get("message") or "")[:2000],
-            "value": float(raw_alert.get("value") or 0),
-            "threshold": float(raw_alert.get("threshold") or 0),
-        }
-        fingerprint_source = dict(normalized)
-        fingerprint_source["unapproved_domains"] = raw_alert.get("unapproved_domains")
-        fingerprint_source['instance_id'] = raw_alert.get('instance_id')
-        fingerprint_source["alert_key"] = raw_alert.get("alert_key")
-        fingerprint = _alert_fingerprint(host_id, fingerprint_source)
-        active_fingerprints.append(fingerprint)
-        existing = conn.execute(
-            "SELECT id, status, severity, occurrence_count,details_json FROM security_alerts WHERE fingerprint=?",
-            (fingerprint,),
-        ).fetchone()
-        allow_policy = conn.execute(
-            "SELECT 1 FROM security_alert_policies WHERE fingerprint=? AND mode='allow_silent'",
-            (fingerprint,),
-        ).fetchone() is not None
-        automatic_remediation = raw_alert.get("automatic_remediation")
-        ongoing_protection = raw_alert.get("ongoing_protection") is True
-        automatically_remediated = (
-            isinstance(automatic_remediation, dict)
-            and automatic_remediation.get("attempted") is True
-            and automatic_remediation.get("succeeded") is True
-            and not ongoing_protection
-        )
-        next_status = (
-            "suppressed" if allow_policy
-            else "remediated" if automatically_remediated
-            else "active"
-        )
-        should_notify = existing is None and not allow_policy and not automatically_remediated
-        if existing is not None:
-            previous_status = str(existing["status"])
-            verification = conn.execute("SELECT state FROM buyer_checks WHERE alert_id=?", (existing["id"],)).fetchone()
-            restart_episode = previous_status == "resolved" or (previous_status == "remediated" and (next_status == "active" or (verification and verification[0] == "verified")))
-            if allow_policy:
-                should_notify = False
-            elif automatically_remediated:
-                should_notify = False
-            elif previous_status == "remediated" and alert_type == "socket_abuse_suspected":
-                recent_freeze = conn.execute(
-                    "SELECT status, updated_at FROM security_actions WHERE alert_id=? AND action_type='freeze_container' ORDER BY id DESC LIMIT 1",
-                    (existing["id"],),
-                ).fetchone()
-                if recent_freeze and str(recent_freeze["status"]) in ("queued", "dispatched", "running", "succeeded") and (ts - int(recent_freeze["updated_at"] or 0)) <= 86400:
-                    next_status = "remediated"
-                    restart_episode = False
-                    should_notify = False
-            elif previous_status == "dismissed":
-                dismiss_decision = conn.execute(
-                    "SELECT created_at FROM security_alert_decisions WHERE alert_id=? AND decision='dismiss_once' ORDER BY id DESC LIMIT 1",
-                    (existing["id"],),
-                ).fetchone()
-                dismiss_ts = int(dismiss_decision["created_at"]) if dismiss_decision else 0
-                if dismiss_ts > 0 and (ts - dismiss_ts) > 3600:
-                    next_status = "active"
-                    should_notify = True
-                else:
-                    next_status = "dismissed"
-                    should_notify = False
-            else:
-                should_notify = previous_status == "resolved" or _SEVERITY_RANK[severity] > _SEVERITY_RANK.get(str(existing["severity"]), 0)
-                previous_details = _alert_details(existing["details_json"])
-                previous_remediation = previous_details.get("automatic_remediation")
-                if (
-                    ongoing_protection
-                    and isinstance(previous_remediation, dict)
-                    and previous_remediation.get("attempted") is True
-                    and previous_remediation.get("succeeded") is not True
-                    and isinstance(automatic_remediation, dict)
-                    and automatic_remediation.get("attempted") is True
-                    and automatic_remediation.get("succeeded") is True
-                ):
-                    should_notify = True
-                if alert_type == 'container_connection_count':
-                    was_escalated = _alert_details(existing['details_json']).get('connection_policy', {}).get('escalated')
-                    should_notify = should_notify or bool(raw_alert.get('connection_policy', {}).get('escalated') and not was_escalated)
-                if alert_type in {"cpu_pressure_protection", "io_pressure_protection", "memory_pressure_protection"}:
-                    previous_details = _alert_details(existing["details_json"])
-                    guard_key = {"cpu_pressure_protection": "cpu_guard", "io_pressure_protection": "io_guard",
-                                 "memory_pressure_protection": "memory_guard"}[alert_type]
-                    try:
-                        previous_tier = int((previous_details.get(guard_key) or {}).get("tier") or 0)
-                        current_tier = int((raw_alert.get(guard_key) or {}).get("tier") or 0)
-                    except (TypeError, ValueError, OverflowError):
-                        previous_tier = current_tier = 0
-                    if current_tier > previous_tier and current_tier > 1:
-                        should_notify = True
-                if alert_type in {"host_vulnerability", "host_security_finding"}:
-                    previous_details = _alert_details(existing["details_json"])
-                    previous_ids = previous_details.get("finding_keys") or previous_details.get("finding_ids")
-                    current_ids = raw_alert.get("finding_keys") or raw_alert.get("finding_ids")
-                    if isinstance(previous_ids, list) and isinstance(current_ids, list):
-                        should_notify = should_notify or bool(set(map(str, current_ids)) - set(map(str, previous_ids)))
-            conn.execute(
-                """
-                UPDATE security_alerts
-                SET severity=?, title=?, message=?, value=?, threshold=?, last_seen=?,
-                    first_seen=CASE WHEN ? THEN ? ELSE first_seen END,
-                    occurrence_count=CASE WHEN ? THEN 1 ELSE occurrence_count+1 END,
-                    status=?, details_json=?
-                WHERE fingerprint=?
-                """,
-                (
-                    severity,
-                    normalized["title"],
-                    normalized["message"],
-                    normalized["value"],
-                    normalized["threshold"],
-                    ts,
-                    bool(restart_episode),
-                    ts,
-                    bool(restart_episode),
-                    next_status,
-                    json.dumps(raw_alert, ensure_ascii=False),
-                    fingerprint,
-                ),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO security_alerts(
-                    fingerprint, host_id, runtime, project, container_name, alert_type,
-                    severity, title, message, value, threshold, first_seen, last_seen,
-                    occurrence_count, status, details_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
-                """,
-                (
-                    fingerprint,
-                    host_id,
-                    normalized["runtime"],
-                    normalized["project"],
-                    normalized["container_name"],
-                    alert_type,
-                    severity,
-                    normalized["title"],
-                    normalized["message"],
-                    normalized["value"],
-                    normalized["threshold"],
-                    ts,
-                    ts,
-                    next_status,
-                    json.dumps(raw_alert, ensure_ascii=False),
-                ),
-            )
-        if should_notify:
-            notification = dict(normalized)
-            row = conn.execute("SELECT id,first_seen FROM security_alerts WHERE fingerprint=?", (fingerprint,)).fetchone()
-            notification["id"] = int(row["id"]) if row is not None else 0
-            notification["event_id"] = f"NW-{row['id']}-{row['first_seen']}" if row is not None else ""
-            notifications.append(notification)
-
-    if partial:
-        return notifications
-    preserve_types = sorted({
-        str(item).strip()[:80] for item in (preserve_active_types or []) if str(item).strip()
-    })
-    if preserve_types:
-        placeholders = ",".join("?" for _ in preserve_types)
-        preserved = conn.execute(
-            f"SELECT fingerprint FROM security_alerts WHERE host_id=? AND alert_type IN ({placeholders}) AND status IN ('active','dismissed')",
-            (host_id, *preserve_types),
-        ).fetchall()
-        active_fingerprints.extend(str(row["fingerprint"]) for row in preserved)
-    pending_network_review = "NOT EXISTS (SELECT 1 FROM network_quarantines q WHERE q.alert_id=security_alerts.id AND q.status NOT IN ('released','replaced'))"
-    resolve_type_values = sorted({
-        str(item).strip()[:80] for item in (resolve_types or []) if str(item).strip()
-    })
-    if resolve_type_values:
-        type_placeholders = ",".join("?" for _ in resolve_type_values)
-        type_filter = f" AND alert_type IN ({type_placeholders})"
-        if active_fingerprints:
-            fingerprint_placeholders = ",".join("?" for _ in active_fingerprints)
-            conn.execute(
-                f"UPDATE security_alerts SET status='resolved', last_seen=? "
-                f"WHERE host_id=? AND status IN ('active','dismissed'){type_filter} "
-                f"AND fingerprint NOT IN ({fingerprint_placeholders}) AND {pending_network_review}",
-                (ts, host_id, *resolve_type_values, *active_fingerprints),
-            )
-        else:
-            conn.execute(
-                f"UPDATE security_alerts SET status='resolved', last_seen=? "
-                f"WHERE host_id=? AND status IN ('active','dismissed'){type_filter} AND {pending_network_review}",
-                (ts, host_id, *resolve_type_values),
-            )
-    elif active_fingerprints:
-        placeholders = ",".join("?" for _ in active_fingerprints)
-        conn.execute(
-            f"UPDATE security_alerts SET status='resolved', last_seen=? "
-            f"WHERE host_id=? AND status IN ('active','dismissed') AND fingerprint NOT IN ({placeholders}) AND {pending_network_review}",
-            (ts, host_id, *active_fingerprints),
-        )
-    else:
-        conn.execute(
-            f"UPDATE security_alerts SET status='resolved', last_seen=? WHERE host_id=? AND status IN ('active','dismissed') AND {pending_network_review}",
-            (ts, host_id),
-        )
-    return notifications
+    return _alert_svc.process_security_alerts(
+        conn, host_id, ts, alerts, partial=partial,
+        preserve_active_types=preserve_active_types, resolve_types=resolve_types,
+    )
 
 
-def queue_connection_alert_deep_samples(
-    conn: sqlite3.Connection, host_id: str, now: int
-) -> int:
-    """Refresh bounded connection evidence for connection and inbound-fanout alerts."""
-    queued = 0
-    alerts = conn.execute(
-        """
-        SELECT * FROM security_alerts
-        WHERE host_id=? AND alert_type IN (
-              'container_connection_count','inbound_ip_fanout','socks_inbound_fanout','socket_abuse_suspected'
-          )
-          AND status='active' AND last_seen=?
-        """,
-        (host_id, now),
-    ).fetchall()
-    for alert in alerts:
-        if queued >= 10:
-            break  # Avoid a large incident fan-out starving the report transaction.
-        runtime = str(alert["runtime"] or "")
-        if runtime not in ("incus", "podman", "runman"):
-            continue
-        alert_id = int(alert["id"])
-        existing = conn.execute(
-            """
-            SELECT id,status,created_at,params_json FROM security_actions
-            WHERE alert_id=? AND action_type='request_deep_sample' AND created_at>=?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (alert_id, int(alert["first_seen"])),
-        ).fetchone()
-        stage = str(alert['alert_type']) + ':' + str(alert['severity']) + (
-            ':escalated'
-            if _alert_details(alert['details_json']).get('connection_policy', {}).get('escalated')
-            else ''
-        )
-        params = {
-            "sample_seconds": 1.0,
-            "process_limit": 100,
-            "socket_limit": 250,
-            "evidence_schema": 5,
-            "stage": stage,
-        }
-        if runtime == "runman":
-            latest = conn.execute(
-                "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='runman' AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
-                (host_id, str(alert["project"] or ""), str(alert["container_name"] or "")),
-            ).fetchone()
-            try:
-                latest_payload = json.loads(latest["payload_json"] or "{}") if latest is not None else {}
-            except (TypeError, ValueError):
-                latest_payload = {}
-            stable_id = str(latest_payload.get("stable_id") or latest_payload.get("id") or "").lower() if isinstance(latest_payload, dict) else ""
-            generation = str(latest_payload.get("instance_id") or "").lower() if isinstance(latest_payload, dict) else ""
-            if (
-                str(alert["project"] or "") != "default"
-                or stable_id != str(alert["container_name"] or "").lower()
-                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", stable_id)
-                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", generation)
-                or latest is None
-                or int(latest["ts"] or 0) > now + 30
-                or now - int(latest["ts"] or 0) > STALE_SECONDS
-            ):
-                continue
-            params["instance_id"] = generation
-        if existing is not None:
-            previous_params = _alert_details(existing['params_json'])
-            if runtime == "runman" and previous_params.get("instance_id") != params.get("instance_id"):
-                if existing['status'] in ('queued', 'dispatched', 'running'):
-                    conn.execute(
-                        "UPDATE security_actions SET status='failed',result_message='Runman 实例代次已变化，旧深度采样已取消',updated_at=? WHERE id=?",
-                        (now, existing['id']),
-                    )
-                existing = None
-            if existing is not None and existing['status'] in ('queued', 'dispatched', 'running'):
-                if now - int(existing['created_at']) > 900:
-                    conn.execute("UPDATE security_actions SET status='failed',result_message='深度取证等待超过15分钟，需要重新采样',updated_at=? WHERE id=?", (now, existing['id']))
-                continue
-            if existing is not None and now - int(existing['created_at']) < 900 and (previous_params.get('stage') == stage or existing['status'] == 'failed'):
-                continue
-        conn.execute(
-            """
-            INSERT INTO security_actions(
-                alert_id,host_id,runtime,project,container_name,action_type,params_json,
-                status,requested_by,created_at,updated_at
-            ) VALUES(?,?,?,?,?,? ,?,'queued','automatic:connection-alert',?,?)
-            """,
-            (
-                alert_id, str(alert["host_id"]), str(alert["runtime"]),
-                str(alert["project"]), str(alert["container_name"]), "request_deep_sample",
-                json.dumps(params),
-                now, now,
-            ),
-        )
-        queued += 1
-    return queued
+def queue_connection_alert_deep_samples(conn: sqlite3.Connection, host_id: str, now: int) -> int:
+    return _alert_svc.queue_connection_alert_deep_samples(conn, host_id, now)
 
 
 def send_alert_webhook(alert: Dict[str, Any]) -> None:
-    if not ALERT_WEBHOOK_URL:
-        return
-    severity = str(alert.get("severity") or "warning")
-    if _SEVERITY_RANK.get(severity, 0) < _SEVERITY_RANK.get(ALERT_WEBHOOK_MIN_SEVERITY, 1):
-        return
-    payload = json.dumps({"event": "narwhal.security_alert", "alert": alert}, ensure_ascii=False).encode()
-    request = urllib.request.Request(
-        ALERT_WEBHOOK_URL,
-        data=payload,
-        headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            response.read(1)
-    except Exception as exc:
-        print(f"alert webhook failed: {exc}")
+    return _tg_svc.send_alert_webhook(alert)
 
 
 def _notification_bot_item(row: sqlite3.Row) -> Dict[str, Any]:
-    """Return a dashboard-safe notification profile; bot tokens never leave the server."""
-    return {
-        "id": int(row["id"]), "name": str(row["name"]), "kind": str(row["kind"]),
-        "target": str(row["target"]), "min_severity": str(row["min_severity"]),
-        "enabled": bool(row["enabled"]), "token_configured": bool(row["token"]),
-        "created_at_utc8": format_utc8(int(row["created_at"])),
-        "updated_at_utc8": format_utc8(int(row["updated_at"])),
-        "last_delivery_status": str(row["last_delivery_status"]),
-        "last_delivery_error": str(row["last_delivery_error"]),
-        "last_sent_at_utc8": format_utc8(int(row["last_sent_at"])) if int(row["last_sent_at"]) else "",
-    }
+    return _tg_svc._notification_bot_item(row)
 
 
 def _telegram_api_call(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    data = json.dumps(payload, ensure_ascii=False).encode()
-    proxy_url = get_telegram_proxy_url()
-    proxy_scheme = urllib.parse.urlsplit(proxy_url).scheme.lower() if proxy_url else ""
-    if proxy_scheme in ("socks5", "socks5h"):
-        try:
-            result = _telegram_api_socks5(token, method, data, proxy_url)
-        except Exception as exc:
-            raise RuntimeError(f"Telegram SOCKS5 代理连接失败：{exc}") from exc
-        if not result.get("ok"):
-            raise RuntimeError(str(result.get("description") or "Telegram rejected the request"))
-        return result
-    request = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/{method}",
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"},
-        method="POST",
-    )
-    try:
-        if proxy_url:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
-            response_context = opener.open(request, timeout=10)
-        else:
-            response_context = urllib.request.urlopen(request, timeout=10)
-        with response_context as response:
-            result = json.loads(response.read(1024 * 1024).decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = json.loads(exc.read(1024 * 1024).decode("utf-8")).get("description")
-        except Exception:
-            detail = ""
-        raise RuntimeError(str(detail or f"Telegram HTTP {exc.code}")) from exc
-    except urllib.error.URLError as exc:
-        if proxy_url:
-            raise RuntimeError(f"Telegram 代理连接失败：{exc.reason}") from exc
-        try:
-            result = _telegram_api_ipv4(token, method, data)
-        except Exception as ipv4_exc:
-            raise RuntimeError(
-                f"Telegram 网络不可达（常规连接：{exc.reason}；IPv4 回退：{ipv4_exc}）。"
-                "请检查 Server 容器出站网络，或配置 TELEGRAM_PROXY_URL。"
-            ) from ipv4_exc
-    if not result.get("ok"):
-        raise RuntimeError(str(result.get("description") or "Telegram rejected the request"))
-    return result
+    return _tg_svc._telegram_api_call(token, method, payload)
 
 
 def _telegram_api(token: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        return _telegram_api_call(token, method, payload)
-    except RuntimeError as exc:
-        err_msg = str(exc).lower()
-        if ("can't parse entities" in err_msg or "entity" in err_msg) and payload.get("parse_mode"):
-            fallback_payload = dict(payload)
-            fallback_payload.pop("parse_mode", None)
-            raw_text = str(fallback_payload.get("text") or "")
-            fallback_payload["text"] = re.sub(r"<[^>]+>", "", raw_text)
-            try:
-                return _telegram_api_call(token, method, fallback_payload)
-            except Exception:
-                pass
-        raise
+    return _tg_svc._telegram_api(token, method, payload)
 
 
 def _telegram_api_socks5(token: str, method: str, data: bytes, proxy_url: str) -> Dict[str, Any]:
-    if socks is None:
-        raise RuntimeError("PySocks 未安装，无法使用 SOCKS5 代理。请运行 pip install PySocks 或配置 HTTP/HTTPS 代理。")
-    parsed = urllib.parse.urlsplit(proxy_url)
-    if not parsed.hostname:
-        raise ValueError("代理地址缺少主机名")
-    proxy_rdns = True
-    proxy_sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        proxy_sock.set_proxy(
-            socks.SOCKS5,
-            parsed.hostname,
-            parsed.port or 1080,
-            rdns=proxy_rdns,
-            username=urllib.parse.unquote(parsed.username) if parsed.username else None,
-            password=urllib.parse.unquote(parsed.password) if parsed.password else None,
-        )
-        proxy_sock.settimeout(10)
-        proxy_sock.connect(("api.telegram.org", 443))
-        tls_sock = ssl.create_default_context().wrap_socket(proxy_sock, server_hostname="api.telegram.org")
-        conn = http.client.HTTPSConnection("api.telegram.org", 443, timeout=10)
-        conn.sock = tls_sock
-        conn.request(
-            "POST", f"/bot{token}/{method}", body=data,
-            headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"},
-        )
-        response = conn.getresponse()
-        body = response.read(1024 * 1024)
-        conn.close()
-        result = json.loads(body.decode("utf-8"))
-        if response.status >= 400:
-            raise RuntimeError(str(result.get("description") or f"Telegram HTTP {response.status}"))
-        return result
-    except Exception:
-        try:
-            proxy_sock.close()
-        except Exception:
-            pass
-        raise
+    return _tg_svc._telegram_api_socks5(token, method, data, proxy_url)
 
 
 def _telegram_api_ipv4(token: str, method: str, data: bytes) -> Dict[str, Any]:
-    host = "api.telegram.org"
-    last_error: Exception | None = None
-    for family, socktype, proto, _, sockaddr in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM):
-        raw_sock = socket.socket(family, socktype, proto)
-        try:
-            raw_sock.settimeout(8)
-            raw_sock.connect(sockaddr)
-            tls_sock = ssl.create_default_context().wrap_socket(raw_sock, server_hostname=host)
-            conn = http.client.HTTPSConnection(host, 443, timeout=8)
-            conn.sock = tls_sock
-            conn.request(
-                "POST", f"/bot{token}/{method}", body=data,
-                headers={"Content-Type": "application/json", "User-Agent": "Narwhal-Container-Monitor/1.0"},
-            )
-            response = conn.getresponse()
-            body = response.read(1024 * 1024)
-            conn.close()
-            result = json.loads(body.decode("utf-8"))
-            if response.status >= 400:
-                raise RuntimeError(str(result.get("description") or f"Telegram HTTP {response.status}"))
-            return result
-        except Exception as exc:
-            last_error = exc
-            try:
-                raw_sock.close()
-            except Exception:
-                pass
-    raise RuntimeError(str(last_error or "没有可用的 Telegram IPv4 地址"))
+    return _tg_svc._telegram_api_ipv4(token, method, data)
 
 
 def _record_bot_delivery(bot_id: int, succeeded: bool, error: str = "") -> None:
-    conn = db()
-    try:
-        conn.execute(
-            "UPDATE notification_bots SET last_delivery_status=?, last_delivery_error=?, last_sent_at=? WHERE id=?",
-            ("succeeded" if succeeded else "failed", "" if succeeded else str(error)[:1000], int(time.time()) if succeeded else 0, bot_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    return _tg_svc._record_bot_delivery(bot_id, succeeded, error)
 
 
 def _telegram_chat_allowed(bot: sqlite3.Row, chat: Dict[str, Any]) -> bool:
-    target, _ = _parse_telegram_target(str(bot["target"] or "").strip())
-    chat_id = str(chat.get("id") or "")
-    username = str(chat.get("username") or "").strip().lower()
-    if target.startswith("@"):
-        return bool(username) and username == target[1:].lower()
-    return bool(chat_id) and hmac.compare_digest(chat_id, target)
+    return _tg_svc._telegram_chat_allowed(bot, chat)
 
 
-def _telegram_active_alerts(severity: str = "all", offset: int = 0, limit: int = 5) -> tuple[List[sqlite3.Row], int]:
-    conn = db()
-    try:
-        where = "status='active'"
-        params: List[Any] = []
-        if severity in ("critical", "warning", "info"):
-            where += " AND severity=?"
-            params.append(severity)
-        total = int(conn.execute(f"SELECT COUNT(*) FROM security_alerts WHERE {where}", params).fetchone()[0])
-        rows = conn.execute(
-            f"SELECT * FROM security_alerts WHERE {where} ORDER BY CASE severity WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END DESC, last_seen DESC LIMIT ? OFFSET ?",
-            (*params, limit, max(0, offset)),
-        ).fetchall()
-        return rows, total
-    finally:
-        conn.close()
+def _telegram_active_alerts(
+    severity: str = "all", offset: int = 0, limit: int = 5
+) -> tuple[List[sqlite3.Row], int]:
+    return _tg_svc._telegram_active_alerts(severity, offset, limit)
 
 
 def _telegram_actionable(alert: sqlite3.Row) -> bool:
-    if alert["runtime"] not in ("podman", "incus", "runman"):
-        return False
-    if alert["alert_type"] not in ("unauthorized_panel_pairing", "socks_weak_auth", "malicious_process"):
-        return False
-    details = _alert_action_evidence(alert)
-    if alert["runtime"] == "runman":
-        if (
-            alert["alert_type"] not in ("unauthorized_panel_pairing", "malicious_process")
-            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", details.get("instance_id", ""))
-            or not (details.get("process_targets") or details.get("file_targets"))
-        ):
-            return False
-    if alert["alert_type"] == "unauthorized_panel_pairing":
-        return bool(details.get("process_patterns") or details.get("config_files"))
-    if alert["alert_type"] == "socks_weak_auth":
-        return details.get("socks_auth_mode") in ("no_auth", "weak_password") and bool(details.get("socks_processes"))
-    has_xmrig = any(isinstance(item, dict) and item.get("process") == "xmrig" for item in details.get("malicious_processes", []))
-    if alert["runtime"] == "runman":
-        has_xmrig = has_xmrig and any(
-            item.get("process") == "xmrig" and item.get("pattern") == "xmrig"
-            and re.fullmatch(r"[0-9]{1,24}", item.get("start_ticks", ""))
-            for item in details.get("process_targets", [])
-        )
-    return has_xmrig
+    return _tg_svc._telegram_actionable(alert)
 
 
 def _telegram_menu() -> tuple[str, Dict[str, Any]]:
-    conn = db()
-    try:
-        counts = {row["severity"]: int(row["count"]) for row in conn.execute(
-            "SELECT severity, COUNT(*) AS count FROM security_alerts WHERE status='active' GROUP BY severity"
-        ).fetchall()}
-    finally:
-        conn.close()
-    total = sum(counts.values())
-    text = (
-        "<b>Narwhal 告警控制台</b>\n"
-        f"活动告警：<b>{total}</b>\n"
-        f"严重：<b>{counts.get('critical', 0)}</b>　警告：<b>{counts.get('warning', 0)}</b>　信息：<b>{counts.get('info', 0)}</b>\n\n"
-        "请选择要查看的范围。"
-    )
-    keyboard = {"inline_keyboard": [
-        [{"text": f"全部活动告警 ({total})", "callback_data": "n:l:all:0"}],
-        [
-            {"text": f"严重 ({counts.get('critical', 0)})", "callback_data": "n:l:critical:0"},
-            {"text": f"警告 ({counts.get('warning', 0)})", "callback_data": "n:l:warning:0"},
-        ],
-        [{"text": "刷新", "callback_data": "n:m"}],
-    ]}
-    return text, keyboard
+    return _tg_svc._telegram_menu()
 
 
 def _telegram_alert_list(severity: str, offset: int) -> tuple[str, Dict[str, Any]]:
-    severity = severity if severity in ("all", "critical", "warning", "info") else "all"
-    offset = max(0, offset)
-    rows, total = _telegram_active_alerts(severity, offset)
-    label = {"all": "全部", "critical": "严重", "warning": "警告", "info": "信息"}[severity]
-    text = f"<b>{label}活动告警</b>\n共 {total} 条，第 {offset + 1 if total else 0}-{min(offset + len(rows), total)} 条。"
-    buttons: List[List[Dict[str, str]]] = []
-    severity_label = {"critical": "严重", "warning": "警告", "info": "信息"}
-    for row in rows:
-        title = str(row["title"] or row["alert_type"] or "告警")
-        buttons.append([{"text": f"{severity_label.get(row['severity'], '告警')} #{row['id']} {title[:26]}", "callback_data": f"n:d:{row['id']}:{severity}:{offset}"}])
-    nav: List[Dict[str, str]] = []
-    if offset > 0:
-        nav.append({"text": "上一页", "callback_data": f"n:l:{severity}:{max(0, offset - 5)}"})
-    if offset + len(rows) < total:
-        nav.append({"text": "下一页", "callback_data": f"n:l:{severity}:{offset + 5}"})
-    if nav:
-        buttons.append(nav)
-    buttons.append([{"text": "刷新", "callback_data": f"n:l:{severity}:{offset}"}, {"text": "返回主菜单", "callback_data": "n:m"}])
-    return text, {"inline_keyboard": buttons}
+    return _tg_svc._telegram_alert_list(severity, offset)
 
 
 def _telegram_alert_detail(alert_id: int, severity: str, offset: int) -> tuple[str, Dict[str, Any]]:
-    conn = db()
-    try:
-        alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
-    finally:
-        conn.close()
-    if alert is None:
-        return "该告警不存在或已被清理。", {"inline_keyboard": [[{"text": "返回列表", "callback_data": f"n:l:{severity}:{offset}"}]]}
-    scope = "/".join(x for x in (str(alert["runtime"] or ""), str(alert["project"] or "")) if x) or "-"
-    raw_message = str(alert['message'] or '')[:1000]
-    text = (
-        f"<b>{html.escape(str(alert['title'] or alert['alert_type']))}</b>\n"
-        f"事件：<code>NW-{alert['id']}-{alert['first_seen']}</code>\n"
-        f"状态：<b>{html.escape(str(alert['status']))}</b>　级别：<b>{html.escape(str(alert['severity']))}</b>\n"
-        f"主机：<code>{html.escape(str(alert['host_id']))}</code>\n"
-        f"容器：<code>{html.escape(scope)} {html.escape(str(alert['container_name'] or '-'))}</code>\n"
-        f"出现次数：{int(alert['occurrence_count'])}\n"
-        f"最近出现：{format_utc8(int(alert['last_seen']))}\n\n"
-        f"{html.escape(raw_message)}"
-    )
-    buttons: List[List[Dict[str, str]]] = []
-    if alert['alert_type'] == 'prohibited_activity':
-        text += '\n\n请先通过宿主机控制台排查，再由网页管理员复核解除隔离。解除不等于风险已恢复。'
-        if PUBLIC_BASE_URL:
-            buttons.append([{'text': '打开管理员隔离面板', 'url': PUBLIC_BASE_URL.rstrip('/')+'/'}])
-    elif alert["status"] == "active":
-        buttons.append([
-            {"text": "本次忽略", "callback_data": f"n:c:{alert_id}:dismiss_once:{severity}:{offset}"},
-            {"text": "标记已处理", "callback_data": f"n:c:{alert_id}:resolve:{severity}:{offset}"},
-        ])
-        buttons.append([{"text": "永久不再提醒", "callback_data": f"n:c:{alert_id}:allow_silent:{severity}:{offset}"}])
-        if _telegram_actionable(alert):
-            buttons.append([{"text": "定向处置", "callback_data": f"n:c:{alert_id}:deny:{severity}:{offset}"}])
-    buttons.append([{"text": "返回列表", "callback_data": f"n:l:{severity}:{offset}"}, {"text": "主菜单", "callback_data": "n:m"}])
-    return text, {"inline_keyboard": buttons}
+    return _tg_svc._telegram_alert_detail(alert_id, severity, offset)
 
 
 async def _telegram_apply_decision(alert_id: int, decision: str, bot_id: int) -> str:
-    class TelegramRequest:
-        def __init__(self) -> None:
-            self.state = type("State", (), {"dashboard_user": f"telegram:{bot_id}"})()
-        async def json(self) -> Dict[str, str]:
-            return {"decision": decision}
-    response = await set_security_alert_disposition(alert_id, TelegramRequest())
-    body = json.loads(response.body)
-    if decision == "deny":
-        return "定向处置已排队，等待节点执行。" if body.get("queued") else "已有相同处置正在执行。"
-    return {"dismiss_once": "已忽略本次告警。", "resolve": "已标记为已处理。", "allow_silent": "已设置为永久不再提醒。"}.get(decision, "处理完成。")
+    return await _tg_svc._telegram_apply_decision(alert_id, decision, bot_id)
 
 
 def _telegram_confirm(alert_id: int, decision: str, severity: str, offset: int) -> tuple[str, Dict[str, Any]]:
-    descriptions = {
-        "dismiss_once": "只隐藏本次连续事件；以后再次发生仍会提醒。",
-        "resolve": "将当前记录标记为已处理；若风险仍存在，下次上报会重新出现。",
-        "allow_silent": "永久抑制此告警指纹，并可能同步放行节点策略。",
-        "deny": "向节点下发定向处置动作，仅处理告警明确识别的目标。",
-    }
-    text = f"<b>确认操作</b>\n告警 #{alert_id}\n\n{descriptions.get(decision, '确认执行此操作？')}"
-    keyboard = {"inline_keyboard": [
-        [{"text": "确认执行", "callback_data": f"n:x:{alert_id}:{decision}:{severity}:{offset}"}],
-        [{"text": "取消并返回", "callback_data": f"n:d:{alert_id}:{severity}:{offset}"}],
-    ]}
-    return text, keyboard
+    return _tg_svc._telegram_confirm(alert_id, decision, severity, offset)
 
 
 def _telegram_send_view(bot: sqlite3.Row, update: Dict[str, Any], text: str, keyboard: Dict[str, Any]) -> None:
-    callback = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
-    message = callback.get("message") if callback and isinstance(callback.get("message"), dict) else None
-    if message:
-        try:
-            _telegram_api(str(bot["token"]), "editMessageText", {
-                "chat_id": str(message.get("chat", {}).get("id")), "message_id": int(message.get("message_id") or 0),
-                "text": text, "parse_mode": "HTML", "reply_markup": keyboard, "disable_web_page_preview": True,
-            })
-        except RuntimeError as exc:
-            # Refreshing an unchanged view is successful from the user's point of view.
-            if "message is not modified" not in str(exc).lower():
-                raise
-    else:
-        incoming = update.get("message") if isinstance(update.get("message"), dict) else {}
-        _telegram_api(str(bot["token"]), "sendMessage", {
-            "chat_id": str(incoming.get("chat", {}).get("id")), "text": text,
-            "parse_mode": "HTML", "reply_markup": keyboard, "disable_web_page_preview": True,
-        })
+    return _tg_svc._telegram_send_view(bot, update, text, keyboard)
 
 
 async def _handle_telegram_update(bot: sqlite3.Row, update: Dict[str, Any]) -> None:
-    callback = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
-    message = callback.get("message") if callback and isinstance(callback.get("message"), dict) else update.get("message")
-    if not isinstance(message, dict) or not _telegram_chat_allowed(bot, message.get("chat") or {}):
-        if callback:
-            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": "此聊天未获授权"})
-        return
-    if callback:
-        data = str(callback.get("data") or "")
-        legacy = re.fullmatch(r"narwhal:(\d+):(dismiss|resolve)", data)
-        if legacy:
-            decision = "dismiss_once" if legacy.group(2) == "dismiss" else "resolve"
-            try:
-                message_text = await _telegram_apply_decision(int(legacy.group(1)), decision, int(bot["id"]))
-            except HTTPException as exc:
-                message_text = str(exc.detail)
-            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": message_text[:180]})
-            return
-        parts = data.split(":")
-        try:
-            if data == "n:m":
-                text, keyboard = _telegram_menu()
-            elif len(parts) == 4 and parts[:2] == ["n", "l"]:
-                text, keyboard = _telegram_alert_list(parts[2], int(parts[3]))
-            elif len(parts) == 5 and parts[:2] == ["n", "d"]:
-                text, keyboard = _telegram_alert_detail(int(parts[2]), parts[3], int(parts[4]))
-            elif len(parts) == 6 and parts[:2] == ["n", "c"]:
-                text, keyboard = _telegram_confirm(int(parts[2]), parts[3], parts[4], int(parts[5]))
-            elif len(parts) == 6 and parts[:2] == ["n", "x"]:
-                result = await _telegram_apply_decision(int(parts[2]), parts[3], int(bot["id"]))
-                detail, keyboard = _telegram_alert_detail(int(parts[2]), parts[4], int(parts[5]))
-                text = f"<b>{html.escape(result)}</b>\n\n{detail}"
-            else:
-                text, keyboard = _telegram_menu()
-            _telegram_send_view(bot, update, text, keyboard)
-            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or "")})
-        except (ValueError, HTTPException, RuntimeError) as exc:
-            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
-            _telegram_api(str(bot["token"]), "answerCallbackQuery", {"callback_query_id": str(callback.get("id") or ""), "text": str(detail)[:180], "show_alert": True})
-        return
-    command = str(message.get("text") or "").split()[0].split("@", 1)[0].lower()
-    if command in ("/start", "/menu", "/alerts"):
-        text, keyboard = _telegram_menu() if command != "/alerts" else _telegram_alert_list("all", 0)
-        _telegram_send_view(bot, update, text, keyboard)
+    return await _tg_svc._handle_telegram_update(bot, update)
 
 
 async def _telegram_polling_loop() -> None:
-    await asyncio.sleep(5)
-    while True:
-        if PUBLIC_BASE_URL:
-            await asyncio.sleep(30)
-            continue
-        conn = db()
-        try:
-            bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
-        finally:
-            conn.close()
-        for bot in bots:
-            bot_id = int(bot["id"])
-            try:
-                if bot_id not in _telegram_poll_offsets:
-                    await asyncio.to_thread(_telegram_api, str(bot["token"]), "deleteWebhook", {"drop_pending_updates": True})
-                    await asyncio.to_thread(_telegram_api, str(bot["token"]), "setMyCommands", {"commands": [
-                        {"command": "menu", "description": "打开交互式告警控制台"},
-                        {"command": "alerts", "description": "查看活动告警"},
-                    ]})
-                    _telegram_poll_offsets[bot_id] = 0
-                result = await asyncio.to_thread(_telegram_api, str(bot["token"]), "getUpdates", {
-                    "offset": _telegram_poll_offsets[bot_id], "timeout": 0,
-                    "allowed_updates": ["message", "callback_query"], "limit": 20,
-                })
-                for update in result.get("result") or []:
-                    _telegram_poll_offsets[bot_id] = max(_telegram_poll_offsets[bot_id], int(update.get("update_id") or 0) + 1)
-                    await _handle_telegram_update(bot, update)
-            except Exception as exc:
-                print(f"Telegram polling warning (bot {bot_id}): {exc}")
-        await asyncio.sleep(3)
+    return await _tg_svc._telegram_polling_loop()
 
 
 def _telegram_duration_text(seconds: int) -> str:
-    seconds = max(0, seconds)
-    if seconds < 60:
-        return "不足 1 分钟"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} 分钟"
-    hours, remaining = divmod(minutes, 60)
-    return f"{hours} 小时 {remaining} 分钟" if remaining else f"{hours} 小时"
+    return _tg_svc._telegram_duration_text(seconds)
 
 
 def _telegram_alert_status_card(
     alert: sqlite3.Row, now: int, deep_evidence: Dict[str, Any] | None = None
 ) -> tuple[str, Dict[str, Any]]:
-    status = str(alert["status"])
-    active = status == "active"
-    duration_end = now if active else int(alert["last_seen"])
-    duration = _telegram_duration_text(duration_end - int(alert["first_seen"]))
-    scope = "/".join(x for x in (str(alert["runtime"] or ""), str(alert["project"] or "")) if x)
-    container_label = f"{scope or '-'} {alert['container_name'] or '-'}"
-    if active:
-        heading = f"Narwhal {str(alert['severity']).upper()} 告警"
-        state_line = f"状态：<b>持续中</b>　持续：<b>{duration}</b>"
-    else:
-        state_labels = {
-            "resolved": "已恢复", "dismissed": "已忽略",
-            "suppressed": "已永久静默", "remediated": "已自动处置",
-        }
-        heading = f"Narwhal 告警{state_labels.get(status, '已结束')}"
-        state_line = f"状态：<b>{state_labels.get(status, '已结束')}</b>　持续：<b>{duration}</b>"
-    details = _alert_details(alert["details_json"])
-    if alert['alert_type'] == 'container_connection_count':
-        state_line = state_line.replace('持续：', '事件跨度：')
-    automatic_remediation = details.get("automatic_remediation") if isinstance(details, dict) else None
-    remediation_text = ""
-    if alert['alert_type'] == 'prohibited_activity':
-        network_state = str((details.get('network_quarantine') or {}).get('status') or 'unknown')
-        heading = 'Narwhal 严重安全告警 · 违规活动'
-        states = {'isolated':'已双向隔离，等待管理员复核', 'failed':'隔离未能完整验证，需立即人工处理',
-                  'release_failed':'解除隔离未验证成功，需人工检查', 'released':'管理员已解除隔离，正在重新监测（非恢复证明）'}
-        state_line = '状态：<b>'+states.get(network_state, '当前隔离状态待确认')+'</b>'
-        proofs = []
-        for item in (details.get('abuse_evidence') or [])[:5]:
-            if not isinstance(item, dict):
-                continue
-            features = item.get('features') or {}
-            proofs.append('PID '+str(item.get('pid') or '-')+' · 连续佐证 '+str(features.get('corroborating_samples') or '-')+' 次'
-                          + (' · 工具 '+str(item['tool']) if item.get('tool') else '')
-                          + (' · 并发配置 '+str(features['concurrency']) if features.get('concurrency') else '')
-                          + (' · SYN 待连接 '+str(item['pending_attempts']) if item.get('pending_attempts') else '')
-                          + (' · 纵向端口 '+str(item['vertical_ports']) if item.get('vertical_ports') else '')
-                          + (' · 横向目标 '+str(item['horizontal_targets']) if item.get('horizontal_targets') else '')
-                          + (' · 待连接占比 '+str(round(float(item.get('pending_ratio',item.get('failed_ratio',0)))*100))+'%' if item.get('pending_ratio') is not None or item.get('failed_ratio') is not None else '')
-                          + (' · 文件 SHA256 '+str(item['source_sha256'])[:12] if item.get('source_sha256') else ''))
-        remediation_text = '\n<b>特征证据</b>\n'+html.escape('\n'.join(proofs))+'\n<b>容器与磁盘保留；隔离会阻断 SSH，请通过宿主机控制台排查。</b>\n'
-    if isinstance(automatic_remediation, dict) and automatic_remediation.get("attempted") is True:
-        remediation_result = str(
-            automatic_remediation.get("message")
-            or automatic_remediation.get("result_message")
-            or "节点已执行定向处置"
-        )[:300]
-        remediation_text = (
-            "\n<b>自动处置</b>："
-            f"<b>{'已完成' if automatic_remediation.get('succeeded') is True else '未完成'}</b>\n"
-            f"{html.escape(remediation_result)}\n"
-        )
-    evidence_text = ""
-    if isinstance(deep_evidence, dict):
-        inbound_ips = int(deep_evidence.get("inbound_unique_ips") or 0)
-        outbound_ips = int(deep_evidence.get("outbound_unique_ips") or 0)
-        inbound_processes = int(deep_evidence.get("inbound_process_count") or 0)
-        outbound_processes = int(deep_evidence.get("outbound_process_count") or 0)
-        all_ips = deep_evidence.get("connection_ips") if isinstance(deep_evidence.get("connection_ips"), list) else []
-        inbound_items = deep_evidence.get("inbound_ips") if isinstance(deep_evidence.get("inbound_ips"), list) else [
-            item for item in all_ips if isinstance(item, dict) and int(item.get("inbound") or 0) > 0
-        ]
-        outbound_items = deep_evidence.get("outbound_ips") if isinstance(deep_evidence.get("outbound_ips"), list) else [
-            item for item in all_ips if isinstance(item, dict) and int(item.get("outbound") or 0) > 0
-        ]
-        # Legacy counts may include private/proxy peers absent from public lists.
-        inbound_ips = len(inbound_items)
-        outbound_ips = len(outbound_items)
-        captured = int(deep_evidence.get('sampled_at') or 0)
-        age = max(0, now - captured) if captured else None
-        evidence_time = datetime.fromtimestamp(captured, timezone(timedelta(hours=8))).strftime('%m-%d %H:%M:%S') if 0 < captured < 253402271999 else '时间未知'
-        evidence_note = f'采集时间：{evidence_time}（UTC+8）；'
-        evidence_note += '历史快照，已过期，不能代表当前状态。' if age is None or age > 900 else '近期快照，不代表完整流量。'
-        if deep_evidence.get('socket_snapshot_truncated'):
-            evidence_note += ' 明细已截断，仅展示部分连接和进程。'
-        if not inbound_items and int(deep_evidence.get('observed_inbound_unique_ips', deep_evidence.get('inbound_unique_ips', 0)) or 0):
-            evidence_note += ' 检测到入站来源，但公网源 IP 尚未映射。'
-        def ip_lines(items: List[Dict[str, Any]], direction: str) -> str:
-            """Telegram-friendly, one public endpoint per line, safely HTML escaped."""
-            label = "入站连接" if direction == "inbound" else "出站连接"
-            lines: List[str] = []
-            for item in items[:10]:
-                if not isinstance(item, dict) or not item.get("ip"):
-                    continue
-                location_parts = [
-                    str(item.get(key) or "").strip()
-                    for key in ("country", "region", "city")
-                    if str(item.get(key) or "").strip()
-                ]
-                location = " ".join(location_parts) or "未知归属地"
-                carrier = str(item.get("isp") or item.get("org") or item.get("asn") or "未知运营商")
-                count = int(item.get(direction) or item.get("connections") or 0)
-                lines.append(
-                    f"<code>{html.escape(str(item['ip'])[:45])}</code> ｜归属地：{html.escape(location[:50])} ｜运营商：{html.escape(carrier[:50])} ｜{label}：{count}"
-                )
-            return "\n".join(lines) or "-"
-        attribution = deep_evidence.get("connection_attribution")
-        attribution_text = ""
-        attribution_unavailable = not isinstance(attribution, dict)
-        if isinstance(attribution, dict):
-            captured_sockets = attribution.get("captured_sockets")
-            try:
-                expected_connections = max(
-                    int(deep_evidence.get("connection_count") or 0),
-                    int(attribution.get("expected_connection_count") or 0),
-                )
-                captured_count = int(captured_sockets or 0)
-            except (TypeError, ValueError, OverflowError):
-                expected_connections, captured_count = 0, 0
-            attribution_unavailable = (
-                attribution.get("evidence_status") == "unavailable"
-                or captured_sockets is None
-                or (expected_connections > 0 and captured_count == 0)
-            )
-            if attribution_unavailable:
-                attribution_text = (
-                    "\n<b>连接发起方核验（单次快照）</b>\n"
-                    "未采集到逐连接来源/PID 数据，发起方向未知；不能把缺失数据当作 0 条。"
-                )
-            else:
-                attribution_text = (
-                    "\n<b>连接发起方核验（单次快照）</b>\n"
-                    f"本机进程发起：已确认 {int(attribution.get('confirmed_local_initiated') or 0)} / 推定 {int(attribution.get('probable_local_initiated') or 0)}；"
-                    f"外部远端发起：已确认 {int(attribution.get('confirmed_remote_initiated') or 0)} / 推定 {int(attribution.get('probable_remote_initiated') or 0)}；"
-                    f"方向未知 {int(attribution.get('unknown_direction') or 0)}。"
-                    f"PID 归属 {int(attribution.get('process_attributed_sockets') or 0)}/{captured_count} 条，"
-                    f"conntrack 五元组匹配 {int(attribution.get('conntrack_confirmed_sockets') or 0)} 条。"
-                )
-            if not attribution.get("conntrack_available"):
-                attribution_text += "\nconntrack 不可用；推定方向不能视为已确认。"
-        signal_counts = {
-            "possible_multiport_probe": 0,
-            "bidirectional_tcp_observed": 0,
-            "mixed_connection_evidence": 0,
-            "unreplied_tcp_observed": 0,
-        }
-        probe_ips: List[str] = []
-        for item in inbound_items:
-            if not isinstance(item, dict):
-                continue
-            signal = item.get("network_evidence")
-            if not isinstance(signal, dict):
-                continue
-            classification = str(signal.get("classification") or "")
-            if classification in signal_counts:
-                signal_counts[classification] += 1
-                if classification == "possible_multiport_probe" and item.get("ip"):
-                    probe_ips.append(str(item["ip"])[:45])
-        signal_text = ""
-        if any(signal_counts.values()):
-            signal_text = (
-                "\n<b>入站行为线索（非恶意定论）</b>："
-                f"多端口探测迹象 {signal_counts['possible_multiport_probe']} IP"
-                + (f"（{html.escape('、'.join(probe_ips[:3]))}）" if probe_ips else "")
-                + f"；双向 TCP {signal_counts['bidirectional_tcp_observed']} IP；"
-                + f"混合/未应答 {signal_counts['mixed_connection_evidence'] + signal_counts['unreplied_tcp_observed']} IP。"
-                "这些只是单次 conntrack 传输线索，需结合应用访问日志判断是否为正常用户请求。"
-            )
-        inbound_ip_summary = "未采集" if attribution_unavailable and not inbound_items else str(inbound_ips)
-        outbound_ip_summary = "未采集" if attribution_unavailable and not outbound_items else str(outbound_ips)
-        inbound_process_summary = "未采集" if attribution_unavailable and not inbound_items else str(inbound_processes)
-        outbound_process_summary = "未采集" if attribution_unavailable and not outbound_items else str(outbound_processes)
-        evidence_text = (
-            f"\n<b>自动深度取证</b>\n"
-            f"{html.escape(evidence_note)}\n"
-            f"入站：{inbound_ip_summary} IP / {inbound_process_summary} 进程\n"
-            f"出站：{outbound_ip_summary} IP / {outbound_process_summary} 进程\n"
-            f"{attribution_text}{signal_text}\n"
-            f"<b>入站 IP（每行一个）</b>\n{ip_lines(inbound_items, 'inbound')}\n"
-            f"<b>出站 IP（每行一个）</b>\n{ip_lines(outbound_items, 'outbound')}\n"
-        )
-    raw_msg = str(alert['message'] or '')[:400]
-    msg_escaped = html.escape(raw_msg)
-    if alert['alert_type'] == 'container_connection_count':
-        msg_escaped += '\n' + html.escape(connection_policy.text(details.get('connection_policy')))
-        metric = details.get('connection_metrics') or {}
-        if metric.get('valid') is True:
-            msg_escaped += html.escape(f"\nTCP已建立 {metric.get('tcp_established', 0)} · 待连接 {metric.get('tcp_pending', 0)} · TIME_WAIT {metric.get('tcp_time_wait', 0)} · UDP socket {metric.get('udp_sockets', 0)}")
-    text = (
-        f"<b>{heading}</b>\n"
-        f"<b>{html.escape(str(alert['title'] or alert['alert_type'] or '-'))}</b>\n"
-        f"{state_line}\n"
-        f"主机：<code>{html.escape(str(alert['host_id'] or '-'))}</code>\n"
-        f"容器：<code>{html.escape(container_label)}</code>\n"
-        f"出现次数：{int(alert['occurrence_count'])}\n"
-        f"{remediation_text}"
-        f"{evidence_text}"
-        f"{msg_escaped}"
-    )
-    keyboard = {"inline_keyboard": [[
-        {"text": "查看并处理" if active else "查看历史", "callback_data": f"n:d:{alert['id']}:all:0"},
-        {"text": "活动告警", "callback_data": "n:l:all:0"},
-    ]]}
-    return text, keyboard
+    return _tg_svc._telegram_alert_status_card(alert, now, deep_evidence)
 
 
 def sync_configured_bot_alert_messages(
@@ -1806,233 +994,27 @@ def sync_configured_bot_alert_messages(
     observed_at: int | None = None,
     alert_id: int | None = None,
 ) -> None:
-    """Create or refresh one Telegram status card per alert, retaining recovery history."""
-    now = int(time.time())
-    conn = db()
-    try:
-        bots = conn.execute("SELECT * FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
-        if not bots:
-            return
-        if alert_id is not None:
-            alerts = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchall()
-        elif host_id is not None and observed_at is not None:
-            alerts = conn.execute(
-                "SELECT * FROM security_alerts WHERE host_id=? AND last_seen=? AND status IN ('active','resolved','dismissed','suppressed','remediated')",
-                (host_id, observed_at),
-            ).fetchall()
-        elif host_id is not None:
-            alerts = conn.execute(
-                "SELECT * FROM security_alerts WHERE host_id=? AND status IN ('active','resolved','dismissed','suppressed','remediated') ORDER BY id DESC LIMIT 50",
-                (host_id,),
-            ).fetchall()
-        else:
-            alerts = []
-        for bot in bots:
-            bot_id = int(bot["id"])
-            chat_target, thread_id = _parse_telegram_target(str(bot["target"] or ""))
-            for alert in alerts:
-                severity = str(alert["severity"])
-                mapping = conn.execute(
-                    "SELECT * FROM telegram_alert_messages WHERE bot_id=? AND alert_id=?",
-                    (bot_id, int(alert["id"])),
-                ).fetchone()
-                # Automatic remediation is itself a security event worth
-                # notifying: the operator needs the evidence and result even
-                # though the alert is no longer active. Suppressed/dismissed
-                # alerts are explicit user choices; a never-sent recovery is
-                # only historical state and must not create a new message.
-                pending_quarantine = alert['alert_type'] == 'prohibited_activity' and (_alert_details(alert['details_json']).get('network_quarantine') or {}).get('status') in {'isolated', 'failed', 'release_failed'}
-                if mapping is None and str(alert["status"]) in ("suppressed", "dismissed", "resolved") and not pending_quarantine:
-                    continue
-                if mapping is None and _SEVERITY_RANK.get(severity, 1) < _SEVERITY_RANK.get(str(bot["min_severity"]), 2):
-                    continue
-                evidence_row = conn.execute(
-                    "SELECT action_id,evidence_json FROM security_alert_evidence WHERE alert_id=? ORDER BY captured_at DESC,id DESC LIMIT 1",
-                    (int(alert["id"]),),
-                ).fetchone()
-                deep_evidence = _alert_details(evidence_row["evidence_json"]) if evidence_row is not None else None
-                evidence_action_id = int(evidence_row["action_id"]) if evidence_row is not None else 0
-                text, keyboard = _telegram_alert_status_card(alert, now, deep_evidence)
-                content_hash = hashlib.sha256((text + json.dumps(keyboard, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
-                if mapping is not None:
-                    status_changed = str(mapping["last_status"]) != str(alert["status"])
-                    severity_changed = str(mapping["last_severity"]) != severity
-                    evidence_changed = int(mapping["last_evidence_action_id"]) != evidence_action_id
-                    if not status_changed and not severity_changed and not evidence_changed and now - int(mapping["updated_at"]) < 60:
-                        continue
-                    if str(mapping["content_hash"]) == content_hash:
-                        continue
-                try:
-                    if mapping is None:
-                        send_payload = {
-                            "chat_id": chat_target, "text": text, "parse_mode": "HTML",
-                            "reply_markup": keyboard, "disable_web_page_preview": True,
-                        }
-                        if thread_id is not None:
-                            send_payload["message_thread_id"] = thread_id
-                        result = _telegram_api(str(bot["token"]), "sendMessage", send_payload)
-                        message_id = int((result.get("result") or {}).get("message_id") or 0)
-                        if message_id <= 0:
-                            raise RuntimeError("Telegram did not return a message id")
-                        conn.execute(
-                            "INSERT INTO telegram_alert_messages(bot_id,alert_id,chat_id,message_id,last_status,last_severity,last_evidence_action_id,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                            (bot_id, int(alert["id"]), chat_target, message_id, str(alert["status"]), severity, evidence_action_id, content_hash, now),
-                        )
-                    else:
-                        edit_chat_id, _ = _parse_telegram_target(str(mapping["chat_id"]))
-                        try:
-                            _telegram_api(str(bot["token"]), "editMessageText", {
-                                "chat_id": edit_chat_id, "message_id": int(mapping["message_id"]),
-                                "text": text, "parse_mode": "HTML", "reply_markup": keyboard,
-                                "disable_web_page_preview": True,
-                            })
-                        except RuntimeError as edit_exc:
-                            err_str = str(edit_exc).lower()
-                            if "message is not modified" in err_str:
-                                pass
-                            elif "message to edit not found" in err_str or "message can't be edited" in err_str:
-                                send_payload = {
-                                    "chat_id": chat_target, "text": text, "parse_mode": "HTML",
-                                    "reply_markup": keyboard, "disable_web_page_preview": True,
-                                }
-                                if thread_id is not None:
-                                    send_payload["message_thread_id"] = thread_id
-                                resend_res = _telegram_api(str(bot["token"]), "sendMessage", send_payload)
-                                new_msg_id = int((resend_res.get("result") or {}).get("message_id") or 0)
-                                if new_msg_id > 0:
-                                    conn.execute(
-                                        "UPDATE telegram_alert_messages SET message_id=?,chat_id=?,last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
-                                        (new_msg_id, chat_target, str(alert["status"]), severity, evidence_action_id, content_hash, now, bot_id, int(alert["id"])),
-                                    )
-                                    conn.commit()
-                                    _record_bot_delivery(bot_id, True)
-                                    continue
-                            else:
-                                raise
-                        conn.execute(
-                            "UPDATE telegram_alert_messages SET last_status=?,last_severity=?,last_evidence_action_id=?,content_hash=?,updated_at=? WHERE bot_id=? AND alert_id=?",
-                            (str(alert["status"]), severity, evidence_action_id, content_hash, now, bot_id, int(alert["id"])),
-                        )
-                    conn.commit()
-                    _record_bot_delivery(bot_id, True)
-                except Exception as exc:
-                    _record_bot_delivery(bot_id, False, str(exc))
-                    print(f"telegram dynamic alert {bot_id}/{alert['id']} failed: {exc}")
-    finally:
-        conn.close()
+    return _tg_svc.sync_configured_bot_alert_messages(host_id, observed_at, alert_id)
 
 
 @app.get("/api/v1/notifications/bots")
 def notification_bots() -> JSONResponse:
-    conn = db()
-    try:
-        rows = conn.execute("SELECT * FROM notification_bots ORDER BY id DESC").fetchall()
-        proxy_url = get_telegram_proxy_url()
-        return JSONResponse(content={
-            "items": [_notification_bot_item(row) for row in rows],
-            "callback_ready": bool(PUBLIC_BASE_URL),
-            "proxy_configured": bool(proxy_url),
-            "proxy_scheme": urllib.parse.urlsplit(proxy_url).scheme.lower() if proxy_url else "",
-        })
-    finally:
-        conn.close()
+    return _tg_svc.notification_bots()
 
 
 @app.post("/api/v1/notifications/bots")
 async def save_notification_bot(request: Request) -> JSONResponse:
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid JSON body")
-    name = str(payload.get("name") or "Telegram 通知").strip()[:80]
-    token = _normalize_telegram_token(payload.get("token"))
-    raw_target = str(payload.get("target") or "").strip()[:200]
-    chat_target, target_thread_id = _parse_telegram_target(raw_target)
-    severity = str(payload.get("min_severity") or "critical").lower()
-    if not token or len(token) > 256 or not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", token):
-        raise HTTPException(status_code=400, detail="请输入有效的 Telegram Bot Token（格式如 123456789:ABCdef...）")
-    if not raw_target or not chat_target or severity not in _SEVERITY_RANK:
-        raise HTTPException(status_code=400, detail="目标（Chat ID 或 @频道）和最低告警级别是必填项")
-    now = int(time.time())
-    conn = db()
-    try:
-        cur = conn.execute(
-            "INSERT INTO notification_bots(name,kind,token,target,min_severity,enabled,callback_secret,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
-            (name, "telegram", token, raw_target, severity, secrets.token_urlsafe(32), now, now),
-        )
-        bot_id = int(cur.lastrowid)
-        row = conn.execute("SELECT * FROM notification_bots WHERE id=?", (bot_id,)).fetchone()
-        conn.commit()
-    finally:
-        conn.close()
-    try:
-        send_payload = {
-            "chat_id": chat_target,
-            "text": "Narwhal 通知机器人已配置成功。后续将按设定的严重级别推送新告警。",
-        }
-        if target_thread_id is not None:
-            send_payload["message_thread_id"] = target_thread_id
-        _telegram_api(token, "sendMessage", send_payload)
-        _record_bot_delivery(bot_id, True)
-    except Exception as exc:
-        conn = db()
-        try:
-            conn.execute("DELETE FROM notification_bots WHERE id=?", (bot_id,))
-            conn.commit()
-        finally:
-            conn.close()
-        raise HTTPException(status_code=502, detail=f"Telegram 配置验证失败：{exc}")
-    callback_error = ""
-    if PUBLIC_BASE_URL:
-        try:
-            _telegram_api(token, "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{row['callback_secret']}", "allowed_updates": ["message", "callback_query"]})
-            _telegram_api(token, "setMyCommands", {"commands": [{"command": "menu", "description": "打开交互式告警控制台"}, {"command": "alerts", "description": "查看活动告警"}]})
-        except Exception as exc:
-            callback_error = str(exc)[:500]
-    conn = db()
-    try:
-        row = conn.execute("SELECT * FROM notification_bots WHERE id=?", (bot_id,)).fetchone()
-        return JSONResponse(status_code=201, content={"item": _notification_bot_item(row), "callback_ready": bool(PUBLIC_BASE_URL) and not callback_error, "callback_error": callback_error})
-    finally:
-        conn.close()
+    return await _tg_svc.save_notification_bot(request)
 
 
 @app.delete("/api/v1/notifications/bots/{bot_id}")
 def delete_notification_bot(bot_id: int) -> JSONResponse:
-    conn = db()
-    try:
-        cur = conn.execute("DELETE FROM notification_bots WHERE id=?", (bot_id,))
-        conn.commit()
-        if not cur.rowcount:
-            raise HTTPException(status_code=404, detail="notification bot not found")
-        return JSONResponse(content={"ok": True})
-    finally:
-        conn.close()
+    return _tg_svc.delete_notification_bot(bot_id)
 
 
 @app.post("/api/v1/notifications/bots/{bot_id}/test")
 def test_notification_bot(bot_id: int) -> JSONResponse:
-    conn = db()
-    try:
-        bot = conn.execute("SELECT * FROM notification_bots WHERE id=?", (bot_id,)).fetchone()
-    finally:
-        conn.close()
-    if bot is None:
-        raise HTTPException(status_code=404, detail="notification bot not found")
-    chat_target, target_thread_id = _parse_telegram_target(str(bot["target"] or ""))
-    try:
-        send_payload = {"chat_id": chat_target, "text": "Narwhal 通知机器人连接测试成功。"}
-        if target_thread_id is not None:
-            send_payload["message_thread_id"] = target_thread_id
-        _telegram_api(str(bot["token"]), "sendMessage", send_payload)
-        if PUBLIC_BASE_URL:
-            _telegram_api(str(bot["token"]), "setWebhook", {"url": f"{PUBLIC_BASE_URL}{_BOT_CALLBACK_PREFIX}{bot_id}/{bot['callback_secret']}", "allowed_updates": ["message", "callback_query"]})
-        _telegram_api(str(bot["token"]), "setMyCommands", {"commands": [{"command": "menu", "description": "打开交互式告警控制台"}, {"command": "alerts", "description": "查看活动告警"}]})
-        _record_bot_delivery(bot_id, True)
-    except Exception as exc:
-        _record_bot_delivery(bot_id, False, str(exc))
-        raise HTTPException(status_code=502, detail=f"Telegram 测试失败：{exc}")
-    return JSONResponse(content={"ok": True, "callback_ready": bool(PUBLIC_BASE_URL)})
+    return _tg_svc.test_notification_bot(bot_id)
 
 
 def _get_system_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
@@ -2169,17 +1151,7 @@ async def test_push_settings(request: Request) -> JSONResponse:
 
 @app.post("/api/v1/notifications/telegram/{bot_id}/{callback_secret}")
 async def telegram_callback(bot_id: int, callback_secret: str, request: Request) -> JSONResponse:
-    conn = db()
-    try:
-        bot = conn.execute("SELECT * FROM notification_bots WHERE id=? AND callback_secret=? AND enabled=1", (bot_id, callback_secret)).fetchone()
-        if bot is None:
-            raise HTTPException(status_code=404, detail="unknown notification bot")
-        payload = await request.json()
-    finally:
-        conn.close()
-    if isinstance(payload, dict):
-        await _handle_telegram_update(bot, payload)
-    return JSONResponse(content={"ok": True})
+    return await _tg_svc.telegram_callback(bot_id, callback_secret, request)
 
 
 def process_connection_overloads(
@@ -2201,15 +1173,17 @@ _latest_cache: Dict[str, Any] | None = None
 _latest_cache_time = 0.0
 _security_status_cache: Dict[str, Any] | None = None
 _security_status_cache_time = 0.0
+_security_status_etag = ""
 _security_status_cache_lock = threading.Lock()
 _security_status_compute_lock = threading.Lock()
 
 
 def invalidate_security_status_cache() -> None:
-    global _security_status_cache, _security_status_cache_time
+    global _security_status_cache, _security_status_cache_time, _security_status_etag
     with _security_status_cache_lock:
         _security_status_cache = None
         _security_status_cache_time = 0.0
+        _security_status_etag = ""
 
 
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
@@ -2270,782 +1244,104 @@ def _validate_host_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
-def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"rules", "abuse"}:
-        raise HTTPException(status_code=400, detail="防火墙配置只允许 rules 和 abuse 字段")
-    raw_rules = payload.get("rules", [])
-    if not isinstance(raw_rules, list) or len(raw_rules) > 64:
-        raise HTTPException(status_code=400, detail="RFW 规则最多支持 64 条（受 eBPF 规则表容量限制）")
-    protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto"}
-    rules = []
-    seen_keys = set()
-    for index, raw in enumerate(raw_rules):
-        allowed = {"key", "priority", "direction", "protocol", "action", "enabled", "port_start", "port_end", "ip_type", "ip", "countries"}
-        if not isinstance(raw, dict) or set(raw) - allowed:
-            raise HTTPException(status_code=400, detail=f"第 {index + 1} 条 RFW 规则字段无效")
-        key = str(raw.get("key") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", key) or key in seen_keys:
-            raise HTTPException(status_code=400, detail=f"第 {index + 1} 条 RFW 规则标识无效或重复")
-        seen_keys.add(key)
-        direction = str(raw.get("direction") or "").lower()
-        protocol = str(raw.get("protocol") or "").lower()
-        action = str(raw.get("action") or "").lower()
-        ip_type = str(raw.get("ip_type") or "").lower()
-        if direction not in {"in", "out"} or protocol not in protocols or action not in {"block", "pass"}:
-            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的方向、协议或动作不支持")
-        if direction == "out" and protocol not in {"all", "tcp", "udp", "socks", "fet", "wireguard", "mtproto"}:
-            raise HTTPException(status_code=400, detail=f"RFW 协议 {protocol} 暂不支持出站匹配")
-        priority = raw.get("priority")
-        port_start = raw.get("port_start")
-        port_end = raw.get("port_end")
-        if type(priority) is not int or not 0 <= priority <= 100000:
-            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的优先级无效")
-        if type(port_start) is not int or not 0 <= port_start <= 65535:
-            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的起始端口无效")
-        if port_end is not None and (type(port_end) is not int or not port_start <= port_end <= 65535):
-            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的结束端口无效")
-        if type(raw.get("enabled")) is not bool:
-            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的 enabled 必须是布尔值")
-        if ip_type not in {"any", "cidr", "geoip"}:
-            raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 的 IP 匹配类型无效")
-        rule = {
-            "key": key,
-            "priority": priority,
-            "direction": direction,
-            "protocol": protocol,
-            "action": action,
-            "enabled": raw["enabled"],
-            "port_start": port_start,
-            "ip_type": ip_type,
-        }
-        if port_end is not None:
-            rule["port_end"] = port_end
-        if ip_type == "cidr":
-            try:
-                rule["ip"] = str(ipaddress.ip_network(str(raw.get("ip") or "").strip(), strict=False))
-            except ValueError:
-                raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 需要有效的 IPv4/IPv6 CIDR") from None
-        elif ip_type == "geoip":
-            countries = raw.get("countries")
-            if not isinstance(countries, list) or not 1 <= len(countries) <= 30:
-                raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 需要 1 到 30 个国家代码")
-            normalized = []
-            for country in countries:
-                code = str(country).strip().upper()
-                if not re.fullmatch(r"[A-Z]{2}", code):
-                    raise HTTPException(status_code=400, detail=f"RFW 规则 {key} 包含无效国家代码")
-                if code not in normalized:
-                    normalized.append(code)
-            rule["countries"] = sorted(normalized)
-        rules.append(rule)
+SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY = firewall_service.SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY
+SPEEDTEST_POLICY_MIN_AGENT_VERSION = firewall_service.SPEEDTEST_POLICY_MIN_AGENT_VERSION
+SPEEDTEST_AUTO_RETRY_INTERVAL = firewall_service.SPEEDTEST_AUTO_RETRY_INTERVAL
+SPEEDTEST_AUTO_RETRY_WINDOW = firewall_service.SPEEDTEST_AUTO_RETRY_WINDOW
+SPEEDTEST_AUTO_MAX_FAILURES_PER_WINDOW = firewall_service.SPEEDTEST_AUTO_MAX_FAILURES_PER_WINDOW
+HOST_FIREWALL_READBACK_REASONS = firewall_service.HOST_FIREWALL_READBACK_REASONS
 
-    raw_abuse = payload.get("abuse", {})
-    categories = {"speedtest", "mining", "bt"}
-    allowed_services = {"ookla", "cloudflare", "fast", "tcpquality", "iperf3_server", "librespeed", "openspeedtest", "ookla_server"}
-    if not isinstance(raw_abuse, dict) or set(raw_abuse) - (categories | {"services", "service_runtimes", "interfaces", "runtimes"}):
-        raise HTTPException(status_code=400, detail="防火墙策略包含不支持的字段")
-    abuse = {}
-    for category in sorted(categories):
-        value = raw_abuse.get(category, False)
-        if type(value) is not bool:
-            raise HTTPException(status_code=400, detail=f"防滥用策略 {category} 必须是布尔值")
-        # The old `speedtest` flag only blocked destination port 5201. Keep
-        # accepting it while reading old clients, but never reapply that
-        # port-only rule; new matching is service/domain/process based.
-        abuse[category] = False if category == "speedtest" else value
-    raw_services = raw_abuse.get("services", [])
-    if not isinstance(raw_services, list) or len(raw_services) > len(allowed_services):
-        raise HTTPException(status_code=400, detail="测速服务列表无效")
-    services = []
-    for service in raw_services:
-        name = str(service).strip().lower()
-        if name not in allowed_services:
-            raise HTTPException(status_code=400, detail="测速服务选择包含不支持的类型")
-        if name not in services:
-            services.append(name)
-    raw_interfaces = raw_abuse.get("interfaces", [])
-    if not isinstance(raw_interfaces, list) or len(raw_interfaces) > 16:
-        raise HTTPException(status_code=400, detail="容器桥接网卡必须是最多 16 项的列表")
-    interfaces = []
-    for interface in raw_interfaces:
-        name = str(interface).strip()
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", name):
-            raise HTTPException(status_code=400, detail="容器桥接网卡名称无效")
-        if name not in interfaces:
-            interfaces.append(name)
-    raw_runtimes = raw_abuse.get("runtimes", [])
-    if not isinstance(raw_runtimes, list) or len(raw_runtimes) > 3:
-        raise HTTPException(status_code=400, detail="容器网桥运行时必须从 Incus / Podman / Runman 中选择，最多三项")
-    runtimes = []
-    for runtime in raw_runtimes:
-        name = str(runtime).strip().lower()
-        if name not in {"incus", "podman", "runman"}:
-            raise HTTPException(status_code=400, detail="容器网桥运行时只支持 Incus、Podman 或 Runman")
-        if name not in runtimes:
-            runtimes.append(name)
-    raw_service_runtimes = raw_abuse.get("service_runtimes", [])
-    if not isinstance(raw_service_runtimes, list) or len(raw_service_runtimes) > 3:
-        raise HTTPException(status_code=400, detail="测速服务运行时必须从 Incus / Podman / Runman 中选择，最多三项")
-    service_runtimes = []
-    for runtime in raw_service_runtimes:
-        name = str(runtime).strip().lower()
-        if name not in {"incus", "podman", "runman"}:
-            raise HTTPException(status_code=400, detail="测速服务范围只支持 Incus、Podman 或 Runman")
-        if name not in service_runtimes:
-            service_runtimes.append(name)
-    if interfaces and runtimes:
-        # Fixed-port RFW templates need bridge names; service guards need
-        # logical runtime scope. They may coexist in one policy.
-        if not services or not any(abuse.get(key) for key in ("mining", "bt")):
-            raise HTTPException(status_code=400, detail="测速服务范围和固定端口规则的目标不能混用")
-    fixed_rules = any(abuse.get(key) is True for key in ("mining", "bt"))
-    if fixed_rules and not interfaces and not runtimes:
-        raise HTTPException(status_code=400, detail="启用固定端口规则前必须选择已采集的容器网卡或运行时")
-    if services and not service_runtimes:
-        raise HTTPException(status_code=400, detail="启用测速服务识别前必须选择 Incus、Podman 或 Runman")
-    abuse["interfaces"] = interfaces
-    abuse["runtimes"] = runtimes
-    abuse["services"] = sorted(services)
-    abuse["service_runtimes"] = service_runtimes
-    return {"rules": rules, "abuse": abuse}
+
+def _validate_host_firewall_policy(payload: Any) -> Dict[str, Any]:
+    return _fw_svc._validate_host_firewall_policy(payload)
 
 
 def _empty_host_firewall_policy() -> Dict[str, Any]:
-    # Default speed-test protections target isolated Incus and Podman
-    # containers. The report reconciler automatically applies this policy only
-    # when the host has no saved policy and no authoritative fleet template.
-    # Host processes and Docker are never in this scope.
-    return {
-        "rules": [],
-        "abuse": {
-            "speedtest": False,
-            "mining": False,
-            "bt": False,
-            "services": [
-                "cloudflare", "fast", "iperf3_server", "librespeed",
-                "ookla", "ookla_server", "openspeedtest", "tcpquality",
-            ],
-            "service_runtimes": ["incus", "podman", "runman"],
-            "interfaces": [],
-            "runtimes": [],
-        },
-    }
-
-
-SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY = "speedtest-auto-default"
-SPEEDTEST_POLICY_MIN_AGENT_VERSION = (1, 7, 136)
-SPEEDTEST_AUTO_RETRY_INTERVAL = 15 * 60
-SPEEDTEST_AUTO_RETRY_WINDOW = 24 * 60 * 60
-SPEEDTEST_AUTO_MAX_FAILURES_PER_WINDOW = 3
+    return _fw_svc._empty_host_firewall_policy()
 
 
 def _agent_version_tuple(value: Any) -> Tuple[int, int, int] | None:
-    match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:$|[-+])", str(value or "").strip())
-    if not match:
-        return None
-    try:
-        return tuple(int(part) for part in match.groups())
-    except (TypeError, ValueError, OverflowError):
-        return None
+    return _fw_svc._agent_version_tuple(value)
 
 
 def _agent_supports_speedtest_policy(agent_version: Any) -> bool:
-    version = _agent_version_tuple(agent_version)
-    return version is not None and version >= SPEEDTEST_POLICY_MIN_AGENT_VERSION
+    return _fw_svc._agent_supports_speedtest_policy(agent_version)
 
 
 def _maybe_queue_default_speedtest_policy(
-    conn: sqlite3.Connection,
-    host_id: str,
-    node_id: str,
-    agent_version: str,
-    ts: int,
+    conn: sqlite3.Connection, host_id: str, node_id: str, agent_version: str, ts: int
 ) -> bool:
-    """Automatically apply the container-only service guard without replacing saved policy."""
-    if not node_id or not _agent_supports_speedtest_policy(agent_version):
-        return False
-    fleet = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
-    if fleet is not None and int(fleet["revision"] or 0) > 0:
-        # An administrator-owned fleet policy is authoritative; its own report
-        # reconciler will apply exactly those selections.
-        return False
-
-    existing = conn.execute(
-        "SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision "
-        "FROM host_firewall_policies WHERE host_id=?", (host_id,),
-    ).fetchone()
-    if existing is not None and str(existing["updated_by"] or "") != SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY:
-        # Any saved single-host policy is an intentional choice, including an
-        # explicit empty/disabled speed-test selection.
-        return False
-
-    desired = _validate_host_firewall_policy(_empty_host_firewall_policy())
-    materialized, _target_status = _materialize_host_firewall_policy(conn, host_id, desired, ts)
-    if materialized is None:
-        return False
-
-    if existing is not None:
-        try:
-            saved = _validate_host_firewall_policy(json.loads(existing["policy_json"] or "{}"))
-        except (HTTPException, TypeError, ValueError):
-            return False
-        if (
-            saved.get("abuse", {}).get("services") != desired.get("abuse", {}).get("services")
-            or saved.get("abuse", {}).get("service_runtimes") != desired.get("abuse", {}).get("service_runtimes")
-            or saved.get("rules")
-        ):
-            return False
-        latest = _latest_host_firewall_action(conn, host_id)
-        if latest is not None:
-            if (
-                str(latest["action_type"] or "") != "apply_host_firewall_policy"
-                or str(latest["requested_by"] or "") != SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY
-            ):
-                return False
-            if latest["status"] in {"queued", "dispatched", "running", "succeeded", "cancelled"}:
-                return False
-            if latest["status"] == "failed":
-                if ts - int(latest["updated_at"] or 0) < SPEEDTEST_AUTO_RETRY_INTERVAL:
-                    return False
-                failures = int(conn.execute(
-                    "SELECT COUNT(*) FROM security_actions WHERE host_id=? "
-                    "AND action_type='apply_host_firewall_policy' AND requested_by=? "
-                    "AND status='failed' AND created_at>=?",
-                    (host_id, SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY, ts - SPEEDTEST_AUTO_RETRY_WINDOW),
-                ).fetchone()[0] or 0)
-                if failures >= SPEEDTEST_AUTO_MAX_FAILURES_PER_WINDOW:
-                    return False
-
-    _enqueue_host_firewall_policy(
-        conn, host_id, node_id, materialized,
-        SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY, ts, 0,
-    )
-    return True
+    return _fw_svc._maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, ts)
 
 
 def _policy_has_rfw_effect(policy: Dict[str, Any] | None) -> bool:
-    if not isinstance(policy, dict):
-        return False
-    rules = policy.get("rules")
-    abuse = policy.get("abuse") if isinstance(policy.get("abuse"), dict) else {}
-    return bool(
-        isinstance(rules, list) and rules
-        or any(abuse.get(key) is True for key in ("speedtest", "mining", "bt"))
-    )
+    return _fw_svc._policy_has_rfw_effect(policy)
 
 
 def _stored_policy_has_rfw_effect(raw: str) -> bool:
-    try:
-        policy = json.loads(raw or "{}")
-    except (TypeError, ValueError):
-        return False
-    # Inspect the persisted shape before validation so legacy port-5201
-    # policies can still be sent to Runman once to remove their owned rule.
-    return _policy_has_rfw_effect(policy)
-
-
-HOST_FIREWALL_READBACK_REASONS = {
-    "platform_unsupported", "unknown", "response_too_large", "readback_endpoint_missing",
-    "readback_http_error", "invalid_json", "invalid_payload", "socket_missing",
-    "socket_permission_denied", "socket_refused", "socket_timeout", "socket_error",
-}
+    return _fw_svc._stored_policy_has_rfw_effect(raw)
 
 
 def _validate_host_firewall_readback(payload: Any, report_ts: int) -> Dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return None
-    status = str(payload.get("status") or "")
-    if status not in {"ready", "unavailable", "unsupported"}:
-        return None
-    raw_reason = payload.get("reason")
-    reason = raw_reason if isinstance(raw_reason, str) and raw_reason in HOST_FIREWALL_READBACK_REASONS else ""
-    clean: Dict[str, Any] = {
-        "status": status, "observed_at": report_ts, "snapshot": None,
-        "reason": "" if status == "ready" else reason or "unknown",
-    }
-    if status != "ready":
-        return clean
-    snapshot = payload.get("snapshot")
-    if not isinstance(snapshot, dict):
-        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-    sync_status = snapshot.get("status")
-    policy_revision = snapshot.get("policy_revision")
-    rule_count = snapshot.get("rule_count")
-    managed_count = snapshot.get("managed_rule_count")
-    drift_count = snapshot.get("drift_count")
-    missing_count = snapshot.get("missing_count")
-    raw_rules = snapshot.get("rules")
-    raw_expected = snapshot.get("expected_rules")
-    rfw_api_version = snapshot.get("rfw_api_version", "")
-    capabilities_known = snapshot.get("capabilities_known", False)
-    raw_supported_protocols = snapshot.get("supported_protocols", [])
-    if (
-        sync_status not in {"in_sync", "drifted"}
-        or type(policy_revision) is not int or not 0 <= policy_revision <= 2**63 - 1
-        or type(rule_count) is not int or not 0 <= rule_count <= 256
-        or type(managed_count) is not int or not 0 <= managed_count <= rule_count
-        or type(drift_count) is not int or not 0 <= drift_count <= 320
-        or type(missing_count) is not int or not 0 <= missing_count <= 64
-        or not isinstance(raw_rules, list) or len(raw_rules) != rule_count
-        or not isinstance(raw_expected, list) or len(raw_expected) > 64
-        or not isinstance(rfw_api_version, str) or len(rfw_api_version) > 64
-        or type(capabilities_known) is not bool
-        or not isinstance(raw_supported_protocols, list) or len(raw_supported_protocols) > 32
-    ):
-        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-    protocols = {"all", "tcp", "udp", "http", "tls", "socks", "ssh", "fet", "wireguard", "openvpn", "quic", "mtproto"}
-    supported_protocols = [str(protocol).strip().lower() for protocol in raw_supported_protocols]
-    if (len(set(supported_protocols)) != len(supported_protocols)
-            or any(protocol not in protocols for protocol in supported_protocols)
-            or (capabilities_known and not supported_protocols)):
-        return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-    rules: List[Dict[str, Any]] = []
-    seen_ids = set()
-    for raw in raw_rules:
-        if not isinstance(raw, dict):
-            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-        rule_id = raw.get("id")
-        priority = raw.get("priority")
-        port_start = raw.get("port_start")
-        port_end = raw.get("port_end")
-        if (
-            type(rule_id) is not int or not 1 <= rule_id <= 2**63 - 1 or rule_id in seen_ids
-            or type(priority) is not int or not 0 <= priority <= 100000
-            or raw.get("direction") not in {"in", "out"}
-            or raw.get("protocol") not in protocols or raw.get("action") not in {"block", "pass"}
-            or type(raw.get("enabled")) is not bool
-            or type(port_start) is not int or not 0 <= port_start <= 65535
-            or type(port_end) is not int or not port_start <= port_end <= 65535
-            or raw.get("ip_type") not in {"any", "cidr", "geoip"}
-            or raw.get("origin") not in {"platform", "manual"}
-            or raw.get("sync_state") not in {"manual", "in_sync", "drifted", "orphaned"}
-        ):
-            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-        seen_ids.add(rule_id)
-        item: Dict[str, Any] = {
-            "id": rule_id, "priority": priority, "direction": raw["direction"],
-            "protocol": raw["protocol"], "action": raw["action"], "enabled": raw["enabled"],
-            "port_start": port_start, "port_end": port_end, "ip_type": raw["ip_type"],
-            "origin": raw["origin"], "sync_state": raw["sync_state"],
-        }
-        managed_key = raw.get("managed_key")
-        if raw["origin"] == "platform":
-            if not isinstance(managed_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", managed_key):
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-            item["managed_key"] = managed_key
-        if raw["ip_type"] == "cidr":
-            try:
-                item["ip"] = str(ipaddress.ip_network(str(raw.get("ip") or "").strip(), strict=False))
-            except ValueError:
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-        elif raw["ip_type"] == "geoip":
-            countries = raw.get("countries")
-            if not isinstance(countries, list) or not 1 <= len(countries) <= 30:
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-            codes = sorted({str(code).strip().upper() for code in countries})
-            if any(not re.fullmatch(r"[A-Z]{2}", code) for code in codes):
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-            item["countries"] = codes
-        rules.append(item)
-    expected_rules: List[Dict[str, Any]] = []
-    expected_keys = set()
-    for raw in raw_expected:
-        if (
-            not isinstance(raw, dict)
-            or not isinstance(raw.get("key"), str)
-            or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", raw["key"])
-            or raw["key"] in expected_keys
-            or raw.get("sync_state") not in {"in_sync", "drifted", "missing"}
-        ):
-            return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-        expected_keys.add(raw["key"])
-        item = {"key": raw["key"], "sync_state": raw["sync_state"]}
-        if "id" in raw:
-            if type(raw["id"]) is not int or not 1 <= raw["id"] <= 2**63 - 1:
-                return {"status": "unavailable", "observed_at": report_ts, "snapshot": None, "reason": "invalid_payload"}
-            item["id"] = raw["id"]
-        expected_rules.append(item)
-    clean["snapshot"] = {
-        "status": sync_status,
-        "observed_at": report_ts,
-        "policy_revision": policy_revision,
-        "rule_count": rule_count,
-        "managed_rule_count": managed_count,
-        "drift_count": drift_count,
-        "missing_count": missing_count,
-        "rfw_api_version": rfw_api_version,
-        "capabilities_known": capabilities_known,
-        "supported_protocols": sorted(supported_protocols),
-        "rules": rules,
-        "expected_rules": expected_rules,
-    }
-    return clean
+    return _fw_svc._validate_host_firewall_readback(payload, report_ts)
 
 
 def _store_host_firewall_readback(
     conn: sqlite3.Connection, host_id: str, security: Dict[str, Any], report_ts: int
 ) -> None:
-    host_firewall = security.get("host_firewall") if isinstance(security, dict) else None
-    if not isinstance(host_firewall, dict) or not isinstance(host_firewall.get("readback"), dict):
-        return
-    readback = _validate_host_firewall_readback(host_firewall["readback"], report_ts)
-    if readback is None:
-        return
-    if readback["status"] == "ready":
-        snapshot_json = json.dumps(readback["snapshot"], ensure_ascii=False, separators=(",", ":"))
-        conn.execute(
-            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json,readback_reason) VALUES(?,?,?,?,?,'') "
-            "ON CONFLICT(host_id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at,"
-            "last_success_at=excluded.last_success_at,snapshot_json=excluded.snapshot_json,readback_reason=''",
-            (host_id, "ready", report_ts, report_ts, snapshot_json),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO host_firewall_readbacks(host_id,status,observed_at,last_success_at,snapshot_json,readback_reason) VALUES(?,?,?,0,'{}',?) "
-            "ON CONFLICT(host_id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at,readback_reason=excluded.readback_reason",
-            (host_id, readback["status"], report_ts, readback["reason"]),
-        )
+    return _fw_svc._store_host_firewall_readback(conn, host_id, security, report_ts)
 
 
-def _host_firewall_live_readback(conn: sqlite3.Connection, host_id: str, now: int | None = None) -> Dict[str, Any]:
-    row = conn.execute(
-        "SELECT status,observed_at,last_success_at,snapshot_json,readback_reason FROM host_firewall_readbacks WHERE host_id=?",
-        (host_id,),
-    ).fetchone()
-    if row is None:
-        return {
-            "status": "unknown", "observed_at": 0, "last_success_at": 0, "stale": True,
-            "reason": "unknown",
-            "sync_status": "unknown", "rule_count": 0, "managed_rule_count": 0,
-            "drift_count": 0, "missing_count": 0, "policy_revision": None, "rfw_api_version": "",
-            "capabilities_known": False, "supported_protocols": [], "supported_protocol_count": 0,
-            "active_blocked_protocols": [], "active_blocked_protocol_count": 0,
-            "protocol_capabilities": {protocol: "unknown" for protocol in RFW_APPLICATION_PROTOCOLS},
-            "mtproto_support": "unknown", "snapshot": None,
-        }
-    try:
-        snapshot = json.loads(row["snapshot_json"] or "{}")
-    except (TypeError, ValueError):
-        snapshot = None
-    if not isinstance(snapshot, dict) or not snapshot:
-        snapshot = None
-    observed_at = int(row["observed_at"] or 0)
-    last_success_at = int(row["last_success_at"] or 0)
-    now = int(time.time()) if now is None else int(now)
-    status = str(row["status"] or "unknown")
-    if status not in {"ready", "unavailable", "unsupported"}:
-        status = "unknown"
-    fresh = status == "ready" and observed_at > 0 and 0 <= now - observed_at <= STALE_SECONDS
-    capabilities_known = bool(snapshot and snapshot.get("capabilities_known")) and fresh
-    supported_protocols = list(snapshot.get("supported_protocols") or []) if capabilities_known else []
-    raw_rules = snapshot.get("rules") if isinstance(snapshot, dict) and isinstance(snapshot.get("rules"), list) else []
-    active_blocked_protocols = sorted({
-        str(rule.get("protocol"))
-        for rule in raw_rules
-        if isinstance(rule, dict)
-        and rule.get("enabled", True) is True
-        and str(rule.get("action") or "block") == "block"
-        and str(rule.get("protocol") or "").strip()
-    }) if fresh else []
-    protocol_capabilities = {
-        protocol: _protocol_capability_state(
-            {"status": status, "stale": not fresh, "capabilities_known": capabilities_known,
-             "supported_protocols": supported_protocols},
-            protocol,
-        )
-        for protocol in RFW_APPLICATION_PROTOCOLS
-    }
-    mtproto_support = "unknown"
-    if capabilities_known:
-        mtproto_support = "supported" if "mtproto" in supported_protocols else "unsupported"
-    return {
-        "status": status,
-        "reason": str(row["readback_reason"] or "unknown") if status != "ready" else "",
-        "observed_at": observed_at,
-        "last_success_at": last_success_at,
-        "age_seconds": max(0, now - observed_at) if observed_at else None,
-        "stale": not fresh,
-        "sync_status": str(snapshot.get("status") or "unknown") if snapshot else "unknown",
-        "rule_count": int(snapshot.get("rule_count") or 0) if snapshot else 0,
-        "managed_rule_count": int(snapshot.get("managed_rule_count") or 0) if snapshot else 0,
-        "drift_count": int(snapshot.get("drift_count") or 0) if snapshot else 0,
-        "missing_count": int(snapshot.get("missing_count") or 0) if snapshot else 0,
-        "policy_revision": int(snapshot.get("policy_revision") or 0) if snapshot else None,
-        "rfw_api_version": str(snapshot.get("rfw_api_version") or "") if capabilities_known else "",
-        "capabilities_known": capabilities_known,
-        "supported_protocols": supported_protocols,
-        "supported_protocol_count": len(supported_protocols),
-        "active_blocked_protocols": active_blocked_protocols,
-        "active_blocked_protocol_count": len(active_blocked_protocols),
-        "protocol_capabilities": protocol_capabilities,
-        "mtproto_support": mtproto_support,
-        "snapshot": snapshot,
-    }
+def _host_firewall_live_readback(
+    conn: sqlite3.Connection, host_id: str, now: int | None = None
+) -> Dict[str, Any]:
+    return _fw_svc._host_firewall_live_readback(conn, host_id, now)
 
 
 def _policy_required_protocols(policy: Dict[str, Any]) -> List[str]:
-    rules = policy.get("rules") if isinstance(policy, dict) else None
-    return sorted({
-        str(rule.get("protocol"))
-        for rule in (rules if isinstance(rules, list) else [])
-        if isinstance(rule, dict) and rule.get("protocol") in RFW_APPLICATION_PROTOCOLS
-    })
+    return _fw_svc._policy_required_protocols(policy)
 
 
 def _policy_protocol_compatibility(
     policy: Dict[str, Any], live_readback: Dict[str, Any]
 ) -> Dict[str, List[str]]:
-    required = _policy_required_protocols(policy)
-    states = {protocol: _protocol_capability_state(live_readback, protocol) for protocol in required}
-    return {
-        "required_protocols": required,
-        "unsupported_protocols": sorted(protocol for protocol, state in states.items() if state == "unsupported"),
-        "unknown_protocols": sorted(protocol for protocol, state in states.items() if state == "unknown"),
-    }
+    return _fw_svc._policy_protocol_compatibility(policy, live_readback)
 
 
 def _protocol_capability_state(live_readback: Dict[str, Any], protocol: str) -> str:
-    """Return support only from a fresh, explicit RFW capability report."""
-    if (
-        not isinstance(live_readback, dict)
-        or live_readback.get("status") != "ready"
-        or live_readback.get("stale") is not False
-        or live_readback.get("capabilities_known") is not True
-    ):
-        return "unknown"
-    supported = live_readback.get("supported_protocols")
-    if not isinstance(supported, list):
-        return "unknown"
-    return "supported" if protocol in supported else "unsupported"
+    return _fw_svc._protocol_capability_state(live_readback, protocol)
 
 
 def _host_firewall_runtime_status(
     conn: sqlite3.Connection, host_id: str, now: int | None = None
 ) -> Dict[str, Any]:
-    now = int(time.time()) if now is None else int(now)
-    row = conn.execute(
-        "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1",
-        (host_id,),
-    ).fetchone()
-    if row is None:
-        return {
-            "control_api": "unknown",
-            "control_api_reason": "no_report",
-            "control_api_http_status": None,
-            "observed_at": 0,
-            "stale": True,
-        }
-    try:
-        security = json.loads(row["payload_json"] or "{}")
-    except (TypeError, ValueError):
-        security = {}
-    runtime = security.get("host_firewall") if isinstance(security, dict) else None
-    if not isinstance(runtime, dict):
-        observed_at = int(row["ts"] or 0)
-        return {
-            "control_api": "unknown",
-            "control_api_reason": "no_capability_report",
-            "control_api_http_status": None,
-            "observed_at": observed_at,
-            "stale": observed_at <= 0 or now - observed_at > STALE_SECONDS or observed_at > now + 30,
-        }
-    control_api = str(runtime.get("control_api") or "unknown")
-    if control_api not in {"ready", "unsupported", "unavailable", "unknown"}:
-        control_api = "unknown"
-    observed_at = int(runtime.get("observed_at") or row["ts"] or 0)
-    allowed_reasons = {
-        "ok", "platform_unsupported", "api_endpoint_missing", "unexpected_http", "http_error",
-        "socket_missing", "socket_permission_denied", "socket_refused", "socket_timeout", "socket_error",
-        "no_report", "no_capability_report", "legacy_report",
-    }
-    reason = str(runtime.get("control_api_reason") or "")
-    if reason not in allowed_reasons:
-        if control_api == "ready":
-            reason = "ok"
-        elif control_api in {"unavailable", "unsupported"}:
-            reason = "legacy_report"
-        else:
-            reason = "no_capability_report"
-    raw_http_status = runtime.get("control_api_http_status")
-    http_status = raw_http_status if type(raw_http_status) is int and 100 <= raw_http_status <= 599 else None
-    return {
-        "control_api": control_api,
-        "control_api_reason": reason,
-        "control_api_http_status": http_status,
-        "observed_at": observed_at,
-        "stale": observed_at <= 0 or now - observed_at > STALE_SECONDS or observed_at > now + 30,
-    }
+    return _fw_svc._host_firewall_runtime_status(conn, host_id, now)
 
 
 def _host_firewall_interface_inventory(
     conn: sqlite3.Connection, host_id: str, now: int | None = None
 ) -> Dict[str, Any]:
-    now = int(time.time()) if now is None else int(now)
-    row = conn.execute(
-        "SELECT payload_json,ts FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1",
-        (host_id,),
-    ).fetchone()
-    empty = {"status": "unknown", "observed_at": 0, "stale": True, "interfaces": []}
-    if row is None:
-        return empty
-    try:
-        security = json.loads(row["payload_json"] or "{}")
-    except (TypeError, ValueError):
-        return {**empty, "status": "unavailable", "observed_at": int(row["ts"] or 0)}
-    host_firewall = security.get("host_firewall") if isinstance(security, dict) else None
-    source = host_firewall.get("interface_inventory") if isinstance(host_firewall, dict) else None
-    if not isinstance(source, dict):
-        return {**empty, "observed_at": int(row["ts"] or 0)}
-    observed_at = int(row["ts"] or 0)
-    stale = observed_at <= 0 or now - observed_at > STALE_SECONDS
-    if source.get("status") != "ready" or not isinstance(source.get("interfaces"), list):
-        return {
-            "status": "unavailable" if source.get("status") == "unavailable" else "unknown",
-            "observed_at": observed_at,
-            "stale": stale,
-            "interfaces": [],
-        }
-
-    interfaces = []
-    seen = set()
-    for raw in source["interfaces"][:64]:
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,15}", name) or name in seen:
-            continue
-        seen.add(name)
-        raw_addresses = raw.get("addresses") if isinstance(raw.get("addresses"), list) else []
-        addresses = []
-        for value in raw_addresses[:16]:
-            try:
-                address = str(ipaddress.ip_interface(str(value).strip()))
-            except ValueError:
-                continue
-            if address not in addresses:
-                addresses.append(address)
-        raw_runtimes = raw.get("runtimes") if isinstance(raw.get("runtimes"), list) else []
-        runtimes = sorted({str(value).lower() for value in raw_runtimes if str(value).lower() in {"incus", "podman", "runman"}})
-        raw_kind = str(raw.get("kind") or "unknown")[:32]
-        kernel_kind = str(raw.get("kernel_kind") or raw_kind)[:32]
-        raw_networks = raw.get("network_names") if isinstance(raw.get("network_names"), list) else []
-        networks = list(dict.fromkeys(
-            str(value)[:100] for value in raw_networks[:16]
-            if isinstance(value, str) and value.strip()
-        ))
-        mtu = raw.get("mtu")
-        interfaces.append({
-            "name": name,
-            "kind": "bridge" if runtimes else raw_kind,
-            "kernel_kind": kernel_kind,
-            "state": str(raw.get("state") or "unknown")[:16].lower(),
-            "mtu": mtu if type(mtu) is int and 0 < mtu <= 65535 else None,
-            "addresses": addresses,
-            "is_default_route": raw.get("is_default_route") is True,
-            "runtimes": runtimes,
-            "network_names": networks,
-            # Older agents can label a runtime-confirmed bridge as `ether`
-            # and set firewall_eligible=false because `ip address show`
-            # omits linkinfo. Runtime labels only come from explicit Incus /
-            # Podman bridge metadata, so preserve that verified mapping.
-            "firewall_eligible": bool(runtimes),
-        })
-    return {
-        "status": "ready",
-        "observed_at": observed_at,
-        "stale": stale,
-        "interfaces": interfaces,
-    }
+    return _fw_svc._host_firewall_interface_inventory(conn, host_id, now)
 
 
 def _host_firewall_policy_targets(
     conn: sqlite3.Connection, host_id: str, policy: Dict[str, Any], now: int | None = None
 ) -> Tuple[List[str] | None, str]:
-    """Resolve a logical runtime selection to fresh, agent-discovered bridge names."""
-    abuse = policy.get("abuse") if isinstance(policy, dict) else None
-    if not isinstance(abuse, dict) or not any(abuse.get(key) is True for key in ("mining", "bt")):
-        return [], "not_required"
-
-    inventory = _host_firewall_interface_inventory(conn, host_id, now)
-    if inventory["status"] != "ready" or inventory["stale"]:
-        return None, "inventory_unavailable"
-
-    eligible = [item for item in inventory["interfaces"] if item["firewall_eligible"]]
-    runtimes = abuse.get("runtimes") if isinstance(abuse.get("runtimes"), list) else []
-    requested_interfaces = abuse.get("interfaces") if isinstance(abuse.get("interfaces"), list) else []
-    if runtimes:
-        selected = [
-            item["name"] for item in eligible
-            if set(item["runtimes"]).intersection(runtimes)
-        ]
-        if not selected:
-            return None, "runtime_not_found"
-        return list(dict.fromkeys(selected)), "ready"
-
-    eligible_names = {item["name"] for item in eligible}
-    if not requested_interfaces or any(name not in eligible_names for name in requested_interfaces):
-        return None, "interface_not_found"
-    return list(dict.fromkeys(requested_interfaces)), "ready"
+    return _fw_svc._host_firewall_policy_targets(conn, host_id, policy, now)
 
 
 def _materialize_host_firewall_policy(
     conn: sqlite3.Connection, host_id: str, policy: Dict[str, Any], now: int | None = None
 ) -> Tuple[Dict[str, Any] | None, str]:
-    """Build the host-local policy sent to Runman; never send logical runtime selectors."""
-    targets, status = _host_firewall_policy_targets(conn, host_id, policy, now)
-    if targets is None:
-        return None, status
-    materialized = dict(policy)
-    abuse = dict(policy.get("abuse") or {})
-    if any(abuse.get(key) is True for key in ("mining", "bt")):
-        abuse["interfaces"] = targets
-    # Runtime selectors are only a fleet/single-host input. Resolve them to
-    # discovered bridges before validating the host-local policy, otherwise
-    # derived interfaces conflict with the selector.
-    abuse.pop("runtimes", None)
-    materialized["abuse"] = abuse
-    validated = _validate_host_firewall_policy(materialized)
-    # Normalization adds an empty runtime selector to every policy. Keep the
-    # node-local payload free of fleet-only fields after validation as well.
-    validated["abuse"].pop("runtimes", None)
-    return validated, status
+    return _fw_svc._materialize_host_firewall_policy(conn, host_id, policy, now)
 
 
 def _latest_host_firewall_action(conn: sqlite3.Connection, host_id: str) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT id,status,result_message,created_at,updated_at,attempts,params_json,action_type,requested_by FROM security_actions "
-        "WHERE host_id=? AND action_type IN ('apply_host_firewall_policy','delete_host_firewall_rule') ORDER BY id DESC LIMIT 1",
-        (host_id,),
-    ).fetchone()
+    return _fw_svc._latest_host_firewall_action(conn, host_id)
 
 
 def _host_firewall_action_summary(conn: sqlite3.Connection, host_id: str) -> Dict[str, Any]:
-    row = _latest_host_firewall_action(conn, host_id)
-    if row is None:
-        return {}
-    try:
-        params = json.loads(row["params_json"] or "{}")
-    except (TypeError, ValueError):
-        params = {}
-    params = params if isinstance(params, dict) else {}
-    rollback = params.get("rollback") if isinstance(params.get("rollback"), dict) else {}
-    action_policy = params.get("policy") if isinstance(params.get("policy"), dict) else {}
-    policy_revision = action_policy.get("revision")
-    rollback_revision = rollback.get("target_revision") if rollback.get("requested") is True else None
-    return {
-        "id": int(row["id"]),
-        "status": str(row["status"] or "unknown"),
-        "action_type": str(row["action_type"] or ""),
-        "attempts": int(row["attempts"] or 0),
-        "created_at": int(row["created_at"] or 0),
-        "updated_at": int(row["updated_at"] or 0),
-        "result_message": str(row["result_message"] or "")[:240],
-        "policy_revision": policy_revision if type(policy_revision) is int and policy_revision >= 0 else None,
-        "rollback": {
-            "requested": rollback.get("requested") is True,
-            "target_revision": rollback_revision if type(rollback_revision) is int and rollback_revision >= 0 else None,
-        },
-    }
+    return _fw_svc._host_firewall_action_summary(conn, host_id)
 
 
 def _enqueue_host_firewall_policy(
@@ -3058,343 +1354,21 @@ def _enqueue_host_firewall_policy(
     fleet_revision: int,
     rollback_target_revision: int | None = None,
 ) -> int:
-    existing = conn.execute(
-        "SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
-    ).fetchone()
-    revision = (int(existing["revision"]) if existing else 0) + 1
-    policy_with_revision = {"revision": revision, **policy}
-    policy_json = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
-    requires_rfw = _policy_has_rfw_effect(policy)
-    if existing and _stored_policy_has_rfw_effect(str(existing["policy_json"] or "{}")):
-        requires_rfw = True
-    if existing and str(existing["policy_json"] or "") != policy_json:
-        conn.execute(
-            "INSERT INTO host_firewall_policy_history(host_id,revision,policy_json,updated_by,updated_at,source_fleet_revision) VALUES(?,?,?,?,?,?)",
-            (host_id, int(existing["revision"]), str(existing["policy_json"] or "{}"), str(existing["updated_by"] or ""), int(existing["updated_at"] or 0), int(existing["source_fleet_revision"] or 0)),
-        )
-        conn.execute(
-            "DELETE FROM host_firewall_policy_history WHERE host_id=? AND id NOT IN (SELECT id FROM host_firewall_policy_history WHERE host_id=? ORDER BY revision DESC,id DESC LIMIT 20)",
-            (host_id, host_id),
-        )
-    conn.execute(
-        "INSERT INTO host_firewall_policies(host_id,revision,policy_json,updated_by,updated_at,source_fleet_revision) "
-        "VALUES(?,?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET revision=excluded.revision,"
-        "policy_json=excluded.policy_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at,"
-        "source_fleet_revision=excluded.source_fleet_revision",
-        (host_id, revision, policy_json, requested_by, now, fleet_revision),
+    return _fw_svc._enqueue_host_firewall_policy(
+        conn, host_id, node_id, policy, requested_by, now, fleet_revision, rollback_target_revision
     )
-    conn.execute(
-        "UPDATE security_actions SET status='cancelled',result_message='已被更新的母机防火墙策略取代',updated_at=? "
-        "WHERE host_id=? AND action_type='apply_host_firewall_policy' AND status IN ('queued','dispatched')",
-        (now, host_id),
-    )
-    action_params = {"expected_node_id": node_id, "policy": policy_with_revision, "requires_rfw": requires_rfw}
-    if fleet_revision > 0:
-        action_params["fleet_revision"] = int(fleet_revision)
-    if rollback_target_revision is not None:
-        action_params["rollback"] = {"requested": True, "target_revision": int(rollback_target_revision)}
-    cur = conn.execute(
-        "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
-        "VALUES(0,?,'host','','__host__','apply_host_firewall_policy',?,'queued',?,?,?)",
-        (
-            host_id,
-            json.dumps(action_params, ensure_ascii=False),
-            requested_by,
-            now,
-            now,
-        ),
-    )
-    return int(cur.lastrowid)
 
 
 def _maybe_queue_fleet_firewall_policy(
-    conn: sqlite3.Connection,
-    host_id: str,
-    node_id: str,
-    ts: int,
-    security: Dict[str, Any],
+    conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, security: Dict[str, Any]
 ) -> bool:
-    runtime = security.get("host_firewall") if isinstance(security, dict) else None
-    if not node_id:
-        return False
-    fleet = conn.execute("SELECT revision,policy_json FROM fleet_firewall_policy WHERE id=1").fetchone()
-    if fleet is None or int(fleet["revision"] or 0) < 1:
-        return False
-    try:
-        policy = _validate_host_firewall_policy(json.loads(fleet["policy_json"] or "{}"))
-    except (HTTPException, TypeError, ValueError):
-        return False
-    local_policy = conn.execute(
-        "SELECT policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)
-    ).fetchone()
-    requires_rfw = _policy_has_rfw_effect(policy) or (
-        local_policy is not None and _stored_policy_has_rfw_effect(str(local_policy["policy_json"] or "{}"))
-    )
-    if requires_rfw and (not isinstance(runtime, dict) or runtime.get("control_api") != "ready"):
-        return False
-    fleet_revision = int(fleet["revision"])
-    state = conn.execute(
-        "SELECT revision,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)
-    ).fetchone()
-    already_on_fleet_revision = (
-        state is not None and int(state["source_fleet_revision"] or 0) >= fleet_revision
-    )
-    live_readback = _host_firewall_live_readback(conn, host_id, ts) if requires_rfw else {"status": "unavailable", "stale": True}
-    drift_repair_needed = (
-        already_on_fleet_revision
-        and live_readback.get("status") == "ready"
-        and live_readback.get("stale") is False
-        and live_readback.get("sync_status") == "drifted"
-    )
-    latest = _latest_host_firewall_action(conn, host_id)
-    same_fleet_revision = False
-    retry_failed_unverified = False
-    if latest is not None:
-        try:
-            latest_params = json.loads(latest["params_json"] or "{}")
-        except (TypeError, ValueError):
-            latest_params = {}
-        same_fleet_revision = int(latest_params.get("fleet_revision") or 0) == fleet_revision
-        if same_fleet_revision and latest["status"] in {"queued", "dispatched", "running"}:
-            return False
-        if same_fleet_revision and latest["status"] == "failed":
-            if ts - int(latest["updated_at"] or 0) < 900:
-                return False
-            failed_for_revision = int(conn.execute(
-                """SELECT COUNT(*) FROM security_actions
-                   WHERE host_id=? AND action_type='apply_host_firewall_policy' AND status='failed'
-                     AND json_valid(params_json)
-                     AND CAST(json_extract(params_json,'$.fleet_revision') AS INTEGER)=?""",
-                (host_id, fleet_revision),
-            ).fetchone()[0] or 0)
-            snapshot = live_readback.get("snapshot") if isinstance(live_readback.get("snapshot"), dict) else {}
-            readback_matches_policy = (
-                live_readback.get("status") == "ready"
-                and live_readback.get("stale") is False
-                and live_readback.get("sync_status") == "in_sync"
-                and live_readback.get("drift_count") == 0
-                and live_readback.get("missing_count") == 0
-                and state is not None
-                and snapshot.get("policy_revision") == int(state["revision"] or 0)
-            )
-            retry_failed_unverified = failed_for_revision < 3 and not readback_matches_policy
-    if already_on_fleet_revision and not drift_repair_needed and not retry_failed_unverified:
-        return False
-    # A fresh drift readback must have been observed after the previous
-    # successful apply before scheduling another repair. This prevents the
-    # same pre-apply snapshot from causing an action loop.
-    if (
-        latest is not None
-        and same_fleet_revision
-        and latest["status"] == "succeeded"
-        and drift_repair_needed
-        and int(live_readback.get("observed_at") or 0) <= int(latest["updated_at"] or 0)
-    ):
-        return False
-    if _policy_required_protocols(policy):
-        compatibility = _policy_protocol_compatibility(policy, live_readback)
-        if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
-            return False
-    host_policy, _target_status = _materialize_host_firewall_policy(conn, host_id, policy, ts)
-    if host_policy is None:
-        return False
-    _enqueue_host_firewall_policy(
-        conn, host_id, node_id, host_policy, "fleet-policy-reconcile", ts, fleet_revision
-    )
-    return True
+    return _fw_svc._maybe_queue_fleet_firewall_policy(conn, host_id, node_id, ts, security)
 
 
 def _ingest_host_firewall_events(
     conn: sqlite3.Connection, host_id: str, security: Dict[str, Any], ts: int
 ) -> Tuple[List[Dict[str, Any]], str]:
-    """Validate, deduplicate, and turn bounded RFW event pages into grouped alerts."""
-    host_firewall = security.get("host_firewall") if isinstance(security, dict) else None
-    if not isinstance(host_firewall, dict) or host_firewall.get("events_api") != "ready":
-        return [], ""
-    instance_id = str(host_firewall.get("instance_id") or "")
-    next_cursor = str(host_firewall.get("next_cursor") or "")
-    events = host_firewall.get("events")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", instance_id):
-        return [], ""
-    cursor_match = re.fullmatch(r"([A-Za-z0-9_-]{1,80}):(\d{1,20})", next_cursor)
-    if not cursor_match or cursor_match.group(1) != instance_id or not isinstance(events, list) or len(events) > 100:
-        return [], ""
-    try:
-        page_sequence = int(cursor_match.group(2))
-    except ValueError:
-        return [], ""
-
-    normalized_events: List[Dict[str, Any]] = []
-    last_page_sequence = 0
-    for event in events:
-        if not isinstance(event, dict):
-            return [], ""
-        sequence = event.get("sequence")
-        observed_at = event.get("observed_at")
-        if type(sequence) is not int or sequence < 1 or type(observed_at) is not int or observed_at <= 0:
-            return [], ""
-        if event.get("cursor") != f"{instance_id}:{sequence}" or sequence <= last_page_sequence:
-            return [], ""
-        last_page_sequence = sequence
-        try:
-            source_ip = str(ipaddress.ip_address(str(event.get("source_ip") or "")))
-            destination_ip = str(ipaddress.ip_address(str(event.get("destination_ip") or "")))
-        except ValueError:
-            return [], ""
-        source_port = event.get("source_port")
-        destination_port = event.get("destination_port")
-        if type(source_port) is not int or not 0 <= source_port <= 65535 or type(destination_port) is not int or not 0 <= destination_port <= 65535:
-            return [], ""
-        transport = str(event.get("transport") or "")
-        app_protocol = str(event.get("app_protocol") or "")
-        direction = str(event.get("direction") or "")
-        action = str(event.get("action") or "")
-        if transport not in {"tcp", "udp", "unknown"} or app_protocol not in {"http", "tls", "socks", "fet", "wireguard", "ssh", "openvpn", "quic", "mtproto", "unknown"} or direction not in {"in", "out"} or action not in {"pass", "block"}:
-            return [], ""
-        countries = event.get("rule_countries")
-        if not isinstance(countries, list) or len(countries) > 30:
-            return [], ""
-        normalized_countries = sorted({str(code).strip().upper() for code in countries})
-        if any(not re.fullmatch(r"[A-Z]{2}", code) for code in normalized_countries):
-            return [], ""
-        normalized_events.append({
-            "sequence": sequence,
-            "observed_at": observed_at,
-            "source_ip": source_ip,
-            "source_port": source_port,
-            "destination_ip": destination_ip,
-            "destination_port": destination_port,
-            "transport": transport,
-            "app_protocol": app_protocol,
-            "direction": direction,
-            "action": action,
-            "rule_id": event.get("rule_id") if type(event.get("rule_id")) is int else None,
-            "rule_countries": normalized_countries,
-        })
-    if page_sequence < last_page_sequence:
-        return [], ""
-
-    previous = conn.execute(
-        "SELECT instance_id,sequence FROM host_firewall_event_state WHERE host_id=?", (host_id,)
-    ).fetchone()
-    previous_instance = str(previous["instance_id"]) if previous is not None else ""
-    previous_sequence = int(previous["sequence"]) if previous is not None else 0
-    same_instance = previous_instance == instance_id
-    last_sequence = previous_sequence if same_instance else 0
-    gap_reasons: List[str] = []
-    dropped = max(0, min(int(host_firewall.get("dropped") or 0), 1_000_000))
-    if previous_instance and not same_instance:
-        gap_reasons.append("RFW 实例已重启或替换")
-    if host_firewall.get("cursor_reset") is True:
-        gap_reasons.append("事件游标被重置")
-    if dropped > 0:
-        gap_reasons.append(f"RFW 环形缓冲区丢弃 {dropped} 条")
-
-    fresh_events = []
-    for event in normalized_events:
-        sequence = int(event["sequence"])
-        if same_instance and sequence <= previous_sequence:
-            continue
-        if same_instance and last_sequence > 0 and sequence > last_sequence + 1:
-            gap_reasons.append(f"事件序号从 {last_sequence} 跳至 {sequence}")
-        fresh_events.append(event)
-        last_sequence = max(last_sequence, sequence)
-
-    grouped: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = {}
-    for event in fresh_events:
-        if event["app_protocol"] not in RFW_CN_ALERT_PROTOCOLS or "CN" not in event["rule_countries"]:
-            continue
-        # RFW currently reports the matched rule's country scope, not the
-        # individual GeoIP country. A CN-only rule is exact; a mixed-country
-        # rule is deliberately marked as scope-only rather than asserted as CN.
-        country_confidence = "exact_cn_rule" if event["rule_countries"] == ["CN"] else "rule_scope_includes_cn"
-        key = (event["app_protocol"], event["direction"], event["action"], country_confidence)
-        grouped.setdefault(key, []).append(event)
-
-    alerts: List[Dict[str, Any]] = []
-    for (app_protocol, direction, action, country_confidence), group in grouped.items():
-        is_pass = action == "pass"
-        protocol_label = {
-            "wireguard": "WireGuard",
-            "socks": "SOCKS",
-            "fet": "FET（高熵加密特征，可能含 SS 类）",
-            "mtproto": "MTProto（混淆传输特征）",
-            "openvpn": "OpenVPN",
-        }.get(app_protocol, app_protocol)
-        if country_confidence == "exact_cn_rule":
-            direction_label = "出站到 CN" if direction == "out" else "来自 CN 的入站"
-        else:
-            direction_label = (
-                "出站命中包含 CN 的 GeoIP 范围（实际国家未知）"
-                if direction == "out"
-                else "入站命中包含 CN 的 GeoIP 范围（实际国家未知）"
-            )
-        action_label = "被放行" if is_pass else "已阻断"
-        scope_note = "规则仅包含 CN，国家范围精确。" if country_confidence == "exact_cn_rule" else "规则国家范围包含 CN，但 RFW 事件未携带实际命中国家，需人工复核。"
-        protocol_note = {
-            "fet": "FET 依首包高熵特征识别，不能确证 Shadowsocks；其他非 TLS 加密流量也可能命中，存在误报。",
-            "mtproto": "MTProto 仅依据已知混淆初始化标记识别，覆盖不完整，不代表确认了完整会话。",
-            "wireguard": "WireGuard 识别主要基于可见的初始握手；协议命中不代表恶意或未授权。",
-            "socks": "SOCKS 协议命中不代表服务未授权或存在滥用。",
-            "openvpn": "OpenVPN 是常见 VPN 协议；协议命中不代表服务未授权或存在滥用。",
-        }.get(app_protocol, "")
-        samples = [
-            f"{event['source_ip']}:{event['source_port']} → {event['destination_ip']}:{event['destination_port']}"
-            for event in group[:10]
-        ]
-        rule_ids = sorted({int(event["rule_id"]) for event in group if event.get("rule_id") is not None})
-        alert_type = f"rfw_cn_{app_protocol}_{direction}_{action}"
-        title = f"RFW {protocol_label} 连接{action_label}"
-        message = (
-            f"RFW 检测到 {direction_label} 的 {protocol_label} 流量，共 {len(group)} 条事件，已{action_label}。"
-            f"样例：{'；'.join(samples) if samples else '无端点样例'}。{scope_note}{protocol_note}"
-        )
-        alerts.append({
-            "type": alert_type,
-            "severity": "critical" if is_pass else "warning",
-            "runtime": "host",
-            "project": "",
-            "container_name": "__host__",
-            "title": title,
-            "message": message[:2000],
-            "value": float(len(group)),
-            "threshold": 1.0,
-            "instance_id": instance_id,
-            "rfw_evidence": {
-                "event_count": len(group),
-                "app_protocol": app_protocol,
-                "direction": direction,
-                "packet_action": action,
-                "country_confidence": country_confidence,
-                "rule_ids": rule_ids[:20],
-                "samples": samples,
-                "first_observed_at": min(int(event["observed_at"]) for event in group),
-                "last_observed_at": max(int(event["observed_at"]) for event in group),
-            },
-        })
-
-    if gap_reasons:
-        alerts.append({
-            "type": "rfw_event_gap",
-            "severity": "warning",
-            "runtime": "host",
-            "project": "",
-            "container_name": "__host__",
-            "title": "RFW 连接事件存在采集缺口",
-            "message": "；".join(sorted(set(gap_reasons))) + "。事件统计可能不完整，不能据此推断未发生连接。",
-            "value": float(dropped),
-            "threshold": 0.0,
-            "instance_id": instance_id,
-            "rfw_evidence": {"dropped": dropped, "cursor_reset": host_firewall.get("cursor_reset") is True},
-        })
-
-    last_sequence = max(last_sequence, page_sequence)
-    conn.execute(
-        "INSERT INTO host_firewall_event_state(host_id,instance_id,sequence,cursor,updated_at) VALUES(?,?,?,?,?) "
-        "ON CONFLICT(host_id) DO UPDATE SET instance_id=excluded.instance_id,sequence=excluded.sequence,cursor=excluded.cursor,updated_at=excluded.updated_at",
-        (host_id, instance_id, last_sequence, next_cursor, ts),
-    )
-    return alerts, next_cursor
+    return _fw_svc._ingest_host_firewall_events(conn, host_id, security, ts)
 
 
 def _fleet_firewall_node_state(
@@ -3405,171 +1379,9 @@ def _fleet_firewall_node_state(
     required_protocols: List[str] | None = None,
     required_policy: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    host_id = str(host["host_id"])
-    node_id = str(host["node_id"] or "")
-    last_seen = int(host["last_seen"] or 0)
-    online = bool(node_id) and now - last_seen <= STALE_SECONDS
-    runtime = _host_firewall_runtime_status(conn, host_id, now)
-    live_readback = _host_firewall_live_readback(conn, host_id, now)
-    interface_inventory = _host_firewall_interface_inventory(conn, host_id, now)
-    container_interfaces = {
-        runtime_name: [
-            item["name"] for item in interface_inventory["interfaces"]
-            if item["firewall_eligible"] and runtime_name in item["runtimes"]
-        ]
-        for runtime_name in ("incus", "podman", "runman")
-    }
-    policy_row = conn.execute(
-        "SELECT revision,source_fleet_revision,policy_json,updated_by FROM host_firewall_policies WHERE host_id=?", (host_id,)
-    ).fetchone()
-    local_revision = int(policy_row["revision"] or 0) if policy_row is not None else 0
-    applied_fleet_revision = int(policy_row["source_fleet_revision"] or 0) if policy_row is not None else 0
-    stored_policy_raw = str(policy_row["policy_json"] or "{}") if policy_row is not None else "{}"
-    try:
-        local_policy = _validate_host_firewall_policy(json.loads(stored_policy_raw)) if policy_row is not None else _empty_host_firewall_policy()
-    except (HTTPException, TypeError, ValueError):
-        local_policy = _empty_host_firewall_policy()
-    # A configured fleet template is authoritative. Otherwise the node-local
-    # policy is authoritative; when none exists, the default container-only
-    # service protection is the desired policy and is reported separately.
-    effective_policy = (
-        required_policy if fleet_revision > 0 and isinstance(required_policy, dict)
-        else local_policy
+    return _fw_svc._fleet_firewall_node_state(
+        conn, host, fleet_revision, now, required_protocols, required_policy
     )
-    _targets, target_status = _host_firewall_policy_targets(conn, host_id, effective_policy, now)
-    protocol_status = _policy_protocol_compatibility(effective_policy, live_readback)
-    policy_abuse = effective_policy.get("abuse") if isinstance(effective_policy.get("abuse"), dict) else {}
-    container_policy_enabled = any(policy_abuse.get(key) is True for key in ("mining", "bt"))
-    rfw_required = _policy_has_rfw_effect(effective_policy) or (
-        policy_row is not None and _stored_policy_has_rfw_effect(stored_policy_raw)
-    )
-    action = _latest_host_firewall_action(conn, host_id)
-    try:
-        action_params = json.loads(action["params_json"] or "{}") if action is not None else {}
-    except (TypeError, ValueError):
-        action_params = {}
-    action_params = action_params if isinstance(action_params, dict) else {}
-    action_policy = action_params.get("policy") if isinstance(action_params.get("policy"), dict) else {}
-    action_requires_rfw = (
-        action_params.get("requires_rfw") is True
-        or str(action["action_type"] or "") == "delete_host_firewall_rule"
-        # Older queued actions predate the explicit requires_rfw flag. Their
-        # own policy payload still proves whether they target RFW.
-        or (
-            str(action["action_type"] or "") == "apply_host_firewall_policy"
-            and _policy_has_rfw_effect(action_policy)
-        )
-    ) if action is not None else False
-    rfw_action = action if action_requires_rfw else None
-    auto_speedtest_default = bool(
-        policy_row is not None
-        and str(policy_row["updated_by"] or "") == SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY
-    )
-    rfw_status = _host_firewall_component_status(
-        registered=bool(node_id), online=online, configured=rfw_required,
-        runtime=runtime, live_readback=live_readback, protocol_status=protocol_status,
-        target_status=target_status, container_policy_enabled=container_policy_enabled,
-        action=rfw_action, local_revision=local_revision,
-        expected_fleet_revision=fleet_revision, applied_fleet_revision=applied_fleet_revision,
-    )
-    container_protection_status = _host_container_protection_status(
-        conn, host_id=host_id, now=now, online=online,
-        agent_version=str(host["agent_version"] or "unknown"),
-        policy=effective_policy, policy_row_exists=policy_row is not None,
-        policy_revision=local_revision, auto_default=(fleet_revision == 0 and policy_row is None) or auto_speedtest_default,
-        latest_action=action, fleet_revision=fleet_revision,
-        applied_fleet_revision=applied_fleet_revision,
-    )
-    status = "unregistered"
-    if node_id:
-        status = "offline" if not online else "awaiting_capability"
-        if online and not rfw_required:
-            if action is not None and action["status"] in {"queued", "dispatched", "running"}:
-                status = "queued"
-            elif action is not None and action["status"] == "failed":
-                status = "apply_failed"
-            elif auto_speedtest_default and action is not None and action["status"] == "succeeded":
-                status = "last_apply_succeeded"
-            elif fleet_revision > 0 and applied_fleet_revision == fleet_revision and action is not None and action["status"] == "succeeded":
-                status = "last_apply_succeeded"
-            elif fleet_revision > 0:
-                status = "not_synced"
-            elif policy_row is None and not _agent_supports_speedtest_policy(host["agent_version"]):
-                status = "speedtest_agent_update_required"
-            elif policy_row is None:
-                status = "speedtest_auto_pending"
-            else:
-                status = "ready"
-        elif online and not runtime["stale"] and runtime["control_api"] == "unsupported":
-            status = "runman_update_required"
-        elif online and not runtime["stale"] and runtime["control_api"] == "unavailable":
-            status = "runman_unavailable"
-        elif online and not live_readback["stale"] and protocol_status["unsupported_protocols"]:
-            status = "rfw_protocol_update_required"
-        elif online and runtime["stale"]:
-            status = (
-                "awaiting_interfaces"
-                if container_policy_enabled and target_status == "inventory_unavailable"
-                else "firewall_status_stale"
-            )
-        elif online and runtime["control_api"] == "ready" and protocol_status["unknown_protocols"]:
-            status = "awaiting_rfw_capability"
-        elif runtime["control_api"] == "ready":
-            if container_policy_enabled and target_status == "inventory_unavailable":
-                status = "awaiting_interfaces"
-            elif container_policy_enabled and target_status in {"runtime_not_found", "interface_not_found"}:
-                status = "interfaces_not_found"
-            elif action is not None and action["status"] in {"queued", "dispatched", "running"}:
-                status = "queued"
-            elif action is not None and action["status"] == "failed":
-                status = "apply_failed"
-            elif (
-                live_readback["status"] == "ready"
-                and not live_readback["stale"]
-                and live_readback["sync_status"] == "drifted"
-            ):
-                status = "drifted"
-            elif fleet_revision > 0 and applied_fleet_revision == fleet_revision and action is not None and action["status"] == "succeeded":
-                status = "last_apply_succeeded"
-            elif fleet_revision > 0:
-                status = "not_synced"
-            else:
-                status = "ready"
-    return {
-        "host_id": host_id,
-        "registered": bool(node_id),
-        "online": online,
-        "agent_version": str(host["agent_version"] or "unknown"),
-        "control_api": runtime["control_api"],
-        "control_api_reason": runtime["control_api_reason"],
-        "control_api_http_status": runtime["control_api_http_status"],
-        "control_api_stale": runtime["stale"],
-        "observed_at": runtime["observed_at"],
-        "live_readback": {key: value for key, value in live_readback.items() if key != "snapshot"},
-        "local_revision": local_revision,
-        "fleet_revision": applied_fleet_revision,
-        "speedtest_auto_default": auto_speedtest_default,
-        "speedtest_policy_supported": _agent_supports_speedtest_policy(host["agent_version"]),
-        "state": status,
-        "rfw_status": rfw_status,
-        "rfw_configured": rfw_required,
-        "container_protection_status": container_protection_status,
-        "required_protocols": protocol_status["required_protocols"],
-        "unsupported_protocols": protocol_status["unsupported_protocols"],
-        "unknown_protocols": protocol_status["unknown_protocols"],
-        "container_interfaces": {
-            "status": interface_inventory["status"],
-            "observed_at": interface_inventory["observed_at"],
-            "stale": interface_inventory["stale"],
-            "by_runtime": container_interfaces,
-        },
-        "last_action": None if action is None else {
-            "id": int(action["id"]),
-            "status": str(action["status"]),
-            "message": str(action["result_message"] or ""),
-            "updated_at_utc8": format_utc8(int(action["updated_at"] or 0)),
-        },
-    }
 
 
 def _host_firewall_component_status(
@@ -3578,49 +1390,13 @@ def _host_firewall_component_status(
     target_status: str, container_policy_enabled: bool, action: sqlite3.Row | None,
     local_revision: int, expected_fleet_revision: int, applied_fleet_revision: int,
 ) -> str:
-    """Classify RFW from current RFW evidence only, never from Agent file persistence."""
-    if not registered:
-        return "unregistered"
-    if not online:
-        return "offline"
-    if not configured:
-        return "not_configured"
-    if runtime.get("stale"):
-        return "status_stale"
-    if runtime.get("control_api") == "unsupported":
-        return "runman_update_required"
-    if runtime.get("control_api") == "unavailable":
-        return "runman_unavailable"
-    if runtime.get("control_api") != "ready":
-        return "awaiting_capability"
-    if live_readback.get("status") == "ready" and not live_readback.get("stale"):
-        if protocol_status.get("unsupported_protocols"):
-            return "rfw_protocol_update_required"
-        if protocol_status.get("unknown_protocols"):
-            return "awaiting_rfw_capability"
-    if live_readback.get("status") != "ready" or live_readback.get("stale"):
-        return "readback_unavailable"
-    if live_readback.get("sync_status") == "drifted":
-        return "drifted"
-    observed_revision = live_readback.get("policy_revision")
-    if (
-        live_readback.get("sync_status") == "in_sync"
-        and int(live_readback.get("drift_count") or 0) == 0
-        and int(live_readback.get("missing_count") or 0) == 0
-        and type(observed_revision) is int
-        and observed_revision == local_revision
-        and (expected_fleet_revision == 0 or applied_fleet_revision == expected_fleet_revision)
-    ):
-        return "verified"
-    if container_policy_enabled and target_status == "inventory_unavailable":
-        return "awaiting_interfaces"
-    if container_policy_enabled and target_status in {"runtime_not_found", "interface_not_found"}:
-        return "interfaces_not_found"
-    if action is not None and action["status"] in {"queued", "dispatched", "running"}:
-        return "queued"
-    if action is not None and action["status"] == "failed":
-        return "apply_failed"
-    return "not_synced"
+    return _fw_svc._host_firewall_component_status(
+        registered=registered, online=online, configured=configured, runtime=runtime,
+        live_readback=live_readback, protocol_status=protocol_status,
+        target_status=target_status, container_policy_enabled=container_policy_enabled,
+        action=action, local_revision=local_revision,
+        expected_fleet_revision=expected_fleet_revision, applied_fleet_revision=applied_fleet_revision,
+    )
 
 
 def _host_container_protection_status(
@@ -3629,112 +1405,12 @@ def _host_container_protection_status(
     policy_revision: int, auto_default: bool, latest_action: sqlite3.Row | None,
     fleet_revision: int, applied_fleet_revision: int,
 ) -> Dict[str, Any]:
-    """Aggregate per-container Agent readbacks for Incus/Podman protection."""
-    abuse = policy.get("abuse") if isinstance(policy, dict) and isinstance(policy.get("abuse"), dict) else {}
-    services = sorted({str(item).strip().lower() for item in abuse.get("services", []) if isinstance(item, str) and item.strip()})
-    runtimes = sorted({str(item).strip().lower() for item in abuse.get("service_runtimes", []) if item in {"incus", "podman", "runman"}})
-    configured = bool(services and runtimes)
-    result: Dict[str, Any] = {
-        "configured": configured, "state": "not_configured", "services": services,
-        "runtimes": runtimes, "policy_revision": policy_revision,
-        "observed_at": 0, "age_seconds": None, "containers_seen": 0,
-        "containers_fresh": 0, "containers_verified": 0,
-        "containers_waiting_revision": 0, "containers_unverified": 0,
-        "containers_stale": 0, "reason": "",
-    }
-    if not configured:
-        return result
-    if not online:
-        result.update(state="node_offline", reason="node_offline")
-        return result
-    if not _agent_supports_speedtest_policy(agent_version):
-        result.update(state="agent_update_required", reason="agent_update_required")
-        return result
-    if not policy_row_exists or policy_revision < 1:
-        state = "waiting_policy" if auto_default or fleet_revision > 0 else "policy_not_applied"
-        result.update(state=state, reason="policy_not_applied")
-        return result
-
-    action = latest_action
-    if action is not None:
-        try:
-            params = json.loads(action["params_json"] or "{}")
-        except (TypeError, ValueError):
-            params = {}
-        action_policy = params.get("policy") if isinstance(params, dict) and isinstance(params.get("policy"), dict) else {}
-        action_revision = action_policy.get("revision")
-        action_is_current = type(action_revision) is int and action_revision == policy_revision
-        if action_is_current and action["status"] in {"queued", "dispatched", "running"}:
-            result.update(state="applying", reason="policy_action_pending")
-            return result
-        if action_is_current and action["status"] == "failed":
-            result.update(state="apply_failed", reason="policy_action_failed")
-            return result
-    if fleet_revision > 0 and applied_fleet_revision != fleet_revision:
-        result.update(state="waiting_policy", reason="fleet_policy_not_applied")
-        return result
-
-    placeholders = ",".join("?" for _ in runtimes)
-    rows = conn.execute(
-        "SELECT runtime,project,container_name,ts,payload_json FROM ("
-        "SELECT runtime,project,container_name,ts,payload_json,"
-        "ROW_NUMBER() OVER (PARTITION BY runtime,project,container_name ORDER BY ts DESC,id DESC) AS row_number "
-        f"FROM reports WHERE host_id=? AND runtime IN ({placeholders}) AND ts>=?"
-        ") WHERE row_number=1 ORDER BY runtime,project,container_name",
-        (host_id, *runtimes, now - 24 * 60 * 60),
-    ).fetchall()
-    result["containers_seen"] = len(rows)
-    if not rows:
-        result.update(state="waiting_samples", reason="no_container_reports")
-        return result
-
-    latest_at = max(int(row["ts"] or 0) for row in rows)
-    result["observed_at"] = latest_at
-    result["age_seconds"] = max(0, now - latest_at) if latest_at else None
-    verified = waiting_revision = unverified = stale = fresh = 0
-    for row in rows:
-        sampled_at = int(row["ts"] or 0)
-        if sampled_at <= 0 or sampled_at > now + 30 or now - sampled_at > STALE_SECONDS:
-            stale += 1
-            continue
-        fresh += 1
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except (TypeError, ValueError):
-            payload = {}
-        security = payload.get("security") if isinstance(payload, dict) and isinstance(payload.get("security"), dict) else {}
-        guard = security.get("speedtest_guard") if isinstance(security.get("speedtest_guard"), dict) else None
-        if guard is None:
-            unverified += 1
-            continue
-        reported_revision = guard.get("policy_revision")
-        if type(reported_revision) is not int or reported_revision != policy_revision:
-            waiting_revision += 1
-            continue
-        reported_services = sorted({str(item).strip().lower() for item in guard.get("services", []) if isinstance(item, str) and item.strip()})
-        expected_services = services if row["runtime"] in runtimes else []
-        guard_state = str(guard.get("state") or "")
-        if reported_services == expected_services and guard_state in {"blocked", "not_detected"}:
-            verified += 1
-        else:
-            unverified += 1
-
-    result.update({
-        "containers_fresh": fresh, "containers_verified": verified,
-        "containers_waiting_revision": waiting_revision,
-        "containers_unverified": unverified, "containers_stale": stale,
-    })
-    if fresh == 0:
-        result.update(state="samples_stale", reason="container_samples_stale")
-    elif verified == fresh and waiting_revision == 0 and unverified == 0 and stale == 0:
-        result.update(state="active", reason="all_fresh_samples_verified")
-    elif verified:
-        result.update(state="partial", reason="some_container_samples_unverified")
-    elif waiting_revision:
-        result.update(state="waiting_revision", reason="agent_has_not_reported_desired_revision")
-    else:
-        result.update(state="unverified", reason="guard_readback_missing_or_failed")
-    return result
+    return _fw_svc._host_container_protection_status(
+        conn, host_id=host_id, now=now, online=online, agent_version=agent_version,
+        policy=policy, policy_row_exists=policy_row_exists, policy_revision=policy_revision,
+        auto_default=auto_default, latest_action=latest_action,
+        fleet_revision=fleet_revision, applied_fleet_revision=applied_fleet_revision,
+    )
 
 
 def _reconcile_host(conn: sqlite3.Connection, host_id: str, node_id: str, ts: int, agent_version: str, config: Dict[str, Any], client_ip: str = "") -> str:
@@ -4006,6 +1682,8 @@ def _process_report_sync(data: Dict[str, Any], client_ip: str) -> Dict[str, Any]
         conn.commit()
     finally:
         conn.close()
+    invalidate_security_status_cache()
+    publish_live_event("report", host_id)
 
     for alert in notifications:
         send_alert_webhook(alert)
@@ -4111,7 +1789,7 @@ def _buyer_mapping_issue(conn, identity, container_id="", now=None):
 
 
 @app.get("/api/v1/latest")
-def latest(include_stale: bool = False, request: Request = None) -> JSONResponse:
+def latest(include_stale: bool = False, request: Request = None) -> Response:
     global _latest_cache, _latest_cache_time
     can_view_user_notes = request is None or getattr(request.state, "dashboard_role", "admin") in {"admin", "operator"}
 
@@ -4430,7 +2108,18 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             },
         })
     res_content = {"server_version": APP_VERSION, "items": out}
-    return JSONResponse(content=res_content)
+    etag = _compute_etag(
+        res_content,
+        salt=f"{int(bool(include_stale))}:{int(bool(can_view_user_notes))}",
+        volatile_keys=("offline_seconds", "host_offline_seconds", "last_seen_age_seconds"),
+    )
+    if _if_none_match_matches(request, etag):
+        server_metrics.metrics.inc("etag_304_hits")
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Vary": "Accept-Encoding", "Cache-Control": "no-store"},
+        )
+    return JSONResponse(content=res_content, headers={"ETag": etag})
 
 
 @app.get("/api/v1/containers/user-note")
@@ -4825,408 +2514,33 @@ def container_diagnostic_status(
 
 
 def _action_item(row: sqlite3.Row) -> Dict[str, Any]:
-    try:
-        params = json.loads(row["params_json"] or "{}")
-    except (TypeError, ValueError):
-        params = {}
-    if row["action_type"] in {"apply_container_connlimit", "release_container_connlimit"}:
-        # Stable IDs, node identities, metric epochs and release capabilities
-        # are sent only through the signed agent channel, never to browsers.
-        params = {
-            key: params[key]
-            for key in ("max_connections", "lease_expires_at")
-            if key in params
-        }
-    elif row["action_type"] == "delete_host_firewall_rule":
-        rule = params.get("rule") if isinstance(params, dict) else None
-        rule_id = rule.get("id") if isinstance(rule, dict) else None
-        params = {"rule_id": rule_id if type(rule_id) is int and rule_id > 0 else 0}
-    elif row["action_type"] == "apply_host_firewall_policy":
-        policy = params.get("policy") if isinstance(params.get("policy"), dict) else {}
-        fleet_revision = params.get("fleet_revision")
-        params = {
-            "revision": int(policy.get("revision") or 0),
-            "rule_count": len(policy.get("rules") or []) if isinstance(policy.get("rules"), list) else 0,
-        }
-        if type(fleet_revision) is int:
-            params["fleet_revision"] = fleet_revision
-    return {
-        "id": int(row["id"]),
-        "alert_id": int(row["alert_id"]),
-        "host_id": row["host_id"],
-        "runtime": row["runtime"],
-        "project": row["project"],
-        "container_name": row["container_name"],
-        "action_type": row["action_type"],
-        "params": params,
-        "status": row["status"],
-        "requested_by": row["requested_by"],
-        "result_message": row["result_message"],
-        "attempts": int(row["attempts"]),
-        "created_at": int(row["created_at"]),
-        "created_at_utc8": format_utc8(int(row["created_at"])),
-        "updated_at": int(row["updated_at"]),
-        "updated_at_utc8": format_utc8(int(row["updated_at"])),
-    }
+    return _alert_svc._action_item(row)
 
 
 def _decision_item(row: sqlite3.Row) -> Dict[str, Any]:
-    return {
-        "id": int(row["id"]),
-        "alert_id": int(row["alert_id"]),
-        "decision": row["decision"],
-        "requested_by": row["requested_by"],
-        "created_at": int(row["created_at"]),
-        "created_at_utc8": format_utc8(int(row["created_at"])),
-    }
+    return _alert_svc._decision_item(row)
 
 
 def _security_alert_item(conn: sqlite3.Connection, row: sqlite3.Row) -> Dict[str, Any]:
-    recovery = buyer_notifications.recovery(conn, row)
-    for field in ('recovered_at', 'closed_at'):
-        recovery[field + '_utc8'] = format_utc8(recovery[field]) if recovery[field] else None
-    latest_action = _latest_action_for_alert(conn, row)
-    latest_decision = conn.execute(
-        "SELECT * FROM security_alert_decisions WHERE alert_id=? ORDER BY id DESC LIMIT 1",
-        (row["id"],),
-    ).fetchone()
-    evidence_row = conn.execute(
-        "SELECT captured_at,evidence_json FROM security_alert_evidence WHERE alert_id=? ORDER BY captured_at DESC,id DESC LIMIT 1",
-        (row["id"],),
-    ).fetchone()
-    deep_evidence = None
-    if evidence_row is not None:
-        deep_evidence = _alert_details(evidence_row["evidence_json"])
-        deep_evidence["captured_at"] = int(evidence_row["captured_at"])
-        deep_evidence["captured_at_utc8"] = format_utc8(int(evidence_row["captured_at"]))
-    return {
-        "id": int(row["id"]),
-        "host_id": row["host_id"],
-        "runtime": row["runtime"],
-        "project": row["project"],
-        "container_name": row["container_name"],
-        "type": row["alert_type"],
-        "protection_only": buyer_notifications.is_protection_only_alert(row),
-        "severity": row["severity"],
-        "title": row["title"],
-        "message": row["message"],
-        "value": float(row["value"] or 0),
-        "threshold": float(row["threshold"] or 0),
-        "first_seen": int(row["first_seen"]),
-        "first_seen_utc8": format_utc8(int(row["first_seen"])),
-        "last_seen": int(row["last_seen"]),
-        "last_seen_utc8": format_utc8(int(row["last_seen"])),
-        "occurrence_count": int(row["occurrence_count"]),
-        "status": row["status"],
-        "recovery": recovery,
-        "details": _alert_action_evidence(row),
-        "deep_evidence": deep_evidence,
-        "latest_action": _action_item(latest_action) if latest_action is not None else None,
-        "latest_decision": (
-            _decision_item(latest_decision) if latest_decision is not None else None
-        ),
-    }
+    return _alert_svc._security_alert_item(conn, row)
 
 
 def _remediation_changed(message: str) -> bool:
-    counts = {
-        key: int(value)
-        for key, value in re.findall(
-            r"\b(killed_processes|removed_services|removed_configs|removed_binaries|cleanup_errors|matched_processes|signal_errors|host_matched_processes|host_killed_processes|host_kill_errors|checked_configs)=(\d+)\b",
-            message,
-        )
-    }
-    no_process_targets = re.search(r"\bno_process_targets=1\b", message) is not None
-    process_scan = (
-        ("matched_processes" in counts or "host_matched_processes" in counts)
-        and not no_process_targets
-    ) or (no_process_targets and counts.get("checked_configs", 0) > 0)
-    remaining_zero = re.search(r"\bremaining_processes=0\b", message) is not None
-    if (
-        "cleanup_errors" not in counts
-        or "signal_errors" not in counts
-        or not process_scan
-        or not remaining_zero
-    ):
-        return False
-    cleanup_errors = counts.get("cleanup_errors", 0)
-    signal_errors = counts.get("signal_errors", 0)
-    host_killed = counts.get("host_killed_processes", 0)
-    host_matched = counts.get("host_matched_processes", 0)
-    host_errors = counts.get("host_kill_errors", 0)
-    signal_recovered = signal_errors == 0 or (
-        "host_matched_processes" in counts
-        and "host_killed_processes" in counts
-        and "host_kill_errors" in counts
-        and host_matched >= signal_errors
-        and host_killed >= signal_errors
-        and host_errors == 0
-        and remaining_zero
-    )
-    errors = cleanup_errors + host_errors + (0 if signal_recovered else signal_errors)
-    changed = sum(
-        counts.get(key, 0)
-        for key in (
-            "killed_processes", "removed_services", "removed_configs", "removed_binaries"
-        )
-    ) > 0
-    if errors > 0:
-        return False
-    if changed:
-        return True
-    no_process_targets = re.search(r"\bno_process_targets=1\b", message) is not None
-    process_scan = (
-        ("matched_processes" in counts or "host_matched_processes" in counts)
-        and not no_process_targets
-    ) or (no_process_targets and counts.get("checked_configs", 0) > 0)
-    return (
-        process_scan
-        and "cleanup_errors" in counts
-        and counts["cleanup_errors"] == 0
-        and "signal_errors" in counts
-        and counts["signal_errors"] == 0
-        and remaining_zero
-    )
+    return _alert_svc._remediation_changed(message)
 
 
 def _alert_details(raw: str) -> Dict[str, Any]:
-    try:
-        value = json.loads(raw or "{}")
-        return value if isinstance(value, dict) else {}
-    except (TypeError, ValueError):
-        return {}
+    return _alert_svc._alert_details(raw)
 
 
 def _alert_action_evidence(alert: sqlite3.Row) -> Dict[str, Any]:
-    """Return structured evidence, including alerts reported by older agents."""
-    details = _alert_details(alert["details_json"])
-    message = str(alert["message"] or "")
-
-    def clean(items: Any, *, domains: bool = False) -> List[str]:
-        if not isinstance(items, list):
-            return []
-        values = []
-        for item in items:
-            if not isinstance(item, str) or not item.strip():
-                continue
-            value = item.strip()
-            if domains:
-                value = value.lower().rstrip(".")
-            values.append(value)
-        return sorted(set(values))
-
-    domains = clean(details.get("unapproved_domains"), domains=True)
-    process_patterns = clean(details.get("process_patterns"))
-    config_files = clean(details.get("config_files"))
-    process_pids = sorted(
-        {
-            int(item)
-            for item in details.get("process_pids", [])
-            if isinstance(item, int) and 1 < item <= 4194304
-        }
-    ) if isinstance(details.get("process_pids"), list) else []
-    if not domains:
-        match = re.search(r"未授权面板域名\s*([^；;]+)", message)
-        domains = clean(match.group(1).split(",") if match else [], domains=True)
-    if not process_patterns:
-        match = re.search(r"节点程序特征\s*([^；;]+)", message)
-        process_patterns = clean(match.group(1).split(",") if match else [])
-    if not config_files:
-        match = re.search(r"配置文件\s*([^；;]+)", message)
-        config_files = clean(match.group(1).split(",") if match else [])
-    details["unapproved_domains"] = domains
-    details["process_patterns"] = process_patterns
-    details["process_pids"] = process_pids
-    details["config_files"] = config_files
-    # Older clients used ``weak``/``weak-auth`` and some reports called this
-    # field ``socks_auth_state``.  Keep the enforcement contract canonical so
-    # those alerts can still be handled safely without accepting arbitrary
-    # user supplied process names.
-    raw_auth_mode = str(
-        details.get("socks_auth_mode") or details.get("socks_auth_state") or "unknown"
-    ).strip().lower().replace("-", "_").replace(" ", "_")
-    auth_mode_aliases = {
-        "weak": "weak_password",
-        "weak_auth": "weak_password",
-        "weak_password": "weak_password",
-        "noauth": "no_auth",
-        "no_auth": "no_auth",
-        "none": "no_auth",
-        "configured": "configured",
-        "unknown": "unknown",
-    }
-    details["socks_auth_mode"] = auth_mode_aliases.get(raw_auth_mode, "unknown")
-    allowed_socks_processes = {
-        "microsocks", "sockd", "danted", "srelay", "hev-socks5-server",
-        "3proxy", "gost", "xray", "v2ray", "sing-box",
-    }
-    socks_config_files = clean(details.get("socks_config_files"))
-    socks_processes = [
-        item.lower()
-        for item in clean(details.get("socks_processes"))
-        if item.lower() in allowed_socks_processes
-    ]
-    # A short-lived compatibility window for pre-1.6 clients which retained
-    # process_matches but did not copy the safe process list into the alert.
-    # Only allowlisted executable names and confirmed weak states are retained.
-    legacy_matches = details.get("socks_process_matches")
-    if isinstance(legacy_matches, list) and not details.get('socks_action_scope_verified'):
-        for item in legacy_matches:
-            if not isinstance(item, dict):
-                continue
-            process = str(item.get("process") or "").strip().lower()
-            state = str(item.get("auth_state") or item.get("auth_mode") or details["socks_auth_mode"])
-            state = auth_mode_aliases.get(
-                state.strip().lower().replace("-", "_").replace(" ", "_"), "unknown"
-            )
-            if process in allowed_socks_processes and state in ("no_auth", "weak_password"):
-                socks_processes.append(process)
-    socks_processes = sorted(set(socks_processes))
-    if (
-        not socks_processes
-        and details["socks_auth_mode"] in ("no_auth", "weak_password")
-        and not details.get('socks_action_scope_verified')
-    ):
-        process_match = re.search(
-            r"(?:^|[；;，,\n])\s*(?:进程|process)\s*(?:[:=：])?\s*([^；;，,\n]+)",
-            message,
-            flags=re.IGNORECASE,
-        )
-        message_processes = (
-            re.split(r"[,，\s]+", process_match.group(1).strip())
-            if process_match
-            else []
-        )
-        socks_processes = sorted(
-            {
-                item.lower()
-                for item in message_processes
-                if item.lower() in allowed_socks_processes
-            }
-        )
-    details["socks_processes"] = socks_processes
-    details["socks_process_pids"] = sorted(
-        {
-            int(item)
-            for item in details.get("socks_process_pids", [])
-            if isinstance(item, int) and 1 < item <= 4194304
-        }
-    ) if isinstance(details.get("socks_process_pids"), list) else []
-    details["socks_config_files"] = socks_config_files
-    malicious_processes = []
-    raw_malicious_processes = details.get("malicious_processes")
-    if isinstance(raw_malicious_processes, list):
-        for item in raw_malicious_processes:
-            if not isinstance(item, dict):
-                continue
-            process = str(item.get("process") or "").strip().lower()
-            try:
-                pid = int(item.get("pid") or 0)
-            except (TypeError, ValueError):
-                pid = 0
-            if process == "xmrig":
-                start_ticks = str(item.get("start_ticks") or "").strip()
-                malicious_processes.append(
-                    {
-                        "process": process,
-                        "pid": pid if 1 < pid <= 4194304 else 0,
-                        "start_ticks": start_ticks if re.fullmatch(r"[0-9]{1,24}", start_ticks) else "",
-                        "pattern": str(item.get("pattern") or "")[:120],
-                    }
-                )
-    if not malicious_processes and alert["alert_type"] == "malicious_process":
-        legacy_match = re.search(
-            r"首个特征\s*(xmrig)\s*[，,]\s*PID\s*(\d+)",
-            message,
-            flags=re.IGNORECASE,
-        )
-        if legacy_match:
-            legacy_pid = int(legacy_match.group(2))
-            malicious_processes.append(
-                {
-                    "process": legacy_match.group(1).lower(),
-                    "pid": legacy_pid if 1 < legacy_pid <= 4194304 else 0,
-                }
-            )
-    details["malicious_processes"] = malicious_processes[:20]
-
-    process_targets = []
-    raw_process_targets = details.get("process_targets")
-    if isinstance(raw_process_targets, list):
-        for item in raw_process_targets[:64]:
-            if not isinstance(item, dict):
-                continue
-            pid = item.get("pid")
-            process = str(item.get("process") or "").strip().lower()
-            pattern = str(item.get("pattern") or "").strip().lower()
-            start_ticks = str(item.get("start_ticks") or "").strip()
-            if (
-                type(pid) is int and 1 < pid <= 4194304
-                and re.fullmatch(r"[a-zA-Z0-9_.@+-]{1,80}", process)
-                and re.fullmatch(r"[a-zA-Z0-9_.@-]{2,80}", pattern)
-                and re.fullmatch(r"[0-9]{1,24}", start_ticks)
-                and int(start_ticks) > 0
-            ):
-                process_targets.append({
-                    "pid": pid, "process": process, "pattern": pattern,
-                    "start_ticks": start_ticks,
-                })
-    details["process_targets"] = process_targets
-
-    file_targets = []
-    raw_file_targets = details.get("file_targets")
-    if isinstance(raw_file_targets, list):
-        for item in raw_file_targets[:128]:
-            if not isinstance(item, dict):
-                continue
-            path = item.get("path")
-            generation = item.get("generation")
-            kind = item.get("kind")
-            if (
-                isinstance(path, str) and len(path) <= 256
-                and re.fullmatch(r"/[A-Za-z0-9_./@:+-]{1,255}", path)
-                and posixpath.normpath(path) == path
-                and isinstance(generation, str)
-                and re.fullmatch(r"[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-7]{3,4}", generation)
-                and isinstance(kind, str)
-                and kind in {"config", "service", "binary"}
-            ):
-                file_targets.append({"path": path, "generation": generation, "kind": kind})
-    details["file_targets"] = file_targets
-    details["instance_id"] = str(details.get("instance_id") or "").strip().lower()[:36]
-    return details
+    return _alert_svc._alert_action_evidence(alert)
 
 
 def _runman_alert_generation_current(
-    conn: sqlite3.Connection, alert: sqlite3.Row, details: Dict[str, Any], now: int | None = None,
+    conn: sqlite3.Connection, alert: sqlite3.Row, details: Dict[str, Any], now: int | None = None
 ) -> tuple[bool, str]:
-    """Require a fresh latest report with the alert's exact Runman identity."""
-    now = int(time.time()) if now is None else int(now)
-    vm_uuid = str(alert["container_name"] or "").lower()
-    instance_id = str(details.get("instance_id") or "").lower()
-    if (
-        alert["runtime"] != "runman" or alert["project"] != "default"
-        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", vm_uuid)
-        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", instance_id)
-    ):
-        return False, "Runman alert target identity is invalid"
-    latest = conn.execute(
-        "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='runman' AND project='default' AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
-        (alert["host_id"], alert["container_name"]),
-    ).fetchone()
-    try:
-        payload = json.loads(latest["payload_json"] or "{}") if latest is not None else {}
-    except (TypeError, ValueError):
-        payload = {}
-    stable_id = str(payload.get("stable_id") or payload.get("id") or "").lower() if isinstance(payload, dict) else ""
-    current_id = str(payload.get("instance_id") or "").lower() if isinstance(payload, dict) else ""
-    report_at = int(latest["ts"] or 0) if latest is not None else 0
-    if (
-        stable_id != vm_uuid or current_id != instance_id
-        or report_at <= 0 or report_at > now + 30 or now - report_at > STALE_SECONDS
-    ):
-        return False, "Runman instance generation is stale or has changed"
-    return True, instance_id
+    return _alert_svc._runman_alert_generation_current(conn, alert, details, now)
 
 
 @app.post("/api/v1/update/version")
@@ -5338,1237 +2652,75 @@ def _queue_security_action_row(
     params: Dict[str, Any],
     requested_by: str,
 ) -> tuple[sqlite3.Row, bool]:
-    existing = conn.execute(
-        """
-        SELECT * FROM security_actions
-        WHERE alert_id=? AND action_type=? AND status IN ('queued','dispatched','running')
-        ORDER BY id DESC LIMIT 1
-        """,
-        (alert["id"], action_type),
-    ).fetchone()
-    if existing is not None:
-        return existing, False
-    now = int(time.time())
-    cur = conn.execute(
-        """
-        INSERT INTO security_actions(
-            alert_id, host_id, runtime, project, container_name, action_type, params_json,
-            status, requested_by, created_at, updated_at
-        ) VALUES(?,?,?,?,?,?,?,'queued',?,?,?)
-        """,
-        (
-            alert["id"], alert["host_id"], alert["runtime"], alert["project"],
-            alert["container_name"], action_type, json.dumps(params, ensure_ascii=False),
-            requested_by[:100], now, now,
-        ),
-    )
-    row = conn.execute("SELECT * FROM security_actions WHERE id=?", (cur.lastrowid,)).fetchone()
-    return row, True
+    return _alert_svc._queue_security_action_row(conn, alert, action_type, params, requested_by)
 
 
 def _fresh_connlimit_identity(
     conn: sqlite3.Connection, alert: sqlite3.Row, now: int, max_connections: int
 ) -> tuple[str, str, Dict[str, Any]]:
-    runtime = str(alert["runtime"] or "").lower()
-    if runtime not in {"incus", "runman"}:
-        raise HTTPException(status_code=409, detail="该运行时没有已核验的 TCP 限额适配器；未下发")
-    host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (alert["host_id"],)).fetchone()
-    if host is None or not str(host["node_id"] or "") or now - int(host["last_seen"] or 0) > STALE_SECONDS:
-        raise HTTPException(status_code=409, detail="该节点尚未注册可校验的 Client 身份")
-    latest = conn.execute(
-        "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime=? AND project=? AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
-        (alert["host_id"], runtime, alert["project"], alert["container_name"]),
-    ).fetchone()
-    if latest is None or now - int(latest["ts"] or 0) > STALE_SECONDS:
-        raise HTTPException(status_code=409, detail="节点或容器采样已过期；为避免对错误实例执行防火墙操作，未下发")
-    try:
-        payload = json.loads(latest["payload_json"] or "{}")
-    except (TypeError, ValueError):
-        payload = {}
-    stable_id = str(payload.get("stable_id") or "") if isinstance(payload, dict) else ""
-    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", stable_id):
-        raise HTTPException(status_code=409, detail="最新采样没有有效的 Incus 实例 UUID；未下发")
-    instance_generation = str(payload.get("instance_id") or "") if isinstance(payload, dict) else ""
-    if runtime == "runman" and not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", instance_generation):
-        raise HTTPException(status_code=409, detail="最新 Runman 采样没有有效实例代次；未下发")
-    metrics = connection_policy.metrics(payload, now) if isinstance(payload, dict) else None
-    if not isinstance(metrics, dict):
-        raise HTTPException(status_code=409, detail="最新连接证据未通过完整性校验；未下发")
-    sampled_at = metrics.get("sampled_at")
-    epoch = metrics.get("epoch")
-    tcp_established = metrics.get("tcp_established")
-    tcp_pending = metrics.get("tcp_pending")
-    if (
-        type(sampled_at) is not int or sampled_at > now + 30 or now - sampled_at > STALE_SECONDS
-        or not isinstance(epoch, str) or not epoch or len(epoch) > 200
-        or type(tcp_established) is not int or type(tcp_pending) is not int
-        or tcp_established < 0 or tcp_pending < 0
-    ):
-        raise HTTPException(status_code=409, detail="TCP 连接证据缺失或过期；未下发")
-    observed_tcp = tcp_established + tcp_pending
-    if observed_tcp <= max_connections:
-        raise HTTPException(
-            status_code=409,
-            detail=f"当前已建立/待建立 TCP 连接为 {observed_tcp}，未超过限额 {max_connections}；该规则不限制 UDP，未下发",
-        )
-    return str(host["node_id"]), (instance_generation if runtime == "runman" else stable_id).lower(), {
-        "metric_epoch": epoch,
-        "observed_tcp_connections": observed_tcp,
-        "observed_at": sampled_at,
-        "action_expires_at": now + 300,
-    }
+    return _alert_svc._fresh_connlimit_identity(conn, alert, now, max_connections)
 
 
-def _latest_action_for_alert(
-    conn: sqlite3.Connection, alert: sqlite3.Row
-) -> sqlite3.Row | None:
-    latest = conn.execute(
-        "SELECT * FROM security_actions WHERE alert_id=? ORDER BY id DESC LIMIT 1",
-        (alert["id"],),
-    ).fetchone()
-    if latest is not None or alert["alert_type"] != "unauthorized_panel_pairing":
-        return latest
-    return conn.execute(
-        """
-        SELECT * FROM security_actions
-        WHERE host_id=? AND runtime=? AND project=? AND container_name=?
-          AND action_type IN ('remediate_panel_pairing','allow_panel_domains')
-        ORDER BY id DESC LIMIT 1
-        """,
-        (
-            alert["host_id"],
-            alert["runtime"],
-            alert["project"],
-            alert["container_name"],
-        ),
-    ).fetchone()
+def _latest_action_for_alert(conn: sqlite3.Connection, alert: sqlite3.Row) -> sqlite3.Row | None:
+    return _alert_svc._latest_action_for_alert(conn, alert)
 
 
-def _refresh_remediation_process_pids(
-    conn: sqlite3.Connection, action: sqlite3.Row
-) -> Dict[str, Any]:
-    try:
-        params = json.loads(action["params_json"] or "{}")
-    except (TypeError, ValueError):
-        params = {}
-    if action["action_type"] != "remediate_panel_pairing" or not isinstance(params, dict):
-        return params if isinstance(params, dict) else {}
-    if action["runtime"] == "runman":
-        # Preserve the exact process start ticks and file fingerprints from the alert.
-        return params
-    alert = conn.execute(
-        "SELECT * FROM security_alerts WHERE id=?", (action["alert_id"],)
-    ).fetchone()
-    if alert is None:
-        return params
-    evidence = _alert_action_evidence(alert)
-    approved_patterns = {
-        str(item).strip().lower()
-        for item in params.get("process_patterns", [])
-        if isinstance(item, str) and item.strip()
-    }
-    current_patterns = {
-        str(item).strip().lower()
-        for item in evidence.get("process_patterns", [])
-        if isinstance(item, str) and item.strip()
-    }
-    if approved_patterns & current_patterns:
-        params["process_pids"] = evidence.get("process_pids") or []
-    return params
+def _refresh_remediation_process_pids(conn: sqlite3.Connection, action: sqlite3.Row) -> Dict[str, Any]:
+    return _alert_svc._refresh_remediation_process_pids(conn, action)
 
 
 @app.post("/api/v1/security/alerts/{alert_id}/actions")
 async def queue_security_action(alert_id: int, request: Request) -> JSONResponse:
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid JSON body")
-    requested_action = str(payload.get("action") or "").strip().lower()
-    if requested_action == "allow" and getattr(request.state,"dashboard_role","admin") != "admin":
-        raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略")
-    action_type = {"remediate": "remediate_panel_pairing", "allow": "allow_panel_domains"}.get(
-        requested_action
-    )
-    if not action_type:
-        raise HTTPException(status_code=400, detail="action must be remediate or allow")
-
-    conn = db()
-    conn.execute("BEGIN IMMEDIATE")
-    alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
-    if alert is None:
-        conn.close()
-        raise HTTPException(status_code=404, detail="alert not found")
-    if alert["status"] != "active":
-        conn.close()
-        raise HTTPException(status_code=409, detail="alert is no longer active")
-    if alert["alert_type"] != "unauthorized_panel_pairing":
-        conn.close()
-        raise HTTPException(status_code=400, detail="this action only supports panel-pairing alerts")
-    if alert["runtime"] not in ("podman", "incus", "runman"):
-        conn.close()
-        raise HTTPException(status_code=400, detail="Docker and unknown runtimes are notice-only")
-    if not alert["container_name"]:
-        conn.close()
-        raise HTTPException(status_code=400, detail="alert has no container target")
-
-    details = _alert_action_evidence(alert)
-    unapproved_domains = [
-        str(item).strip().lower().rstrip(".")
-        for item in details.get("unapproved_domains", [])
-        if isinstance(item, str) and item.strip()
-    ]
-    process_patterns = [
-        str(item).strip().lower()
-        for item in details.get("process_patterns", [])
-        if isinstance(item, str) and item.strip()
-    ]
-    config_files = [
-        str(item).strip()
-        for item in details.get("config_files", [])
-        if isinstance(item, str) and item.strip()
-    ]
-    process_pids = details.get("process_pids") or []
-    if action_type == "allow_panel_domains":
-        if not unapproved_domains:
-            conn.close()
-            raise HTTPException(status_code=400, detail="alert has no exact domains to allow")
-        params = {"domains": sorted(set(unapproved_domains))}
-    else:
-        if not process_patterns and not config_files:
-            conn.close()
-            raise HTTPException(status_code=400, detail="alert has no safe remediation evidence")
-        params = {
-            "domains": sorted(set(unapproved_domains)),
-            "process_patterns": sorted(set(process_patterns)),
-            "process_pids": process_pids,
-            "config_files": sorted(set(config_files)),
-        }
-        if alert["runtime"] == "runman":
-            identity_ok, instance_id = _runman_alert_generation_current(conn, alert, details)
-            if not identity_ok:
-                conn.close()
-                raise HTTPException(status_code=409, detail=instance_id)
-            process_targets = details.get("process_targets") or []
-            file_targets = details.get("file_targets") or []
-            if not process_targets and not file_targets:
-                conn.close()
-                raise HTTPException(status_code=409, detail="Runman alert has no generation-bound process or file targets")
-            params.update({
-                "instance_id": instance_id,
-                "process_targets": process_targets,
-                "file_targets": file_targets,
-            })
-
-    requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
-    row, queued = _queue_security_action_row(conn, alert, action_type, params, requested_by)
-    investigation.sync_states(conn, alert['host_id'], int(time.time()), alert_id=alert['id'])
-    conn.commit()
-    conn.close()
-    return JSONResponse(
-        status_code=202 if queued else 200,
-        content={"ok": True, "queued": queued, "action": _action_item(row)},
-    )
+    return await _alert_svc.queue_security_action(alert_id, request)
 
 
 @app.post("/api/v1/security/alerts/{alert_id}/disposition")
 async def set_security_alert_disposition(alert_id: int, request: Request) -> JSONResponse:
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid JSON body")
-    decision = str(payload.get("decision") or "").strip().lower()
-    if decision in ("allow_silent", "freeze_container", "unfreeze_container") and getattr(request.state,"dashboard_role","admin") != "admin":
-        raise HTTPException(status_code=403,detail="只有管理员可以修改长期放行策略或执行容器封禁操作")
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "stop_reviewed_socks", "apply_container_connlimit", "release_container_connlimit", "freeze_container", "unfreeze_container"):
-        raise HTTPException(
-            status_code=400,
-            detail="unsupported alert disposition",
-        )
-
-    conn = db()
-    conn.execute("BEGIN IMMEDIATE")
-    alert = conn.execute("SELECT * FROM security_alerts WHERE id=?", (alert_id,)).fetchone()
-    if alert is None:
-        conn.close()
-        raise HTTPException(status_code=404, detail="alert not found")
-    if alert['alert_type'] == 'prohibited_activity' and decision != 'reopen':
-        conn.close()
-        raise HTTPException(status_code=409, detail='隔离事件必须由管理员复核后，通过解除隔离入口处理；不能用忽略、静默或标记恢复替代。')
-    if alert["status"] != "active" and decision not in ("deny", "reopen", "allow_silent", "resolve", "release_udp_throttle", "apply_udp_throttle", "release_container_connlimit", "freeze_container", "unfreeze_container"):
-        conn.close()
-        raise HTTPException(status_code=409, detail="alert is no longer active")
-
-    requested_by = str(
-        getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard")
-    )[:100]
-    now = int(time.time())
-    action = None
-    queued = False
-    if decision == 'stop_reviewed_socks':
-        if alert['runtime'] == 'runman' and getattr(request.state, 'dashboard_role', 'admin') != 'admin':
-            conn.close()
-            raise HTTPException(status_code=403, detail='Runman 人工停止操作仅限管理员')
-        details = json.loads(alert['details_json'])
-        reviews = details.get('password_review', [])
-        observed = details.get('review_observed_at', 0)
-        token = details.get('review_token', '')
-        runman_generation = ''
-        runman_identity_ok = True
-        if alert['runtime'] == 'runman':
-            runman_generation = str(details.get('instance_id') or '').lower()
-            latest = conn.execute(
-                "SELECT ts,payload_json FROM reports WHERE host_id=? AND runtime='runman' AND project='default' AND container_name=? ORDER BY ts DESC,id DESC LIMIT 1",
-                (alert['host_id'], alert['container_name']),
-            ).fetchone()
-            try:
-                latest_payload = json.loads(latest['payload_json'] or '{}') if latest is not None else {}
-            except (TypeError, ValueError):
-                latest_payload = {}
-            stable_id = str(latest_payload.get('stable_id') or latest_payload.get('id') or '').lower() if isinstance(latest_payload, dict) else ''
-            latest_generation = str(latest_payload.get('instance_id') or '').lower() if isinstance(latest_payload, dict) else ''
-            report_at = int(latest['ts'] or 0) if latest is not None else 0
-            runman_identity_ok = (
-                alert['project'] == 'default'
-                and bool(re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', alert['container_name'].lower()))
-                and bool(re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', runman_generation))
-                and stable_id == alert['container_name'].lower()
-                and latest_generation == runman_generation
-                and report_at > 0 and report_at <= now + 30 and 0 <= now - report_at <= STALE_SECONDS
-            )
-        if (alert['alert_type'] != 'socks_password_review' or alert['status'] != 'active'
-            or alert['runtime'] not in {'incus', 'podman', 'runman'} or not isinstance(observed, (int, float))
-            or not 0 <= now-observed <= 900 or not 0 <= now-alert['last_seen'] <= 900
-            or not isinstance(reviews, list) or not reviews or not all(isinstance(r, dict) and r.get('action_safe') is True for r in reviews)
-            or not re.fullmatch(r'[0-9a-f]{64}', str(token)) or payload.get('review_token') != token
-            or not runman_identity_ok):
-            conn.close()
-            raise HTTPException(status_code=409, detail='证据过期、目标不明确或包含混合业务；请刷新后重新审核，未停止服务')
-        reviewed_params = {'manual_review': True, 'review_token': token, 'review_observed_at': observed}
-        if alert['runtime'] == 'runman':
-            reviewed_params['instance_id'] = runman_generation
-        action, queued = _queue_security_action_row(conn, alert, 'stop_reviewed_socks', reviewed_params, requested_by)
-    elif decision == "deny":
-        if alert["alert_type"] not in _ACTIONABLE_ALERT_TYPES:
-            conn.close()
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "deny supports panel-pairing, confirmed no-auth SOCKS, "
-                    "and exact XMRig alerts"
-                ),
-            )
-        if alert["runtime"] not in ("podman", "incus", "runman"):
-            conn.close()
-            raise HTTPException(status_code=400, detail="Docker is notice-only and cannot be denied")
-        if not alert["container_name"]:
-            conn.close()
-            raise HTTPException(status_code=400, detail="alert has no container target")
-        conn.execute(
-            "DELETE FROM security_alert_policies WHERE fingerprint=?",
-            (alert["fingerprint"],),
-        )
-        conn.execute("UPDATE security_alerts SET status='active' WHERE id=?", (alert_id,))
-        details = _alert_action_evidence(alert)
-        runman_instance_id = ""
-        if alert["runtime"] == "runman":
-            if alert["alert_type"] not in ("unauthorized_panel_pairing", "malicious_process"):
-                conn.close()
-                raise HTTPException(status_code=400, detail="Runman deny supports only generation-bound panel or XMRig remediation")
-            identity_ok, runman_instance_id = _runman_alert_generation_current(conn, alert, details, now)
-            if not identity_ok:
-                conn.close()
-                raise HTTPException(status_code=409, detail=runman_instance_id)
-        if alert["alert_type"] == "socks_weak_auth":
-            if details.get("socks_auth_mode") not in ("no_auth", "weak_password"):
-                conn.close()
-                raise HTTPException(
-                    status_code=400,
-                    detail="仅可处置已确认空密码或弱密码的 SOCKS 服务",
-                )
-            process_names = details.get("socks_processes") or []
-            if not process_names:
-                conn.close()
-                raise HTTPException(status_code=400, detail="alert has no safe SOCKS process evidence")
-            params = {
-                "auth_mode": details["socks_auth_mode"],
-                "process_names": process_names,
-                "process_pids": details.get("socks_process_pids") or [],
-                "config_files": details.get("socks_config_files") or [],
-            }
-            action, queued = _queue_security_action_row(
-                conn, alert, "enforce_socks_auth", params, requested_by
-            )
-        elif alert["alert_type"] == "unauthorized_panel_pairing":
-            process_patterns = details.get("process_patterns") or []
-            process_pids = details.get("process_pids") or []
-            config_files = details.get("config_files") or []
-            if not process_patterns and not config_files:
-                conn.close()
-                raise HTTPException(status_code=400, detail="alert has no safe remediation evidence")
-            params = {
-                "domains": details.get("unapproved_domains") or [],
-                "process_patterns": process_patterns,
-                "process_pids": process_pids,
-                "config_files": config_files,
-            }
-            if alert["runtime"] == "runman":
-                process_targets = details.get("process_targets") or []
-                file_targets = details.get("file_targets") or []
-                if not process_targets and not file_targets:
-                    conn.close()
-                    raise HTTPException(status_code=409, detail="Runman alert has no generation-bound process or file targets")
-                params.update({
-                    "instance_id": runman_instance_id,
-                    "process_targets": process_targets,
-                    "file_targets": file_targets,
-                })
-            action, queued = _queue_security_action_row(
-                conn, alert, "remediate_panel_pairing", params, requested_by
-            )
-        else:
-            malicious_processes = details.get("malicious_processes") or []
-            exact_xmrig = [
-                item for item in malicious_processes
-                if isinstance(item, dict) and item.get("process") == "xmrig"
-            ]
-            if not exact_xmrig:
-                conn.close()
-                raise HTTPException(
-                    status_code=400,
-                    detail="alert has no exact XMRig process evidence",
-                )
-            process_pids = []
-            for item in exact_xmrig:
-                try:
-                    process_pid = int(item.get("pid") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if 1 < process_pid <= 4194304:
-                    process_pids.append(process_pid)
-            process_targets = [
-                item for item in (details.get("process_targets") or [])
-                if item.get("process") == "xmrig" and item.get("pattern") == "xmrig"
-                and any(
-                    malware.get("pid") == item.get("pid")
-                    and malware.get("start_ticks") == item.get("start_ticks")
-                    for malware in exact_xmrig
-                )
-            ]
-            if alert["runtime"] == "runman" and not process_targets:
-                conn.close()
-                raise HTTPException(status_code=409, detail="Runman XMRig alert lacks exact process-start evidence")
-            params = {
-                "process_names": ["xmrig"],
-                "process_pids": sorted(set(process_pids)),
-            }
-            if alert["runtime"] == "runman":
-                params.update({
-                    "instance_id": runman_instance_id,
-                    "process_targets": process_targets,
-                    "file_targets": details.get("file_targets") or [],
-                })
-            action, queued = _queue_security_action_row(
-                conn, alert, "remediate_malicious_process", params, requested_by
-            )
-    elif decision == "allow_silent":
-        conn.execute(
-            """
-            INSERT INTO security_alert_policies(
-                fingerprint, mode, requested_by, created_at, updated_at
-            ) VALUES(?,'allow_silent',?,?,?)
-            ON CONFLICT(fingerprint) DO UPDATE SET
-                mode='allow_silent', requested_by=excluded.requested_by,
-                updated_at=excluded.updated_at
-            """,
-            (alert["fingerprint"], requested_by, now, now),
-        )
-        conn.execute("UPDATE security_alerts SET status='suppressed' WHERE id=?", (alert_id,))
-        if alert["alert_type"] == "unauthorized_panel_pairing" and alert["runtime"] in ("podman", "incus", "runman"):
-            details = _alert_action_evidence(alert)
-            domains = details.get("unapproved_domains") or []
-            if domains:
-                action, queued = _queue_security_action_row(
-                    conn, alert, "allow_panel_domains", {"domains": domains}, requested_by
-                )
-        elif alert["alert_type"] == "socks_weak_auth" and alert["runtime"] in ("podman", "incus"):
-            action, queued = _queue_security_action_row(
-                conn, alert, "release_socks_auth", {}, requested_by
-            )
-    elif decision == "dismiss_once":
-        conn.execute("UPDATE security_alerts SET status='dismissed' WHERE id=?", (alert_id,))
-    elif decision == "resolve":
-        conn.execute("UPDATE security_alerts SET status='resolved' WHERE id=?", (alert_id,))
-    elif decision == "release_udp_throttle":
-        conn.execute("UPDATE security_alerts SET status='resolved' WHERE id=?", (alert_id,))
-        action, queued = _queue_security_action_row(
-            conn, alert, "release_udp_throttle", {}, requested_by
-        )
-    elif decision == "apply_udp_throttle":
-        action, queued = _queue_security_action_row(
-            conn, alert, "apply_udp_throttle", {"rate_mbps": 10, "duration": 3600}, requested_by
-        )
-    elif decision in ("freeze_container", "unfreeze_container"):
-        if alert["runtime"] not in ("podman", "incus", "runman") or not alert["container_name"]:
-            conn.close()
-            raise HTTPException(status_code=400, detail="当前运行时或目标实例不支持封禁/冻结操作")
-        details = _alert_action_evidence(alert)
-        freeze_params: Dict[str, Any] = {}
-        if details.get("instance_id"):
-            freeze_params["instance_id"] = str(details.get("instance_id"))
-        if details.get("pid") and str(details.get("pid")).isdigit():
-            freeze_params["pid"] = int(details["pid"])
-        if decision == "freeze_container":
-            conn.execute("UPDATE security_alerts SET status='remediated' WHERE id=?", (alert_id,))
-        action, queued = _queue_security_action_row(
-            conn, alert, decision, freeze_params, requested_by
-        )
-    elif decision in ("apply_container_connlimit", "release_container_connlimit"):
-        if getattr(request.state, "dashboard_role", "admin") != "admin":
-            conn.close()
-            raise HTTPException(status_code=403, detail="只有管理员可以修改容器连接限制")
-        if (
-            alert["alert_type"] != "container_connection_count"
-            or alert["runtime"] not in {"incus", "runman"}
-            or alert["project"] != "default"
-            or not alert["container_name"]
-        ):
-            conn.close()
-            raise HTTPException(status_code=400, detail="临时 TCP 限额仅适用于 default 项目内已接入的 Incus/Runman 连接数告警")
-        if decision == "apply_container_connlimit":
-            raw_limit = payload.get("max_connections", 500)
-            raw_duration = payload.get("duration_seconds", 1800)
-            if type(raw_limit) is not int or not 100 <= raw_limit <= 10000:
-                conn.close()
-                raise HTTPException(status_code=400, detail="TCP 连接限额必须在 100–10000 之间")
-            if type(raw_duration) is not int or not 300 <= raw_duration <= 3600:
-                conn.close()
-                raise HTTPException(status_code=400, detail="限额有效期必须在 300–3600 秒之间")
-            try:
-                node_id, instance_id, evidence = _fresh_connlimit_identity(conn, alert, now, raw_limit)
-            except HTTPException:
-                conn.close()
-                raise
-            active = conn.execute(
-                "SELECT params_json,status FROM security_actions WHERE host_id=? AND runtime=? AND project='default' AND container_name=? AND action_type='apply_container_connlimit' AND status='succeeded' ORDER BY id DESC LIMIT 1",
-                (alert["host_id"], alert["runtime"], alert["container_name"]),
-            ).fetchone()
-            if active is not None:
-                try:
-                    active_params = json.loads(active["params_json"] or "{}")
-                except (TypeError, ValueError):
-                    active_params = {}
-                if not isinstance(active_params, dict) or not active_params.get("instance_id"):
-                    conn.close()
-                    raise HTTPException(status_code=409, detail="已有连接限制记录无法核实；为避免重复应用，请等待其自动过期")
-                active_lease = active_params.get("lease_expires_at")
-                if active_params.get("instance_id") == instance_id and type(active_lease) is not int:
-                    conn.close()
-                    raise HTTPException(status_code=409, detail="已有连接限制的过期时间无法核实；请等待节点自动清理")
-                if active_params.get("instance_id") == instance_id and active_lease > now:
-                    conn.close()
-                    raise HTTPException(status_code=409, detail="该实例已有未过期的连接限制；请先解除或等待自动过期")
-            params = {
-                **evidence,
-                "expected_node_id": node_id,
-                "instance_id": instance_id,
-                "policy_id": secrets.token_hex(16),
-                "max_connections": raw_limit,
-                "lease_expires_at": now + raw_duration,
-                "reason": "admin_requested_connection_limit",
-            }
-            action, queued = _queue_security_action_row(
-                conn, alert, "apply_container_connlimit", params, requested_by
-            )
-        else:
-            latest = conn.execute(
-                "SELECT * FROM security_actions WHERE alert_id=? AND action_type IN ('apply_container_connlimit','release_container_connlimit') ORDER BY id DESC LIMIT 1",
-                (alert_id,),
-            ).fetchone()
-            if latest is None or latest["action_type"] != "apply_container_connlimit" or latest["status"] != "succeeded":
-                conn.close()
-                raise HTTPException(status_code=409, detail="没有可解除的已生效 TCP 限额")
-            try:
-                applied = json.loads(latest["params_json"] or "{}")
-            except (TypeError, ValueError):
-                applied = {}
-            applied_lease = applied.get("lease_expires_at") if isinstance(applied, dict) else None
-            if type(applied_lease) is not int or applied_lease <= now:
-                conn.close()
-                raise HTTPException(status_code=409, detail="该 TCP 限额已自动过期")
-            host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (alert["host_id"],)).fetchone()
-            if host is None or not host["node_id"] or now - int(host["last_seen"] or 0) > STALE_SECONDS:
-                conn.close()
-                raise HTTPException(status_code=409, detail="节点离线或身份不可校验；现有限额仍会由节点自动过期")
-            params = {
-                "expected_node_id": str(host["node_id"]),
-                "instance_id": str(applied.get("instance_id") or ""),
-                "policy_id": str(applied.get("policy_id") or ""),
-                "action_expires_at": now + 300,
-                "lease_expires_at": applied_lease,
-            }
-            if not re.fullmatch(r"[0-9a-f]{32}", params["policy_id"]) or not params["instance_id"]:
-                conn.close()
-                raise HTTPException(status_code=409, detail="已生效限额缺少安全撤销标识；等待自动过期")
-            action, queued = _queue_security_action_row(
-                conn, alert, "release_container_connlimit", params, requested_by
-            )
-    else:
-        conn.execute(
-            "DELETE FROM security_alert_policies WHERE fingerprint=?",
-            (alert["fingerprint"],),
-        )
-        conn.execute("UPDATE security_alerts SET status='active' WHERE id=?", (alert_id,))
-        if (
-            alert["alert_type"] == "unauthorized_panel_pairing"
-            and alert["runtime"] in ("podman", "incus", "runman")
-        ):
-            domains = _alert_action_evidence(alert).get("unapproved_domains") or []
-            if domains:
-                action, queued = _queue_security_action_row(
-                    conn,
-                    alert,
-                    "disallow_panel_domains",
-                    {"domains": domains},
-                    requested_by,
-                )
-
-    conn.execute(
-        """
-        INSERT INTO security_alert_decisions(
-            alert_id, fingerprint, decision, requested_by, created_at
-        ) VALUES(?,?,?,?,?)
-        """,
-        (alert_id, alert["fingerprint"], decision, requested_by, now),
-    )
-    investigation.sync_states(conn, alert['host_id'], now, alert_id=alert['id'])
-    conn.commit()
-    conn.close()
-    try:
-        sync_configured_bot_alert_messages(alert_id=alert_id)
-    except Exception as exc:
-        print(f"telegram sync on disposition {alert_id} failed: {exc}")
-    return JSONResponse(
-        status_code=202 if action is not None and queued else 200,
-        content={
-            "ok": True,
-            "decision": decision,
-            "queued": queued,
-            "action": _action_item(action) if action is not None else None,
-        },
-    )
+    return await _alert_svc.set_security_alert_disposition(alert_id, request)
 
 
 @app.post("/api/v1/containers/disposition")
 async def set_container_disposition(request: Request) -> JSONResponse:
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid JSON body")
-    host_id = str(payload.get("host_id") or "").strip()[:200]
-    runtime = str(payload.get("runtime") or "").strip()[:80]
-    project = str(payload.get("project") or "").strip()[:100]
-    container_name = str(payload.get("container_name") or "").strip()[:200]
-    decision = str(payload.get("decision") or "").strip().lower()
-    raw_alert_id = payload.get("alert_id")
-    alert_id = None
-    if raw_alert_id not in (None, ""):
-        try:
-            alert_id = int(raw_alert_id)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="alert_id must be an integer")
-        if alert_id <= 0:
-            raise HTTPException(status_code=400, detail="alert_id must be positive")
-    if not host_id or not runtime or not container_name:
-        raise HTTPException(
-            status_code=400, detail="host_id, runtime, and container_name are required"
-        )
-    if decision not in ("deny", "allow_silent", "dismiss_once", "reopen", "resolve", "release_udp_throttle", "apply_udp_throttle", "freeze_container", "unfreeze_container", "apply_udp_blackhole", "release_udp_blackhole", "apply_anti_spoof", "release_anti_spoof"):
-        raise HTTPException(status_code=400, detail="invalid decision")
-
-    conn = db()
-    try:
-        identity = (host_id, runtime, project, container_name)
-        selected_alert_id = None
-        if alert_id is not None:
-            alert = conn.execute(
-                "SELECT * FROM security_alerts WHERE id=?", (alert_id,)
-            ).fetchone()
-            if alert is None:
-                raise HTTPException(status_code=404, detail="alert not found")
-            alert_identity = (
-                str(alert["host_id"] or ""),
-                str(alert["runtime"] or ""),
-                str(alert["project"] or ""),
-                str(alert["container_name"] or ""),
-            )
-            if (
-                alert_identity[0] != identity[0]
-                or alert_identity[1] != identity[1]
-                or alert_identity[3] != identity[3]
-                or (
-                    alert_identity[2]
-                    and identity[2]
-                    and alert_identity[2] != identity[2]
-                )
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="alert_id 与目标主机、运行时、项目或容器不匹配",
-                )
-            selected_alert_id = int(alert["id"])
-        else:
-            # Never let a generic DDoS/connection alert win just because it is
-            # newer than the actionable SOCKS/panel alert the user clicked.
-            # The frontend normally sends alert_id; this fallback keeps the
-            # drawer compatible with older clients.
-            actionable_types = tuple(sorted(_ACTIONABLE_ALERT_TYPES))
-            placeholders = ",".join("?" for _ in actionable_types)
-            alert = conn.execute(
-                f"""
-                SELECT * FROM security_alerts
-                WHERE host_id=? AND runtime=?
-                  AND (project=? OR project='' OR ?='')
-                  AND container_name=?
-                  AND status='active' AND alert_type IN ({placeholders})
-                ORDER BY id DESC LIMIT 1
-                """,
-                (host_id, runtime, project, project, container_name, *actionable_types),
-            ).fetchone()
-            if alert is None and decision == "resolve":
-                # Resolve is a generic acknowledgement action; it may be used
-                # for a non-remediable telemetry alert from the drawer.
-                alert = conn.execute(
-                    """
-                    SELECT * FROM security_alerts
-                    WHERE host_id=? AND runtime=?
-                      AND (project=? OR project='' OR ?='')
-                      AND container_name=?
-                      AND status='active'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (host_id, runtime, project, project, container_name),
-                ).fetchone()
-            if alert is not None:
-                selected_alert_id = int(alert["id"])
-
-        if selected_alert_id is not None:
-            conn.close()
-            return await set_security_alert_disposition(selected_alert_id, request)
-
-        if decision in ("release_udp_throttle", "apply_udp_throttle", "freeze_container", "unfreeze_container", "apply_udp_blackhole", "release_udp_blackhole", "apply_anti_spoof", "release_anti_spoof"):
-            now = int(time.time())
-            action_type = decision
-            params = {"rate_mbps": 10, "duration": 3600} if decision == "apply_udp_throttle" else {}
-            requested_by = str(
-                getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard")
-            )[:100]
-            cur = conn.execute(
-                """
-                INSERT INTO security_actions(
-                    alert_id, host_id, runtime, project, container_name, action_type, params_json,
-                    status, requested_by, created_at, updated_at
-                ) VALUES(0,?,?,?,?,?,?,'queued',?,?,?)
-                """,
-                (host_id, runtime, project, container_name, action_type, json.dumps(params, ensure_ascii=False), requested_by, now, now),
-            )
-            action_row = conn.execute("SELECT * FROM security_actions WHERE id=?", (cur.lastrowid,)).fetchone()
-            conn.commit()
-            conn.close()
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "ok": True,
-                    "decision": decision,
-                    "queued": True,
-                    "action": _action_item(action_row) if action_row is not None else None,
-                },
-            )
-        if alert is None:
-            raise HTTPException(
-                status_code=404,
-                detail="未找到该容器对应的可处置活动安全告警记录",
-            )
-        selected_alert_id = int(alert["id"])
-    finally:
-        conn.close()
-    return await set_security_alert_disposition(selected_alert_id, request)
+    return await _alert_svc.set_container_disposition(request)
 
 
 @app.get("/api/v1/hosts/{host_id:path}/firewall-policy")
 def get_host_firewall_policy(host_id: str) -> JSONResponse:
-    if not host_id or len(host_id) > 200:
-        raise HTTPException(status_code=400, detail="主机标识无效")
-    conn = db()
-    try:
-        now = int(time.time())
-        host = conn.execute("SELECT node_id,agent_version FROM hosts WHERE host_id=?", (host_id,)).fetchone()
-        if host is None:
-            raise HTTPException(status_code=404, detail="主机不存在")
-        row = conn.execute("SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
-        if row is None:
-            revision, policy, updated_by, updated_at, source_fleet_revision = 0, _empty_host_firewall_policy(), "", 0, 0
-        else:
-            try:
-                policy = json.loads(row["policy_json"] or "{}")
-            except (TypeError, ValueError):
-                policy = _empty_host_firewall_policy()
-            try:
-                policy = _validate_host_firewall_policy(policy)
-            except HTTPException:
-                policy = _empty_host_firewall_policy()
-            revision, updated_by, updated_at, source_fleet_revision = int(row["revision"]), str(row["updated_by"] or ""), int(row["updated_at"] or 0), int(row["source_fleet_revision"] or 0)
-        action = _latest_host_firewall_action(conn, host_id)
-        latest = None if action is None else {
-            "id": int(action["id"]), "status": str(action["status"]),
-            "message": str(action["result_message"] or ""),
-            "updated_at_utc8": format_utc8(int(action["updated_at"] or 0)),
-        }
-        return JSONResponse({
-            "host_id": host_id,
-            "agent_ready": bool(str(host["node_id"] or "")),
-            "revision": revision,
-            "source_fleet_revision": source_fleet_revision,
-            "policy": policy,
-            "runtime_status": _host_firewall_runtime_status(conn, host_id, now),
-            "interface_inventory": _host_firewall_interface_inventory(conn, host_id, now),
-            "live_readback": _host_firewall_live_readback(conn, host_id, now),
-            "updated_by": updated_by,
-            "speedtest_auto_default": updated_by == SPEEDTEST_AUTO_DEFAULT_REQUESTED_BY,
-            "speedtest_policy_supported": _agent_supports_speedtest_policy(host["agent_version"]),
-            "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
-            "latest_action": latest,
-            "policy_history": [
-                {
-                    "revision": int(item["revision"]),
-                    "policy": json.loads(item["policy_json"] or "{}"),
-                    "updated_by": str(item["updated_by"] or ""),
-                    "updated_at_utc8": format_utc8(int(item["updated_at"] or 0)),
-                    "source_fleet_revision": int(item["source_fleet_revision"] or 0),
-                }
-                for item in conn.execute(
-                    "SELECT revision,policy_json,updated_by,updated_at,source_fleet_revision FROM host_firewall_policy_history WHERE host_id=? ORDER BY revision DESC,id DESC LIMIT 20",
-                    (host_id,),
-                ).fetchall()
-            ],
-        })
-    finally:
-        conn.close()
+    return _fw_svc.get_host_firewall_policy(host_id)
 
 
 def _prepare_host_firewall_recovery(conn: sqlite3.Connection, host_id: str, now: int):
-    """Fail closed unless a single online host has fresh, compatible RFW readback."""
-    host = conn.execute("SELECT node_id,last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
-    if host is None:
-        raise HTTPException(status_code=404, detail="主机不存在")
-    node_id = str(host["node_id"] or "")
-    if not node_id or now - int(host["last_seen"] or 0) > STALE_SECONDS:
-        raise HTTPException(status_code=409, detail="母机离线或上报过期，未下发防火墙操作")
-    fleet = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
-    if fleet is not None and int(fleet["revision"] or 0) > 0:
-        raise HTTPException(status_code=409, detail="全局策略模板已启用；请从全局策略入口处理，避免单机状态分叉")
-    runtime = _host_firewall_runtime_status(conn, host_id, now)
-    if runtime.get("stale"):
-        raise HTTPException(status_code=409, detail="Runman 防火墙能力状态已过期；等待 Agent 重新上报后再操作")
-    if runtime.get("control_api") != "ready":
-        raise HTTPException(status_code=409, detail="Runman 防火墙控制接口尚未确认可用")
-    readback = _host_firewall_live_readback(conn, host_id, now)
-    if readback.get("status") != "ready" or readback.get("stale") or not isinstance(readback.get("snapshot"), dict):
-        raise HTTPException(status_code=409, detail="RFW 实时读回缺失或已过期，未下发操作")
-    if conn.execute(
-        "SELECT 1 FROM security_actions WHERE host_id=? AND action_type IN ('apply_host_firewall_policy','delete_host_firewall_rule') AND status IN ('queued','dispatched','running') LIMIT 1",
-        (host_id,),
-    ).fetchone():
-        raise HTTPException(status_code=409, detail="该主机已有防火墙操作正在执行")
-    return node_id, readback
+    return _fw_svc._prepare_host_firewall_recovery(conn, host_id, now)
 
 
 @app.post("/api/v1/firewall/host-policy/retry")
 async def retry_host_firewall_policy(request: Request) -> JSONResponse:
-    if getattr(request.state, "dashboard_role", "admin") != "admin":
-        raise HTTPException(status_code=403, detail="只有管理员可以重试母机防火墙策略")
-    try:
-        payload = json.loads(await request.body())
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="请求必须是有效 JSON") from None
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="请求必须是 JSON 对象")
-    host_id = str(payload.get("host_id") or "")[:200]
-    if not host_id:
-        raise HTTPException(status_code=400, detail="需要指定主机")
-    conn = db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        action = _latest_host_firewall_action(conn, host_id)
-        readback = _host_firewall_live_readback(conn, host_id, int(time.time()))
-        if not action or (action["status"] != "failed" and not (readback.get("sync_status") == "drifted" and not readback.get("stale"))):
-            raise HTTPException(status_code=409, detail="仅当最近应用失败或新鲜读回显示策略偏差时可重试")
-        now = int(time.time())
-        node_id, readback = _prepare_host_firewall_recovery(conn, host_id, now)
-        current = conn.execute("SELECT policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
-        policy = _validate_host_firewall_policy(json.loads(current["policy_json"] or "{}")) if current else _empty_host_firewall_policy()
-        materialized, target_state = _materialize_host_firewall_policy(conn, host_id, policy, now)
-        if materialized is None:
-            raise HTTPException(status_code=409, detail=f"目标网卡/运行时已不可验证（{target_state}），未下发重试")
-        compatibility = _policy_protocol_compatibility(materialized, readback)
-        if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
-            raise HTTPException(status_code=409, detail="RFW 实时协议能力不满足当前策略，未下发重试")
-        requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
-        action_id = _enqueue_host_firewall_policy(conn, host_id, node_id, materialized, requested_by, now, 0)
-        revision = int(conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()[0])
-        conn.commit()
-        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "action_id": action_id, "queued": True})
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return await _fw_svc.retry_host_firewall_policy(request)
 
 
 @app.post("/api/v1/firewall/host-policy/rollback")
 async def rollback_host_firewall_policy(request: Request) -> JSONResponse:
-    if getattr(request.state, "dashboard_role", "admin") != "admin":
-        raise HTTPException(status_code=403, detail="只有管理员可以回滚母机防火墙策略")
-    try:
-        payload = json.loads(await request.body())
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="请求必须是有效 JSON") from None
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="请求必须是 JSON 对象")
-    host_id = str(payload.get("host_id") or "")[:200]
-    if not host_id:
-        raise HTTPException(status_code=400, detail="需要指定主机")
-    conn = db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        history = conn.execute(
-            "SELECT revision,policy_json FROM host_firewall_policy_history WHERE host_id=? ORDER BY revision DESC,id DESC LIMIT 1",
-            (host_id,),
-        ).fetchone()
-        if not history:
-            raise HTTPException(status_code=409, detail="没有可回滚的历史策略")
-        now = int(time.time())
-        node_id, readback = _prepare_host_firewall_recovery(conn, host_id, now)
-        try:
-            previous = _validate_host_firewall_policy(json.loads(history["policy_json"] or "{}"))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=409, detail="历史策略记录无效，未下发回滚") from None
-        materialized, target_state = _materialize_host_firewall_policy(conn, host_id, previous, now)
-        if materialized is None:
-            raise HTTPException(status_code=409, detail=f"历史策略引用的网卡已无法验证（{target_state}），未下发回滚")
-        compatibility = _policy_protocol_compatibility(materialized, readback)
-        if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
-            raise HTTPException(status_code=409, detail="RFW 实时协议能力不满足历史策略，未下发回滚")
-        requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
-        action_id = _enqueue_host_firewall_policy(
-            conn, host_id, node_id, materialized, requested_by, now, 0,
-            rollback_target_revision=int(history["revision"]),
-        )
-        revision = int(conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()[0])
-        conn.commit()
-        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "restored_revision": int(history["revision"]), "action_id": action_id, "queued": True})
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return await _fw_svc.rollback_host_firewall_policy(request)
 
 
 @app.post("/api/v1/hosts/{host_id:path}/firewall-policy")
 async def update_host_firewall_policy(host_id: str, request: Request) -> JSONResponse:
-    if getattr(request.state, "dashboard_role", "admin") != "admin":
-        raise HTTPException(status_code=403, detail="只有管理员可以修改母机防火墙策略")
-    if not host_id or len(host_id) > 200:
-        raise HTTPException(status_code=400, detail="主机标识无效")
-    raw_body = await request.body()
-    if len(raw_body) > 128 * 1024:
-        raise HTTPException(status_code=413, detail="防火墙配置超过 128 KiB")
-    try:
-        payload = json.loads(raw_body)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="防火墙配置必须是有效 JSON") from None
-    policy = _validate_host_firewall_policy(payload)
-    now = int(time.time())
-    requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
-    conn = db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        fleet_template = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
-        if fleet_template is not None and int(fleet_template["revision"] or 0) > 0:
-            raise HTTPException(status_code=409, detail="全局防火墙模板已启用；请编辑全局模板，避免单机配置与统一期望策略冲突")
-        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
-        if host is None:
-            raise HTTPException(status_code=404, detail="主机不存在")
-        node_id = str(host["node_id"] or "")
-        if not node_id:
-            raise HTTPException(status_code=409, detail="该主机尚未注册可校验身份的 Watcher Agent")
-        host_policy, target_status = _materialize_host_firewall_policy(conn, host_id, policy, now)
-        if host_policy is None:
-            message = "网卡清单尚未就绪或已过期，请刷新并等待母机重新上报后再应用。" if target_status == "inventory_unavailable" else "所选运行时/网卡未出现在母机最新采集到的 Incus / Podman bridge 中，请重新选择。"
-            raise HTTPException(status_code=409, detail=message)
-        policy = host_policy
-        if _policy_required_protocols(policy):
-            live_readback = _host_firewall_live_readback(conn, host_id, now)
-            compatibility = _policy_protocol_compatibility(policy, live_readback)
-            if compatibility["unsupported_protocols"]:
-                names = ", ".join(compatibility["unsupported_protocols"])
-                raise HTTPException(status_code=409, detail=f"该节点当前 RFW 不支持所选应用协议（运行中能力清单未包含）：{names}；请部署包含对应协议检测能力的 RFW 版本并更新节点，等待新鲜能力读回后再应用。仅更新 Watcher Agent 不会增加 RFW 协议支持")
-            if compatibility["unknown_protocols"]:
-                names = ", ".join(compatibility["unknown_protocols"])
-                raise HTTPException(status_code=409, detail=f"该节点尚无所选应用协议的新鲜 RFW 能力读回：{names}；请先刷新并等待节点上报。若读回仍显示不支持，需部署包含对应协议检测能力的 RFW 版本")
-        action_id = _enqueue_host_firewall_policy(conn, host_id, node_id, policy, requested_by, now, 0)
-        revision_row = conn.execute("SELECT revision FROM host_firewall_policies WHERE host_id=?", (host_id,)).fetchone()
-        revision = int(revision_row["revision"])
-        conn.commit()
-        return JSONResponse(status_code=202, content={"ok": True, "revision": revision, "action_id": action_id, "queued": True})
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return await _fw_svc.update_host_firewall_policy(host_id, request)
 
 
 @app.delete("/api/v1/hosts/{host_id:path}/firewall-rules/{rule_id}")
 async def delete_host_firewall_rule(host_id: str, rule_id: int, request: Request) -> JSONResponse:
-    if getattr(request.state, "dashboard_role", "admin") != "admin":
-        raise HTTPException(status_code=403, detail="只有管理员可以删除母机 RFW 规则")
-    if not host_id or len(host_id) > 200 or not 1 <= rule_id <= 2**63 - 1:
-        raise HTTPException(status_code=400, detail="主机或 RFW 规则标识无效")
-
-    now = int(time.time())
-    requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
-    conn = db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        host = conn.execute("SELECT node_id FROM hosts WHERE host_id=?", (host_id,)).fetchone()
-        if host is None:
-            raise HTTPException(status_code=404, detail="主机不存在")
-        node_id = str(host["node_id"] or "")
-        if not node_id:
-            raise HTTPException(status_code=409, detail="该主机尚未注册可校验身份的 Watcher Agent")
-
-        readback = _host_firewall_live_readback(conn, host_id, now)
-        if readback.get("status") != "ready" or readback.get("stale") is not False:
-            raise HTTPException(status_code=409, detail="RFW 规则读回已过期或不可用；刷新并等待母机重新上报后再删除")
-        snapshot = readback.get("snapshot")
-        if not isinstance(snapshot, dict):
-            raise HTTPException(status_code=409, detail="没有可验证的当前 RFW 规则快照")
-        rules = snapshot.get("rules") if isinstance(snapshot.get("rules"), list) else []
-        target = next((
-            rule for rule in rules
-            if isinstance(rule, dict) and type(rule.get("id")) is int and rule["id"] == rule_id
-        ), None)
-        if target is None:
-            raise HTTPException(status_code=404, detail="该规则已不在最近一次 RFW 读回中，请刷新列表")
-        if target.get("origin") != "manual" or target.get("sync_state") != "manual":
-            raise HTTPException(status_code=409, detail="平台管理规则请先在期望规则列表中移除，再保存并应用")
-
-        expected_rule = {
-            key: target[key]
-            for key in (
-                "id", "priority", "direction", "protocol", "action", "enabled",
-                "port_start", "port_end", "ip_type", "origin", "sync_state",
-            )
-            if key in target
-        }
-        if "ip" in target:
-            expected_rule["ip"] = target["ip"]
-        if "countries" in target:
-            expected_rule["countries"] = target["countries"]
-
-        pending_rows = conn.execute(
-            "SELECT id,params_json FROM security_actions WHERE host_id=? AND action_type='delete_host_firewall_rule' "
-            "AND status IN ('queued','dispatched','running')",
-            (host_id,),
-        ).fetchall()
-        for pending_row in pending_rows:
-            try:
-                pending_params = json.loads(pending_row["params_json"] or "{}")
-            except (TypeError, ValueError):
-                pending_params = {}
-            pending_rule = pending_params.get("rule") if isinstance(pending_params, dict) else None
-            if isinstance(pending_rule, dict) and pending_rule.get("id") == rule_id:
-                conn.commit()
-                return JSONResponse(status_code=202, content={
-                    "ok": True, "rule_id": rule_id, "action_id": int(pending_row["id"]), "queued": True,
-                })
-
-        params = {"expected_node_id": node_id, "rule": expected_rule}
-        cur = conn.execute(
-            "INSERT INTO security_actions(alert_id,host_id,runtime,project,container_name,action_type,params_json,status,requested_by,created_at,updated_at) "
-            "VALUES(0,?,'host','','__host__','delete_host_firewall_rule',?,'queued',?,?,?)",
-            (host_id, json.dumps(params, ensure_ascii=False), requested_by, now, now),
-        )
-        conn.commit()
-        return JSONResponse(status_code=202, content={
-            "ok": True, "rule_id": rule_id, "action_id": int(cur.lastrowid), "queued": True,
-        })
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return await _fw_svc.delete_host_firewall_rule(host_id, rule_id, request)
 
 
 @app.get("/api/v1/firewall/fleet-policy")
 def get_fleet_firewall_policy() -> JSONResponse:
-    now = int(time.time())
-    conn = db()
-    try:
-        template = conn.execute(
-            "SELECT revision,policy_json,updated_by,updated_at FROM fleet_firewall_policy WHERE id=1"
-        ).fetchone()
-        if template is None:
-            revision, policy, updated_by, updated_at = 0, _empty_host_firewall_policy(), "", 0
-        else:
-            try:
-                policy = _validate_host_firewall_policy(json.loads(template["policy_json"] or "{}"))
-            except (HTTPException, TypeError, ValueError):
-                policy = _empty_host_firewall_policy()
-            revision = int(template["revision"] or 0)
-            updated_by = str(template["updated_by"] or "")
-            updated_at = int(template["updated_at"] or 0)
-        hosts = conn.execute(
-            "SELECT host_id,node_id,last_seen,agent_version FROM hosts ORDER BY host_id"
-        ).fetchall()
-        required_protocols = _policy_required_protocols(policy)
-        nodes = [
-            _fleet_firewall_node_state(conn, host, revision, now, required_protocols, policy)
-            for host in hosts
-        ]
-        readback_current = sum(1 for item in nodes if item["live_readback"]["status"] == "ready" and not item["live_readback"]["stale"])
-        readback_drifted = sum(
-            1 for item in nodes
-            if item["live_readback"]["status"] == "ready"
-            and not item["live_readback"]["stale"]
-            and item["live_readback"]["sync_status"] == "drifted"
-        )
-        readback_unavailable = sum(1 for item in nodes if item["live_readback"]["status"] in {"unavailable", "unsupported", "unknown"} or item["live_readback"]["stale"])
-        return JSONResponse({
-            "revision": revision,
-            "automatic_speedtest_default": revision == 0,
-            "policy": policy,
-            "updated_by": updated_by,
-            "updated_at_utc8": format_utc8(updated_at) if updated_at else "",
-            "hosts": nodes,
-            "counts": {
-                "total": len(nodes),
-                "registered": sum(1 for item in nodes if item["registered"]),
-                "online": sum(1 for item in nodes if item["online"]),
-                "control_ready": sum(
-                    1 for item in nodes
-                    if item["control_api"] == "ready" and item["online"] and not item["control_api_stale"]
-                ),
-                "last_apply_succeeded": sum(1 for item in nodes if item["state"] == "last_apply_succeeded"),
-                "deferred": sum(1 for item in nodes if item["state"] not in {"last_apply_succeeded", "ready"}),
-                "network_deferred": sum(1 for item in nodes if item["state"] in {"awaiting_interfaces", "interfaces_not_found"}),
-                "live_readback_current": readback_current,
-                "drifted_hosts": readback_drifted,
-                "readback_unavailable": readback_unavailable,
-                "mtproto_supported_hosts": sum(1 for item in nodes if item["live_readback"]["mtproto_support"] == "supported"),
-                "mtproto_unsupported_hosts": sum(1 for item in nodes if item["live_readback"]["mtproto_support"] == "unsupported"),
-                "mtproto_capability_unknown_hosts": sum(1 for item in nodes if item["live_readback"]["mtproto_support"] == "unknown"),
-                "required_protocols_supported_hosts": sum(1 for item in nodes if item["required_protocols"] and not item["unsupported_protocols"] and not item["unknown_protocols"]),
-                "required_protocols_unsupported_hosts": sum(1 for item in nodes if item["unsupported_protocols"]),
-                "required_protocols_unknown_hosts": sum(1 for item in nodes if item["unknown_protocols"]),
-                "rfw_configured_hosts": sum(1 for item in nodes if item["rfw_configured"]),
-                "rfw_verified_hosts": sum(1 for item in nodes if item["rfw_status"] == "verified"),
-                "rfw_attention_hosts": sum(1 for item in nodes if item["rfw_configured"] and item["rfw_status"] != "verified"),
-                "container_protection_configured_hosts": sum(1 for item in nodes if item["container_protection_status"]["configured"]),
-                "container_protection_active_hosts": sum(1 for item in nodes if item["container_protection_status"]["configured"] and item["container_protection_status"]["state"] == "active"),
-                "container_protection_attention_hosts": sum(1 for item in nodes if item["container_protection_status"]["configured"] and item["container_protection_status"]["state"] != "active"),
-                "container_protection_containers_seen": sum(int(item["container_protection_status"]["containers_seen"] or 0) for item in nodes),
-                "container_protection_containers_verified": sum(int(item["container_protection_status"]["containers_verified"] or 0) for item in nodes),
-            },
-            # Rules are read from the running RFW userspace API and compared
-            # with Runman's ownership map; this is not a direct eBPF map dump.
-            "live_rule_readback_supported": True,
-        })
-    finally:
-        conn.close()
+    return _fw_svc.get_fleet_firewall_policy()
 
 
 @app.post("/api/v1/firewall/fleet-policy")
 async def update_fleet_firewall_policy(request: Request) -> JSONResponse:
-    if getattr(request.state, "dashboard_role", "admin") != "admin":
-        raise HTTPException(status_code=403, detail="只有管理员可以修改全局母机防火墙策略")
-    raw_body = await request.body()
-    if len(raw_body) > 128 * 1024:
-        raise HTTPException(status_code=413, detail="防火墙配置超过 128 KiB")
-    try:
-        payload = json.loads(raw_body)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="防火墙配置必须是有效 JSON") from None
-    policy = _validate_host_firewall_policy(payload)
-    now = int(time.time())
-    requested_by = str(getattr(request.state, "dashboard_user", DASHBOARD_USERNAME or "dashboard"))[:100]
-    conn = db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute("SELECT revision FROM fleet_firewall_policy WHERE id=1").fetchone()
-        revision = (int(existing["revision"]) if existing else 0) + 1
-        conn.execute(
-            "INSERT INTO fleet_firewall_policy(id,revision,policy_json,updated_by,updated_at) VALUES(1,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,policy_json=excluded.policy_json,"
-            "updated_by=excluded.updated_by,updated_at=excluded.updated_at",
-            (revision, json.dumps(policy, ensure_ascii=False, separators=(",", ":")), requested_by, now),
-        )
-        hosts = conn.execute("SELECT host_id,node_id,last_seen FROM hosts ORDER BY host_id").fetchall()
-        queued = 0
-        deferred = 0
-        network_deferred = 0
-        policy_abuse = policy.get("abuse") if isinstance(policy, dict) else None
-        container_policy_enabled = isinstance(policy_abuse, dict) and any(
-            policy_abuse.get(key) is True for key in ("mining", "bt")
-        )
-        for host in hosts:
-            host_id = str(host["host_id"])
-            node_id = str(host["node_id"] or "")
-            host_online = bool(node_id) and now - int(host["last_seen"] or 0) <= STALE_SECONDS
-            existing_policy_row = conn.execute(
-                "SELECT policy_json FROM host_firewall_policies WHERE host_id=?", (host_id,)
-            ).fetchone()
-            requires_rfw = _policy_has_rfw_effect(policy) or (
-                existing_policy_row is not None
-                and _stored_policy_has_rfw_effect(str(existing_policy_row["policy_json"] or "{}"))
-            )
-            runtime = _host_firewall_runtime_status(conn, host_id, now)
-            if host_online and (
-                not requires_rfw
-                or (runtime["control_api"] == "ready" and not runtime["stale"])
-            ):
-                if _policy_required_protocols(policy):
-                    live_readback = _host_firewall_live_readback(conn, host_id, now)
-                    compatibility = _policy_protocol_compatibility(policy, live_readback)
-                    if compatibility["unsupported_protocols"] or compatibility["unknown_protocols"]:
-                        deferred += 1
-                        continue
-                host_policy, target_status = _materialize_host_firewall_policy(conn, host_id, policy, now)
-                if host_policy is None:
-                    deferred += 1
-                    network_deferred += 1
-                    continue
-                _enqueue_host_firewall_policy(conn, host_id, node_id, host_policy, requested_by, now, revision)
-                queued += 1
-            else:
-                deferred += 1
-                if container_policy_enabled or requires_rfw:
-                    _targets, target_status = _host_firewall_policy_targets(conn, host_id, policy, now)
-                    if target_status in {"inventory_unavailable", "runtime_not_found", "interface_not_found"}:
-                        network_deferred += 1
-        conn.commit()
-        return JSONResponse(status_code=202, content={
-            "ok": True,
-            "revision": revision,
-            "queued_hosts": queued,
-            "deferred_hosts": deferred,
-            "network_deferred_hosts": network_deferred,
-            "total_hosts": len(hosts),
-        })
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return await _fw_svc.update_fleet_firewall_policy(request)
 
 
 @app.post("/api/v1/hosts/{host_id}/config")
@@ -6633,59 +2785,104 @@ def _poll_security_actions_sync(
 ) -> Dict[str, Any]:
     conn = db()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("UPDATE hosts SET last_seen=? WHERE host_id=?", (now, host_id))
-        if client_ip:
-            reach_monitor.record_client_ip(conn, host_id, client_ip, now)
-        conn.execute(
-            """
-            UPDATE security_actions
-            SET status='failed', result_message='agent did not confirm action after 3 attempts', updated_at=?
-            WHERE host_id=? AND status='dispatched' AND attempts>=3 AND updated_at < ?
-            """,
-            (now, host_id, now - 120),
+        db_file = _db_file_key(conn)
+        host_row = conn.execute("SELECT last_seen FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        with _poll_heartbeat_lock:
+            prev = _poll_heartbeat_by_db.get((db_file, host_id)) if db_file else None
+        need_heartbeat = (
+            not db_file
+            or POLL_HEARTBEAT_WRITE_INTERVAL_SECONDS == 0
+            or host_row is None
+            or now - int(host_row["last_seen"] or 0) >= POLL_HEARTBEAT_WRITE_INTERVAL_SECONDS
+            or prev is None
+            or now < prev[0]
+            or now - prev[0] >= POLL_HEARTBEAT_WRITE_INTERVAL_SECONDS
+            or (bool(client_ip) and client_ip != prev[1])
         )
-        rows = conn.execute(
-            """
-            SELECT * FROM security_actions
-            WHERE host_id=? AND attempts < 3
-              AND (status='queued' OR (status='dispatched' AND updated_at < ?))
-            ORDER BY id LIMIT 10
-            """,
-            (host_id, now - 120),
-        ).fetchall()
-        actions = []
-        for row in rows:
-            stored = json.loads(row["params_json"] or "{}")
-            if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'confirm_replaced_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
-                continue
-            if row["action_type"] == "restart_container" and stored.get("expected_node_id") != node_id:
-                continue
-            params = _refresh_remediation_process_pids(conn, row)
+        has_action_work = bool(
             conn.execute(
-                "UPDATE security_actions SET status='dispatched', attempts=attempts+1, updated_at=?, params_json=? WHERE id=?",
-                (now, json.dumps(params, ensure_ascii=False), row["id"]),
-            )
-            action = _action_item(row)
-            action["params"] = params
-            action["status"] = "dispatched"
-            action["attempts"] += 1
-            actions.append(action)
-
-        tcp_probe = {"job": None, "cancelled": []}
-        gfw_probe = {"job": None}
-        conn.execute("SAVEPOINT probe_lease")
+                """
+                SELECT 1 FROM security_actions
+                WHERE host_id=?
+                  AND ((status='dispatched' AND attempts>=3 AND updated_at < ?)
+                       OR (attempts < 3 AND (status='queued' OR (status='dispatched' AND updated_at < ?))))
+                LIMIT 1
+                """,
+                (host_id, now - 120, now - 120),
+            ).fetchone()
+        )
         try:
-            tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
-            gfw_probe = gfw_monitor.lease_job(conn, host_id, node_id, now, gfw_probe_capabilities)
-            conn.execute("RELEASE SAVEPOINT probe_lease")
+            tcp_needs_write, tcp_cancelled = tcping.has_pending_work(conn, host_id, node_id, now)
         except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT probe_lease")
-            conn.execute("RELEASE SAVEPOINT probe_lease")
-            logging.exception("TCP probe queue failed; signed security polling continues")
+            tcp_needs_write, tcp_cancelled = True, []
+        try:
+            gfw_needs_write = gfw_monitor.has_pending_work(conn, host_id, node_id, now, gfw_probe_capabilities)
+        except Exception:
+            gfw_needs_write = True
+
+        if not (need_heartbeat or has_action_work or tcp_needs_write or gfw_needs_write):
+            actions = []
+            tcp_probe = {"job": None, "cancelled": tcp_cancelled}
+            gfw_probe = {"job": None}
+            server_metrics.metrics.inc("idle_poll_readonly_hits")
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE hosts SET last_seen=? WHERE host_id=?", (now, host_id))
+            if client_ip:
+                reach_monitor.record_client_ip(conn, host_id, client_ip, now)
+            conn.execute(
+                """
+                UPDATE security_actions
+                SET status='failed', result_message='agent did not confirm action after 3 attempts', updated_at=?
+                WHERE host_id=? AND status='dispatched' AND attempts>=3 AND updated_at < ?
+                """,
+                (now, host_id, now - 120),
+            )
+            rows = conn.execute(
+                """
+                SELECT * FROM security_actions
+                WHERE host_id=? AND attempts < 3
+                  AND (status='queued' OR (status='dispatched' AND updated_at < ?))
+                ORDER BY id LIMIT 10
+                """,
+                (host_id, now - 120),
+            ).fetchall()
+            actions = []
+            for row in rows:
+                stored = json.loads(row["params_json"] or "{}")
+                if (row["runtime"] == "host" and row["action_type"] in {"update_host_config", "self_uninstall", "discover_access_logs", "host_security_rescan", "managed_upgrade", "managed_rollback",'disk_cleanup_scan','disk_cleanup_execute', 'apply_host_firewall_policy', 'delete_host_firewall_rule'} or row['action_type'] in {'release_network_quarantine', 'confirm_replaced_network_quarantine', 'apply_container_connlimit', 'release_container_connlimit'}) and stored.get("expected_node_id") != node_id:
+                    continue
+                if row["action_type"] == "restart_container" and stored.get("expected_node_id") != node_id:
+                    continue
+                params = _refresh_remediation_process_pids(conn, row)
+                conn.execute(
+                    "UPDATE security_actions SET status='dispatched', attempts=attempts+1, updated_at=?, params_json=? WHERE id=?",
+                    (now, json.dumps(params, ensure_ascii=False), row["id"]),
+                )
+                action = _action_item(row)
+                action["params"] = params
+                action["status"] = "dispatched"
+                action["attempts"] += 1
+                actions.append(action)
+
             tcp_probe = {"job": None, "cancelled": []}
             gfw_probe = {"job": None}
-        conn.commit()
+            conn.execute("SAVEPOINT probe_lease")
+            try:
+                tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
+                gfw_probe = gfw_monitor.lease_job(conn, host_id, node_id, now, gfw_probe_capabilities)
+                conn.execute("RELEASE SAVEPOINT probe_lease")
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT probe_lease")
+                conn.execute("RELEASE SAVEPOINT probe_lease")
+                logging.exception("TCP probe queue failed; signed security polling continues")
+                tcp_probe = {"job": None, "cancelled": []}
+                gfw_probe = {"job": None}
+            conn.commit()
+            server_metrics.metrics.inc("idle_poll_write_hits")
+            if db_file:
+                with _poll_heartbeat_lock:
+                    _poll_heartbeat_by_db[(db_file, host_id)] = (now, client_ip)
 
         ops_services = [{"id": r["id"], **operations.loads(r["payload"])} for r in conn.execute("SELECT id,payload FROM ops_services WHERE host_id=? AND enabled=1 LIMIT 20", (host_id,)).fetchall()]
         cleanup_policy=disk_cleanup.node_config(conn,node_id)
@@ -6804,6 +3001,7 @@ async def security_action_result(
             elif status == "succeeded":
                 status = "failed"
                 message = f"remediation could not be verified; no process, service or config change was confirmed; {message}"[:2000]
+        committed = False
         if row["status"] not in ("succeeded", "failed", "cancelled"):
             if row['action_type'] in disk_cleanup.TYPES:
                 disk_cleanup.record(conn,host_id,node_id,payload.get('cleanup_run'))
@@ -6843,8 +3041,12 @@ async def security_action_result(
             abuse_api.record_release_result(conn, row, params, status, now, message)
             abuse_api.record_replacement_result(conn, row, params, status, now, message)
             conn.commit()
+            committed = True
     finally:
         conn.close()
+    if committed:
+        invalidate_security_status_cache()
+        publish_live_event("action", host_id)
     if row['action_type'] in {'release_network_quarantine', 'confirm_replaced_network_quarantine'} and status in {'succeeded', 'failed'}:
         # A resolved release result may not appear in the next live sample;
         # update the existing Telegram card now, never leave "isolated" forever.
@@ -6853,23 +3055,7 @@ async def security_action_result(
 
 
 def broadcast_commerce_telegram(text: str, parse_mode: str = "HTML") -> int:
-    conn = db()
-    try:
-        bots = conn.execute("SELECT id, token, target FROM notification_bots WHERE enabled=1 AND kind='telegram'").fetchall()
-    finally:
-        conn.close()
-    sent_count = 0
-    for bot in bots:
-        try:
-            target_chat_id, thread_id = _parse_telegram_target(bot["target"])
-            payload = {"chat_id": target_chat_id, "text": text, "parse_mode": parse_mode}
-            if thread_id is not None:
-                payload["message_thread_id"] = thread_id
-            _telegram_api(bot["token"], "sendMessage", payload)
-            sent_count += 1
-        except Exception as exc:
-            logger.warning("Failed to send commerce notification via bot %s: %s", bot["id"], exc)
-    return sent_count
+    return _tg_svc.broadcast_commerce_telegram(text, parse_mode)
 
 
 operations_api.attach(app, db, lambda: DB_PATH, database_storage_status, cleanup_old_reports, lambda: APP_VERSION, lambda: DASHBOARD_USERNAME)
@@ -6879,46 +3065,29 @@ tcping.attach(app, db, STATIC_DIR, verify_signature, signed_json_response)
 security_routes.attach(app, db, STALE_SECONDS, lambda: APP_VERSION)
 gfw_monitor.attach(app, db, verify_signature, signed_json_response)
 abuse_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, _queue_security_action_row)
-admission_api.attach(app, db, verify_signature, signed_json_response, process_security_alerts, sync_configured_bot_alert_messages, buyer_notifications.reconcile)
+admission_api.attach(
+    app,
+    db,
+    verify_signature,
+    signed_json_response,
+    process_security_alerts,
+    sync_configured_bot_alert_messages,
+    buyer_notifications.reconcile,
+    on_event=publish_live_event,
+    on_metric=server_metrics.metrics.inc,
+)
 ip_reputation.attach(app, db, lambda: DB_PATH, commerce.cipher)
 reach_monitor.attach(app, db, verify_signature, signed_json_response)
 
 
 @app.get("/api/v1/security/actions")
 def security_actions(limit: int = 200) -> JSONResponse:
-    limit = max(1, min(limit, 1000))
-    conn = db()
-    rows = conn.execute("SELECT * FROM security_actions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    conn.close()
-    return JSONResponse(content={"items": [_action_item(row) for row in rows]})
+    return _alert_svc.security_actions(limit)
 
 
 @app.get("/api/v1/security/alerts")
 def security_alerts(active_only: bool = True, limit: int = 200) -> JSONResponse:
-    limit = max(1, min(limit, 1000))
-    conn = db()
-    if active_only:
-        rows = conn.execute(
-            """
-            SELECT a.* FROM security_alerts a
-            LEFT JOIN hosts h ON h.host_id=a.host_id
-            WHERE a.status='active'
-              AND a.alert_type<>'admission_unverified'
-              AND a.alert_type <> 'speedtest_attempt_blocked'
-              AND (a.container_name<>'' OR h.host_id IS NULL OR h.last_seen>=?)
-            ORDER BY a.last_seen DESC, a.id DESC LIMIT ?
-            """,
-            (int(time.time()) - STALE_SECONDS, limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM security_alerts ORDER BY last_seen DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    items = [_security_alert_item(conn, row) for row in rows]
-    conn.close()
-    active_count = sum(1 for item in items if item["status"] == "active") if not active_only else len(items)
-    return JSONResponse(content={"items": items, "active_count": active_count})
+    return _alert_svc.security_alerts(active_only, limit)
 
 
 def sni_and_node_health(limit: int = 100) -> JSONResponse:
@@ -6965,82 +3134,14 @@ def security_alert_history(
     limit: int = 100,
     offset: int = 0,
 ) -> JSONResponse:
-    valid_statuses = {"active", "suppressed", "dismissed", "resolved", "remediated"}
-    valid_severities = {"info", "warning", "critical"}
-    status = status.strip().lower()
-    severity = severity.strip().lower()
-    alert_type = alert_type.strip()[:80]
-    host_id = host_id.strip()[:200]
-    query = query.strip()[:200]
-    if status != "all" and status not in valid_statuses:
-        raise HTTPException(status_code=400, detail="invalid alert status")
-    if severity != "all" and severity not in valid_severities:
-        raise HTTPException(status_code=400, detail="invalid alert severity")
-    limit = max(1, min(limit, 200))
-    offset = max(0, offset)
-    clauses: List[str] = []
-    params: List[Any] = []
-    if status != "all":
-        clauses.append("status=?")
-        params.append(status)
-    if severity != "all":
-        clauses.append("severity=?")
-        params.append(severity)
-    if alert_type and alert_type != "all":
-        clauses.append("alert_type=?")
-        params.append(alert_type)
-    if host_id:
-        clauses.append("host_id=?")
-        params.append(host_id)
-    if query:
-        like_query = f"%{query}%"
-        clauses.append(
-            "(host_id LIKE ? OR container_name LIKE ? OR title LIKE ? OR message LIKE ? OR details_json LIKE ?)"
-        )
-        params.extend([like_query, like_query, like_query, like_query, like_query])
-    where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    conn = db()
-    total = int(
-        conn.execute(
-            f"SELECT COUNT(*) FROM security_alerts{where_sql}", params
-        ).fetchone()[0]
-    )
-    rows = conn.execute(
-        f"SELECT * FROM security_alerts{where_sql} "
-        "ORDER BY last_seen DESC, id DESC LIMIT ? OFFSET ?",
-        (*params, limit, offset),
-    ).fetchall()
-    counts = {item: 0 for item in ("all", *sorted(valid_statuses))}
-    for count_row in conn.execute(
-        "SELECT status, COUNT(*) AS count FROM security_alerts GROUP BY status"
-    ).fetchall():
-        current_status = str(count_row["status"])
-        counts[current_status] = int(count_row["count"])
-        counts["all"] += int(count_row["count"])
-    alert_types = [
-        str(item["alert_type"])
-        for item in conn.execute(
-            "SELECT DISTINCT alert_type FROM security_alerts ORDER BY alert_type"
-        ).fetchall()
-    ]
-    hosts = [
-        str(item["host_id"])
-        for item in conn.execute(
-            "SELECT DISTINCT host_id FROM security_alerts ORDER BY host_id"
-        ).fetchall()
-    ]
-    items = [_security_alert_item(conn, row) for row in rows]
-    conn.close()
-    return JSONResponse(
-        content={
-            "items": items,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "counts": counts,
-            "alert_types": alert_types,
-            "hosts": hosts,
-        }
+    return _alert_svc.security_alert_history(
+        status=status,
+        severity=severity,
+        alert_type=alert_type,
+        host_id=host_id,
+        query=query,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -7211,24 +3312,51 @@ def _security_collection_health(
 
 
 @app.get("/api/v1/security/status")
-def security_status() -> JSONResponse:
-    global _security_status_cache, _security_status_cache_time
+def security_status(request: Request = None) -> Response:
+    global _security_status_cache, _security_status_cache_time, _security_status_etag
+    volatile = ("last_seen_age_seconds", "report_age_seconds", "duration_seconds")
     now_mono = time.monotonic()
     with _security_status_cache_lock:
         if _security_status_cache is not None and now_mono - _security_status_cache_time < 10.0:
-            return JSONResponse(content=_security_status_cache)
+            cached_content = _security_status_cache
+            cached_etag = _security_status_etag or _compute_etag(cached_content, volatile_keys=volatile)
+            _security_status_etag = cached_etag
+            if _if_none_match_matches(request, cached_etag):
+                server_metrics.metrics.inc("etag_304_hits")
+                return Response(
+                    status_code=304,
+                    headers={"ETag": cached_etag, "Vary": "Accept-Encoding", "Cache-Control": "no-store"},
+                )
+            return JSONResponse(content=cached_content, headers={"ETag": cached_etag})
 
     with _security_status_compute_lock:
         now_mono = time.monotonic()
         with _security_status_cache_lock:
             if _security_status_cache is not None and now_mono - _security_status_cache_time < 10.0:
-                return JSONResponse(content=_security_status_cache)
+                cached_content = _security_status_cache
+                cached_etag = _security_status_etag or _compute_etag(cached_content, volatile_keys=volatile)
+                _security_status_etag = cached_etag
+                if _if_none_match_matches(request, cached_etag):
+                    server_metrics.metrics.inc("etag_304_hits")
+                    return Response(
+                        status_code=304,
+                        headers={"ETag": cached_etag, "Vary": "Accept-Encoding", "Cache-Control": "no-store"},
+                    )
+                return JSONResponse(content=cached_content, headers={"ETag": cached_etag})
 
         res_content = _compute_security_status()
+        etag = _compute_etag(res_content, volatile_keys=volatile)
         with _security_status_cache_lock:
             _security_status_cache = res_content
             _security_status_cache_time = time.monotonic()
-        return JSONResponse(content=res_content)
+            _security_status_etag = etag
+        if _if_none_match_matches(request, etag):
+            server_metrics.metrics.inc("etag_304_hits")
+            return Response(
+                status_code=304,
+                headers={"ETag": etag, "Vary": "Accept-Encoding", "Cache-Control": "no-store"},
+            )
+        return JSONResponse(content=res_content, headers={"ETag": etag})
 
 
 def _compute_security_status() -> Dict[str, Any]:
@@ -7656,3 +3784,14 @@ def stats_page(request: Request = None) -> Any:
 
 
 legacy_pages.attach(app, lambda: STATIC_DIR)
+live_events.attach(app, server_metrics.metrics)
+app.add_middleware(
+    server_metrics.SelectiveGZipMiddleware,
+    excluded_paths=set(_AGENT_ONLY_PATHS) | {"/api/v1/events/stream"},
+    minimum_size=1024,
+    compresslevel=5,
+)
+app.add_middleware(
+    server_metrics.MetricsMiddleware,
+    metrics_collector=server_metrics.metrics,
+)

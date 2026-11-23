@@ -15,7 +15,13 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { request } from '../../api/client';
+import {
+  api,
+  request,
+  type ServerMetricsRoute,
+  type ServerMetricsSlowItem,
+  type ServerMetricsSnapshot,
+} from '../../api/client';
 import { SpecStrip } from '../../v2/components/Primitives';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { ToastMessage } from '../common/Toast';
@@ -304,7 +310,15 @@ export function OperationsView({ onToast, isPaused = false, initialSection, init
             ? `?period=${historyPeriod}&days=${historyDays}&entity=${encodeURIComponent(historyEntity)}`
             : '';
         const route = section === 'inventory' ? 'service-inventory' : endpoint;
-        info = await request<RecordData>(`/api/v1/ops/${route}${suffix}`);
+        if (section === 'storage' && ['admin', 'operator'].includes(me.role)) {
+          const [storageInfo, serverMetrics] = await Promise.all([
+            request<RecordData>(`/api/v1/ops/${route}${suffix}`),
+            api.getServerMetrics().catch(() => null),
+          ]);
+          info = { ...storageInfo, server_metrics: serverMetrics };
+        } else {
+          info = await request<RecordData>(`/api/v1/ops/${route}${suffix}`);
+        }
         if (section === 'users') info.audit = (await request<RecordData>('/api/v1/ops/audit')).items;
         if (section === 'policies') info.entities = (await request<RecordData>('/api/v1/ops/traffic')).items;
       }
@@ -757,6 +771,172 @@ export function OperationsView({ onToast, isPaused = false, initialSection, init
                   </div>
                 )}
               </Card>
+              {data.server_metrics && (() => {
+                const sm = data.server_metrics as ServerMetricsSnapshot;
+                const slowThresholdMs = Number(sm.slow_threshold_ms ?? 250);
+                const counters = sm.counters || {};
+                const gauges = sm.gauges || {};
+                const routes: ServerMetricsRoute[] = Array.isArray(sm.routes) ? sm.routes : [];
+                const recentSlow: ServerMetricsSlowItem[] = Array.isArray(sm.recent_slow_requests) ? sm.recent_slow_requests : [];
+
+                return (
+                  <Card
+                    eyebrow="SERVER SELF-OBSERVABILITY"
+                    title="服务端性能与慢接口观测"
+                    badge={
+                      <span className="rn2-pill rn2-pill-sm rn2-pill-blue font-mono tabular-nums">
+                        阈值 ≥{slowThresholdMs} ms
+                      </span>
+                    }
+                  >
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                      <div className="min-w-0 rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-3">
+                        <p className="text-[11px] font-semibold text-[#697b9c]">总请求数</p>
+                        <p className="mt-1 font-mono text-lg font-extrabold text-[#087bff] tabular-nums">
+                          {Number(sm.total_requests ?? 0).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="min-w-0 rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-3">
+                        <p className="text-[11px] font-semibold text-[#697b9c]">
+                          {`慢请求 (≥${slowThresholdMs}ms)`}
+                        </p>
+                        <p
+                          className={`mt-1 font-mono text-lg font-extrabold tabular-nums ${
+                            Number(sm.slow_request_count ?? 0) > 0 ? 'text-[#b41835]' : 'text-[#0b1636]'
+                          }`}
+                        >
+                          {Number(sm.slow_request_count ?? 0).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="min-w-0 rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-3">
+                        <p className="text-[11px] font-semibold text-[#697b9c]">空轮询零写入</p>
+                        <p className="mt-1 font-mono text-lg font-extrabold text-[#147468] tabular-nums">
+                          {Number(counters.idle_poll_readonly_hits ?? 0).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="min-w-0 rounded-xl border border-[#dce5ef] bg-[#f4f8fd] p-3">
+                        <p className="text-[11px] font-semibold text-[#697b9c]">ETag 304 / 活跃 SSE</p>
+                        <p className="mt-1 font-mono text-lg font-extrabold text-[#0b1636] tabular-nums">
+                          {Number(counters.etag_304_hits ?? 0).toLocaleString()} /{' '}
+                          {Number(gauges.sse_active_connections ?? 0).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <h4 id="ops-server-metrics-table-heading" className="text-xs font-bold text-[#0b1636]">
+                          路由耗时分布（按 P95 降序）
+                        </h4>
+                        <span className="font-mono text-[11px] text-[#697b9c] tabular-nums">
+                          SSE 推送 {Number(counters.sse_events_published ?? 0).toLocaleString()} · 准入零写入{' '}
+                          {Number(counters.admission_readonly_hits ?? 0).toLocaleString()}
+                        </span>
+                      </div>
+                      {!routes.length ? (
+                        <Empty text="暂无路由性能观测样本。" />
+                      ) : (
+                        <div
+                          tabIndex={0}
+                          role="region"
+                          aria-labelledby="ops-server-metrics-table-heading"
+                          className="rn2-table-wrap"
+                        >
+                          <table className="min-w-[640px] text-left text-xs tabular-nums">
+                            <thead>
+                              <tr>
+                                <th scope="col" className="px-3.5 py-2.5 font-semibold">路由</th>
+                                <th scope="col" className="px-3.5 py-2.5 text-right font-semibold">请求数</th>
+                                <th scope="col" className="px-3.5 py-2.5 text-right font-semibold">P50 (ms)</th>
+                                <th scope="col" className="px-3.5 py-2.5 text-right font-semibold">P95 (ms)</th>
+                                <th scope="col" className="px-3.5 py-2.5 text-right font-semibold">Max (ms)</th>
+                                <th scope="col" className="px-3.5 py-2.5 text-right font-semibold">304 / 慢 / 错</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {routes.map((r) => (
+                                <tr key={`${r.method}:${r.path}`} className="group">
+                                  <th
+                                    scope="row"
+                                    className="border-b border-[#eaf0f7] px-3.5 py-2.5 text-left font-mono font-semibold text-[#0b1636] group-hover:bg-[#f8fbff] group-last:border-b-0"
+                                  >
+                                    <span className="mr-1.5 inline-block rounded bg-[#e8f3ff] px-1.5 py-0.5 text-[10px] font-bold text-[#0657b8]">
+                                      {r.method}
+                                    </span>
+                                    <span className="break-all">{r.path}</span>
+                                  </th>
+                                  <td className="px-3.5 py-2.5 text-right font-mono text-[#31485e]">
+                                    {Number(r.count ?? 0).toLocaleString()}
+                                  </td>
+                                  <td className="px-3.5 py-2.5 text-right font-mono text-[#31485e]">
+                                    {Number(r.p50_ms ?? 0).toFixed(1)}
+                                  </td>
+                                  <td
+                                    className={`px-3.5 py-2.5 text-right font-mono font-semibold ${
+                                      Number(r.p95_ms ?? 0) >= slowThresholdMs ? 'text-[#b41835]' : 'text-[#08458c]'
+                                    }`}
+                                  >
+                                    {Number(r.p95_ms ?? 0).toFixed(1)}
+                                  </td>
+                                  <td className="px-3.5 py-2.5 text-right font-mono text-[#31485e]">
+                                    {Number(r.max_ms ?? 0).toFixed(1)}
+                                  </td>
+                                  <td className="px-3.5 py-2.5 text-right font-mono text-[#697b9c]">
+                                    {Number(r.status_304_count ?? 0)} / {Number(r.slow_count ?? 0)} /{' '}
+                                    {Number(r.error_count ?? 0)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {recentSlow.length > 0 && (
+                      <div className="mt-4 rounded-xl border border-[#f7d58b] bg-[#fef6e4] p-3.5">
+                        <h4 className="mb-2 text-xs font-bold text-[#78350f]">
+                          最近慢请求（≥{slowThresholdMs} ms）
+                        </h4>
+                        <div className="divide-y divide-[#f7d58b]/60">
+                          {recentSlow.map((item, idx) => (
+                            <div
+                              key={`${item.ts}-${item.method}-${item.path}-${idx}`}
+                              className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs tabular-nums"
+                            >
+                              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                <span className="shrink-0 font-mono text-[#9a5b00]">{date(item.ts)}</span>
+                                <span className="shrink-0 rounded bg-white/80 px-1.5 py-0.5 font-mono text-[10px] font-bold text-[#0b1636]">
+                                  {item.method}
+                                </span>
+                                <span className="min-w-0 break-all font-mono font-semibold text-[#0b1636]">
+                                  {item.path}
+                                </span>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-2 font-mono">
+                                <span
+                                  className={`rn2-pill rn2-pill-sm ${
+                                    item.status_code >= 500
+                                      ? 'rn2-pill-crimson'
+                                      : item.status_code >= 400
+                                        ? 'rn2-pill-amber'
+                                        : 'rn2-pill-slate'
+                                  }`}
+                                >
+                                  HTTP {item.status_code}
+                                </span>
+                                <span className="font-bold text-[#b41835]">
+                                  {Number(item.duration_ms ?? 0).toFixed(1)} ms
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </Card>
+                );
+              })()}
             </>
           )}
 

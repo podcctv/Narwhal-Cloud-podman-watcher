@@ -13,13 +13,18 @@ const path = require('node:path');
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => { if (request.method() === 'POST' && !request.url().includes('/auth/')) mutations.push(request.url()); });
     await page.route('**/api/v1/latest*', async route => {
-      const response = await route.fetch(); const data = await response.json();
+      const reqHeaders = { ...route.request().headers() };
+      delete reqHeaders['if-none-match'];
+      const response = await route.fetch({ headers: reqHeaders });
+      const data = await response.json();
       for (const item of data.items || []) if (item.security?.admission) {
         item.security.admission.observed_at = Math.floor(Date.now() / 1000);
         item.security.admission.source_limit_enforced = false;
         for (const value of Object.values(item.security.admission.blocked || {})) value.last_seen = Math.floor(Date.now() / 1000);
       }
-      await route.fulfill({ response, json: data });
+      const resHeaders = { ...response.headers() };
+      delete resHeaders['etag'];
+      await route.fulfill({ response, headers: resHeaders, json: data });
     });
     await page.goto('http://127.0.0.1:8795/login');
     await page.getByLabel('用户名', { exact: true }).fill('preview');
