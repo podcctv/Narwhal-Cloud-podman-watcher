@@ -210,10 +210,12 @@ dashboard_auth.attach(app, lambda: db(), lambda: (DASHBOARD_USERNAME, DASHBOARD_
 
 
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_MS / 1000.0)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_MS / 1000.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-16384")
+    conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
 
@@ -223,6 +225,7 @@ def init_db() -> None:
     # Never serve a short-lived snapshot from the previous database in that case.
     _latest_cache = None
     _latest_cache_time = 0.0
+    invalidate_security_status_cache()
     conn = db()
     # WAL lets dashboard reads coexist with frequent agent writes.  This is
     # especially important once monitor.db contains large JSON payloads.
@@ -231,6 +234,7 @@ def init_db() -> None:
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone():
         conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=2000")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS reports (
@@ -462,6 +466,15 @@ def init_db() -> None:
         conn.execute("ALTER TABLE reports ADD COLUMN runtime TEXT NOT NULL DEFAULT 'podman'")
     if "project" not in col_names:
         conn.execute("ALTER TABLE reports ADD COLUMN project TEXT NOT NULL DEFAULT ''")
+    if "inbound_unique_ips" not in col_names:
+        conn.execute("ALTER TABLE reports ADD COLUMN inbound_unique_ips INTEGER")
+    if "outbound_unique_ips" not in col_names:
+        conn.execute("ALTER TABLE reports ADD COLUMN outbound_unique_ips INTEGER")
+    hs_cols = {str(c["name"]) for c in conn.execute("PRAGMA table_info(host_security)").fetchall()}
+    if "total_rx_bps" not in hs_cols:
+        conn.execute("ALTER TABLE host_security ADD COLUMN total_rx_bps REAL")
+    if "total_tx_bps" not in hs_cols:
+        conn.execute("ALTER TABLE host_security ADD COLUMN total_tx_bps REAL")
     host_cols = {str(c["name"]) for c in conn.execute("PRAGMA table_info(hosts)").fetchall()}
     if "node_id" not in host_cols:
         conn.execute("ALTER TABLE hosts ADD COLUMN node_id TEXT NOT NULL DEFAULT ''")
@@ -495,6 +508,18 @@ def init_db() -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reports_host_runtime_project_container_ts "
         "ON reports(host_id, runtime, project, container_name, ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_security_alerts_active_host_type "
+        "ON security_alerts(host_id, alert_type) WHERE status='active'"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reports_ts_host_peaks "
+        "ON reports(ts, host_id, conn_count, net_rx_bps, net_tx_bps, inbound_unique_ips, outbound_unique_ips)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_host_security_ts_peaks "
+        "ON host_security(ts, host_id, total_rx_bps, total_tx_bps)"
     )
     conn.execute(
         """
@@ -2175,12 +2200,15 @@ _latest_cache: Dict[str, Any] | None = None
 _latest_cache_time = 0.0
 _security_status_cache: Dict[str, Any] | None = None
 _security_status_cache_time = 0.0
+_security_status_cache_lock = threading.Lock()
+_security_status_compute_lock = threading.Lock()
 
 
 def invalidate_security_status_cache() -> None:
     global _security_status_cache, _security_status_cache_time
-    _security_status_cache = None
-    _security_status_cache_time = 0.0
+    with _security_status_cache_lock:
+        _security_status_cache = None
+        _security_status_cache_time = 0.0
 
 
 def _purge_host(conn: sqlite3.Connection, host_id: str) -> None:
@@ -3769,16 +3797,7 @@ def dispatch_buyer_notifications_for_alerts(host_id: str, alerts: list) -> None:
         conn.close()
 
 
-@app.post("/api/v1/report")
-async def report(
-    request: Request,
-    x_timestamp: str = Header(default=""),
-    x_signature: str = Header(default=""),
-) -> Dict[str, Any]:
-    body = await request.body()
-    verify_signature(body, x_timestamp, x_signature)
-    data = json.loads(body)
-
+def _process_report_sync(data: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
     host_id = str(data.get("host_id") or "unknown")[:200]
     node_id = str(data.get("node_id") or "")[:128]
     client_config = data.get("client_config") if isinstance(data.get("client_config"), dict) else {}
@@ -3797,7 +3816,6 @@ async def report(
     automatic_stops_queued = 0
     automatic_deep_samples_queued = 0
     try:
-        client_ip = reach_monitor.extract_client_ip(request)
         host_id = _reconcile_host(conn, host_id, node_id, ts, agent_version, client_config, client_ip)
         _maybe_queue_default_speedtest_policy(conn, host_id, node_id, agent_version, int(time.time()))
         automatic_stops_queued = process_connection_overloads(conn, host_id, ts, containers, incus_runtime_health)
@@ -3816,13 +3834,23 @@ async def report(
         for c in containers:
             stored_payload = dict(c)
             stored_payload["_agent_version"] = agent_version
+            c_sec = c.get("security") if isinstance(c.get("security"), dict) else {}
+            try:
+                inbound_ips = int(c_sec.get("inbound_unique_ips") or 0)
+            except (TypeError, ValueError):
+                inbound_ips = 0
+            try:
+                outbound_ips = int(c_sec.get("outbound_unique_ips") or 0)
+            except (TypeError, ValueError):
+                outbound_ips = 0
             conn.execute(
                 """
                 INSERT INTO reports(
                     host_id, container_name, runtime, project, cpu_percent, mem_bytes, mem_percent, net_rx_bps, net_tx_bps,
                     conn_count, disk_file, disk_size_bytes, disk_used_percent,
-                    podman_network_ok_v4, podman_network_ok_v6, ts, payload_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    podman_network_ok_v4, podman_network_ok_v6, ts, payload_json,
+                    inbound_unique_ips, outbound_unique_ips
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     host_id,
@@ -3842,6 +3870,8 @@ async def report(
                     podman_v6,
                     ts,
                     json.dumps(stored_payload, ensure_ascii=False),
+                    inbound_ips,
+                    outbound_ips,
                 ),
             )
             deep_sample = c.get("deep_sample") if isinstance(c.get("deep_sample"), dict) else None
@@ -3932,9 +3962,17 @@ async def report(
                 historical_firewall = dict(host_firewall_history)
                 historical_firewall.pop("readback", None)
                 historical_security["host_firewall"] = historical_firewall
+            try:
+                hs_rx_bps = float(historical_security.get("total_rx_bps") or 0.0)
+            except (TypeError, ValueError):
+                hs_rx_bps = 0.0
+            try:
+                hs_tx_bps = float(historical_security.get("total_tx_bps") or 0.0)
+            except (TypeError, ValueError):
+                hs_tx_bps = 0.0
             conn.execute(
-                "INSERT INTO host_security(host_id, ts, payload_json) VALUES(?,?,?)",
-                (host_id, ts, json.dumps(historical_security, ensure_ascii=False)),
+                "INSERT INTO host_security(host_id, ts, payload_json, total_rx_bps, total_tx_bps) VALUES(?,?,?,?,?)",
+                (host_id, ts, json.dumps(historical_security, ensure_ascii=False), hs_rx_bps, hs_tx_bps),
             )
             if ts > int(previous_sample or 0):
                 sample_health = _security_collection_health(
@@ -3990,6 +4028,19 @@ async def report(
         "motd_states": motd_states,
         "security_policy": security_policy,
     }
+
+
+@app.post("/api/v1/report")
+async def report(
+    request: Request,
+    x_timestamp: str = Header(default=""),
+    x_signature: str = Header(default=""),
+) -> Dict[str, Any]:
+    body = await request.body()
+    verify_signature(body, x_timestamp, x_signature)
+    data = json.loads(body)
+    client_ip = reach_monitor.extract_client_ip(request)
+    return await asyncio.to_thread(_process_report_sync, data, client_ip)
 
 
 def _candidate_vm_ids(runtime: str, container_name: str, container_id: str) -> tuple[str, ...]:
@@ -4076,36 +4127,32 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         buyer_email_mapping_states = {}
         mapped_after = int(time.time()) - buyer_notifications.buyer_mapping.TTL
         if can_view_user_notes:
-            buyer_emails = {}
-            for r in conn.execute(
-                """
-                SELECT host_id,runtime,project,container_name,vm_id,user_email
-                FROM buyer_targets WHERE source='upstream' AND enabled=1 AND scope='user'
-                  AND user_email<>'' AND verified_at>=?
-                """,
-                (mapped_after,),
-            ):
-                email_val = str(r["user_email"] or "")
-                buyer_emails[(r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"])] = email_val
-                if r["runtime"] in ("incus", "podman", "container"):
-                    buyer_emails.setdefault((r["host_id"], "runman", r["project"], r["container_name"], r["vm_id"]), email_val)
-                elif r["runtime"] == "runman":
-                    buyer_emails.setdefault((r["host_id"], "incus", r["project"], r["container_name"], r["vm_id"]), email_val)
-
-            buyer_email_mapping_states = {}
             for r in conn.execute(
                 """
                 SELECT host_id,runtime,project,container_name,vm_id,user_email,user_name,verified_at,enabled
                 FROM buyer_targets WHERE source='upstream' AND scope='user'
                 """
             ):
+                email_val = str(r["user_email"] or "")
                 uname_val = str(r["user_name"] or "").strip() if "user_name" in r.keys() else ""
-                state_val = (str(r["user_email"] or ""), int(r["verified_at"] or 0), int(r["enabled"] or 0), uname_val)
-                buyer_email_mapping_states[(r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"])] = state_val
+                verified_at = int(r["verified_at"] or 0)
+                enabled_val = int(r["enabled"] or 0)
+                t_key = (r["host_id"], r["runtime"], r["project"], r["container_name"], r["vm_id"])
+                state_val = (email_val, verified_at, enabled_val, uname_val)
+                buyer_email_mapping_states[t_key] = state_val
+                is_active_email = enabled_val == 1 and email_val != "" and verified_at >= mapped_after
+                if is_active_email:
+                    buyer_emails[t_key] = email_val
                 if r["runtime"] in ("incus", "podman", "container"):
-                    buyer_email_mapping_states.setdefault((r["host_id"], "runman", r["project"], r["container_name"], r["vm_id"]), state_val)
+                    alias_key = (r["host_id"], "runman", r["project"], r["container_name"], r["vm_id"])
+                    buyer_email_mapping_states.setdefault(alias_key, state_val)
+                    if is_active_email:
+                        buyer_emails.setdefault(alias_key, email_val)
                 elif r["runtime"] == "runman":
-                    buyer_email_mapping_states.setdefault((r["host_id"], "incus", r["project"], r["container_name"], r["vm_id"]), state_val)
+                    alias_key = (r["host_id"], "incus", r["project"], r["container_name"], r["vm_id"])
+                    buyer_email_mapping_states.setdefault(alias_key, state_val)
+                    if is_active_email:
+                        buyer_emails.setdefault(alias_key, email_val)
             buyer_email_issues = {
                 (r["host_id"], r["runtime"], r["project"], r["container_name"]): str(r["reason"] or "")
                 for r in conn.execute(
@@ -4115,12 +4162,6 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         host_heartbeats = {
             str(row["host_id"]): int(row["last_seen"])
             for row in conn.execute("SELECT host_id, last_seen FROM hosts").fetchall()
-        }
-        host_report_timestamps = {
-            str(row["host_id"]): int(row["max_ts"])
-            for row in conn.execute(
-                "SELECT host_id, MAX(ts) AS max_ts FROM reports GROUP BY host_id"
-            ).fetchall()
         }
         rows = conn.execute(
             """
@@ -4134,32 +4175,47 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             ORDER BY r.host_id, r.runtime, r.project, r.container_name
             """
         ).fetchall()
-
-        host_rows = conn.execute(
-            """
-            SELECT r.host_id, r.payload_json, r.ts
-            FROM reports r
-            JOIN (
-                SELECT host_id, MAX(ts) AS max_ts
-                FROM reports
-                GROUP BY host_id
-            ) m ON r.host_id=m.host_id AND r.ts=m.max_ts
-            """
-        ).fetchall()
     finally:
         conn.close()
 
-    host_disk_map: Dict[str, Dict[str, Any]] = {}
-    for h in host_rows:
-        payload = json.loads(h["payload_json"]) if h["payload_json"] else {}
-        candidate_disk=payload.get('disk',{})
-        if isinstance(candidate_disk,dict) and candidate_disk.get('root_total_bytes'):
-            host_disk_map[h['host_id']]=candidate_disk
+    host_report_timestamps: Dict[str, int] = {}
+    for r in rows:
+        hid = str(r["host_id"])
+        r_ts = int(r["ts"])
+        if r_ts > host_report_timestamps.get(hid, -1):
+            host_report_timestamps[hid] = r_ts
+
+    imbalance_min_bps = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_MIN_BPS", "2097152"))
+    imbalance_warn_ratio = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_RATIO_WARN", "10.0"))
 
     now = int(time.time())
-    out = []
+    host_disk_map: Dict[str, Dict[str, Any]] = {}
+    parsed_rows = []
     for r in rows:
+        hid = str(r["host_id"])
+        stale_seconds = max(0, now - r["ts"])
+        hidden_offline = stale_seconds > OFFLINE_HIDE_SECONDS
+        host_last_seen = host_heartbeats.get(hid, int(r["ts"]))
+        host_stale = now - host_last_seen > STALE_SECONDS
+        is_latest_host_row = int(r["ts"]) == host_report_timestamps.get(hid, -1)
+        if hidden_offline or (host_stale and not include_stale):
+            if is_latest_host_row and hid not in host_disk_map:
+                payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+                candidate_disk = payload.get("disk", {})
+                if isinstance(candidate_disk, dict) and candidate_disk.get("root_total_bytes"):
+                    host_disk_map[hid] = candidate_disk
+            continue
         payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+        if is_latest_host_row:
+            candidate_disk = payload.get("disk", {})
+            if isinstance(candidate_disk, dict) and candidate_disk.get("root_total_bytes"):
+                host_disk_map[hid] = candidate_disk
+        parsed_rows.append((r, payload, stale_seconds, host_last_seen, host_stale))
+
+    out = []
+    for r, payload, stale_seconds, host_last_seen, host_stale in parsed_rows:
+        stale = stale_seconds > STALE_SECONDS
+        hidden_offline = False
         current_container_id = str(payload.get("id") or "")
         note = container_notes.get((r["host_id"], r["runtime"], r["project"], r["container_name"], current_container_id), {})
         manual_email = str(note.get("user_email") or "") if can_view_user_notes else ""
@@ -4203,19 +4259,6 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
             if conn_count > ALERT_CONN_WARNING_THRESHOLD
             else ""
         )
-        stale_seconds = max(0, now - r["ts"])
-        stale = stale_seconds > STALE_SECONDS
-        hidden_offline = stale_seconds > OFFLINE_HIDE_SECONDS
-        host_last_seen = host_heartbeats.get(str(r["host_id"]), int(r["ts"]))
-        host_stale = now - host_last_seen > STALE_SECONDS
-        # include_stale keeps a short diagnostic window for offline hosts and
-        # disappeared containers, but must not bypass the configured panel
-        # retention limit. Otherwise deleted containers remain visible until
-        # the much longer database retention cleanup runs.
-        if hidden_offline:
-            continue
-        if host_stale and not include_stale:
-            continue
         container_disk = payload.get("container_disk", {})
         container_disk = container_disk if isinstance(container_disk, dict) else {}
         backing_image = container_disk.get("backing_image", {})
@@ -4273,8 +4316,6 @@ def latest(include_stale: bool = False, request: Request = None) -> JSONResponse
         min_bps = min(rx_bps, tx_bps)
         eff_min = max(min_bps, 1024.0)
         imb_ratio = max_bps / eff_min
-        imbalance_min_bps = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_MIN_BPS", "2097152"))
-        imbalance_warn_ratio = float(os.getenv("SECURITY_TRAFFIC_IMBALANCE_RATIO_WARN", "10.0"))
         traffic_imbalance = max_bps >= imbalance_min_bps and imb_ratio >= imbalance_warn_ratio
         traffic_direction = "outbound_heavy" if tx_bps > rx_bps else "inbound_heavy" if rx_bps > tx_bps else "balanced"
 
@@ -6582,28 +6623,16 @@ async def delete_host(host_id: str, request: Request) -> JSONResponse:
         conn.close()
 
 
-@app.post("/api/v1/actions/poll")
-async def poll_security_actions(
-    request: Request,
-    x_timestamp: str = Header(default=""),
-    x_signature: str = Header(default=""),
-) -> Response:
-    body = await request.body()
-    verify_signature(body, x_timestamp, x_signature)
-    try:
-        payload = json.loads(body)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="invalid JSON body")
-    host_id = str(payload.get("host_id") or "")[:200]
-    node_id = str(payload.get("node_id") or "")[:128]
-    gfw_probe_capabilities = payload.get("gfw_probe_capabilities")
-    if not host_id:
-        raise HTTPException(status_code=400, detail="host_id is required")
-    now = int(time.time())
+def _poll_security_actions_sync(
+    host_id: str,
+    node_id: str,
+    client_ip: str,
+    gfw_probe_capabilities: Any,
+    now: int,
+) -> Dict[str, Any]:
     conn = db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        client_ip = reach_monitor.extract_client_ip(request)
         conn.execute("UPDATE hosts SET last_seen=? WHERE host_id=?", (now, host_id))
         if client_ip:
             reach_monitor.record_client_ip(conn, host_id, client_ip, now)
@@ -6641,7 +6670,22 @@ async def poll_security_actions(
             action["status"] = "dispatched"
             action["attempts"] += 1
             actions.append(action)
+
+        tcp_probe = {"job": None, "cancelled": []}
+        gfw_probe = {"job": None}
+        conn.execute("SAVEPOINT probe_lease")
+        try:
+            tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
+            gfw_probe = gfw_monitor.lease_job(conn, host_id, node_id, now, gfw_probe_capabilities)
+            conn.execute("RELEASE SAVEPOINT probe_lease")
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT probe_lease")
+            conn.execute("RELEASE SAVEPOINT probe_lease")
+            logging.exception("TCP probe queue failed; signed security polling continues")
+            tcp_probe = {"job": None, "cancelled": []}
+            gfw_probe = {"job": None}
         conn.commit()
+
         ops_services = [{"id": r["id"], **operations.loads(r["payload"])} for r in conn.execute("SELECT id,payload FROM ops_services WHERE host_id=? AND enabled=1 LIMIT 20", (host_id,)).fetchall()]
         cleanup_policy=disk_cleanup.node_config(conn,node_id)
         bandwidth_row = conn.execute("SELECT payload FROM ops_settings WHERE key=?", (f"manual_bandwidth:{host_id}",)).fetchone()
@@ -6681,19 +6725,34 @@ async def poll_security_actions(
             "recovery_percent": 50,
             "recovery_seconds": 600,
         }
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            tcp_probe = tcping.lease_jobs(conn, host_id, node_id, now)
-            gfw_probe = gfw_monitor.lease_job(conn, host_id, node_id, now, gfw_probe_capabilities)
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            logging.exception("TCP probe queue failed; signed security polling continues")
-            tcp_probe = {"job": None, "cancelled": []}
-            gfw_probe = {"job": None}
     finally:
         conn.close()
-    return signed_json_response({"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy,'bandwidth_limits':bandwidth_policy}, "tcp_probe": tcp_probe, "gfw_probe": gfw_probe}, x_timestamp)
+    return {"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy,'bandwidth_limits':bandwidth_policy}, "tcp_probe": tcp_probe, "gfw_probe": gfw_probe}
+
+
+@app.post("/api/v1/actions/poll")
+async def poll_security_actions(
+    request: Request,
+    x_timestamp: str = Header(default=""),
+    x_signature: str = Header(default=""),
+) -> Response:
+    body = await request.body()
+    verify_signature(body, x_timestamp, x_signature)
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    host_id = str(payload.get("host_id") or "")[:200]
+    node_id = str(payload.get("node_id") or "")[:128]
+    gfw_probe_capabilities = payload.get("gfw_probe_capabilities")
+    if not host_id:
+        raise HTTPException(status_code=400, detail="host_id is required")
+    now = int(time.time())
+    client_ip = reach_monitor.extract_client_ip(request)
+    res_payload = await asyncio.to_thread(
+        _poll_security_actions_sync, host_id, node_id, client_ip, gfw_probe_capabilities, now
+    )
+    return signed_json_response(res_payload, x_timestamp)
 
 
 @app.post("/api/v1/actions/result")
@@ -7154,9 +7213,24 @@ def _security_collection_health(
 def security_status() -> JSONResponse:
     global _security_status_cache, _security_status_cache_time
     now_mono = time.monotonic()
-    if _security_status_cache is not None and now_mono - _security_status_cache_time < 5.0:
-        return JSONResponse(content=_security_status_cache)
+    with _security_status_cache_lock:
+        if _security_status_cache is not None and now_mono - _security_status_cache_time < 10.0:
+            return JSONResponse(content=_security_status_cache)
 
+    with _security_status_compute_lock:
+        now_mono = time.monotonic()
+        with _security_status_cache_lock:
+            if _security_status_cache is not None and now_mono - _security_status_cache_time < 10.0:
+                return JSONResponse(content=_security_status_cache)
+
+        res_content = _compute_security_status()
+        with _security_status_cache_lock:
+            _security_status_cache = res_content
+            _security_status_cache_time = time.monotonic()
+        return JSONResponse(content=res_content)
+
+
+def _compute_security_status() -> Dict[str, Any]:
     conn = db()
     try:
         now_utc8 = datetime.now(tz=UTC8)
@@ -7208,8 +7282,8 @@ def security_status() -> JSONResponse:
                     MAX(conn_count) AS max_conn,
                     SUM(net_rx_bps) AS sum_rx,
                     SUM(net_tx_bps) AS sum_tx,
-                    MAX(COALESCE(CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips,
-                    MAX(COALESCE(CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS max_outbound_ips
+                    MAX(COALESCE(inbound_unique_ips, CAST(json_extract(payload_json, '$.security.inbound_unique_ips') AS INTEGER), 0)) AS max_inbound_ips,
+                    MAX(COALESCE(outbound_unique_ips, CAST(json_extract(payload_json, '$.security.outbound_unique_ips') AS INTEGER), 0)) AS max_outbound_ips
                 FROM reports
                 WHERE ts >= ?
                 GROUP BY host_id, ts
@@ -7223,8 +7297,8 @@ def security_status() -> JSONResponse:
             """
             SELECT
                 host_id,
-                MAX(COALESCE(CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
-                MAX(COALESCE(CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps
+                MAX(COALESCE(total_rx_bps, CAST(json_extract(payload_json, '$.total_rx_bps') AS REAL), 0)) AS peak_rx_bps,
+                MAX(COALESCE(total_tx_bps, CAST(json_extract(payload_json, '$.total_tx_bps') AS REAL), 0)) AS peak_tx_bps
             FROM host_security
             WHERE ts >= ?
             GROUP BY host_id
@@ -7410,10 +7484,7 @@ def security_status() -> JSONResponse:
                 "today_peak_tx_bps": max(float(p.get("peak_tx_bps", 0.0)), cur_tx),
             }
         )
-    res_content = {"items": items}
-    _security_status_cache = res_content
-    _security_status_cache_time = time.monotonic()
-    return JSONResponse(content=res_content)
+    return {"items": items}
 
 
 

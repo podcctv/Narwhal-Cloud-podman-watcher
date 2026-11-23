@@ -1,4 +1,5 @@
 """Signed, bounded node-local enforcement receipts. No firewall decisions here."""
+import asyncio
 import ipaddress
 import json
 import re
@@ -26,6 +27,7 @@ def initialize(conn):
     conn.execute('''CREATE TABLE IF NOT EXISTS admission_states(
         host_id TEXT,runtime TEXT,project TEXT,container_name TEXT,instance_id TEXT,
         observed_at INTEGER,payload TEXT,PRIMARY KEY(host_id,runtime,project,container_name))''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_admission_states_observed_at ON admission_states(observed_at)')
 
 
 def normalized_alert(value):
@@ -113,6 +115,66 @@ def normalized_alert(value):
     return clean
 
 
+def _write_admission_status(db, host_id, node_id, client_ip, items, now):
+    conn = db()
+    try:
+        host = conn.execute('SELECT node_id FROM hosts WHERE host_id=?', (host_id,)).fetchone()
+        if not host or not node_id or host['node_id'] != node_id:
+            raise HTTPException(403, 'wrong node identity')
+        conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?', (now, host_id))
+        if client_ip:
+            try:
+                conn.execute(
+                    "INSERT INTO host_client_ips(host_id, client_ip, updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(host_id) DO UPDATE SET client_ip=excluded.client_ip, updated_at=excluded.updated_at",
+                    (host_id, client_ip, now),
+                )
+            except Exception:
+                pass
+        for value in items:
+            data = value['admission']
+            stamp = data.get('observed_at', 0)
+            if not now - 90 <= stamp <= now + 30:
+                continue
+            conn.execute(
+                '''INSERT INTO admission_states VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET
+                   instance_id=excluded.instance_id,observed_at=excluded.observed_at,payload=excluded.payload
+                   WHERE excluded.observed_at>admission_states.observed_at''',
+                (host_id, value['runtime'], value['project'], value['container_name'], value['instance_id'], stamp, json.dumps(data)),
+            )
+        # Legacy Agents may have written protection-health states into the
+        # security incident table. Close those rows only when an active row exists.
+        has_active = conn.execute(
+            "SELECT 1 FROM security_alerts WHERE host_id=? AND alert_type='admission_unverified' AND status='active' LIMIT 1",
+            (host_id,),
+        ).fetchone()
+        if has_active:
+            conn.execute(
+                "UPDATE security_alerts SET status='resolved',last_seen=? "
+                "WHERE host_id=? AND alert_type='admission_unverified' AND status='active'",
+                (now, host_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _write_admission_event(db, host_id, node_id, alert, now, process_alerts, reconcile):
+    conn = db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        host = conn.execute('SELECT node_id FROM hosts WHERE host_id=?', (host_id,)).fetchone()
+        if not host or not node_id or host['node_id'] != node_id:
+            raise HTTPException(403, 'wrong node identity')
+        conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?', (now, host_id))
+        process_alerts(conn, host_id, now, [alert], partial=True)
+        reconcile(conn, host_id, now)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reconcile):
     @app.post('/api/v1/admission/status')
     async def status(request:Request,x_timestamp:str=Header(default=''),x_signature:str=Header(default='')):
@@ -127,36 +189,10 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
             if not isinstance(values,list) or len(values)>1000:raise ValueError()
             items=[normalized_alert({**v,'type':'admission_unverified'}) for v in values]
         except (ValueError,TypeError,KeyError,AttributeError):raise HTTPException(400,'invalid bounded status batch')
-        now=int(time.time());conn=db()
-        try:
-            host=conn.execute('SELECT node_id FROM hosts WHERE host_id=?',(host_id,)).fetchone()
-            if not host or not node_id or host['node_id']!=node_id:raise HTTPException(403,'wrong node identity')
-            forwarded = request.headers.get('x-forwarded-for')
-            client_ip = forwarded.split(',')[0].strip() if forwarded else (request.client.host if request.client else '')
-            conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?', (now, host_id))
-            if client_ip:
-                try:
-                    conn.execute("INSERT INTO host_client_ips(host_id, client_ip, updated_at) VALUES(?,?,?) ON CONFLICT(host_id) DO UPDATE SET client_ip=excluded.client_ip, updated_at=excluded.updated_at", (host_id, client_ip, now))
-                except Exception:
-                    pass
-            for value in items:
-                data=value['admission'];stamp=data.get('observed_at',0)
-                if not now-90<=stamp<=now+30:continue
-                conn.execute('''INSERT INTO admission_states VALUES(?,?,?,?,?,?,?)
-                    ON CONFLICT(host_id,runtime,project,container_name) DO UPDATE SET
-                    instance_id=excluded.instance_id,observed_at=excluded.observed_at,payload=excluded.payload
-                    WHERE excluded.observed_at>admission_states.observed_at''',
-                    (host_id,value['runtime'],value['project'],value['container_name'],value['instance_id'],stamp,json.dumps(data)))
-            # Legacy Agents may have written protection-health states into the
-            # security incident table. Close those rows; the current state stays
-            # available from admission_states and the container status panel.
-            conn.execute("UPDATE security_alerts SET status='resolved',last_seen=? "
-                         "WHERE host_id=? AND alert_type='admission_unverified' AND status='active'",
-                         (now,host_id))
-            # A current-state table, not an append-only telemetry log.
-            conn.execute('DELETE FROM admission_states WHERE observed_at<?',(now-86400,))
-            conn.commit()
-        finally:conn.close()
+        now=int(time.time())
+        forwarded = request.headers.get('x-forwarded-for')
+        client_ip = forwarded.split(',')[0].strip() if forwarded else (request.client.host if request.client else '')
+        await asyncio.to_thread(_write_admission_status, db, host_id, node_id, client_ip, items, now)
         return signed_response({'ok':True},x_timestamp)
 
     @app.post('/api/v1/admission/events')
@@ -171,17 +207,9 @@ def attach(app,db,verify_signature,signed_response,process_alerts,sync_bots,reco
             host_id,node_id=str(payload.get('host_id') or ''),str(payload.get('node_id') or '')
             alert=normalized_alert(payload.get('alert'))
         except (ValueError,TypeError,AttributeError):raise HTTPException(400,'invalid event payload')
-        now=int(time.time());conn=db()
-        try:
-            conn.execute('BEGIN IMMEDIATE')
-            host=conn.execute('SELECT node_id FROM hosts WHERE host_id=?',(host_id,)).fetchone()
-            if not host or not node_id or host['node_id']!=node_id:raise HTTPException(403,'wrong node identity')
-            conn.execute('UPDATE hosts SET last_seen=? WHERE host_id=?',(now,host_id))
-            process_alerts(conn,host_id,now,[alert],partial=True)
-            reconcile(conn,host_id,now)
-            conn.commit()
-        finally:conn.close()
+        now=int(time.time())
+        await asyncio.to_thread(_write_admission_event, db, host_id, node_id, alert, now, process_alerts, reconcile)
         # Delivery may fail without affecting the committed receipt or local rules.
-        try:sync_bots(host_id,now)
+        try:await asyncio.to_thread(sync_bots, host_id, now)
         except Exception:pass
         return signed_response({'ok':True},x_timestamp)

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -20,6 +21,11 @@ STALE_SECONDS = 900
 SOURCE_NETWORK_STALE_SECONDS = 7 * 86400
 JOB_SECONDS = 600
 MAX_ACTIVE_CYCLES = 30
+GFW_HISTORY_RETENTION_SECONDS = max(3 * 86400, int(os.getenv("GFW_HISTORY_RETENTION_DAYS", "14")) * 86400)
+GFW_SCHEDULE_INTERVAL_SECONDS = max(5, min(60, int(os.getenv("GFW_SCHEDULE_INTERVAL_SECONDS", "15"))))
+
+_schedule_throttle_lock = threading.Lock()
+_last_schedule_by_db: dict[str, int] = {}
 PROBE_RESULT_ERROR_CODES = {"", "timeout", "refused", "network_error", "family_unsupported", "no_route", "host_unreachable", "local_policy_block"}
 PROBE_CAPABILITY_STALE_SECONDS = 900
 PROBE_FAILURE_CODES = {
@@ -870,6 +876,14 @@ def initialize(conn):
         conn.execute("ALTER TABLE gfw_probe_jobs ADD COLUMN source_carrier TEXT NOT NULL DEFAULT ''")
     if "source_network_id" not in job_columns:
         conn.execute("ALTER TABLE gfw_probe_jobs ADD COLUMN source_network_id TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS gfw_jobs_active_deadline ON gfw_probe_jobs(deadline_at) WHERE status IN ('queued','running')")
+    conn.execute("CREATE INDEX IF NOT EXISTS gfw_jobs_cycle_id ON gfw_probe_jobs(cycle_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS gfw_jobs_created_at ON gfw_probe_jobs(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS gfw_cycles_created_at ON gfw_cycles(created_at)")
+    db_file = _db_file_key(conn)
+    if db_file:
+        with _schedule_throttle_lock:
+            _last_schedule_by_db.pop(db_file, None)
 
 
 def _role_counts(conn, now):
@@ -1339,6 +1353,14 @@ def _apply_cycle(conn, cycle, now):
     return True
 
 
+def _db_file_key(conn) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        return str(row[2] or "") if row else ""
+    except Exception:
+        return ""
+
+
 def _store_route_capabilities(conn, node_id, now, capabilities):
     if not node_id or not isinstance(capabilities, dict):
         return
@@ -1346,20 +1368,66 @@ def _store_route_capabilities(conn, node_id, now, capabilities):
     ipv6 = capabilities.get("ipv6_default_route")
     if type(ipv4) is not bool and type(ipv6) is not bool:
         return
+    new_v4 = int(ipv4) if type(ipv4) is bool else None
+    new_v6 = int(ipv6) if type(ipv6) is bool else None
+    existing = conn.execute(
+        "SELECT ipv4_default_route,ipv6_default_route,route_capabilities_updated_at FROM gfw_probe_roles WHERE node_id=?",
+        (node_id,),
+    ).fetchone()
+    if not existing:
+        return
+    if (
+        existing["ipv4_default_route"] == new_v4
+        and existing["ipv6_default_route"] == new_v6
+        and now - int(existing["route_capabilities_updated_at"] or 0) < 60
+    ):
+        return
     conn.execute(
         "UPDATE gfw_probe_roles SET ipv4_default_route=?,ipv6_default_route=?,route_capabilities_updated_at=? WHERE node_id=?",
-        (int(ipv4) if type(ipv4) is bool else None,
-         int(ipv6) if type(ipv6) is bool else None,
-         now, node_id),
+        (new_v4, new_v6, now, node_id),
     )
 
 
+def prune_history(conn, now, batch_size: int = 500) -> int:
+    cutoff = int(now) - GFW_HISTORY_RETENTION_SECONDS
+    limit = max(1, min(5000, int(batch_size)))
+    removed = 0
+    job_rows = conn.execute(
+        "SELECT id FROM gfw_probe_jobs WHERE created_at<? AND status<>'running' LIMIT ?",
+        (cutoff, limit),
+    ).fetchall()
+    if job_rows:
+        job_ids = [r[0] for r in job_rows]
+        placeholders = ",".join("?" for _ in job_ids)
+        cur_res = conn.execute(f"DELETE FROM gfw_probe_results WHERE job_id IN ({placeholders})", job_ids)
+        removed += max(0, cur_res.rowcount)
+        cur_jobs = conn.execute(f"DELETE FROM gfw_probe_jobs WHERE id IN ({placeholders})", job_ids)
+        removed += max(0, cur_jobs.rowcount)
+    cycle_rows = conn.execute(
+        "SELECT id FROM gfw_cycles WHERE created_at<? AND status NOT IN ('queued','running') LIMIT ?",
+        (cutoff, limit),
+    ).fetchall()
+    if cycle_rows:
+        cycle_ids = [r[0] for r in cycle_rows]
+        placeholders = ",".join("?" for _ in cycle_ids)
+        cur_cyc = conn.execute(f"DELETE FROM gfw_cycles WHERE id IN ({placeholders})", cycle_ids)
+        removed += max(0, cur_cyc.rowcount)
+    return removed
+
+
 def lease_job(conn, host_id, node_id, now, capabilities=None):
-    conn.execute("DELETE FROM gfw_probe_results WHERE job_id IN (SELECT id FROM gfw_probe_jobs WHERE created_at<? AND status<>'running')", (now - 90 * 86400,))
-    conn.execute("DELETE FROM gfw_probe_jobs WHERE created_at<? AND status<>'running'", (now - 90 * 86400,))
-    conn.execute("DELETE FROM gfw_cycles WHERE created_at<? AND status NOT IN ('queued','running')", (now - 90 * 86400,))
     _store_route_capabilities(conn, node_id, now, capabilities)
-    _schedule(conn, now)
+    db_file = _db_file_key(conn)
+    should_schedule = True
+    if db_file:
+        with _schedule_throttle_lock:
+            last_ts = _last_schedule_by_db.get(db_file, 0)
+            if now >= last_ts and now - last_ts < GFW_SCHEDULE_INTERVAL_SECONDS:
+                should_schedule = False
+            else:
+                _last_schedule_by_db[db_file] = now
+    if should_schedule:
+        _schedule(conn, now)
     conn.execute("UPDATE gfw_probe_jobs SET status='expired',finished_at=?,error='probe deadline elapsed' WHERE status IN ('queued','running') AND deadline_at<=?", (now, now))
     cycles = conn.execute("SELECT * FROM gfw_cycles WHERE status IN ('queued','running') AND deadline_at<=? LIMIT 100", (now,)).fetchall()
     for cycle in cycles:

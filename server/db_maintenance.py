@@ -7,6 +7,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+try:
+    from server import gfw_monitor, tcping
+except ImportError:
+    import gfw_monitor  # type: ignore[no-redef]
+    import tcping  # type: ignore[no-redef]
+
 
 def run_cleanup(
     *,
@@ -35,6 +41,7 @@ def run_cleanup(
         deadline = time.monotonic() + cleanup_time_budget_seconds
         conn = db_fn()
         investigation_maintain_fn(conn, now)
+        tcping.expire(conn, now)
         conn.commit()
 
         # Complete each small transaction before starting the next; never hold
@@ -63,12 +70,14 @@ def run_cleanup(
         effective_report_cap = min(report_max_rows, 15000) if disk_pressure else report_max_rows
         effective_host_sec_cap = min(host_security_max_rows, 8000) if disk_pressure else host_security_max_rows
         effective_raw_cutoff = max(raw_cutoff, now - 48 * 3600) if disk_pressure else raw_cutoff
+        gfw_batch = min(report_cleanup_batch_size, 1000)
 
-        for _ in range(20):
+        for loop_idx in range(20):
             progress = 0
             jobs = [
                 ("reports", "ts < ?", (effective_raw_cutoff,)),
                 ("host_security", "ts < ?", (effective_raw_cutoff,)),
+                ("admission_states", "observed_at < ?", (now - 86400,)),
                 ("ops_rollups", "bucket < ?", (cutoff,)),
                 ("host_reachability_history", "checked_at < ?", (now - min(purge_seconds, 14 * 86400),)),
                 ("gfw_probe_results", "NOT EXISTS (SELECT 1 FROM gfw_probe_jobs j WHERE j.id=gfw_probe_results.job_id)", ()),
@@ -83,6 +92,11 @@ def run_cleanup(
             ]
             for table, predicate, params in jobs:
                 progress += prune(table, predicate, params)
+            gfw_removed = gfw_monitor.prune_history(conn, now, batch_size=gfw_batch)
+            if gfw_removed:
+                conn.commit()
+                removed_total += gfw_removed
+                progress += gfw_removed
             # A row budget also bounds high-frequency raw history within the
             # retention period. Preserve each identity's newest sample.
             for table, cap, identity in (
@@ -113,8 +127,11 @@ def run_cleanup(
                 if not remains:
                     conn.execute("DELETE FROM hosts WHERE host_id=?", (host[0],))
                     conn.commit()
-            backlog = progress > 0
-            if not backlog or time.monotonic() >= deadline:
+            if progress == 0:
+                backlog = False
+                break
+            if loop_idx == 19 or time.monotonic() >= deadline:
+                backlog = True
                 break
         # Incremental mode is enabled for new DBs and by the explicit recovery
         # command for old DBs. Never run a full VACUUM in this online loop.

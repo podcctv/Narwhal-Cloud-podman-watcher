@@ -175,6 +175,7 @@ def initialize(conn):
       finished_at INTEGER NOT NULL DEFAULT 0,message TEXT NOT NULL DEFAULT '');
     CREATE UNIQUE INDEX IF NOT EXISTS tcp_one_active_node ON tcp_jobs(node_id) WHERE status IN ('queued','running');
     CREATE INDEX IF NOT EXISTS tcp_jobs_source_time ON tcp_jobs(source_id,created_at);
+    CREATE INDEX IF NOT EXISTS tcp_jobs_created_at ON tcp_jobs(created_at);
     CREATE TABLE IF NOT EXISTS tcp_results(job_id TEXT NOT NULL,target_id TEXT NOT NULL,payload TEXT NOT NULL,
       PRIMARY KEY(job_id,target_id));
     CREATE TABLE IF NOT EXISTS tcp_batches(job_id TEXT NOT NULL,sequence INTEGER NOT NULL,digest TEXT NOT NULL,
@@ -300,10 +301,14 @@ def directory(conn):
     return {**json.loads(row[0]), "fetched_at": row[1], "stale": time.time() - row[1] > 86400, "source": DIRECTORY_URL}
 
 
-def expire(conn, now):
+def expire_active(conn, now):
     conn.execute("""UPDATE tcp_jobs SET status=CASE WHEN EXISTS(SELECT 1 FROM tcp_results r WHERE r.job_id=tcp_jobs.id)
       THEN 'partial' ELSE 'expired' END,finished_at=?,message='任务超过执行期限，未完成项目未计为连接失败'
       WHERE status IN ('queued','running') AND deadline_at<=?""", (now, now))
+
+
+def expire(conn, now):
+    expire_active(conn, now)
     old = [r[0] for r in conn.execute("SELECT id FROM tcp_jobs WHERE created_at<? AND status NOT IN ('queued','running') LIMIT 100", (now-86400,))]
     for job_id in old:
         conn.execute("DELETE FROM tcp_results WHERE job_id=?", (job_id,))
@@ -565,7 +570,7 @@ def admit(conn, source_id, scope, now):
 
 def lease_jobs(conn, host_id, node_id, now):
     """Called inside the existing signed poll transaction; no security action semantics."""
-    expire(conn, now)
+    expire_active(conn, now)
     cancelled = [r[0] for r in conn.execute("SELECT id FROM tcp_jobs WHERE host_id=? AND node_id=? AND status='cancelled' AND created_at>? LIMIT 30", (host_id, node_id, now-3600))]
     row = conn.execute("SELECT j.* FROM tcp_jobs j JOIN tcp_sources s ON s.id=j.source_id WHERE j.host_id=? AND j.node_id=? AND s.enabled=1 AND j.status IN ('queued','running') AND j.started_at=0 ORDER BY j.created_at LIMIT 1", (host_id, node_id)).fetchone() if enabled(conn) else None
     job = None

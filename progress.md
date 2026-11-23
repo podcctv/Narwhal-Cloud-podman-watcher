@@ -2,6 +2,17 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 35：单核服务端轮询热路径与 SQLite 性能优化（v2.0.4）
+
+- **消除高频轮询中的全表扫描与热事务阻塞（`server/gfw_monitor.py`、`server/tcping.py`、`server/admission_api.py`）**：
+  - 为 `gfw_probe_jobs`、`gfw_cycles`、`tcp_jobs`、`admission_states`、`security_alerts`、`reports` 与 `host_security` 补齐缺失索引与部分索引。
+  - 将 `gfw_monitor.lease_job`、`tcping.lease_jobs` 与 `POST /api/v1/admission/status` 每次请求内联触发的历史表 `DELETE` 扫描统一移入 `server/db_maintenance.py` 有界批清理；`gfw_monitor.lease_job` 增加 `_schedule` 节流与 `_store_route_capabilities` 变更短路，`_store_route_capabilities` 无记录或路由无变化时不写入。
+  - `/api/v1/admission/status` 与 `/api/v1/admission/events` 的阻塞 DB 操作移入 `asyncio.to_thread` 执行，并按条件短路历史 `admission_unverified` 告警关闭更新。
+- **合并写入事务、消除 `json_extract` 全表解析并提升 SQLite 缓存（`server/app.py`、`server/db_maintenance.py`）**：
+  - 提升连接配置为 `cache_size=-16384`（16 MiB）、`temp_store=MEMORY`、`wal_autocheckpoint=2000`；将 `POST /api/v1/actions/poll` 与 `POST /api/v1/report` 的同步 DB 逻辑移入 `asyncio.to_thread`，并合并 `actions/poll` 的两次 `BEGIN IMMEDIATE` 写事务为单事务（以 `SAVEPOINT probe_lease` 保持 probe 队列容错隔离）。
+  - 为 `reports` 新增 `inbound_unique_ips`/`outbound_unique_ips`、为 `host_security` 新增 `total_rx_bps`/`total_tx_bps` 冗余列与覆盖索引，`GET /api/v1/security/status` 通过 `COALESCE(col, json_extract(...))` 避免实时采样对 `payload_json` 做 JSON 全文解析，并将缓存提升至 10s + 单飞计算锁；同步优化 `GET /api/v1/latest` 合并 `buyer_targets` 查询与复用已读取的 `reports` 行。
+  - 修正 `db_maintenance.run_cleanup` 的 `backlog` 判定，避免已排空过期数据后后台任务仍按 5 秒间隔空转。
+
 ## Phase 34：按方案 B「现代浅色 SaaS 工作台」落地主控端前端视觉与布局重构（v2.0.2 / v2.0.3）
 
 - **Clean Light SaaS Workbench 设计令牌与基础样式（`frontend/src/v2/styles/theme-v2.css`、`frontend/src/styles/index.css`）**：

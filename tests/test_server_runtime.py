@@ -2834,6 +2834,134 @@ class ServerRuntimeTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_hot_indexes_query_plans_and_denormalized_peak_columns(self):
+        now = int(time.time())
+        conn = server.db()
+        try:
+            indexes = {
+                row["name"]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+            }
+            for expected in (
+                "idx_security_alerts_active_host_type",
+                "idx_reports_ts_host_peaks",
+                "idx_host_security_ts_peaks",
+                "idx_admission_states_observed_at",
+                "tcp_jobs_created_at",
+                "gfw_jobs_active_deadline",
+                "gfw_jobs_cycle_id",
+                "gfw_jobs_created_at",
+                "gfw_cycles_created_at",
+            ):
+                self.assertIn(expected, indexes)
+
+            plan_cases = [
+                (
+                    "gfw_jobs_active_deadline",
+                    "SELECT id FROM gfw_probe_jobs WHERE status IN ('queued','running') AND deadline_at<=?",
+                    (now,),
+                ),
+                (
+                    "gfw_jobs_cycle_id",
+                    "SELECT * FROM gfw_probe_jobs WHERE cycle_id=?",
+                    ("cycle-1",),
+                ),
+                (
+                    "idx_admission_states_observed_at",
+                    "SELECT rowid FROM admission_states WHERE observed_at<?",
+                    (now - 86400,),
+                ),
+                (
+                    "idx_security_alerts_active_host_type",
+                    "SELECT 1 FROM security_alerts WHERE host_id=? AND alert_type='admission_unverified' AND status='active' LIMIT 1",
+                    ("host-1",),
+                ),
+            ]
+            for expected_idx, sql, params in plan_cases:
+                plan = " ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall())
+                self.assertIn(expected_idx, plan, f"{sql} -> {plan}")
+
+            # New reports write denormalized peak columns; legacy NULL rows still fall back cleanly.
+            payload_data = {
+                "host_id": "perf-host",
+                "node_id": "perf-node",
+                "agent_version": "2.0.4",
+                "timestamp": now,
+                "containers": [
+                    {
+                        "id": "c-1",
+                        "name": "c-1",
+                        "runtime": "podman",
+                        "project": "",
+                        "cpu_percent": 1.0,
+                        "mem_bytes": 100,
+                        "mem_percent": 1.0,
+                        "net_rx_bps": 1000.0,
+                        "net_tx_bps": 2000.0,
+                        "conn_count": 10,
+                        "security": {"inbound_unique_ips": 17, "outbound_unique_ips": 9},
+                    }
+                ],
+                "security": {
+                    "enabled": True,
+                    "total_rx_bps": 12345.0,
+                    "total_tx_bps": 67890.0,
+                    "alerts": [],
+                },
+            }
+            result = server._process_report_sync(payload_data, "198.51.100.10")
+            self.assertTrue(result["ok"])
+
+            rep = conn.execute(
+                "SELECT inbound_unique_ips, outbound_unique_ips FROM reports WHERE host_id='perf-host' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual((rep["inbound_unique_ips"], rep["outbound_unique_ips"]), (17, 9))
+
+            hs = conn.execute(
+                "SELECT total_rx_bps, total_tx_bps FROM host_security WHERE host_id='perf-host' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual((hs["total_rx_bps"], hs["total_tx_bps"]), (12345.0, 67890.0))
+
+            # Insert a legacy NULL-column row at slightly older timestamp with higher JSON value to verify fallback.
+            conn.execute(
+                """
+                INSERT INTO reports(
+                    host_id, container_name, runtime, project, cpu_percent, mem_bytes, mem_percent,
+                    net_rx_bps, net_tx_bps, conn_count, disk_file, disk_size_bytes, disk_used_percent,
+                    podman_network_ok_v4, podman_network_ok_v6, ts, payload_json
+                ) VALUES('perf-host','c-old','podman','',1,1,1,1,1,5,'',0,0,1,1,?,?)
+                """,
+                (now - 5, json.dumps({"security": {"inbound_unique_ips": 25, "outbound_unique_ips": 14}})),
+            )
+            conn.execute(
+                "INSERT INTO admission_states(host_id,runtime,project,container_name,instance_id,observed_at,payload) VALUES('perf-host','podman','','expired-c','id1',?,'{}')",
+                (now - 90000,),
+            )
+            conn.execute(
+                "INSERT INTO admission_states(host_id,runtime,project,container_name,instance_id,observed_at,payload) VALUES('perf-host','podman','','fresh-c','id2',?,'{}')",
+                (now - 60,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        server.invalidate_security_status_cache()
+        sec_items = {x["host_id"]: x for x in json.loads(server.security_status().body)["items"]}
+        self.assertEqual(sec_items["perf-host"]["today_peak_inbound_ips"], 25)
+        self.assertEqual(sec_items["perf-host"]["today_peak_outbound_ips"], 14)
+        self.assertEqual(sec_items["perf-host"]["today_peak_rx_bps"], 12345.0)
+        self.assertEqual(sec_items["perf-host"]["today_peak_tx_bps"], 67890.0)
+
+        # Cleanup drains bounded expired rows without falsely leaving backlog=True.
+        server.cleanup_old_reports(now_ts=now, force=True)
+        self.assertFalse(server._cleanup_status.get("backlog"))
+        conn = server.db()
+        try:
+            adm_names = {r["container_name"] for r in conn.execute("SELECT container_name FROM admission_states").fetchall()}
+            self.assertEqual(adm_names, {"fresh-c"})
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

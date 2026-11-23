@@ -342,6 +342,58 @@ class GfwCoverageDiagnosticTests(unittest.TestCase):
         self.assertTrue(evidence["reason"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM gfw_events WHERE host_id=?", (self.target_host,)).fetchone()[0], 0)
 
+    def test_prune_history_removes_only_expired_terminal_jobs_and_preserves_state(self):
+        gfw_monitor.initialize(self.conn)
+        old_ts = self.now - gfw_monitor.GFW_HISTORY_RETENTION_SECONDS - 100
+        fresh_ts = self.now - 3600
+        self.conn.execute(
+            "INSERT INTO gfw_cycles(id,host_id,node_id,targets_json,status,created_at,deadline_at) VALUES(?,?,?,?,?,?,?)",
+            ("cyc-old", self.target_host, self.target_node, "[]", "complete", old_ts, old_ts + 600),
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_cycles(id,host_id,node_id,targets_json,status,created_at,deadline_at) VALUES(?,?,?,?,?,?,?)",
+            ("cyc-fresh", self.target_host, self.target_node, "[]", "partial", fresh_ts, fresh_ts + 600),
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_probe_jobs(id,cycle_id,source_host_id,source_node_id,role,targets_json,targets_hash,lease,status,created_at,deadline_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("job-old", "cyc-old", "src-host", "src-node", "mainland", "[]", "h", "l1", "complete", old_ts, old_ts + 600),
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_probe_jobs(id,cycle_id,source_host_id,source_node_id,role,targets_json,targets_hash,lease,status,created_at,deadline_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("job-running", "cyc-fresh", "src-host", "src-node", "mainland", "[]", "h", "l2", "running", old_ts, self.now + 600),
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_probe_jobs(id,cycle_id,source_host_id,source_node_id,role,targets_json,targets_hash,lease,status,created_at,deadline_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("job-fresh", "cyc-fresh", "src-host", "src-node", "overseas", "[]", "h", "l3", "complete", fresh_ts, fresh_ts + 600),
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_probe_results(job_id,target_id,success,latency_ms,error,attempts) VALUES('job-old','t1',1,10.0,'',1)"
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_probe_results(job_id,target_id,success,latency_ms,error,attempts) VALUES('job-fresh','t1',1,12.0,'',1)"
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_states(host_id,node_id,state) VALUES(?,?,?)",
+            (self.target_host, self.target_node, "normal"),
+        )
+        self.conn.execute(
+            "INSERT INTO gfw_events(host_id,node_id,event_type,at) VALUES(?,?,?,?)",
+            (self.target_host, self.target_node, "blocked", old_ts),
+        )
+        self.conn.commit()
+
+        removed = gfw_monitor.prune_history(self.conn, self.now, batch_size=50)
+        self.assertGreaterEqual(removed, 3)
+
+        job_ids = {r[0] for r in self.conn.execute("SELECT id FROM gfw_probe_jobs").fetchall()}
+        self.assertEqual(job_ids, {"job-running", "job-fresh"})
+        cyc_ids = {r[0] for r in self.conn.execute("SELECT id FROM gfw_cycles").fetchall()}
+        self.assertEqual(cyc_ids, {"cyc-fresh"})
+        res_ids = {r[0] for r in self.conn.execute("SELECT job_id FROM gfw_probe_results").fetchall()}
+        self.assertEqual(res_ids, {"job-fresh"})
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM gfw_states").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM gfw_events").fetchone()[0], 1)
+
 
 class GfwFamilyProbePlanTests(unittest.TestCase):
     @staticmethod
