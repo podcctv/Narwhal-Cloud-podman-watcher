@@ -2,7 +2,7 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
-## Phase 34：按方案 B「现代浅色 SaaS 工作台」落地主控端前端视觉与布局重构（v2.0.2）
+## Phase 34：按方案 B「现代浅色 SaaS 工作台」落地主控端前端视觉与布局重构（v2.0.2 / v2.0.3）
 
 - **Clean Light SaaS Workbench 设计令牌与基础样式（`frontend/src/v2/styles/theme-v2.css`、`frontend/src/styles/index.css`）**：
   - 将画布与卡片体系切换至方案 B 浅石板灰（`#f8fafc`）+ 纯白悬浮卡片（`#ffffff`、`#e2e8f0` 边框与柔和扩散阴影），搭配靛蓝主强调色（`#4f46e5` / `#6366f1`）与翡翠绿在线状态色（`#10b981` / `#059669`），同步更新 `.rn2-card-head`、`.rn2-btn-*` 与 `@theme` 语义令牌。
