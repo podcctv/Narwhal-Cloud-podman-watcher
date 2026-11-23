@@ -2,6 +2,14 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 36：生产库离线压缩与 `server/legacy_pages.py` 路由抽离（v2.0.5）
+
+- **生产数据库离线压缩与开启增量回收（`15.204.57.108:8721`）**：
+  - 在短暂停服维护窗口对 `/opt/narwhal-monitor/server-data/monitor.db` 执行跨分区 `VACUUM INTO` 并开启 `PRAGMA auto_vacuum=INCREMENTAL`（`auto_vacuum=2`），完成全表行数与 `PRAGMA integrity_check` 校验后安全切换上线。
+  - `monitor.db` 体积由 `2.8G`（`3,000,680,448 B`，空闲页 `1.67 GiB`）缩减至 `1.1G`（`1,151,029,248 B`，空闲页 `0`），根分区可用空间由 `2.0G`（90%）释放至 `2.6G`（87%），服务重启后 WAL 与 `/login` 探活均正常。
+- **内联降级页面抽离（`server/legacy_pages.py`、`server/app.py`、`server/Dockerfile`）**：
+  - 将 `server/app.py` 末尾 ~880 行旧版降级 HTML/CSS/JS 页面处理器（`/alerts/history`、`/`、`/container-detail`、`/stats`）拆入独立模块 `server/legacy_pages.py`，同步更新 `server/Dockerfile` 镜像构建清单并在 `server/app.py` 保留兼容性导出与测试函数封装。
+
 ## Phase 35：单核服务端轮询热路径与 SQLite 性能优化（v2.0.4）
 
 - **消除高频轮询中的全表扫描与热事务阻塞（`server/gfw_monitor.py`、`server/tcping.py`、`server/admission_api.py`）**：
