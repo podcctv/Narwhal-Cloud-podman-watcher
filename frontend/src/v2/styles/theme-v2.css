@@ -1,42 +1,42 @@
 /* ==========================================================================
-   Narwhal Monitor 2.0 — RackNerd BlackFriday 2026 & ctrl. Dual-Contrast Theme
-   Light-Ice workspace (#f2f7ff / #ffffff) + Deep Midnight Navy headers (#03182e)
+   Narwhal Monitor 2.0 — Clean Light SaaS Workbench (Coolify / Tailscale / Stripe)
+   Alabaster-Slate workspace (#f8fafc / #ffffff) + Indigo (#4f46e5) & Emerald (#10b981)
    ========================================================================== */
 
 :root {
   color-scheme: light;
 
-  --rn-ink: #0b1636;
-  --rn-slate: #31485e;
-  --rn-muted: #697b9c;
-  --rn-blue: #087bff;
-  --rn-blue-deep: #0967bb;
-  --rn-cyan: #00b6ec;
-  --rn-sky: #54c7ff;
-  --rn-orange: #ff6b00;
-  --rn-orange-end: #ff8100;
-  --rn-orange-hover: #e05b00;
-  --rn-line: #cedae7;
-  --rn-line-soft: #dce5ef;
-  --rn-cell-line: #d2dfec;
-  --rn-soft: #f2f7ff;
-  --rn-spec-bg: #f4f8fd;
-  --rn-teal: #147468;
-  --rn-teal-bg: #e6f7f4;
+  --rn-ink: #0f172a;
+  --rn-slate: #475569;
+  --rn-muted: #64748b;
+  --rn-blue: #4f46e5;
+  --rn-blue-deep: #4338ca;
+  --rn-cyan: #0ea5e9;
+  --rn-sky: #a5b4fc;
+  --rn-orange: #4f46e5;
+  --rn-orange-end: #6366f1;
+  --rn-orange-hover: #4338ca;
+  --rn-line: #e2e8f0;
+  --rn-line-soft: #f1f5f9;
+  --rn-cell-line: #e2e8f0;
+  --rn-soft: #f8fafc;
+  --rn-spec-bg: #f8fafc;
+  --rn-teal: #059669;
+  --rn-teal-bg: #ecfdf5;
 
-  --rn-navy-0: #02182f;
-  --rn-navy-1: #03182e;
-  --rn-navy-2: #031d3d;
-  --rn-navy-3: #073365;
+  --rn-navy-0: #0f172a;
+  --rn-navy-1: #1e293b;
+  --rn-navy-2: #1e1b4b;
+  --rn-navy-3: #312e81;
 
-  --surface-canvas: #f2f7ff;
+  --surface-canvas: #f8fafc;
   --surface-1: #ffffff;
-  --surface-2: #f4f8fd;
-  --surface-3: #e8f1fb;
-  --border-muted: #dce5ef;
-  --border-strong: #cedae7;
+  --surface-2: #f8fafc;
+  --surface-3: #f1f5f9;
+  --border-muted: #f1f5f9;
+  --border-strong: #e2e8f0;
 
-  --font-sans: 'Plus Jakarta Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-mono: 'Inconsolata', 'Fira Code', ui-monospace, monospace;
 }
 
@@ -44,7 +44,7 @@ body {
   margin: 0;
   background-color: var(--rn-soft);
   background-image:
-    radial-gradient(ellipse 80% 42% at 50% -6%, rgba(8, 123, 255, 0.07) 0%, rgba(0, 182, 236, 0.03) 48%, transparent 76%);
+    radial-gradient(ellipse 75% 36% at 50% -4%, rgba(79, 70, 229, 0.045) 0%, rgba(16, 185, 129, 0.02) 50%, transparent 76%);
   color: var(--rn-ink);
   font-family: var(--font-sans);
   overflow-x: hidden;
@@ -127,7 +127,7 @@ progress::-moz-progress-bar {
 
   .rn2-hero {
     color-scheme: dark;
-    background: radial-gradient(ellipse at 50% 45%, #073365 0, #031d3d 65%, #02182f 100%);
+    background: linear-gradient(135deg, #1e1b4b 0%, #312e81 55%, #1e293b 100%);
     color: #f8fafc;
   }
 
@@ -136,13 +136,13 @@ progress::-moz-progress-bar {
     background: #ffffff;
     color: var(--rn-ink);
     border: 1px solid var(--rn-line);
-    border-radius: 14px;
-    box-shadow: 0 5px 16px rgba(12, 37, 65, 0.07);
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04), 0 8px 24px -4px rgba(15, 23, 42, 0.05);
   }
 
   .rn2-card-featured {
     border-color: var(--rn-blue);
-    box-shadow: 0 0 0 1px var(--rn-blue), 0 8px 24px rgba(18, 84, 161, 0.14);
+    box-shadow: 0 0 0 1px rgba(79, 70, 229, 0.3), 0 10px 26px -4px rgba(79, 70, 229, 0.14);
   }
 
   .rn2-card-head {
@@ -153,13 +153,13 @@ progress::-moz-progress-bar {
     gap: 0.75rem;
     padding-block: 0.875rem;
     padding-inline: 1.125rem;
-    background: linear-gradient(125deg, #163957, #0e233c 58%, #0c1c30);
-    color: #e6f4ff;
-    border-radius: 13px 13px 0 0;
+    background: linear-gradient(125deg, #1e293b, #0f172a 70%);
+    color: #f8fafc;
+    border-radius: 11px 11px 0 0;
   }
 
   .rn2-card-head-blue {
-    background: linear-gradient(125deg, #0967bb, #08458c 64%, #07376e);
+    background: linear-gradient(125deg, #4f46e5, #4338ca 64%, #312e81);
     color: #ffffff;
   }
 
@@ -248,38 +248,38 @@ progress::-moz-progress-bar {
   }
 
   .rn2-btn-orange {
-    background: linear-gradient(105deg, #ff6b00, #ff8100);
-    border-color: #ea5e00;
+    background: linear-gradient(135deg, #4f46e5, #4338ca);
+    border-color: #4338ca;
     color: #ffffff;
-    box-shadow: 0 4px 12px -2px rgba(255, 107, 0, 0.34);
+    box-shadow: 0 4px 12px -2px rgba(79, 70, 229, 0.34);
   }
   .rn2-btn-orange:hover:not(:disabled) {
-    background: linear-gradient(105deg, #e05b00, #f06e00);
-    border-color: #c85200;
-    box-shadow: 0 6px 16px -2px rgba(224, 91, 0, 0.42);
+    background: linear-gradient(135deg, #4338ca, #3730a3);
+    border-color: #3730a3;
+    box-shadow: 0 6px 16px -2px rgba(67, 56, 202, 0.42);
   }
 
   .rn2-btn-blue {
-    background: linear-gradient(125deg, #087bff, #0967bb);
-    border-color: #0867d6;
+    background: linear-gradient(135deg, #6366f1, #4f46e5);
+    border-color: #4f46e5;
     color: #ffffff;
-    box-shadow: 0 4px 12px -2px rgba(8, 123, 255, 0.3);
+    box-shadow: 0 4px 12px -2px rgba(79, 70, 229, 0.28);
   }
   .rn2-btn-blue:hover:not(:disabled) {
-    background: linear-gradient(125deg, #066ae0, #08559e);
-    border-color: #0657b8;
-    box-shadow: 0 6px 16px -2px rgba(8, 123, 255, 0.38);
+    background: linear-gradient(135deg, #4f46e5, #4338ca);
+    border-color: #4338ca;
+    box-shadow: 0 6px 16px -2px rgba(79, 70, 229, 0.36);
   }
 
   .rn2-btn-navy {
-    background: linear-gradient(125deg, #163957, #0e233c 65%, #0c1c30);
-    border-color: #204c74;
-    color: #e6f4ff;
-    box-shadow: 0 4px 12px -2px rgba(12, 37, 65, 0.24);
+    background: linear-gradient(125deg, #1e293b, #0f172a 70%);
+    border-color: #334155;
+    color: #f8fafc;
+    box-shadow: 0 4px 12px -2px rgba(15, 23, 42, 0.22);
   }
   .rn2-btn-navy:hover:not(:disabled) {
-    background: linear-gradient(125deg, #1c476b, #122d4d 65%, #0e223a);
-    border-color: var(--rn-cyan);
+    background: linear-gradient(125deg, #334155, #1e293b 70%);
+    border-color: var(--rn-blue);
     color: #ffffff;
   }
 
@@ -291,16 +291,16 @@ progress::-moz-progress-bar {
   .rn2-btn-ghost:hover:not(:disabled) {
     background: var(--rn-spec-bg);
     border-color: var(--rn-blue);
-    color: #08458c;
+    color: #4338ca;
   }
 
   :where(.rn2-dark-zone, .rn2-hero, .rn2-card-head, .rn2-card-head-blue) .rn2-btn-ghost {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(84, 199, 255, 0.34);
-    color: #e6f4ff;
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(165, 180, 252, 0.34);
+    color: #f8fafc;
   }
   :where(.rn2-dark-zone, .rn2-hero, .rn2-card-head, .rn2-card-head-blue) .rn2-btn-ghost:hover:not(:disabled) {
-    background: rgba(8, 123, 255, 0.24);
+    background: rgba(99, 102, 241, 0.26);
     border-color: var(--rn-sky);
     color: #ffffff;
   }

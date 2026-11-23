@@ -1,18 +1,156 @@
+/* ==========================================================================
+   Console Shell & Left SaaS Sidebar — Clean Light SaaS Workbench (Option B)
+   ========================================================================== */
+
+.saas-shell-frame {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+@media (min-width: 1024px) {
+  .saas-shell-frame {
+    flex-direction: row;
+    align-items: stretch;
+  }
+}
+
+/* ---------- Desktop Left Vertical Sidebar (w-60 / 240px) ---------- */
+.saas-sidebar {
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 10px 14px;
+  flex: none;
+}
+
+.saas-sidebar-brand {
+  display: none;
+}
+
+.saas-sidebar-footer {
+  display: none;
+}
+
+.saas-nav-group-label {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .saas-sidebar {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    border-bottom: 0;
+    border-right: 1px solid #e2e8f0;
+    padding: 18px 14px 16px;
+    box-shadow: 2px 0 12px -4px rgba(15, 23, 42, 0.04);
+    overflow-y: auto;
+    z-index: 35;
+  }
+
+  .saas-sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 4px 6px 16px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid #f1f5f9;
+  }
+
+  .saas-brand-mark {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+    color: #ffffff;
+    font: 800 14px var(--font-mono);
+    box-shadow: 0 4px 12px -2px rgba(79, 70, 229, 0.4);
+  }
+
+  .saas-brand-copy {
+    min-width: 0;
+  }
+
+  .saas-brand-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    font-weight: 800;
+    color: #0f172a;
+    letter-spacing: -0.015em;
+  }
+
+  .saas-version-badge {
+    border: 1px solid #c7d2fe;
+    border-radius: 6px;
+    padding: 1px 5px;
+    background: #eef2ff;
+    color: #4f46e5;
+    font: 700 10px var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .saas-brand-copy p {
+    margin: 2px 0 0;
+    font-size: 11px;
+    color: #64748b;
+  }
+
+  .saas-nav-group-label {
+    display: block;
+    padding: 10px 10px 4px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #94a3b8;
+  }
+
+  .saas-sidebar-footer {
+    margin-top: auto;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #f8fafc;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .saas-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+    flex: none;
+  }
+}
+
+/* ---------- Top Header Bar (.app-header) ---------- */
 .app-header {
   position: sticky;
   top: 0;
   z-index: 30;
-  color-scheme: dark;
-  margin-bottom: 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  background: linear-gradient(180deg, #03182e 0%, #021428 100%);
-  box-shadow: 0 8px 26px -8px rgba(2, 24, 47, 0.55);
+  color-scheme: light;
+  border-bottom: 1px solid #e2e8f0;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(12px);
 }
 
 .app-header-inner {
   max-width: 1536px;
   margin: 0 auto;
-  padding: 12px 24px 10px;
+  padding: 10px 24px;
 }
 
 .app-header-top {
@@ -34,14 +172,13 @@
   display: grid;
   place-items: center;
   flex: none;
-  width: 40px;
-  height: 40px;
-  border: 1px solid rgba(84, 199, 255, 0.55);
-  border-radius: 12px;
-  background: linear-gradient(135deg, #073365 0%, #031d3d 100%);
-  color: #00b6ec;
-  font: 800 16px var(--font-mono);
-  box-shadow: inset 0 1px 0 rgba(84, 199, 255, 0.25), 0 0 18px -4px rgba(0, 182, 236, 0.45);
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+  color: #ffffff;
+  font: 800 14px var(--font-mono);
+  box-shadow: 0 4px 10px -2px rgba(79, 70, 229, 0.35);
 }
 
 .app-brand-copy {
@@ -56,30 +193,30 @@
 
 .app-brand-title h1 {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1.35;
-  letter-spacing: -0.01em;
-  color: #f8fafc;
+  letter-spacing: -0.015em;
+  color: #0f172a;
   white-space: nowrap;
 }
 
-.app-brand-title > span {
+.app-brand-title > span:last-child {
   flex: none;
-  border: 1px solid #54c7ff;
+  border: 1px solid #c7d2fe;
   border-radius: 6px;
   padding: 1px 6px;
   font: 600 11px var(--font-mono);
-  color: #54c7ff;
-  background: rgba(7, 51, 101, 0.6);
+  color: #4f46e5;
+  background: #eef2ff;
   font-variant-numeric: tabular-nums;
 }
 
 .app-brand-copy p {
-  margin: 2px 0 0;
+  margin: 1px 0 0;
   font-size: 12px;
-  line-height: 1.45;
-  color: #a9c1dc;
+  line-height: 1.4;
+  color: #64748b;
 }
 
 .app-header-tools {
@@ -92,33 +229,36 @@
 
 .app-header-tools > .app-search,
 .app-header-tools > .app-logout {
-  height: 48px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid rgba(84, 199, 255, 0.26);
+  border: 1px solid #e2e8f0;
   border-radius: 10px;
   padding: 0 13px;
-  color: #e6f4ff;
-  background: linear-gradient(130deg, #0b2443 0%, #071931 100%);
+  color: #334155;
+  background: #ffffff;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .app-search kbd {
   padding: 2px 6px;
-  border: 1px solid rgba(84, 199, 255, 0.35);
+  border: 1px solid #e2e8f0;
   border-radius: 5px;
-  background: #02182f;
+  background: #f8fafc;
   font: 600 10px var(--font-mono);
-  color: #54c7ff;
+  color: #4f46e5;
 }
 
 .app-header button:not(:disabled),
-.app-header a {
+.app-header a,
+.saas-sidebar button:not(:disabled),
+.saas-sidebar a {
   cursor: pointer;
 }
 
@@ -127,27 +267,32 @@
   cursor: wait;
 }
 
-.app-header-tools > .app-search:hover,
+.app-header-tools > .app-search:hover {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
 .app-header-tools > .app-logout:hover {
-  border-color: #54c7ff;
-  background: #092c54;
-  color: #ffffff;
+  border-color: #fecdd3;
+  background: #fff1f2;
+  color: #be123c;
 }
 
 .app-header button:focus-visible,
-.app-header a:focus-visible {
-  outline: 2px solid #54c7ff;
+.app-header a:focus-visible,
+.saas-sidebar button:focus-visible,
+.saas-sidebar a:focus-visible {
+  outline: 2px solid #4f46e5;
   outline-offset: 2px;
 }
 
+/* ---------- Primary Navigation (Desktop Vertical / Mobile Grid) ---------- */
 .app-primary-nav {
   display: flex;
-  align-items: center;
-  gap: 4px;
+  flex-direction: column;
+  gap: 3px;
   min-width: 0;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .app-primary-nav > button,
@@ -155,13 +300,12 @@
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 7px;
+  gap: 10px;
   min-height: 44px;
-  padding: 8px 13px;
+  padding: 8px 12px;
   border: 1px solid transparent;
-  border-radius: 9px;
-  color: #cbd5e1;
+  border-radius: 10px;
+  color: #475569;
   text-decoration: none;
   font-size: 13px;
   font-weight: 600;
@@ -171,100 +315,88 @@
 
 .app-primary-nav > button:hover,
 .app-primary-nav > a:hover {
-  background: rgba(7, 51, 101, 0.72);
-  border-color: rgba(84, 199, 255, 0.32);
-  color: #ffffff;
+  background: #f8fafc;
+  color: #0f172a;
 }
 
 .app-primary-nav > button[aria-current='page'] {
-  background: linear-gradient(135deg, #087bff 0%, #00b6ec 100%);
-  border-color: rgba(125, 211, 252, 0.9);
-  color: #ffffff;
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #4f46e5;
   font-weight: 700;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 4px 16px -3px rgba(8, 123, 255, 0.55);
-}
-
-.app-primary-nav > button[aria-current='page']::after {
-  content: '';
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 3px;
-  height: 2.5px;
-  border-radius: 999px;
-  background: #ffffff;
-  opacity: 0.95;
-  pointer-events: none;
+  box-shadow: 0 1px 2px rgba(79, 70, 229, 0.08);
 }
 
 .app-primary-nav > .app-tcp-link {
-  color: #7dd3fc;
-  margin-left: auto;
-  border-color: rgba(84, 199, 255, 0.36);
-  background: rgba(7, 51, 101, 0.5);
+  color: #059669;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
 }
 
 .app-primary-nav > .app-tcp-link:hover {
-  background: rgba(8, 123, 255, 0.28);
-  border-color: #54c7ff;
-  color: #ffffff;
+  background: #d1fae5;
+  color: #047857;
 }
 
 .app-alert-count {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
   border-radius: 999px;
-  background: #ff6b00;
+  background: #e11d48;
   color: #ffffff;
   font: 700 10px var(--font-mono);
   font-variant-numeric: tabular-nums;
-  box-shadow: 0 0 0 1px rgba(2, 24, 47, 0.35);
 }
 
 .app-alert-count-unknown {
-  background: #475569;
-  color: #f1f5f9;
+  background: #64748b;
+  color: #f8fafc;
 }
 
 .app-alert-count-stale {
-  background: #854d0e;
-  color: #fef3c7;
+  background: #d97706;
+  color: #ffffff;
 }
 
 .app-nav-short {
   display: none;
 }
 
-@media (max-width: 1180px) {
-  .app-header-inner {
-    padding: 12px 16px 10px;
+/* ---------- Tablet & Mobile Responsive Grid (< 1024px) ---------- */
+@media (max-width: 1023px) {
+  .app-header {
+    position: relative;
+    margin-bottom: 12px;
   }
-  .app-brand-copy p {
-    display: none;
+  .app-header-inner {
+    padding: 10px 14px;
   }
   .app-search kbd {
     display: none;
   }
+  .app-primary-nav {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 5px;
+  }
   .app-primary-nav > button,
   .app-primary-nav > a {
-    padding: 8px 9px;
+    justify-content: center;
+    padding: 7px 6px;
     font-size: 12px;
     gap: 5px;
+  }
+  .app-alert-count {
+    margin-left: 2px;
   }
 }
 
 @media (max-width: 900px) {
-  .app-header {
-    position: relative;
-    margin-bottom: 16px;
-  }
-  .app-header-inner {
-    padding: 10px 12px 8px;
-  }
   .app-header-top {
     flex-wrap: wrap;
     gap: 8px;
@@ -277,14 +409,8 @@
     flex: 1;
   }
   .app-primary-nav {
-    display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 4px;
-    margin-top: 8px;
-    padding-top: 8px;
-  }
-  .app-primary-nav > .app-tcp-link {
-    margin-left: 0;
   }
   .app-primary-nav > button,
   .app-primary-nav > a {
@@ -294,20 +420,17 @@
 }
 
 @media (max-width: 540px) {
+  .app-header-inner {
+    padding: 10px 12px;
+  }
   .app-brand-title h1 {
-    font-size: 16px;
+    font-size: 15px;
   }
   .app-brand-mark {
-    width: 34px;
-    height: 34px;
-    font-size: 14px;
-    border-radius: 10px;
-  }
-  .app-brand-title {
-    gap: 6px;
-  }
-  .app-brand {
-    gap: 8px;
+    width: 32px;
+    height: 32px;
+    font-size: 13px;
+    border-radius: 9px;
   }
   .app-header-tools {
     gap: 6px;
@@ -334,11 +457,6 @@
     padding: 6px 2px;
     gap: 3px;
   }
-  .app-primary-nav > button[aria-current='page']::after {
-    left: 6px;
-    right: 6px;
-    bottom: 2px;
-  }
   .app-nav-full {
     display: none;
   }
@@ -358,7 +476,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app-header * {
+  .app-header *,
+  .saas-sidebar * {
     transition: none !important;
     animation: none !important;
   }

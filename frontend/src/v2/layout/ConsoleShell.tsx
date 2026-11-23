@@ -2,6 +2,7 @@ import React from 'react';
 import {
   BarChart3,
   BriefcaseBusiness,
+  ChevronRight,
   Globe2,
   LayoutDashboard,
   LogOut,
@@ -46,117 +47,192 @@ export interface ConsoleShellProps {
 }
 
 const NAVIGATION = [
-  { tab: 'dashboard', label: '总览看板', icon: LayoutDashboard },
-  { tab: 'alerts', label: '安全告警', icon: ShieldAlert },
-  { tab: 'investigation', label: '用户排查', icon: Users },
-  { tab: 'stats', label: '数据统计', icon: BarChart3 },
-  { tab: 'commerce', label: '经营分析', icon: BriefcaseBusiness },
-  { tab: 'operations', label: '运维中心', icon: Wrench },
-  { tab: 'firewall', label: '母机防火墙', icon: ShieldCheck },
-  { tab: 'settings', label: '系统设置', icon: Settings },
+  { tab: 'dashboard', label: '总览看板', short: '总览', group: 'monitor', icon: LayoutDashboard },
+  { tab: 'alerts', label: '安全告警', short: '告警', group: 'monitor', icon: ShieldAlert },
+  { tab: 'investigation', label: '用户排查', short: '排查', group: 'monitor', icon: Users },
+  { tab: 'stats', label: '数据统计', short: '统计', group: 'monitor', icon: BarChart3 },
+  { tab: 'commerce', label: '经营分析', short: '经营', group: 'ops', icon: BriefcaseBusiness },
+  { tab: 'operations', label: '运维中心', short: '运维', group: 'ops', icon: Wrench },
+  { tab: 'firewall', label: '母机防火墙', short: '防火墙', group: 'ops', icon: ShieldCheck },
+  { tab: 'settings', label: '系统设置', short: '设置', group: 'ops', icon: Settings },
 ] as const;
 
-export const ConsoleShell: React.FC<ConsoleShellProps> = (props) => (
-  <header className="app-header">
-    <div className="app-header-inner">
-      <div className="app-header-top">
-        <div className="app-brand">
-          <div className="app-brand-mark" aria-hidden="true">
-            NW
-          </div>
-          <div className="app-brand-copy">
-            <div className="app-brand-title">
-              <h1>Narwhal Monitor</h1>
-              <span>v{props.serverVersion || 'dev'}</span>
-            </div>
-            <p>{props.subLabel || '云原生容器与主机安全监控中心'}</p>
-          </div>
-        </div>
+const TAB_BREADCRUMBS: Record<ConsoleTab, { section: string; title: string; subtitle: string }> = {
+  dashboard: { section: 'Overview', title: '总览看板', subtitle: 'Fleet Health & Telemetry' },
+  alerts: { section: 'Security', title: '安全告警', subtitle: 'Active Incidents & Audit' },
+  investigation: { section: 'Security', title: '用户排查', subtitle: 'Tenant & Lifetime Forensics' },
+  stats: { section: 'Analytics', title: '数据统计', subtitle: 'Top Resource Consumers' },
+  commerce: { section: 'Business', title: '经营分析', subtitle: 'Revenue & Profitability' },
+  operations: { section: 'Operations', title: '运维中心', subtitle: '14-in-1 Fleet Workbench' },
+  firewall: { section: 'Network', title: '母机防火墙', subtitle: 'RFW & Protocol Policies' },
+  settings: { section: 'Platform', title: '系统设置', subtitle: 'Policies & Integrations' },
+  notifications: { section: 'Platform', title: '系统设置', subtitle: 'Buyer Notification Audit' },
+};
 
-        <div className="app-header-tools" role="group" aria-label="看板工具">
-          <button
-            type="button"
-            onClick={props.onOpenSearch}
-            aria-label="打开全局检索"
-            className="app-search"
-          >
-            <Search aria-hidden="true" size={16} />
-            <span>全局检索</span>
-            <kbd>Ctrl+K</kbd>
-          </button>
-          <CountdownTimer
-            countdown={props.countdown}
-            totalSeconds={props.totalSeconds}
-            isPaused={props.isPaused}
-            onTogglePause={props.onTogglePause}
-            onRefreshNow={props.onRefreshNow}
-            isRefreshing={props.isRefreshing}
-            lastRefreshTime={props.lastRefreshTime}
-          />
-          <button
-            type="button"
-            onClick={props.onLogout}
-            disabled={props.isLoggingOut}
-            className="app-logout"
-            aria-label={props.isLoggingOut ? '正在退出' : '退出登录'}
-            title="退出登录"
-          >
-            <LogOut aria-hidden="true" size={16} />
-            <span>{props.isLoggingOut ? '正在退出' : '退出登录'}</span>
-          </button>
-        </div>
+export interface ConsoleSidebarProps {
+  activeTab: ConsoleTab;
+  onSelectTab: (tab: ConsoleTab) => void;
+  serverVersion: string;
+  activeAlertCount: number;
+  alertCountState: 'unknown' | 'current' | 'stale';
+}
+
+export const ConsoleSidebar: React.FC<ConsoleSidebarProps> = ({
+  activeTab,
+  onSelectTab,
+  serverVersion,
+  activeAlertCount,
+  alertCountState,
+}) => (
+  <aside className="saas-sidebar" aria-label="主侧边栏">
+    <div className="saas-sidebar-brand">
+      <div className="saas-brand-mark" aria-hidden="true">
+        NW
       </div>
+      <div className="saas-brand-copy">
+        <div className="saas-brand-title">
+          <span>Narwhal Monitor</span>
+          <span className="saas-version-badge">v{serverVersion || 'dev'}</span>
+        </div>
+        <p>Cloud Container Workbench</p>
+      </div>
+    </div>
 
-      <nav aria-label="主导航" className="app-primary-nav">
-        {NAVIGATION.map(({ tab, label, icon: Icon }) => {
-          const selected =
-            props.activeTab === tab ||
-            (tab === 'settings' && props.activeTab === 'notifications');
-          const showAlertCount =
-            tab === 'alerts' &&
-            (props.activeAlertCount > 0 || props.alertCountState === 'unknown');
+    <nav aria-label="主导航" className="app-primary-nav">
+      {NAVIGATION.map(({ tab, label, short, group, icon: Icon }, idx) => {
+        const selected =
+          activeTab === tab ||
+          (tab === 'settings' && activeTab === 'notifications');
+        const showAlertCount =
+          tab === 'alerts' &&
+          (activeAlertCount > 0 || alertCountState === 'unknown');
+        const isFirstOps = group === 'ops' && NAVIGATION[idx - 1]?.group !== 'ops';
 
-          return (
+        return (
+          <React.Fragment key={tab}>
+            {idx === 0 && (
+              <div className="saas-nav-group-label" aria-hidden="true">
+                监控与安全
+              </div>
+            )}
+            {isFirstOps && (
+              <div className="saas-nav-group-label" aria-hidden="true">
+                平台与运维
+              </div>
+            )}
             <button
               type="button"
-              key={tab}
-              onClick={() => props.onSelectTab(tab)}
+              onClick={() => onSelectTab(tab)}
               aria-current={selected ? 'page' : undefined}
             >
-              <Icon aria-hidden="true" size={16} />
-              <span>{label}</span>
+              <Icon aria-hidden="true" size={17} />
+              <span className="app-nav-full">{label}</span>
+              <span className="app-nav-short">{short}</span>
               {showAlertCount && (
                 <span
                   className={`app-alert-count${
-                    props.alertCountState === 'unknown'
+                    alertCountState === 'unknown'
                       ? ' app-alert-count-unknown'
-                      : props.alertCountState === 'stale'
+                      : alertCountState === 'stale'
                         ? ' app-alert-count-stale'
                         : ''
                   }`}
                   aria-label={
-                    props.alertCountState === 'unknown'
+                    alertCountState === 'unknown'
                       ? '活动告警数量未知'
-                      : `${props.alertCountState === 'stale' ? '上次成功采样：' : ''}${props.activeAlertCount} 项活动告警`
+                      : `${alertCountState === 'stale' ? '上次成功采样：' : ''}${activeAlertCount} 项活动告警`
                   }
                 >
-                  {props.alertCountState === 'unknown'
+                  {alertCountState === 'unknown'
                     ? '?'
-                    : props.activeAlertCount > 99
+                    : activeAlertCount > 99
                       ? '99+'
-                      : props.activeAlertCount}
+                      : activeAlertCount}
                 </span>
               )}
             </button>
-          );
-        })}
+          </React.Fragment>
+        );
+      })}
 
-        <a href="/tcping" className="app-tcp-link" aria-label="全国 TCP 测试">
-          <Globe2 aria-hidden="true" size={16} />
-          <span className="app-nav-full">全国 TCP 测试</span>
-          <span className="app-nav-short">TCP 测速</span>
-        </a>
-      </nav>
+      <div className="saas-nav-group-label" aria-hidden="true">
+        外部探测
+      </div>
+      <a href="/tcping" className="app-tcp-link" aria-label="全国 TCP 测试">
+        <Globe2 aria-hidden="true" size={17} />
+        <span className="app-nav-full">全国 TCP 测试</span>
+        <span className="app-nav-short">TCP 测速</span>
+      </a>
+    </nav>
+
+    <div className="saas-sidebar-footer" aria-hidden="true">
+      <div className="saas-status-dot" />
+      <div className="min-w-0">
+        <p className="truncate text-xs font-semibold text-[#0f172a]">控制面运行中</p>
+        <p className="truncate text-[11px] text-[#64748b]">Light SaaS · 2.0 Workbench</p>
+      </div>
     </div>
-  </header>
+  </aside>
 );
+
+export const ConsoleShell: React.FC<ConsoleShellProps> = (props) => {
+  const crumb = TAB_BREADCRUMBS[props.activeTab] || TAB_BREADCRUMBS.dashboard;
+
+  return (
+    <header className="app-header">
+      <div className="app-header-inner">
+        <div className="app-header-top">
+          <div className="app-brand">
+            <div className="app-brand-mark lg:hidden" aria-hidden="true">
+              NW
+            </div>
+            <div className="app-brand-copy">
+              <div className="app-brand-title">
+                <span className="hidden items-center gap-1.5 text-xs font-semibold text-[#64748b] lg:inline-flex">
+                  <span>{crumb.section}</span>
+                  <ChevronRight className="h-3.5 w-3.5 text-[#94a3b8]" aria-hidden="true" />
+                </span>
+                <h1>{crumb.title}</h1>
+                <span className="lg:hidden">v{props.serverVersion || 'dev'}</span>
+              </div>
+              <p className="hidden sm:block">{props.subLabel || crumb.subtitle}</p>
+            </div>
+          </div>
+
+          <div className="app-header-tools" role="group" aria-label="看板工具">
+            <button
+              type="button"
+              onClick={props.onOpenSearch}
+              aria-label="打开全局检索"
+              className="app-search"
+            >
+              <Search aria-hidden="true" size={16} />
+              <span>全局检索</span>
+              <kbd>Ctrl+K</kbd>
+            </button>
+            <CountdownTimer
+              countdown={props.countdown}
+              totalSeconds={props.totalSeconds}
+              isPaused={props.isPaused}
+              onTogglePause={props.onTogglePause}
+              onRefreshNow={props.onRefreshNow}
+              isRefreshing={props.isRefreshing}
+              lastRefreshTime={props.lastRefreshTime}
+            />
+            <button
+              type="button"
+              onClick={props.onLogout}
+              disabled={props.isLoggingOut}
+              className="app-logout"
+              aria-label={props.isLoggingOut ? '正在退出' : '退出登录'}
+              title="退出登录"
+            >
+              <LogOut aria-hidden="true" size={16} />
+              <span>{props.isLoggingOut ? '正在退出' : '退出登录'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+};

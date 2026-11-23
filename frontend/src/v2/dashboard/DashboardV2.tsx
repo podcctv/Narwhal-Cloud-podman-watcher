@@ -8,6 +8,7 @@ import {
 } from '../../api/types';
 import { api, request } from '../../api/client';
 import { AppHeader } from '../../components/layout/AppHeader';
+import { ConsoleSidebar } from '../layout/ConsoleShell';
 import { HeroKpiBar, QuickOpsTarget, WorkspaceFocus } from './HeroKpiBar';
 import { SecurityAlertSection } from '../../components/dashboard/SecurityAlertSection';
 import { QuarantinePanel } from '../../components/dashboard/QuarantinePanel';
@@ -338,28 +339,38 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
   const showFleet = workspaceFocus === 'all' || workspaceFocus === 'fleet';
 
   return (
-    <div className="min-h-screen bg-[#f2f7ff] text-[#0b1636] flex flex-col selection:bg-[#087bff]/20 selection:text-[#03182e]">
-      {/* Top Application Header */}
-      <AppHeader
-        onLogout={logout}
-        isLoggingOut={isLoggingOut}
+    <div className="saas-shell-frame selection:bg-[#4f46e5]/15 selection:text-[#312e81]">
+      {/* Left Vertical SaaS Sidebar (Desktop) / Compact Nav Grid (Mobile & Tablet) */}
+      <ConsoleSidebar
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
         serverVersion={serverVersion}
         activeAlertCount={activeAlertsCount}
         alertCountState={!hasLoadedData ? 'unknown' : dataFetchError ? 'stale' : 'current'}
-        countdown={countdown}
-        totalSeconds={effectivePollInterval}
-        isPaused={isPaused}
-        onTogglePause={() => setIsPaused((prev) => !prev)}
-        onRefreshNow={fetchAllData}
-        isRefreshing={isRefreshing}
-        lastRefreshTime={lastRefreshTime}
-        onOpenSearch={() => setIsSearchOpen(true)}
       />
 
-      {/* Main Body */}
-      <main className={`mx-auto w-full ${activeTab === 'investigation' ? 'max-w-[1536px]' : 'max-w-7xl'} flex-1 px-4 sm:px-6 pb-16`}>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Top Clean SaaS Breadcrumb & Utility Header */}
+        <AppHeader
+          onLogout={logout}
+          isLoggingOut={isLoggingOut}
+          activeTab={activeTab}
+          onSelectTab={handleSelectTab}
+          serverVersion={serverVersion}
+          activeAlertCount={activeAlertsCount}
+          alertCountState={!hasLoadedData ? 'unknown' : dataFetchError ? 'stale' : 'current'}
+          countdown={countdown}
+          totalSeconds={effectivePollInterval}
+          isPaused={isPaused}
+          onTogglePause={() => setIsPaused((prev) => !prev)}
+          onRefreshNow={fetchAllData}
+          isRefreshing={isRefreshing}
+          lastRefreshTime={lastRefreshTime}
+          onOpenSearch={() => setIsSearchOpen(true)}
+        />
+
+        {/* Main Body */}
+        <main className={`mx-auto w-full ${activeTab === 'investigation' ? 'max-w-[1536px]' : 'max-w-7xl'} flex-1 px-4 pt-5 pb-16 sm:px-6`}>
         {activeTab === 'dashboard' && hasLoadedData && dataFetchError && (
           <section
             role="alert"
@@ -543,6 +554,7 @@ export const DashboardV2: React.FC<DashboardV2Props> = ({ onQuickOps }) => {
 
       {/* Toast Feedbacks */}
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+      </div>
     </div>
   );
 };

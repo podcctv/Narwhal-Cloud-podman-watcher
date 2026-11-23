@@ -1,6 +1,15 @@
 # 当前进展与待办
 
-更新时间：2026-11-19（Asia/Shanghai）
+更新时间：2026-11-23（Asia/Shanghai）
+
+## Phase 34：按方案 B「现代浅色 SaaS 工作台」落地主控端前端视觉与布局重构（v2.0.2）
+
+- **Clean Light SaaS Workbench 设计令牌与基础样式（`frontend/src/v2/styles/theme-v2.css`、`frontend/src/styles/index.css`）**：
+  - 将画布与卡片体系切换至方案 B 浅石板灰（`#f8fafc`）+ 纯白悬浮卡片（`#ffffff`、`#e2e8f0` 边框与柔和扩散阴影），搭配靛蓝主强调色（`#4f46e5` / `#6366f1`）与翡翠绿在线状态色（`#10b981` / `#059669`），同步更新 `.rn2-card-head`、`.rn2-btn-*` 与 `@theme` 语义令牌。
+- **左侧固定分组导航栏 + 顶部面包屑壳层（`frontend/src/v2/layout/ConsoleShell.tsx`、`console-shell.css`、`DashboardV2.tsx`、`CountdownTimer.tsx`）**：
+  - 桌面端（`>= 1024px`）引入 `240px` 纯白固定左侧栏 `ConsoleSidebar`，按「监控与安全」「平台与运维」「外部探测」分组呈现 8 大主视图与 `/tcping` 入口，激活态使用靛蓝胶囊高亮；顶部保留轻量化白色面包屑栏与实时轮询/全局检索/退出控制；平板及移动端（`< 1024px`）自动折叠为紧凑网格顶栏并保持全断点零溢出。
+- **总览 KPI 卡片与登录页同步美化（`frontend/src/v2/dashboard/HeroKpiBar.tsx`、`frontend/src/v2/auth/LoginViewV2.tsx`）**：
+  - 将 `HeroKpiBar` 重构为 4 张纯净悬浮白卡 KPI + 彩色圆角图标徽章 + Workspace Focus 焦点切换条；同步将 `LoginViewV2` 升级为浅石板灰画布与纯白悬浮登录卡片，保留既有 E2E 交互契约并重新构建 `server/static/`（`VERSION` 递增至 `2.0.2`）。
 
 ## Phase 33：`service-audit` 代理面板 SQLite 数据库只读脱敏解析（v2.0.1）
 

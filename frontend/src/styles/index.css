@@ -4,39 +4,39 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  --color-dark-50: #03182e;
-  --color-dark-100: #031d3d;
-  --color-dark-200: #072647;
-  --color-dark-300: #073365;
-  --color-dark-400: #142238;
-  --color-dark: #02182f;
+  --color-dark-50: #0f172a;
+  --color-dark-100: #1e293b;
+  --color-dark-200: #334155;
+  --color-dark-300: #312e81;
+  --color-dark-400: #1e1b4b;
+  --color-dark: #0f172a;
 
-  --color-ice: #f2f7ff;
-  --color-ice-spec: #f4f8fd;
-  --color-ink: #0b1636;
-  --color-ink-muted: #697b9c;
-  --color-line: #cedae7;
+  --color-ice: #f8fafc;
+  --color-ice-spec: #f1f5f9;
+  --color-ink: #0f172a;
+  --color-ink-muted: #64748b;
+  --color-line: #e2e8f0;
 
-  --color-border: #cedae7;
-  --color-border-subtle: #dce5ef;
-  --color-border-glow: #087bff;
+  --color-border: #e2e8f0;
+  --color-border-subtle: #f1f5f9;
+  --color-border-glow: #4f46e5;
 
-  --color-accent: #00b6ec;
-  --color-accent-hover: #54c7ff;
+  --color-accent: #10b981;
+  --color-accent-hover: #059669;
 
-  --color-brand: #087bff;
-  --color-brand-glow: rgba(8, 123, 255, 0.16);
+  --color-brand: #4f46e5;
+  --color-brand-glow: rgba(79, 70, 229, 0.16);
 
-  --color-cta: #ff6b00;
-  --color-cta-hover: #e05b00;
-  --color-teal: #147468;
+  --color-cta: #4f46e5;
+  --color-cta-hover: #4338ca;
+  --color-teal: #059669;
 
   --font-mono: 'Inconsolata', 'Fira Code', ui-monospace, monospace;
-  --font-sans: 'Plus Jakarta Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 
-  --shadow-glass: 0 5px 16px rgba(12, 37, 65, 0.07);
-  --shadow-glow: 0 8px 24px rgba(18, 84, 161, 0.14);
-  --shadow-glow-emerald: 0 0 18px -3px rgba(20, 116, 104, 0.25);
+  --shadow-glass: 0 1px 3px rgba(15, 23, 42, 0.04), 0 8px 24px -4px rgba(15, 23, 42, 0.05);
+  --shadow-glow: 0 8px 24px rgba(79, 70, 229, 0.14);
+  --shadow-glow-emerald: 0 0 18px -3px rgba(16, 185, 129, 0.25);
   --shadow-glow-rose: 0 0 18px -3px rgba(220, 38, 38, 0.25);
 }
 
