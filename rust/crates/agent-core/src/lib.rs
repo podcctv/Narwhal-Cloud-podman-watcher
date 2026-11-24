@@ -3,6 +3,7 @@
 pub mod actions;
 mod banner;
 mod cpu_guard_exec;
+mod manual_resource_limits;
 mod resource_guard_exec;
 pub use banner::{build_shell_banner_install_script, build_ssh_banner_install_script};
 use banner::MotdDeliveryState;
@@ -437,6 +438,9 @@ pub struct AgentState {
     host_audit_state: host_audit::HostAuditState,
     operations_services: Vec<ServiceProbeSpec>,
     bandwidth_state_path: PathBuf,
+    manual_resource_limits_path: PathBuf,
+    manual_resource_limits: manual_resource_limits::ManualResourceLimitsPolicy,
+    manual_resource_limits_updated_at: u64,
     cleanup_journal_path: PathBuf,
     cleanup_policy: app_guard::disk_cleanup::CleanupPolicy,
     disk_cleanup_running: Arc<AtomicBool>,
@@ -670,6 +674,13 @@ impl AgentState {
             host_audit_state: host_audit::HostAuditState::default(),
             operations_services: Vec::new(),
             bandwidth_state_path: tc_guard::default_state_path(),
+            manual_resource_limits_path: manual_resource_limits::default_manual_resource_state_path(),
+            manual_resource_limits: manual_resource_limits::load_policy_state(
+                &manual_resource_limits::default_manual_resource_state_path(),
+                &config.host_id,
+                &config.node_id,
+            ),
+            manual_resource_limits_updated_at: 0,
             cleanup_journal_path: PathBuf::from(app_guard::disk_cleanup::DEFAULT_STATE_PATH),
             cleanup_policy: app_guard::disk_cleanup::CleanupPolicy::default(),
             disk_cleanup_running: std::sync::Arc::new(AtomicBool::new(false)),
@@ -866,6 +877,28 @@ impl AgentState {
             allow_new_limits && resource_guard_exec::memory_auto_limit_enabled_from_env();
         let allow_io_limits =
             allow_new_limits && resource_guard_exec::io_auto_limit_enabled_from_env();
+
+        self.cpu_guard_enforcer.reconcile_manual_limits(
+            containers,
+            &self.manual_resource_limits,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
+        self.memory_guard_enforcer.reconcile_manual_limits(
+            containers,
+            &self.manual_resource_limits,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
+        self.io_guard_enforcer.reconcile_manual_limits(
+            containers,
+            &self.manual_resource_limits,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
 
         let cpu_out = self
             .cpu_guard
@@ -1065,6 +1098,14 @@ impl AgentState {
         let ops_services_json = probe_operations_services_json(&self.operations_services, timestamp);
         let ops_disk_cleanup_json = self.build_disk_cleanup_summary_json(timestamp);
         let manual_bw_json = tc_guard::last_status_json(&self.bandwidth_state_path);
+        let manual_res_json = manual_resource_limits::build_manual_resource_limits_report_json(
+            &self.manual_resource_limits,
+            containers,
+            &self.cpu_guard_enforcer,
+            &self.memory_guard_enforcer,
+            &self.io_guard_enforcer,
+            self.manual_resource_limits_updated_at,
+        );
         self.last_containers = containers.to_vec();
 
         let agent_ver = resolved_agent_version();
@@ -1082,7 +1123,7 @@ impl AgentState {
         let mut out = String::with_capacity(8192);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"manual_bandwidth_limits\":{}{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"disk_cleanup\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"managed_upgrade\":{},\"auto_update\":{},\"capabilities\":{},\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"manual_bandwidth_limits\":{},\"manual_resource_limits\":{}{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"disk_cleanup\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"managed_upgrade\":{},\"auto_update\":{},\"capabilities\":{},\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -1115,6 +1156,7 @@ impl AgentState {
             host_fw_json,
             host_audit_json,
             manual_bw_json,
+            manual_res_json,
             incus_runtime_field,
             conntrack_json,
             psi_snapshot_json,
@@ -4545,6 +4587,48 @@ impl AgentState {
                 }
             }
         }
+        if let Some(res_val) = ops.get("resource_limits") {
+            if let Ok(policy) = manual_resource_limits::parse_and_validate_policy_json(
+                &res_val.to_json(),
+                &config.host_id,
+                &config.node_id,
+            ) {
+                let now = current_unix_ts();
+                let changed = policy.revision != self.manual_resource_limits.revision
+                    || policy.limits != self.manual_resource_limits.limits;
+                self.manual_resource_limits = policy;
+                if changed {
+                    self.manual_resource_limits_updated_at = now;
+                    let _ = manual_resource_limits::save_policy_state(
+                        &self.manual_resource_limits_path,
+                        &self.manual_resource_limits,
+                    );
+                }
+                if !self.last_containers.is_empty() {
+                    self.cpu_guard_enforcer.reconcile_manual_limits(
+                        &self.last_containers,
+                        &self.manual_resource_limits,
+                        &self.proc_root,
+                        &self.cgroup_root,
+                        now,
+                    );
+                    self.memory_guard_enforcer.reconcile_manual_limits(
+                        &self.last_containers,
+                        &self.manual_resource_limits,
+                        &self.proc_root,
+                        &self.cgroup_root,
+                        now,
+                    );
+                    self.io_guard_enforcer.reconcile_manual_limits(
+                        &self.last_containers,
+                        &self.manual_resource_limits,
+                        &self.proc_root,
+                        &self.cgroup_root,
+                        now,
+                    );
+                }
+            }
+        }
     }
 
     fn build_disk_cleanup_summary_json(&self, _timestamp: u64) -> String {
@@ -5373,6 +5457,27 @@ impl AgentState {
             allow_new_limits && resource_guard_exec::memory_auto_limit_enabled_from_env();
         let allow_io_limits =
             allow_new_limits && resource_guard_exec::io_auto_limit_enabled_from_env();
+        self.cpu_guard_enforcer.reconcile_manual_limits(
+            &containers,
+            &self.manual_resource_limits,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
+        self.memory_guard_enforcer.reconcile_manual_limits(
+            &containers,
+            &self.manual_resource_limits,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
+        self.io_guard_enforcer.reconcile_manual_limits(
+            &containers,
+            &self.manual_resource_limits,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
         let cpu_out = self
             .cpu_guard
             .observe(timestamp, &host_cpu_sample, &cpu_samples, allow_cpu_limits);

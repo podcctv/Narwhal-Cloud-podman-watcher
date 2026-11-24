@@ -443,6 +443,403 @@ def attach(app, db, database_path, storage, cleanup, version, admin_name):
         finally:
             conn.close()
 
+    @router.put("/hosts/{host_id}/bandwidth-limits/container")
+    async def put_container_bandwidth_limit(host_id: str, request: Request):
+        require_admin(request)
+        if not host_id or len(host_id) > 200:
+            raise HTTPException(400, "invalid host")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "请求必须是有效 JSON") from None
+        allowed_fields = {
+            "runtime", "project", "container_name", "container_id",
+            "upload_mbps", "download_mbps", "clear",
+        }
+        if not isinstance(body, dict) or set(body) - allowed_fields:
+            raise HTTPException(400, "单容器带宽策略字段无效")
+        runtime = str(body.get("runtime") or "")
+        project = str(body.get("project") or "")
+        name = str(body.get("container_name") or "")
+        container_id = str(body.get("container_id") or "")
+        if runtime not in {"incus", "podman", "runman"}:
+            raise HTTPException(400, "单容器限速仅支持 Incus、Podman 和 Runman")
+        if not name or len(name) > 200 or len(project) > 100 or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,256}", container_id):
+            raise HTTPException(400, "容器身份无效")
+        clear = body.get("clear") is True
+        upload = body.get("upload_mbps", 0)
+        download = body.get("download_mbps", 0)
+        if clear:
+            upload = 0
+            download = 0
+        elif type(upload) is not int or type(download) is not int or not 0 <= upload <= 100000 or not 0 <= download <= 100000:
+            raise HTTPException(400, "上下行速率必须是 0–100000 之间的整数")
+        is_remove = clear or (upload == 0 and download == 0)
+
+        conn = db()
+        try:
+            context = bandwidth_context(conn, host_id)
+            if not is_remove:
+                if not context["host_online"] or not context["expected_node_id"]:
+                    raise HTTPException(409, "需要主机在线并上报节点身份")
+                if int(time.time()) - int(context["sample_at"] or 0) > 900:
+                    raise HTTPException(409, "网卡和容器清单已过期，请等待主机重新上报")
+                known_containers = {
+                    (item["runtime"], item["project"], item["container_name"], item["container_id"])
+                    for item in context["containers"]
+                }
+                if (runtime, project, name, container_id) not in known_containers:
+                    raise HTTPException(409, "容器身份与最新采样不匹配；刷新后重新选择目标容器")
+            saved = context["policy"]
+            existing_limits = list(saved.get("limits") or [])
+            target_key = (runtime, project, name, container_id)
+            remaining = [
+                item for item in existing_limits
+                if not (
+                    isinstance(item, dict)
+                    and item.get("scope") == "container"
+                    and (
+                        str(item.get("runtime") or ""),
+                        str(item.get("project") or ""),
+                        str(item.get("container_name") or ""),
+                        str(item.get("container_id") or ""),
+                    ) == target_key
+                )
+            ]
+            if not is_remove:
+                remaining.append({
+                    "scope": "container",
+                    "runtime": runtime,
+                    "project": project,
+                    "container_name": name,
+                    "container_id": container_id,
+                    "upload_mbps": upload,
+                    "download_mbps": download,
+                })
+            has_host_limit = any(
+                isinstance(item, dict) and item.get("scope") == "host"
+                and (item.get("upload_mbps", 0) or item.get("download_mbps", 0))
+                for item in remaining
+            )
+            saved_auto = saved.get("auto_throttle") if isinstance(saved.get("auto_throttle"), dict) else {}
+            auto_enabled = bool(saved_auto.get("enabled", has_host_limit)) and has_host_limit
+            policy = {
+                "schema": 1,
+                "host_id": host_id,
+                "expected_node_id": context["expected_node_id"],
+                "revision": int(saved.get("revision") or 0) + 1,
+                "limits": remaining,
+                "auto_throttle": {"enabled": auto_enabled},
+                "updated_at": int(time.time()),
+                "updated_by": request.state.dashboard_user,
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO ops_settings(key,payload) VALUES(?,?)",
+                (f"manual_bandwidth:{host_id}", json.dumps(policy, ensure_ascii=True)),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "revision": policy["revision"],
+                "cleared": is_remove,
+                "limits": remaining,
+                "auto_throttle": bandwidth_auto_settings(policy, has_host_limit),
+                "apply": "主机 Agent 下一次动作轮询时应用；最多等待一个轮询周期",
+            }
+        finally:
+            conn.close()
+
+    def resource_limits_context(conn, host_id):
+        host = conn.execute("SELECT node_id,last_seen,agent_version FROM hosts WHERE host_id=?", (host_id,)).fetchone()
+        if not host:
+            raise HTTPException(404, "主机不存在")
+        report = conn.execute(
+            "SELECT ts,payload_json FROM host_security WHERE host_id=? ORDER BY ts DESC,id DESC LIMIT 1",
+            (host_id,),
+        ).fetchone()
+        security = ops.loads(report["payload_json"], {}) if report else {}
+        now = int(time.time())
+        latest_container_rows = conn.execute(
+            """SELECT r.runtime,r.project,r.container_name,r.payload_json FROM reports r
+               JOIN (SELECT runtime,project,container_name,MAX(ts) AS ts FROM reports
+                     WHERE host_id=? AND ts>=? GROUP BY runtime,project,container_name) latest
+                 ON latest.runtime=r.runtime AND latest.project=r.project
+                AND latest.container_name=r.container_name AND latest.ts=r.ts
+               WHERE r.host_id=? AND r.ts>=? ORDER BY r.container_name LIMIT 500""",
+            (host_id, now - 900, host_id, now - 900),
+        ).fetchall()
+        containers = []
+        for row in latest_container_rows:
+            item = ops.loads(row["payload_json"], {})
+            if row["runtime"] not in {"incus", "podman", "runman"} or not isinstance(item, dict):
+                continue
+            name = str(row["container_name"] or "")
+            container_id = (
+                str(item.get("instance_id") or "") if row["runtime"] == "runman"
+                else str(item.get("id") or "")
+            )
+            if not name or not container_id:
+                continue
+            c_sec = item.get("security") if isinstance(item.get("security"), dict) else {}
+            containers.append({
+                "runtime": row["runtime"],
+                "project": str(row["project"] or ""),
+                "container_name": name,
+                "container_id": container_id,
+                "cpu_guard": c_sec.get("cpu_guard") if isinstance(c_sec.get("cpu_guard"), dict) else None,
+                "memory_guard": c_sec.get("memory_guard") if isinstance(c_sec.get("memory_guard"), dict) else None,
+                "io_guard": c_sec.get("io_guard") if isinstance(c_sec.get("io_guard"), dict) else None,
+            })
+        settings_row = conn.execute("SELECT payload FROM ops_settings WHERE key=?", (f"manual_resource_limits:{host_id}",)).fetchone()
+        saved = ops.loads(settings_row[0], {}) if settings_row else {}
+        if not isinstance(saved, dict):
+            saved = {}
+        saved_limits = saved.get("limits", []) if isinstance(saved.get("limits"), list) else []
+        reported = security.get("manual_resource_limits") if isinstance(security.get("manual_resource_limits"), dict) else {}
+        return {
+            "host_id": host_id,
+            "expected_node_id": str(host["node_id"] or ""),
+            "agent_version": str(host["agent_version"] or "unknown")[:80],
+            "host_online": bool(host["node_id"] and now - int(host["last_seen"] or 0) <= 900),
+            "sample_at": int(report["ts"] or 0) if report else 0,
+            "containers": containers,
+            "policy": {
+                "schema": 1,
+                "revision": int(saved.get("revision") or 0),
+                "limits": saved_limits,
+            },
+            "reported": reported,
+        }
+
+    def _normalize_resource_limit_item(item, known_containers, allow_unknown=False):
+        allowed_fields = {
+            "runtime", "project", "container_name", "container_id", "mode",
+            "cpu_cpus", "memory_high_mb", "io_device",
+            "io_read_mbps", "io_write_mbps", "io_read_iops", "io_write_iops", "note",
+        }
+        if not isinstance(item, dict) or set(item) - allowed_fields:
+            raise HTTPException(400, "资源限制策略字段无效")
+        runtime = str(item.get("runtime") or "")
+        project = str(item.get("project") or "")
+        name = str(item.get("container_name") or "")
+        container_id = str(item.get("container_id") or "")
+        if runtime not in {"incus", "podman", "runman"}:
+            raise HTTPException(400, "单容器资源限制仅支持 Incus、Podman 和 Runman")
+        if not name or len(name) > 200 or len(project) > 100 or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,256}", container_id):
+            raise HTTPException(400, "容器身份无效")
+        if not allow_unknown and (runtime, project, name, container_id) not in known_containers:
+            raise HTTPException(409, "容器身份与最新采样不匹配；刷新后重新选择目标容器")
+        mode = str(item.get("mode") or "cooperate").strip().lower()
+        if mode not in {"cooperate", "lock"}:
+            raise HTTPException(400, "mode 必须为 cooperate 或 lock")
+
+        def _opt_float(key, lo, hi):
+            val = item.get(key)
+            if val is None or val == "":
+                return None
+            if type(val) is bool or not isinstance(val, (int, float)):
+                raise HTTPException(400, f"{key} 必须是数字")
+            fval = float(val)
+            if not ops.math.isfinite(fval) or not (lo <= fval <= hi):
+                raise HTTPException(400, f"{key} 超出支持范围 ({lo}–{hi})")
+            return round(fval, 3)
+
+        def _opt_int(key, lo, hi):
+            val = item.get(key)
+            if val is None or val == "":
+                return None
+            if type(val) is not int or not (lo <= val <= hi):
+                raise HTTPException(400, f"{key} 必须是 {lo}–{hi} 之间的整数")
+            return val
+
+        cpu_cpus = _opt_float("cpu_cpus", 0.05, 64.0)
+        memory_high_mb = _opt_int("memory_high_mb", 16, 1048576)
+        io_read_mbps = _opt_int("io_read_mbps", 1, 10000)
+        io_write_mbps = _opt_int("io_write_mbps", 1, 10000)
+        io_read_iops = _opt_int("io_read_iops", 10, 1000000)
+        io_write_iops = _opt_int("io_write_iops", 10, 1000000)
+        io_device = str(item.get("io_device") or "").strip()
+        if io_device and not re.fullmatch(r"\d+:\d+", io_device):
+            raise HTTPException(400, "io_device 必须为空或 MAJOR:MINOR 设备号（例如 8:0）")
+        note = str(item.get("note") or "").strip()[:120]
+        if all(x is None for x in (cpu_cpus, memory_high_mb, io_read_mbps, io_write_mbps, io_read_iops, io_write_iops)):
+            raise HTTPException(400, "至少需要配置一项资源限额（CPU、内存或磁盘 I/O）")
+
+        entry = {
+            "runtime": runtime,
+            "project": project,
+            "container_name": name,
+            "container_id": container_id,
+            "mode": mode,
+            "cpu_cpus": cpu_cpus,
+            "memory_high_mb": memory_high_mb,
+            "io_device": io_device,
+            "io_read_mbps": io_read_mbps,
+            "io_write_mbps": io_write_mbps,
+            "io_read_iops": io_read_iops,
+            "io_write_iops": io_write_iops,
+            "note": note,
+        }
+        return (runtime, project, name, container_id), entry
+
+    @router.get("/hosts/{host_id}/resource-limits")
+    def get_resource_limits(host_id: str, request: Request):
+        require_operator(request)
+        if not host_id or len(host_id) > 200:
+            raise HTTPException(400, "invalid host")
+        conn = db()
+        try:
+            return resource_limits_context(conn, host_id)
+        finally:
+            conn.close()
+
+    @router.put("/hosts/{host_id}/resource-limits")
+    async def put_resource_limits(host_id: str, request: Request):
+        require_admin(request)
+        if not host_id or len(host_id) > 200:
+            raise HTTPException(400, "invalid host")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "请求必须是有效 JSON") from None
+        if (not isinstance(body, dict) or set(body) - {"limits"}
+                or "limits" not in body or not isinstance(body["limits"], list)
+                or len(body["limits"]) > 256):
+            raise HTTPException(400, "limits 必须是最多 256 项的列表")
+        conn = db()
+        try:
+            context = resource_limits_context(conn, host_id)
+            if body["limits"]:
+                if not context["host_online"] or not context["expected_node_id"]:
+                    raise HTTPException(409, "需要主机在线并上报节点身份")
+                if int(time.time()) - int(context["sample_at"] or 0) > 900:
+                    raise HTTPException(409, "主机与容器清单已过期，请等待主机重新上报")
+            elif not context["expected_node_id"]:
+                raise HTTPException(409, "需要主机已注册节点身份")
+            known_containers = {
+                (item["runtime"], item["project"], item["container_name"], item["container_id"])
+                for item in context["containers"]
+            }
+            normalized = []
+            identities = set()
+            for item in body["limits"]:
+                key, entry = _normalize_resource_limit_item(item, known_containers, allow_unknown=False)
+                if key in identities:
+                    raise HTTPException(400, "同一容器不能重复配置")
+                identities.add(key)
+                normalized.append(entry)
+            saved = context["policy"]
+            policy = {
+                "schema": 1,
+                "host_id": host_id,
+                "expected_node_id": context["expected_node_id"],
+                "revision": int(saved.get("revision") or 0) + 1,
+                "limits": normalized,
+                "updated_at": int(time.time()),
+                "updated_by": request.state.dashboard_user,
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO ops_settings(key,payload) VALUES(?,?)",
+                (f"manual_resource_limits:{host_id}", json.dumps(policy, ensure_ascii=True)),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "revision": policy["revision"],
+                "limits": normalized,
+                "apply": "主机 Agent 下一次动作轮询时应用；最多等待一个轮询周期",
+            }
+        finally:
+            conn.close()
+
+    @router.put("/hosts/{host_id}/resource-limits/container")
+    async def put_container_resource_limit(host_id: str, request: Request):
+        require_admin(request)
+        if not host_id or len(host_id) > 200:
+            raise HTTPException(400, "invalid host")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "请求必须是有效 JSON") from None
+        allowed_fields = {
+            "runtime", "project", "container_name", "container_id", "mode",
+            "cpu_cpus", "memory_high_mb", "io_device",
+            "io_read_mbps", "io_write_mbps", "io_read_iops", "io_write_iops",
+            "note", "clear",
+        }
+        if not isinstance(body, dict) or set(body) - allowed_fields:
+            raise HTTPException(400, "单容器资源限制字段无效")
+        runtime = str(body.get("runtime") or "")
+        project = str(body.get("project") or "")
+        name = str(body.get("container_name") or "")
+        container_id = str(body.get("container_id") or "")
+        if runtime not in {"incus", "podman", "runman"}:
+            raise HTTPException(400, "单容器资源限制仅支持 Incus、Podman 和 Runman")
+        if not name or len(name) > 200 or len(project) > 100 or not re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,256}", container_id):
+            raise HTTPException(400, "容器身份无效")
+        numeric_keys = ("cpu_cpus", "memory_high_mb", "io_read_mbps", "io_write_mbps", "io_read_iops", "io_write_iops")
+        is_clear = body.get("clear") is True or all(body.get(k) in (None, "") for k in numeric_keys)
+
+        conn = db()
+        try:
+            context = resource_limits_context(conn, host_id)
+            if not context["expected_node_id"]:
+                raise HTTPException(409, "需要主机已注册节点身份")
+            target_key = (runtime, project, name, container_id)
+            new_entry = None
+            if not is_clear:
+                if not context["host_online"]:
+                    raise HTTPException(409, "需要主机在线并上报节点身份")
+                if int(time.time()) - int(context["sample_at"] or 0) > 900:
+                    raise HTTPException(409, "主机与容器清单已过期，请等待主机重新上报")
+                known_containers = {
+                    (item["runtime"], item["project"], item["container_name"], item["container_id"])
+                    for item in context["containers"]
+                }
+                item_payload = {k: v for k, v in body.items() if k != "clear"}
+                _, new_entry = _normalize_resource_limit_item(item_payload, known_containers, allow_unknown=False)
+            saved = context["policy"]
+            remaining = [
+                item for item in (saved.get("limits") or [])
+                if not (
+                    isinstance(item, dict)
+                    and (
+                        str(item.get("runtime") or ""),
+                        str(item.get("project") or ""),
+                        str(item.get("container_name") or ""),
+                        str(item.get("container_id") or ""),
+                    ) == target_key
+                )
+            ]
+            if new_entry is not None:
+                if len(remaining) >= 256:
+                    raise HTTPException(400, "单台主机最多配置 256 条容器资源限额")
+                remaining.append(new_entry)
+            policy = {
+                "schema": 1,
+                "host_id": host_id,
+                "expected_node_id": context["expected_node_id"],
+                "revision": int(saved.get("revision") or 0) + 1,
+                "limits": remaining,
+                "updated_at": int(time.time()),
+                "updated_by": request.state.dashboard_user,
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO ops_settings(key,payload) VALUES(?,?)",
+                (f"manual_resource_limits:{host_id}", json.dumps(policy, ensure_ascii=True)),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "revision": policy["revision"],
+                "cleared": is_clear,
+                "limit": new_entry,
+                "limits": remaining,
+                "apply": "主机 Agent 下一次动作轮询时应用；最多等待一个轮询周期",
+            }
+        finally:
+            conn.close()
+
     @router.get("/service-inventory")
     def service_inventory(request: Request, host_id: str = "", runtime: str = "", limit: int = 200):
         limit = max(1, min(500, int(limit)))

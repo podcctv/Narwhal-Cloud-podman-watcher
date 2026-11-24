@@ -1748,3 +1748,348 @@ fn test_suspicious_process_alerts_exclude_proxy_binaries_but_keep_malicious_ones
     assert!(malicious_alerts.contains("\"type\":\"suspicious_process\""));
     assert!(malicious_alerts.contains("发现疑似恶意/违规进程：xmrig (PID 301)"));
 }
+
+#[test]
+fn test_manual_resource_limits_cooperate_lock_restore_and_generation_binding() {
+    let base = std::env::temp_dir().join(format!(
+        "narwhal-manual-res-test-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let cgroup_root = base.join("cgroup");
+
+    let vm1 = "aaaaaaaa-1111-4111-8111-111111111111";
+    let gen1 = "bbbbbbbb-2222-4222-8222-222222222222";
+    let gen_stale = "cccccccc-3333-4333-8333-333333333333";
+
+    fs::create_dir_all(proc_root.join("8101")).unwrap();
+    fs::write(
+        proc_root.join("8101").join("cgroup"),
+        format!("0::/system.slice/runman-{vm1}.service/ct\n"),
+    )
+    .unwrap();
+    let cg1 = cgroup_root
+        .join("system.slice")
+        .join(format!("runman-{vm1}.service"))
+        .join("ct");
+    fs::create_dir_all(&cg1).unwrap();
+    fs::write(cg1.join("cgroup.events"), "populated 1\n").unwrap();
+    fs::write(cg1.join("cpu.max"), "max 100000\n").unwrap();
+    fs::write(cg1.join("memory.high"), "max\n").unwrap();
+    fs::write(
+        cg1.join("io.max"),
+        "8:0 rbps=max wbps=max riops=max wiops=max\n",
+    )
+    .unwrap();
+    fs::write(cg1.join("io.stat"), "8:0 rbytes=1024 wbytes=2048\n").unwrap();
+
+    let containers = vec![ContainerSample {
+        id: vm1.to_string(),
+        stable_id: vm1.to_string(),
+        name: vm1.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(8101),
+        status: "running".to_string(),
+        instance_id: gen1.to_string(),
+        network_addresses: Vec::new(),
+        pid_metrics_json: None,
+        socket_tables_json: None,
+        cgroup_metrics_json: None,
+    }];
+
+    // 1. Stale generation ID must NOT apply manual limits.
+    let stale_policy_json = format!(
+        r#"{{"schema":1,"host_id":"h1","expected_node_id":"n1","revision":1,"limits":[{{"runtime":"runman","project":"default","container_name":"{vm1}","container_id":"{gen_stale}","mode":"cooperate","cpu_cpus":0.5,"memory_high_mb":128,"io_device":"","io_read_mbps":20,"io_write_mbps":10,"io_read_iops":null,"io_write_iops":null,"note":"stale"}}]}}"#
+    );
+    let stale_policy =
+        crate::manual_resource_limits::parse_and_validate_policy_json(&stale_policy_json, "h1", "n1")
+            .unwrap();
+    let mut cpu_enf = CpuGuardEnforcer::new(base.join("cpu.json"));
+    let mut mem_enf = MemoryGuardEnforcer::new(base.join("mem.json"));
+    let mut io_enf = IoGuardEnforcer::new(base.join("io.json"));
+
+    cpu_enf.reconcile_manual_limits(&containers, &stale_policy, &proc_root, &cgroup_root, 100);
+    mem_enf.reconcile_manual_limits(&containers, &stale_policy, &proc_root, &cgroup_root, 100);
+    io_enf.reconcile_manual_limits(&containers, &stale_policy, &proc_root, &cgroup_root, 100);
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "max 100000");
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "max");
+    assert!(cpu_enf.records.is_empty());
+
+    // 2. Cooperate policy matching gen1 applies CPU (0.5), memory (128 MiB), IO (auto-resolved 8:0).
+    let coop_policy_json = format!(
+        r#"{{"schema":1,"host_id":"h1","expected_node_id":"n1","revision":2,"limits":[{{"runtime":"runman","project":"default","container_name":"{vm1}","container_id":"{gen1}","mode":"cooperate","cpu_cpus":0.5,"memory_high_mb":128,"io_device":"","io_read_mbps":20,"io_write_mbps":10,"io_read_iops":null,"io_write_iops":null,"note":"coop"}}]}}"#
+    );
+    let coop_policy =
+        crate::manual_resource_limits::parse_and_validate_policy_json(&coop_policy_json, "h1", "n1")
+            .unwrap();
+    cpu_enf.reconcile_manual_limits(&containers, &coop_policy, &proc_root, &cgroup_root, 200);
+    mem_enf.reconcile_manual_limits(&containers, &coop_policy, &proc_root, &cgroup_root, 200);
+    io_enf.reconcile_manual_limits(&containers, &coop_policy, &proc_root, &cgroup_root, 200);
+
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "50000 100000");
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "134217728");
+    assert_eq!(
+        fs::read_to_string(cg1.join("io.max")).unwrap().trim(),
+        "8:0 rbps=20971520 wbps=10485760 riops=max wiops=max"
+    );
+    assert_eq!(cpu_enf.records.get(vm1).unwrap().effective_source, "manual");
+    assert_eq!(mem_enf.records.get(vm1).unwrap().effective_source, "manual");
+    assert_eq!(io_enf.records.get(vm1).unwrap().effective_source, "manual");
+
+    // 3. Cooperate linkage: Auto ApplyLimit looser (0.75 > 0.5) keeps manual; EscalateLimit stricter (0.25 < 0.5) tightens.
+    cpu_enf.execute_actions(
+        &containers,
+        &[guard_core::CpuGuardAction::ApplyLimit {
+            key: vm1.to_string(),
+            tier: 1,
+            target_cpus: 0.75,
+            fair_share_cpus: Some(1.0),
+            pressure_basis: "cpu_busy",
+        }],
+        &proc_root,
+        &cgroup_root,
+        250,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "50000 100000");
+    assert_eq!(cpu_enf.records.get(vm1).unwrap().effective_source, "manual");
+
+    cpu_enf.execute_actions(
+        &containers,
+        &[guard_core::CpuGuardAction::EscalateLimit {
+            key: vm1.to_string(),
+            tier: 2,
+            target_cpus: 0.25,
+        }],
+        &proc_root,
+        &cgroup_root,
+        300,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "25000 100000");
+    assert_eq!(
+        cpu_enf.records.get(vm1).unwrap().effective_source,
+        "auto_over_manual"
+    );
+
+    // Also test memory stricter tighten + IO combined min per axis:
+    mem_enf.execute_actions(
+        &containers,
+        &[guard_core::MemoryGuardAction::ApplyMemoryHigh {
+            key: vm1.to_string(),
+            tier: 2,
+            target_bytes: 100_000_000,
+        }],
+        &proc_root,
+        &cgroup_root,
+        300,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "100000000");
+    assert_eq!(
+        mem_enf.records.get(vm1).unwrap().effective_source,
+        "auto_over_manual"
+    );
+
+    io_enf.execute_actions(
+        &containers,
+        &[guard_core::IoGuardAction::ApplyIoMax {
+            key: vm1.to_string(),
+            device: "8:0".to_string(),
+            tier: 1,
+            target: guard_core::IoMaxLimits {
+                rbps: Some(50_000_000), // looser than 20 MiB/s -> keep 20 MiB/s
+                wbps: Some(5_000_000),  // stricter than 10 MiB/s -> tighten to 5 MB/s
+                riops: Some(300),
+                wiops: None,
+            },
+        }],
+        &proc_root,
+        &cgroup_root,
+        300,
+    );
+    assert_eq!(
+        fs::read_to_string(cg1.join("io.max")).unwrap().trim(),
+        "8:0 rbps=20971520 wbps=5000000 riops=300 wiops=max"
+    );
+    assert_eq!(
+        io_enf.records.get(vm1).unwrap().effective_source,
+        "auto_over_manual"
+    );
+
+    // 4. On auto RestoreLimit, all 3 must restore back to manual_limit (NOT original_limit)!
+    cpu_enf.execute_actions(
+        &containers,
+        &[guard_core::CpuGuardAction::RestoreLimit {
+            key: vm1.to_string(),
+            original_cpus: 1.0,
+            cooldown_until: 900,
+        }],
+        &proc_root,
+        &cgroup_root,
+        400,
+    );
+    mem_enf.execute_actions(
+        &containers,
+        &[guard_core::MemoryGuardAction::RestoreMemoryHigh {
+            key: vm1.to_string(),
+            original_high_bytes: None,
+            cooldown_until: 900,
+        }],
+        &proc_root,
+        &cgroup_root,
+        400,
+    );
+    io_enf.execute_actions(
+        &containers,
+        &[guard_core::IoGuardAction::RestoreIoMax {
+            key: vm1.to_string(),
+            device: "8:0".to_string(),
+            original: guard_core::IoMaxLimits::default(),
+            cooldown_until: 900,
+        }],
+        &proc_root,
+        &cgroup_root,
+        400,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "50000 100000");
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "134217728");
+    assert_eq!(
+        fs::read_to_string(cg1.join("io.max")).unwrap().trim(),
+        "8:0 rbps=20971520 wbps=10485760 riops=max wiops=max"
+    );
+    assert_eq!(cpu_enf.records.get(vm1).unwrap().effective_source, "manual");
+    assert!(!cpu_enf.records.get(vm1).unwrap().manual_override);
+
+    // 5. Switch to Lock mode: strict auto ApplyLimit must NOT overwrite manual CPU limit.
+    let lock_policy_json = format!(
+        r#"{{"schema":1,"host_id":"h1","expected_node_id":"n1","revision":3,"limits":[{{"runtime":"runman","project":"default","container_name":"{vm1}","container_id":"{gen1}","mode":"lock","cpu_cpus":0.5,"memory_high_mb":null,"io_device":"","io_read_mbps":null,"io_write_mbps":null,"io_read_iops":null,"io_write_iops":null,"note":"locked"}}]}}"#
+    );
+    let lock_policy =
+        crate::manual_resource_limits::parse_and_validate_policy_json(&lock_policy_json, "h1", "n1")
+            .unwrap();
+    cpu_enf.reconcile_manual_limits(&containers, &lock_policy, &proc_root, &cgroup_root, 500);
+    mem_enf.reconcile_manual_limits(&containers, &lock_policy, &proc_root, &cgroup_root, 500);
+    io_enf.reconcile_manual_limits(&containers, &lock_policy, &proc_root, &cgroup_root, 500);
+    // Memory and IO cleared -> restored to original max!
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "max");
+    assert_eq!(
+        fs::read_to_string(cg1.join("io.max")).unwrap().trim(),
+        "8:0 rbps=max wbps=max riops=max wiops=max"
+    );
+
+    cpu_enf.execute_actions(
+        &containers,
+        &[guard_core::CpuGuardAction::ApplyLimit {
+            key: vm1.to_string(),
+            tier: 3,
+            target_cpus: 0.1,
+            fair_share_cpus: Some(0.5),
+            pressure_basis: "cpu_busy",
+        }],
+        &proc_root,
+        &cgroup_root,
+        550,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "50000 100000");
+    assert_eq!(cpu_enf.records.get(vm1).unwrap().effective_source, "manual");
+
+    // 6. Clearing CPU manual rule restores to original "max 100000" once auto recovers.
+    cpu_enf.execute_actions(
+        &containers,
+        &[guard_core::CpuGuardAction::RestoreLimit {
+            key: vm1.to_string(),
+            original_cpus: 1.0,
+            cooldown_until: 1200,
+        }],
+        &proc_root,
+        &cgroup_root,
+        600,
+    );
+    let empty_policy = crate::manual_resource_limits::ManualResourceLimitsPolicy {
+        host_id: "h1".to_string(),
+        expected_node_id: "n1".to_string(),
+        revision: 4,
+        limits: Vec::new(),
+    };
+    cpu_enf.reconcile_manual_limits(&containers, &empty_policy, &proc_root, &cgroup_root, 650);
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "max 100000");
+    assert!(!cpu_enf.records.contains_key(vm1));
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_poll_resource_limits_emits_manual_resource_limits_telemetry() {
+    let base = std::env::temp_dir().join(format!(
+        "narwhal-poll-res-test-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let cgroup_root = base.join("cgroup");
+    let vm1 = "dddddddd-1111-4111-8111-111111111111";
+    let gen1 = "eeeeeeee-2222-4222-8222-222222222222";
+
+    fs::create_dir_all(proc_root.join("8201")).unwrap();
+    fs::write(
+        proc_root.join("8201").join("cgroup"),
+        format!("0::/system.slice/runman-{vm1}.service/ct\n"),
+    )
+    .unwrap();
+    fs::write(proc_root.join("8201").join("stat"), "8201 (sing-box) R 1 8201 8201 0 -1 0 0 0 0 0 1000 0 0 0 20 0 1 0 100 0 0").unwrap();
+    fs::write(proc_root.join("stat"), "cpu  100 0 50 9850 0 0 0 0 0 0\n").unwrap();
+    fs::write(proc_root.join("loadavg"), "0.10 0.10 0.10 1/10 8201\n").unwrap();
+    fs::write(proc_root.join("meminfo"), "MemTotal: 1024000 kB\nMemAvailable: 512000 kB\n").unwrap();
+    let cg1 = cgroup_root
+        .join("system.slice")
+        .join(format!("runman-{vm1}.service"))
+        .join("ct");
+    fs::create_dir_all(&cg1).unwrap();
+    fs::write(cg1.join("cgroup.events"), "populated 1\n").unwrap();
+    fs::write(cg1.join("cpu.max"), "max 100000\n").unwrap();
+    fs::write(cg1.join("memory.high"), "max\n").unwrap();
+
+    let cfg = Config {
+        host_id: "host-res".to_string(),
+        node_id: "node-res".to_string(),
+        ..Config::default()
+    };
+    let mut state = AgentState::with_paths(&cfg, proc_root, base.join("nf_conntrack"));
+    state.cgroup_root = cgroup_root;
+    state.manual_resource_limits_path = base.join("manual-resource-limits.json");
+    state.cpu_guard_enforcer = CpuGuardEnforcer::new(base.join("cpu-state.json"));
+    state.memory_guard_enforcer = MemoryGuardEnforcer::new(base.join("mem-state.json"));
+    state.io_guard_enforcer = IoGuardEnforcer::new(base.join("io-state.json"));
+
+    let poll_body = format!(
+        r#"{{"actions":[],"operations":{{"resource_limits":{{"schema":1,"host_id":"host-res","expected_node_id":"node-res","revision":5,"limits":[{{"runtime":"runman","project":"default","container_name":"{vm1}","container_id":"{gen1}","mode":"cooperate","cpu_cpus":0.5,"memory_high_mb":256,"io_device":"","io_read_mbps":null,"io_write_mbps":null,"io_read_iops":null,"io_write_iops":null,"note":"manual"}}]}}}}}}"#
+    );
+    state.configure_operations_bandwidth_and_cleanup(&poll_body, &cfg);
+
+    let containers = vec![ContainerSample {
+        id: vm1.to_string(),
+        stable_id: vm1.to_string(),
+        name: vm1.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(8201),
+        status: "running".to_string(),
+        instance_id: gen1.to_string(),
+        network_addresses: Vec::new(),
+        pid_metrics_json: None,
+        socket_tables_json: None,
+        cgroup_metrics_json: None,
+    }];
+    let report = state.build_report_json_with_containers(&cfg, 1_700_000_000, &containers);
+    assert!(report.contains("\"manual_resource_limits\":{\"revision\":5,\"state\":\"applied\""), "{report}");
+    assert!(report.contains("\"state\":\"manual_limited\""), "{report}");
+    assert!(report.contains("\"effective_source\":\"manual\""), "{report}");
+    assert_eq!(fs::read_to_string(cg1.join("cpu.max")).unwrap().trim(), "50000 100000");
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "268435456");
+
+    let _ = fs::remove_dir_all(&base);
+}

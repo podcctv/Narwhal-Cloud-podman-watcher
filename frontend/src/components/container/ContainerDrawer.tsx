@@ -30,6 +30,7 @@ import { DiagnosticPanel } from './DiagnosticPanel';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { AdmissionStatus } from './AdmissionStatus';
 import { ConnectionEvidenceTimeline } from './ConnectionEvidenceTimeline';
+import { ContainerResourceLimitControls } from './ContainerResourceLimitControls';
 import { SocketAbuseEvidence, extractSocketAbuseAssessment } from '../alerts/SocketAbuseEvidence';
 import { hasContainerResourceOrProtectionActivity, hasContainerProtocolGuard } from '../dashboard/ContainerStateBadges';
 import { evaluateContainerRisk } from '../dashboard/HostContainerList';
@@ -66,8 +67,10 @@ const RESOURCE_GUARD_STATES: Record<string, string> = {
   waiting_for_pressure: '等待内存压力',
   waiting_for_other_limit: '等待其他资源保护结束',
   limited: '限额已读回确认',
+  manual_limited: '主动限额已读回',
   active: '限额已读回确认',
   limit_failed: '限额未确认',
+  apply_failed: '限额应用失败',
   limited_unverified: '限额待读回',
   limit_unverified: '限额待读回',
   restore_failed: '恢复失败',
@@ -93,9 +96,10 @@ const RESOURCE_GUARD_STATES: Record<string, string> = {
 };
 
 const guardTone = (state?: string) => {
-  if (['limited', 'active'].includes(state || '')) return 'border-[#9ccaff] bg-[#e8f3ff]/75 text-[#0657b8]';
+  if (['limited', 'manual_limited', 'active'].includes(state || '')) return 'border-[#9ccaff] bg-[#e8f3ff]/75 text-[#0657b8]';
   if ([
     'limit_failed',
+    'apply_failed',
     'limited_unverified',
     'limit_unverified',
     'restore_failed',
@@ -151,8 +155,21 @@ const formatIoCount = (value?: string | number) => {
   return Number.isFinite(parsed) ? `${parsed} 次/秒` : '未知';
 };
 
-const formatIoLimit = (value?: Record<string, string>) => {
+const formatIoLimit = (value?: string | Record<string, string>) => {
   if (!value) return '暂无读回数据';
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return '暂无读回数据';
+    const parsed: Record<string, string> = {};
+    for (const tok of trimmed.split(/\s+/)) {
+      const [k, v] = tok.split('=');
+      if (k && v) parsed[k] = v;
+    }
+    if (!parsed.rbps && !parsed.wbps && !parsed.riops && !parsed.wiops) {
+      return trimmed;
+    }
+    return `读 ${formatIoRate(parsed.rbps)} · 写 ${formatIoRate(parsed.wbps)} · 读 IOPS ${formatIoCount(parsed.riops)} · 写 IOPS ${formatIoCount(parsed.wiops)}`;
+  }
   return `读 ${formatIoRate(value.rbps)} · 写 ${formatIoRate(value.wbps)} · 读 IOPS ${formatIoCount(value.riops)} · 写 IOPS ${formatIoCount(value.wiops)}`;
 };
 
@@ -1056,8 +1073,20 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                           {formatMinutes(cpuGuard.confirmed_duration_seconds)}。
                         </p>
                       )}
-                      {['limited', 'limit_unverified', 'limited_unverified', 'limit_failed', 'restore_failed', 'escalating', 'restoring'].includes(cpuGuard?.state || '') && (
+                      {['limited', 'manual_limited', 'apply_failed', 'limit_unverified', 'limited_unverified', 'limit_failed', 'restore_failed', 'escalating', 'restoring'].includes(cpuGuard?.state || '') && (
                         <div className="space-y-1 rounded-lg border border-[#d2dfec] bg-white p-2.5 text-[11px] text-[#31485e]">
+                          {cpuGuard?.effective_source && cpuGuard.effective_source !== 'none' && (
+                            <p>
+                              裁决来源：
+                              <span className="ml-1 font-bold text-[#0657b8]">
+                                {cpuGuard.effective_source === 'auto_over_manual'
+                                  ? '主动限制 + 自动保护联合收紧'
+                                  : cpuGuard.effective_source === 'manual'
+                                  ? `主动限制 (${cpuGuard.manual_mode === 'lock' ? '锁定' : '协同联动'})`
+                                  : '自动保护'}
+                              </span>
+                            </p>
+                          )}
                           <p>原限额：<span className="font-mono font-bold text-[#0b1636]">{cpuGuard?.original_limit || '未记录'}</span></p>
                           <p>
                             策略目标：<span className="font-mono font-bold text-[#0b1636]">{cpuGuard?.expected_limit || cpuGuard?.active_limit || '等待读回'}</span>
@@ -1114,8 +1143,20 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                           {formatMinutes(memoryGuard.confirmed_duration_seconds)}。
                         </p>
                       )}
-                      {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'apply_unverified'].includes(memoryGuard?.state || '') && (
+                      {['active', 'limited', 'manual_limited', 'apply_failed', 'applying', 'escalating', 'restoring', 'restore_failed', 'apply_unverified'].includes(memoryGuard?.state || '') && (
                         <div className="space-y-1 rounded-lg border border-[#d2dfec] bg-white p-2.5 text-[11px] text-[#31485e]">
+                          {memoryGuard?.effective_source && memoryGuard.effective_source !== 'none' && (
+                            <p>
+                              裁决来源：
+                              <span className="ml-1 font-bold text-[#0657b8]">
+                                {memoryGuard.effective_source === 'auto_over_manual'
+                                  ? '主动限制 + 自动保护联合收紧'
+                                  : memoryGuard.effective_source === 'manual'
+                                  ? `主动限制 (${memoryGuard.manual_mode === 'lock' ? '锁定' : '协同联动'})`
+                                  : '自动保护'}
+                              </span>
+                            </p>
+                          )}
                           <p>原 memory.high：<span className="font-mono font-bold text-[#0b1636]">{formatMemoryHigh(memoryGuard?.original_limit)}</span></p>
                           <p>
                             当前 memory.high：<span className="font-mono font-bold text-[#0b1636]">{formatMemoryHigh(memoryGuard?.active_limit)}</span>
@@ -1164,8 +1205,20 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                           {formatMinutes(ioGuard.confirmed_duration_seconds)}。
                         </p>
                       )}
-                      {['active', 'applying', 'escalating', 'restoring', 'restore_failed', 'retry_wait'].includes(ioGuard?.state || '') && (
+                      {['active', 'limited', 'manual_limited', 'apply_failed', 'applying', 'escalating', 'restoring', 'restore_failed', 'retry_wait'].includes(ioGuard?.state || '') && (
                         <div className="space-y-1 rounded-lg border border-[#d2dfec] bg-white p-2.5 text-[11px] text-[#31485e]">
+                          {ioGuard?.effective_source && ioGuard.effective_source !== 'none' && (
+                            <p>
+                              裁决来源：
+                              <span className="ml-1 font-bold text-[#0657b8]">
+                                {ioGuard.effective_source === 'auto_over_manual'
+                                  ? '主动限制 + 自动保护联合收紧'
+                                  : ioGuard.effective_source === 'manual'
+                                  ? `主动限制 (${ioGuard.manual_mode === 'lock' ? '锁定' : '协同联动'})`
+                                  : '自动保护'}
+                              </span>
+                            </p>
+                          )}
                           <p>原 I/O 限额：<span className="font-mono font-bold text-[#0b1636]">{formatIoLimit(ioGuard?.original_limit)}</span></p>
                           <p>
                             策略目标：<span className="font-mono font-bold text-[#0b1636]">{formatIoLimit(ioGuard?.expected_limit || ioGuard?.active_limit)}</span>
@@ -1216,6 +1269,13 @@ export const ContainerDrawer: React.FC<ContainerDrawerProps> = ({
                     </p>
                     <p className="mt-1 text-[#4a607a]">PSI 表示任务因资源压力而等待的时间比例；它辅助区分持续计算与资源争用，不用于认定用户行为。</p>
                   </div>
+
+                  <ContainerResourceLimitControls
+                    identity={identity}
+                    container={container}
+                    onToast={onToast}
+                    onRefresh={onRefresh}
+                  />
                 </section>
               )}
             </div>

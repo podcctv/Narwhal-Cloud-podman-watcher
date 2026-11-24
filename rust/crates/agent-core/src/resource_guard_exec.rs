@@ -13,6 +13,9 @@ use guard_core::{
 use runtime_drivers::{ContainerSample, JsonVal};
 
 use crate::cpu_guard_exec::{resolve_safe_container_cgroup, ContainerMetricsSummary};
+use crate::manual_resource_limits::{
+    find_matching_rule, resolve_container_io_device, ManualLimitMode, ManualResourceLimitsPolicy,
+};
 use crate::{container_guard_key, json_escape};
 
 const DEFAULT_MEMORY_GUARD_STATE_PATH: &str = "/var/lib/narwhal-agent/memory-guard-limits.json";
@@ -214,6 +217,15 @@ pub(crate) struct EnforcedMemoryRecord {
     pub restore_failed: bool,
     pub last_error: String,
     pub applied_at: u64,
+    pub manual_active: bool,
+    pub manual_mode: ManualLimitMode,
+    pub manual_bytes: Option<u64>,
+    pub manual_limit: String,
+    pub auto_active: bool,
+    pub auto_bytes: Option<u64>,
+    pub auto_limit: String,
+    pub effective_source: String,
+    pub manual_revision: i64,
 }
 
 fn parse_valid_memory_high(raw: &str) -> Option<String> {
@@ -289,12 +301,35 @@ impl MemoryGuardEnforcer {
                     instance_id: v.get_str("instance_id").unwrap_or("").to_string(),
                     original_limit: v.get_str("original_limit").unwrap_or("max").to_string(),
                     applied_limit: v.get_str("applied_limit").unwrap_or("").to_string(),
-                    tier: v.get_u64("tier").unwrap_or(1).clamp(1, 3) as u8,
+                    tier: v.get_u64("tier").unwrap_or(0).clamp(0, 3) as u8,
                     readback_confirmed: v.get_bool("readback_confirmed").unwrap_or(false),
                     manual_override: v.get_bool("manual_override").unwrap_or(false),
                     restore_failed: v.get_bool("restore_failed").unwrap_or(false),
                     last_error: v.get_str("last_error").unwrap_or("").to_string(),
                     applied_at: v.get_u64("applied_at").unwrap_or(0),
+                    manual_active: v.get_bool("manual_active").unwrap_or(false),
+                    manual_mode: ManualLimitMode::parse(
+                        v.get_str("manual_mode").unwrap_or("cooperate"),
+                    )
+                    .unwrap_or_default(),
+                    manual_bytes: v.get("manual_bytes").and_then(JsonVal::as_u64),
+                    manual_limit: v.get_str("manual_limit").unwrap_or("").to_string(),
+                    auto_active: v.get_bool("auto_active").unwrap_or(false),
+                    auto_bytes: v.get("auto_bytes").and_then(JsonVal::as_u64),
+                    auto_limit: v.get_str("auto_limit").unwrap_or("").to_string(),
+                    effective_source: {
+                        let s = v.get_str("effective_source").unwrap_or("");
+                        if s.is_empty() {
+                            if v.get_bool("manual_active").unwrap_or(false) {
+                                "manual".to_string()
+                            } else {
+                                "auto".to_string()
+                            }
+                        } else {
+                            s.to_string()
+                        }
+                    },
+                    manual_revision: v.get("manual_revision").and_then(JsonVal::as_i64).unwrap_or(0),
                 },
             );
         }
@@ -306,9 +341,17 @@ impl MemoryGuardEnforcer {
             if idx > 0 {
                 json.push(',');
             }
+            let manual_b_json = r
+                .manual_bytes
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            let auto_b_json = r
+                .auto_bytes
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "null".to_string());
             let _ = write!(
                 json,
-                "\"{}\":{{\"runtime\":\"{}\",\"project\":\"{}\",\"name\":\"{}\",\"instance_id\":\"{}\",\"original_limit\":\"{}\",\"applied_limit\":\"{}\",\"tier\":{},\"readback_confirmed\":{},\"manual_override\":{},\"restore_failed\":{},\"last_error\":\"{}\",\"applied_at\":{}}}",
+                "\"{}\":{{\"runtime\":\"{}\",\"project\":\"{}\",\"name\":\"{}\",\"instance_id\":\"{}\",\"original_limit\":\"{}\",\"applied_limit\":\"{}\",\"tier\":{},\"readback_confirmed\":{},\"manual_override\":{},\"restore_failed\":{},\"last_error\":\"{}\",\"applied_at\":{},\"manual_active\":{},\"manual_mode\":\"{}\",\"manual_bytes\":{},\"manual_limit\":\"{}\",\"auto_active\":{},\"auto_bytes\":{},\"auto_limit\":\"{}\",\"effective_source\":\"{}\",\"manual_revision\":{}}}",
                 json_escape(k),
                 json_escape(&r.runtime),
                 json_escape(&r.project),
@@ -322,10 +365,280 @@ impl MemoryGuardEnforcer {
                 r.restore_failed,
                 json_escape(&r.last_error),
                 r.applied_at,
+                r.manual_active,
+                r.manual_mode.as_str(),
+                manual_b_json,
+                json_escape(&r.manual_limit),
+                r.auto_active,
+                auto_b_json,
+                json_escape(&r.auto_limit),
+                json_escape(&r.effective_source),
+                r.manual_revision,
             );
         }
         json.push_str("}}");
         write_atomic_json(&self.state_path, "memory-guard-limits", &json)
+    }
+
+    pub(crate) fn reconcile_manual_limits(
+        &mut self,
+        containers: &[ContainerSample],
+        policy: &ManualResourceLimitsPolicy,
+        proc_root: &Path,
+        cgroup_root: &Path,
+        timestamp: u64,
+    ) {
+        let mut by_key: HashMap<String, &ContainerSample> = HashMap::with_capacity(containers.len());
+        for c in containers {
+            let k = container_guard_key(c);
+            if !k.is_empty() {
+                by_key.insert(k, c);
+            }
+        }
+
+        for c in containers {
+            let key = container_guard_key(c);
+            if key.is_empty() {
+                continue;
+            }
+            let Some(rule) = find_matching_rule(policy, c) else {
+                continue;
+            };
+            let Some(raw_bytes) = rule.memory_high_bytes() else {
+                continue;
+            };
+            let manual_bytes = raw_bytes.max(MIN_MEMORY_HIGH_BYTES);
+            let manual_limit_str = manual_bytes.to_string();
+            let (_, inst_id) = container_identity_strings(c);
+            let rt = c.runtime.trim().to_ascii_lowercase();
+            let existing_opt = self.records.get(&key).cloned();
+
+            let (boundary, original, current_live) = match read_memory_high(c, proc_root, cgroup_root)
+            {
+                Ok((b, live)) => {
+                    let orig = existing_opt
+                        .as_ref()
+                        .map(|ex| {
+                            if !ex.original_limit.is_empty() {
+                                ex.original_limit.clone()
+                            } else {
+                                live.clone()
+                            }
+                        })
+                        .unwrap_or_else(|| live.clone());
+                    (b, orig, live)
+                }
+                Err(err) => {
+                    let mut rec = existing_opt.unwrap_or(EnforcedMemoryRecord {
+                        runtime: rt,
+                        project: c.project.clone(),
+                        name: c.name.clone(),
+                        instance_id: inst_id,
+                        original_limit: String::new(),
+                        applied_limit: String::new(),
+                        tier: 0,
+                        readback_confirmed: false,
+                        manual_override: false,
+                        restore_failed: false,
+                        last_error: String::new(),
+                        applied_at: timestamp,
+                        manual_active: true,
+                        manual_mode: rule.mode,
+                        manual_bytes: Some(manual_bytes),
+                        manual_limit: manual_limit_str,
+                        auto_active: false,
+                        auto_bytes: None,
+                        auto_limit: String::new(),
+                        effective_source: "manual".to_string(),
+                        manual_revision: policy.revision,
+                    });
+                    rec.manual_active = true;
+                    rec.manual_mode = rule.mode;
+                    rec.manual_bytes = Some(manual_bytes);
+                    rec.manual_revision = policy.revision;
+                    rec.readback_confirmed = false;
+                    rec.last_error = err;
+                    self.records.insert(key, rec);
+                    let _ = self.save_state();
+                    continue;
+                }
+            };
+
+            let (auto_active, auto_bytes, auto_limit) = existing_opt
+                .as_ref()
+                .map(|ex| (ex.auto_active, ex.auto_bytes, ex.auto_limit.clone()))
+                .unwrap_or((false, None, String::new()));
+
+            let auto_is_stricter = rule.mode == ManualLimitMode::Cooperate
+                && auto_active
+                && auto_bytes.is_some_and(|ab| ab < manual_bytes && !auto_limit.is_empty());
+
+            let (desired_limit, desired_source) = if auto_is_stricter {
+                (auto_limit.clone(), "auto_over_manual".to_string())
+            } else {
+                (manual_limit_str.clone(), "manual".to_string())
+            };
+
+            let revision_changed = existing_opt
+                .as_ref()
+                .map(|ex| {
+                    !ex.manual_active
+                        || ex.manual_revision != policy.revision
+                        || ex.manual_mode != rule.mode
+                        || ex.manual_limit != manual_limit_str
+                })
+                .unwrap_or(true);
+
+            if !revision_changed
+                && existing_opt
+                    .as_ref()
+                    .is_some_and(|ex| ex.readback_confirmed && current_live == desired_limit)
+            {
+                continue;
+            }
+
+            let mut rec = existing_opt.unwrap_or(EnforcedMemoryRecord {
+                runtime: rt,
+                project: c.project.clone(),
+                name: c.name.clone(),
+                instance_id: inst_id,
+                original_limit: original.clone(),
+                applied_limit: desired_limit.clone(),
+                tier: 0,
+                readback_confirmed: false,
+                manual_override: false,
+                restore_failed: false,
+                last_error: String::new(),
+                applied_at: timestamp,
+                manual_active: true,
+                manual_mode: rule.mode,
+                manual_bytes: Some(manual_bytes),
+                manual_limit: manual_limit_str.clone(),
+                auto_active,
+                auto_bytes,
+                auto_limit,
+                effective_source: desired_source.clone(),
+                manual_revision: policy.revision,
+            });
+            rec.original_limit = original;
+            rec.manual_active = true;
+            rec.manual_mode = rule.mode;
+            rec.manual_bytes = Some(manual_bytes);
+            rec.manual_limit = manual_limit_str;
+            rec.manual_override = false;
+            rec.restore_failed = false;
+            rec.manual_revision = policy.revision;
+            rec.applied_limit = desired_limit.clone();
+            rec.effective_source = desired_source;
+            rec.applied_at = timestamp;
+            self.records.insert(key.clone(), rec);
+            if let Err(err) = self.save_state() {
+                if let Some(r) = self.records.get_mut(&key) {
+                    r.last_error = err;
+                }
+                continue;
+            }
+
+            let write_res = if current_live == desired_limit {
+                Ok(())
+            } else {
+                write_memory_high(&boundary, &desired_limit)
+            };
+            let readback_res = read_memory_high(c, proc_root, cgroup_root);
+            if let Some(r) = self.records.get_mut(&key) {
+                match (write_res, readback_res) {
+                    (Ok(()), Ok((_, after))) if after == desired_limit => {
+                        r.readback_confirmed = true;
+                        r.last_error.clear();
+                    }
+                    (Err(e), _) => {
+                        r.readback_confirmed = false;
+                        r.last_error = e;
+                    }
+                    (Ok(()), Err(e)) => {
+                        r.readback_confirmed = false;
+                        r.last_error = format!("应用主动 memory.high 后读回失败: {e}");
+                    }
+                    (Ok(()), Ok((_, after))) => {
+                        r.readback_confirmed = false;
+                        r.last_error =
+                            format!("主动 memory.high 读回不一致: 期望 {desired_limit}, 实际 {after}");
+                    }
+                }
+            }
+            let _ = self.save_state();
+        }
+
+        let manual_keys: Vec<String> = self
+            .records
+            .iter()
+            .filter_map(|(k, r)| if r.manual_active { Some(k.clone()) } else { None })
+            .collect();
+        for key in manual_keys {
+            let Some(c) = by_key.get(&key).copied() else {
+                continue;
+            };
+            if find_matching_rule(policy, c)
+                .and_then(|r| r.memory_high_mb)
+                .is_some()
+            {
+                continue;
+            }
+            let Some(existing) = self.records.get(&key).cloned() else {
+                continue;
+            };
+            let (restore_target, keep_auto) = if existing.auto_active && !existing.auto_limit.is_empty()
+            {
+                (existing.auto_limit.clone(), true)
+            } else {
+                (existing.original_limit.clone(), false)
+            };
+            if restore_target.is_empty() {
+                if !keep_auto {
+                    self.records.remove(&key);
+                    let _ = self.save_state();
+                }
+                continue;
+            }
+            let write_res = match read_memory_high(c, proc_root, cgroup_root) {
+                Ok((_, before)) if before == restore_target => Ok(()),
+                Ok((boundary, _)) => write_memory_high(&boundary, &restore_target),
+                Err(e) => Err(e),
+            };
+            let readback_res = read_memory_high(c, proc_root, cgroup_root);
+            match (write_res, readback_res) {
+                (Ok(()), Ok((_, after))) if after == restore_target => {
+                    if keep_auto {
+                        if let Some(r) = self.records.get_mut(&key) {
+                            r.manual_active = false;
+                            r.manual_bytes = None;
+                            r.manual_limit.clear();
+                            r.manual_revision = policy.revision;
+                            r.applied_limit = restore_target;
+                            r.effective_source = "auto".to_string();
+                            r.readback_confirmed = true;
+                            r.restore_failed = false;
+                            r.last_error.clear();
+                        }
+                    } else {
+                        self.records.remove(&key);
+                    }
+                }
+                (Err(e), _) | (Ok(()), Err(e)) => {
+                    if let Some(r) = self.records.get_mut(&key) {
+                        r.restore_failed = true;
+                        r.last_error = e;
+                    }
+                }
+                (Ok(()), Ok(_)) => {
+                    if let Some(r) = self.records.get_mut(&key) {
+                        r.restore_failed = true;
+                        r.last_error = "清除主动 memory.high 后读回未确认一致".to_string();
+                    }
+                }
+            }
+            let _ = self.save_state();
+        }
     }
 
     pub(crate) fn execute_actions(
@@ -356,6 +669,55 @@ impl MemoryGuardEnforcer {
                     };
                     let (_, inst_id) = container_identity_strings(c);
                     let rt = c.runtime.trim().to_ascii_lowercase();
+                    let clamped_bytes = (*target_bytes).max(MIN_MEMORY_HIGH_BYTES);
+                    let target_str = clamped_bytes.to_string();
+                    if let Some(existing) = self.records.get(key).cloned() {
+                        if existing.manual_active {
+                            if existing.manual_mode == ManualLimitMode::Lock
+                                || existing.manual_bytes.is_some_and(|mb| clamped_bytes >= mb)
+                            {
+                                if let Some(r) = self.records.get_mut(key) {
+                                    r.auto_active = true;
+                                    r.auto_bytes = Some(clamped_bytes);
+                                    r.auto_limit = target_str;
+                                    r.tier = *tier;
+                                    r.effective_source = "manual".to_string();
+                                }
+                                let _ = self.save_state();
+                                continue;
+                            }
+                            if let Ok((boundary, _)) = read_memory_high(c, proc_root, cgroup_root) {
+                                let write_res = write_memory_high(&boundary, &target_str);
+                                let readback_res = read_memory_high(c, proc_root, cgroup_root);
+                                if let Some(r) = self.records.get_mut(key) {
+                                    r.auto_active = true;
+                                    r.auto_bytes = Some(clamped_bytes);
+                                    r.auto_limit = target_str.clone();
+                                    r.tier = *tier;
+                                    match (write_res, readback_res) {
+                                        (Ok(()), Ok((_, after))) if after == target_str => {
+                                            r.applied_limit = target_str;
+                                            r.effective_source = "auto_over_manual".to_string();
+                                            r.readback_confirmed = true;
+                                            r.last_error.clear();
+                                        }
+                                        (Err(e), _) | (Ok(()), Err(e)) => {
+                                            r.readback_confirmed = false;
+                                            r.last_error = e;
+                                        }
+                                        (Ok(()), Ok((_, after))) => {
+                                            r.readback_confirmed = false;
+                                            r.last_error = format!(
+                                                "联合收紧 memory.high 读回不一致: 期望 {target_str}, 实际 {after}"
+                                            );
+                                        }
+                                    }
+                                }
+                                let _ = self.save_state();
+                            }
+                            continue;
+                        }
+                    }
                     let (boundary, original) = match read_memory_high(c, proc_root, cgroup_root) {
                         Ok(res) => res,
                         Err(err) => {
@@ -374,13 +736,21 @@ impl MemoryGuardEnforcer {
                                     restore_failed: false,
                                     last_error: err,
                                     applied_at: timestamp,
+                                    manual_active: false,
+                                    manual_mode: ManualLimitMode::Cooperate,
+                                    manual_bytes: None,
+                                    manual_limit: String::new(),
+                                    auto_active: true,
+                                    auto_bytes: Some(clamped_bytes),
+                                    auto_limit: String::new(),
+                                    effective_source: "auto".to_string(),
+                                    manual_revision: 0,
                                 },
                             );
                             let _ = self.save_state();
                             continue;
                         }
                     };
-                    let target_str = (*target_bytes).max(MIN_MEMORY_HIGH_BYTES).to_string();
                     self.records.insert(
                         key.clone(),
                         EnforcedMemoryRecord {
@@ -396,6 +766,15 @@ impl MemoryGuardEnforcer {
                             restore_failed: false,
                             last_error: String::new(),
                             applied_at: timestamp,
+                            manual_active: false,
+                            manual_mode: ManualLimitMode::Cooperate,
+                            manual_bytes: None,
+                            manual_limit: String::new(),
+                            auto_active: true,
+                            auto_bytes: Some(clamped_bytes),
+                            auto_limit: target_str.clone(),
+                            effective_source: "auto".to_string(),
+                            manual_revision: 0,
                         },
                     );
                     if let Err(err) = self.save_state() {
@@ -444,6 +823,22 @@ impl MemoryGuardEnforcer {
                     if existing.manual_override {
                         continue;
                     }
+                    let clamped_bytes = (*target_bytes).max(MIN_MEMORY_HIGH_BYTES);
+                    let next_str = clamped_bytes.to_string();
+                    if existing.manual_active
+                        && (existing.manual_mode == ManualLimitMode::Lock
+                            || existing.manual_bytes.is_some_and(|mb| clamped_bytes >= mb))
+                    {
+                        if let Some(r) = self.records.get_mut(key) {
+                            r.auto_active = true;
+                            r.auto_bytes = Some(clamped_bytes);
+                            r.auto_limit = next_str;
+                            r.tier = *tier;
+                            r.effective_source = "manual".to_string();
+                        }
+                        let _ = self.save_state();
+                        continue;
+                    }
                     match read_memory_high(c, proc_root, cgroup_root) {
                         Ok((boundary, before)) => {
                             if !existing.applied_limit.is_empty()
@@ -458,14 +853,21 @@ impl MemoryGuardEnforcer {
                                 let _ = self.save_state();
                                 continue;
                             }
-                            let next_str = (*target_bytes).max(MIN_MEMORY_HIGH_BYTES).to_string();
                             let write_res = write_memory_high(&boundary, &next_str);
                             let readback_res = read_memory_high(c, proc_root, cgroup_root);
                             if let Some(r) = self.records.get_mut(key) {
                                 match (write_res, readback_res) {
                                     (Ok(()), Ok((_, after))) if after == next_str => {
-                                        r.applied_limit = next_str;
+                                        r.applied_limit = next_str.clone();
+                                        r.auto_active = true;
+                                        r.auto_bytes = Some(clamped_bytes);
+                                        r.auto_limit = next_str;
                                         r.tier = *tier;
+                                        r.effective_source = if existing.manual_active {
+                                            "auto_over_manual".to_string()
+                                        } else {
+                                            "auto".to_string()
+                                        };
                                         r.readback_confirmed = true;
                                         r.last_error.clear();
                                     }
@@ -496,7 +898,51 @@ impl MemoryGuardEnforcer {
                         continue;
                     };
                     if existing.manual_override {
-                        self.records.remove(key);
+                        if !existing.manual_active {
+                            self.records.remove(key);
+                            let _ = self.save_state();
+                        }
+                        continue;
+                    }
+                    if existing.manual_active {
+                        let target_restore = existing.manual_limit.clone();
+                        let write_res = if target_restore.is_empty() {
+                            Ok(())
+                        } else {
+                            match read_memory_high(c, proc_root, cgroup_root) {
+                                Ok((_, before)) if before == target_restore => Ok(()),
+                                Ok((boundary, _)) => write_memory_high(&boundary, &target_restore),
+                                Err(e) => Err(e),
+                            }
+                        };
+                        let readback_res = read_memory_high(c, proc_root, cgroup_root);
+                        if let Some(r) = self.records.get_mut(key) {
+                            r.auto_active = false;
+                            r.auto_bytes = None;
+                            r.auto_limit.clear();
+                            r.tier = 0;
+                            match (write_res, readback_res) {
+                                (Ok(()), Ok((_, after)))
+                                    if target_restore.is_empty() || after == target_restore =>
+                                {
+                                    r.applied_limit = target_restore;
+                                    r.effective_source = "manual".to_string();
+                                    r.readback_confirmed = true;
+                                    r.restore_failed = false;
+                                    r.last_error.clear();
+                                }
+                                (Err(e), _) | (Ok(()), Err(e)) => {
+                                    r.restore_failed = true;
+                                    r.last_error = e;
+                                }
+                                (Ok(()), Ok(_)) => {
+                                    r.restore_failed = true;
+                                    r.last_error =
+                                        "自动压力恢复至主动 memory.high 后读回未确认一致"
+                                            .to_string();
+                                }
+                            }
+                        }
                         let _ = self.save_state();
                         continue;
                     }
@@ -610,15 +1056,41 @@ impl MemoryGuardEnforcer {
                             true,
                         )
                     } else if r.readback_confirmed {
-                        (
-                            "limited",
-                            "容器内存压力持续超过保护条件，已启用可恢复 memory.high 保护并读回确认。",
-                            true,
-                            r.original_limit.as_str(),
-                            r.applied_limit.as_str(),
-                            r.last_error.as_str(),
-                            false,
-                        )
+                        if r.manual_active && r.effective_source == "manual" {
+                            (
+                                "manual_limited",
+                                if r.auto_active {
+                                    "已启用容器主动 memory.high 限额并读回确认（当前严于自动压力限额）。"
+                                } else {
+                                    "已启用容器主动 memory.high 限额并读回确认。"
+                                },
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        } else if r.manual_active && r.effective_source == "auto_over_manual" {
+                            (
+                                "limited",
+                                "主动 memory.high 生效中，且因持续内存压力由自动保护进一步收紧。",
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        } else {
+                            (
+                                "limited",
+                                "容器内存压力持续超过保护条件，已启用可恢复 memory.high 保护并读回确认。",
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        }
                     } else {
                         (
                             "apply_failed",
@@ -709,8 +1181,32 @@ impl MemoryGuardEnforcer {
                     ("normal", "内存运行正常。", false, "", "", "", false)
                 };
 
+            let manual_active = rec.map(|r| r.manual_active).unwrap_or(false);
+            let manual_mode_str = rec
+                .filter(|r| r.manual_active)
+                .map(|r| r.manual_mode.as_str())
+                .unwrap_or("");
+            let manual_limit_str = rec
+                .filter(|r| r.manual_active)
+                .map(|r| r.manual_limit.as_str())
+                .unwrap_or("");
+            let manual_mb_json = rec
+                .filter(|r| r.manual_active)
+                .and_then(|r| r.manual_bytes)
+                .map(|b| (b / (1024 * 1024)).to_string())
+                .unwrap_or_else(|| "null".to_string());
+            let effective_source_str = rec
+                .map(|r| r.effective_source.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(if dec.is_some_and(|d| d.stage == GuardStage::Active) {
+                    "auto"
+                } else {
+                    "none"
+                });
+            let actual_limit_str = if readback_confirmed { active_limit } else { "" };
+
             let status_json = format!(
-                "{{\"state\":\"{}\",\"tier\":{},\"high_samples\":{},\"required_samples\":{},\"cooldown_remaining_seconds\":{},\"original_limit\":\"{}\",\"active_limit\":\"{}\",\"expected_limit\":\"{}\",\"readback_confirmed\":{},\"last_error\":\"{}\",\"message\":\"{}\"}}",
+                "{{\"state\":\"{}\",\"tier\":{},\"high_samples\":{},\"required_samples\":{},\"cooldown_remaining_seconds\":{},\"original_limit\":\"{}\",\"active_limit\":\"{}\",\"expected_limit\":\"{}\",\"actual_limit\":\"{}\",\"readback_confirmed\":{},\"manual_active\":{},\"manual_mode\":\"{}\",\"manual_limit\":\"{}\",\"manual_mb\":{},\"effective_source\":\"{}\",\"last_error\":\"{}\",\"message\":\"{}\"}}",
                 json_escape(state_str),
                 tier,
                 high_samples,
@@ -719,7 +1215,13 @@ impl MemoryGuardEnforcer {
                 json_escape(orig_limit),
                 json_escape(active_limit),
                 json_escape(active_limit),
+                json_escape(actual_limit_str),
                 readback_confirmed,
+                manual_active,
+                json_escape(manual_mode_str),
+                json_escape(manual_limit_str),
+                manual_mb_json,
+                json_escape(effective_source_str),
                 json_escape(last_error),
                 json_escape(message),
             );
@@ -727,7 +1229,8 @@ impl MemoryGuardEnforcer {
 
             let watching_alert = dec
                 .map(|d| d.stage == GuardStage::Watching && d.high_samples >= 2)
-                .unwrap_or(false);
+                .unwrap_or(false)
+                && !manual_active;
             let active_or_failed = matches!(state_str, "limited" | "apply_failed" | "restore_failed");
             if watching_alert || active_or_failed {
                 let (_, inst_id) = container_identity_strings(c);
@@ -836,6 +1339,35 @@ pub(crate) struct EnforcedIoRecord {
     pub restore_failed: bool,
     pub last_error: String,
     pub applied_at: u64,
+    pub manual_active: bool,
+    pub manual_mode: ManualLimitMode,
+    pub manual_limit: String,
+    pub auto_active: bool,
+    pub auto_limit: String,
+    pub effective_source: String,
+    pub manual_revision: i64,
+}
+
+fn min_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+fn combine_io_limits(a: &IoMaxLimits, b: &IoMaxLimits) -> IoMaxLimits {
+    IoMaxLimits {
+        rbps: min_opt_u64(a.rbps, b.rbps),
+        wbps: min_opt_u64(a.wbps, b.wbps),
+        riops: min_opt_u64(a.riops, b.riops),
+        wiops: min_opt_u64(a.wiops, b.wiops),
+    }
+}
+
+fn parse_io_max_str(raw: &str) -> IoMaxLimits {
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    parse_io_max_fields(&tokens).unwrap_or_default()
 }
 
 fn is_valid_device(dev: &str) -> bool {
@@ -947,12 +1479,33 @@ impl IoGuardEnforcer {
                         .unwrap_or("rbps=max wbps=max riops=max wiops=max")
                         .to_string(),
                     applied_limit: v.get_str("applied_limit").unwrap_or("").to_string(),
-                    tier: v.get_u64("tier").unwrap_or(1).clamp(1, 3) as u8,
+                    tier: v.get_u64("tier").unwrap_or(0).clamp(0, 3) as u8,
                     readback_confirmed: v.get_bool("readback_confirmed").unwrap_or(false),
                     manual_override: v.get_bool("manual_override").unwrap_or(false),
                     restore_failed: v.get_bool("restore_failed").unwrap_or(false),
                     last_error: v.get_str("last_error").unwrap_or("").to_string(),
                     applied_at: v.get_u64("applied_at").unwrap_or(0),
+                    manual_active: v.get_bool("manual_active").unwrap_or(false),
+                    manual_mode: ManualLimitMode::parse(
+                        v.get_str("manual_mode").unwrap_or("cooperate"),
+                    )
+                    .unwrap_or_default(),
+                    manual_limit: v.get_str("manual_limit").unwrap_or("").to_string(),
+                    auto_active: v.get_bool("auto_active").unwrap_or(false),
+                    auto_limit: v.get_str("auto_limit").unwrap_or("").to_string(),
+                    effective_source: {
+                        let s = v.get_str("effective_source").unwrap_or("");
+                        if s.is_empty() {
+                            if v.get_bool("manual_active").unwrap_or(false) {
+                                "manual".to_string()
+                            } else {
+                                "auto".to_string()
+                            }
+                        } else {
+                            s.to_string()
+                        }
+                    },
+                    manual_revision: v.get("manual_revision").and_then(JsonVal::as_i64).unwrap_or(0),
                 },
             );
         }
@@ -966,7 +1519,7 @@ impl IoGuardEnforcer {
             }
             let _ = write!(
                 json,
-                "\"{}\":{{\"runtime\":\"{}\",\"project\":\"{}\",\"name\":\"{}\",\"instance_id\":\"{}\",\"device\":\"{}\",\"original_limit\":\"{}\",\"applied_limit\":\"{}\",\"tier\":{},\"readback_confirmed\":{},\"manual_override\":{},\"restore_failed\":{},\"last_error\":\"{}\",\"applied_at\":{}}}",
+                "\"{}\":{{\"runtime\":\"{}\",\"project\":\"{}\",\"name\":\"{}\",\"instance_id\":\"{}\",\"device\":\"{}\",\"original_limit\":\"{}\",\"applied_limit\":\"{}\",\"tier\":{},\"readback_confirmed\":{},\"manual_override\":{},\"restore_failed\":{},\"last_error\":\"{}\",\"applied_at\":{},\"manual_active\":{},\"manual_mode\":\"{}\",\"manual_limit\":\"{}\",\"auto_active\":{},\"auto_limit\":\"{}\",\"effective_source\":\"{}\",\"manual_revision\":{}}}",
                 json_escape(k),
                 json_escape(&r.runtime),
                 json_escape(&r.project),
@@ -981,10 +1534,326 @@ impl IoGuardEnforcer {
                 r.restore_failed,
                 json_escape(&r.last_error),
                 r.applied_at,
+                r.manual_active,
+                r.manual_mode.as_str(),
+                json_escape(&r.manual_limit),
+                r.auto_active,
+                json_escape(&r.auto_limit),
+                json_escape(&r.effective_source),
+                r.manual_revision,
             );
         }
         json.push_str("}}");
         write_atomic_json(&self.state_path, "io-guard-limits", &json)
+    }
+
+    pub(crate) fn reconcile_manual_limits(
+        &mut self,
+        containers: &[ContainerSample],
+        policy: &ManualResourceLimitsPolicy,
+        proc_root: &Path,
+        cgroup_root: &Path,
+        timestamp: u64,
+    ) {
+        let mut by_key: HashMap<String, &ContainerSample> = HashMap::with_capacity(containers.len());
+        for c in containers {
+            let k = container_guard_key(c);
+            if !k.is_empty() {
+                by_key.insert(k, c);
+            }
+        }
+
+        for c in containers {
+            let key = container_guard_key(c);
+            if key.is_empty() {
+                continue;
+            }
+            let Some(rule) = find_matching_rule(policy, c) else {
+                continue;
+            };
+            if !rule.has_io_limits() {
+                continue;
+            }
+            let (_, inst_id) = container_identity_strings(c);
+            let rt = c.runtime.trim().to_ascii_lowercase();
+            let existing_opt = self.records.get(&key).cloned();
+            let existing_dev = existing_opt
+                .as_ref()
+                .map(|ex| ex.device.as_str())
+                .unwrap_or("");
+            let device = match resolve_container_io_device(
+                proc_root,
+                cgroup_root,
+                c,
+                &rule.io_device,
+                existing_dev,
+            ) {
+                Ok(dev) => dev,
+                Err(err) => {
+                    let mut rec = existing_opt.unwrap_or(EnforcedIoRecord {
+                        runtime: rt,
+                        project: c.project.clone(),
+                        name: c.name.clone(),
+                        instance_id: inst_id,
+                        device: rule.io_device.clone(),
+                        original_limit: String::new(),
+                        applied_limit: String::new(),
+                        tier: 0,
+                        readback_confirmed: false,
+                        manual_override: false,
+                        restore_failed: false,
+                        last_error: String::new(),
+                        applied_at: timestamp,
+                        manual_active: true,
+                        manual_mode: rule.mode,
+                        manual_limit: format_io_max_values(&rule.target_io_limits()),
+                        auto_active: false,
+                        auto_limit: String::new(),
+                        effective_source: "manual".to_string(),
+                        manual_revision: policy.revision,
+                    });
+                    rec.manual_active = true;
+                    rec.manual_mode = rule.mode;
+                    rec.manual_revision = policy.revision;
+                    rec.readback_confirmed = false;
+                    rec.last_error = err;
+                    self.records.insert(key, rec);
+                    let _ = self.save_state();
+                    continue;
+                }
+            };
+
+            let manual_io = rule.target_io_limits();
+            let manual_limit_str = format_io_max_values(&manual_io);
+            let (boundary, original, current_live) =
+                match read_io_max_device_line(c, &device, proc_root, cgroup_root) {
+                    Ok((b, live)) => {
+                        let orig = existing_opt
+                            .as_ref()
+                            .map(|ex| {
+                                if !ex.original_limit.is_empty() {
+                                    ex.original_limit.clone()
+                                } else {
+                                    live.clone()
+                                }
+                            })
+                            .unwrap_or_else(|| live.clone());
+                        (b, orig, live)
+                    }
+                    Err(err) => {
+                        let mut rec = existing_opt.unwrap_or(EnforcedIoRecord {
+                            runtime: rt,
+                            project: c.project.clone(),
+                            name: c.name.clone(),
+                            instance_id: inst_id,
+                            device,
+                            original_limit: String::new(),
+                            applied_limit: String::new(),
+                            tier: 0,
+                            readback_confirmed: false,
+                            manual_override: false,
+                            restore_failed: false,
+                            last_error: String::new(),
+                            applied_at: timestamp,
+                            manual_active: true,
+                            manual_mode: rule.mode,
+                            manual_limit: manual_limit_str,
+                            auto_active: false,
+                            auto_limit: String::new(),
+                            effective_source: "manual".to_string(),
+                            manual_revision: policy.revision,
+                        });
+                        rec.manual_active = true;
+                        rec.manual_mode = rule.mode;
+                        rec.manual_revision = policy.revision;
+                        rec.readback_confirmed = false;
+                        rec.last_error = err;
+                        self.records.insert(key, rec);
+                        let _ = self.save_state();
+                        continue;
+                    }
+                };
+
+            let (auto_active, auto_limit) = existing_opt
+                .as_ref()
+                .map(|ex| (ex.auto_active, ex.auto_limit.clone()))
+                .unwrap_or((false, String::new()));
+
+            let (desired_limit, desired_source) =
+                if rule.mode == ManualLimitMode::Cooperate && auto_active && !auto_limit.is_empty()
+                {
+                    let combined = combine_io_limits(&manual_io, &parse_io_max_str(&auto_limit));
+                    let combined_str = format_io_max_values(&combined);
+                    let src = if combined_str != manual_limit_str {
+                        "auto_over_manual".to_string()
+                    } else {
+                        "manual".to_string()
+                    };
+                    (combined_str, src)
+                } else {
+                    (manual_limit_str.clone(), "manual".to_string())
+                };
+
+            let revision_changed = existing_opt
+                .as_ref()
+                .map(|ex| {
+                    !ex.manual_active
+                        || ex.manual_revision != policy.revision
+                        || ex.manual_mode != rule.mode
+                        || ex.manual_limit != manual_limit_str
+                        || ex.device != device
+                })
+                .unwrap_or(true);
+
+            if !revision_changed
+                && existing_opt
+                    .as_ref()
+                    .is_some_and(|ex| ex.readback_confirmed && current_live == desired_limit)
+            {
+                continue;
+            }
+
+            let mut rec = existing_opt.unwrap_or(EnforcedIoRecord {
+                runtime: rt,
+                project: c.project.clone(),
+                name: c.name.clone(),
+                instance_id: inst_id,
+                device: device.clone(),
+                original_limit: original.clone(),
+                applied_limit: desired_limit.clone(),
+                tier: 0,
+                readback_confirmed: false,
+                manual_override: false,
+                restore_failed: false,
+                last_error: String::new(),
+                applied_at: timestamp,
+                manual_active: true,
+                manual_mode: rule.mode,
+                manual_limit: manual_limit_str.clone(),
+                auto_active,
+                auto_limit,
+                effective_source: desired_source.clone(),
+                manual_revision: policy.revision,
+            });
+            rec.device = device.clone();
+            rec.original_limit = original;
+            rec.manual_active = true;
+            rec.manual_mode = rule.mode;
+            rec.manual_limit = manual_limit_str;
+            rec.manual_override = false;
+            rec.restore_failed = false;
+            rec.manual_revision = policy.revision;
+            rec.applied_limit = desired_limit.clone();
+            rec.effective_source = desired_source;
+            rec.applied_at = timestamp;
+            self.records.insert(key.clone(), rec);
+            if let Err(err) = self.save_state() {
+                if let Some(r) = self.records.get_mut(&key) {
+                    r.last_error = err;
+                }
+                continue;
+            }
+
+            let write_res = if current_live == desired_limit {
+                Ok(())
+            } else {
+                write_io_max_device_line(&boundary, &device, &desired_limit)
+            };
+            let readback_res = read_io_max_device_line(c, &device, proc_root, cgroup_root);
+            if let Some(r) = self.records.get_mut(&key) {
+                match (write_res, readback_res) {
+                    (Ok(()), Ok((_, after))) if after == desired_limit => {
+                        r.readback_confirmed = true;
+                        r.last_error.clear();
+                    }
+                    (Err(e), _) => {
+                        r.readback_confirmed = false;
+                        r.last_error = e;
+                    }
+                    (Ok(()), Err(e)) => {
+                        r.readback_confirmed = false;
+                        r.last_error = format!("应用主动 io.max 后读回失败: {e}");
+                    }
+                    (Ok(()), Ok((_, after))) => {
+                        r.readback_confirmed = false;
+                        r.last_error =
+                            format!("主动 io.max 读回不一致: 期望 {desired_limit}, 实际 {after}");
+                    }
+                }
+            }
+            let _ = self.save_state();
+        }
+
+        let manual_keys: Vec<String> = self
+            .records
+            .iter()
+            .filter_map(|(k, r)| if r.manual_active { Some(k.clone()) } else { None })
+            .collect();
+        for key in manual_keys {
+            let Some(c) = by_key.get(&key).copied() else {
+                continue;
+            };
+            if find_matching_rule(policy, c).is_some_and(|r| r.has_io_limits()) {
+                continue;
+            }
+            let Some(existing) = self.records.get(&key).cloned() else {
+                continue;
+            };
+            let (restore_target, keep_auto) = if existing.auto_active && !existing.auto_limit.is_empty()
+            {
+                (existing.auto_limit.clone(), true)
+            } else {
+                (existing.original_limit.clone(), false)
+            };
+            if restore_target.is_empty() || existing.device.is_empty() {
+                if !keep_auto {
+                    self.records.remove(&key);
+                    let _ = self.save_state();
+                }
+                continue;
+            }
+            let write_res = match read_io_max_device_line(c, &existing.device, proc_root, cgroup_root)
+            {
+                Ok((_, before)) if before == restore_target => Ok(()),
+                Ok((boundary, _)) => {
+                    write_io_max_device_line(&boundary, &existing.device, &restore_target)
+                }
+                Err(e) => Err(e),
+            };
+            let readback_res =
+                read_io_max_device_line(c, &existing.device, proc_root, cgroup_root);
+            match (write_res, readback_res) {
+                (Ok(()), Ok((_, after))) if after == restore_target => {
+                    if keep_auto {
+                        if let Some(r) = self.records.get_mut(&key) {
+                            r.manual_active = false;
+                            r.manual_limit.clear();
+                            r.manual_revision = policy.revision;
+                            r.applied_limit = restore_target;
+                            r.effective_source = "auto".to_string();
+                            r.readback_confirmed = true;
+                            r.restore_failed = false;
+                            r.last_error.clear();
+                        }
+                    } else {
+                        self.records.remove(&key);
+                    }
+                }
+                (Err(e), _) | (Ok(()), Err(e)) => {
+                    if let Some(r) = self.records.get_mut(&key) {
+                        r.restore_failed = true;
+                        r.last_error = e;
+                    }
+                }
+                (Ok(()), Ok(_)) => {
+                    if let Some(r) = self.records.get_mut(&key) {
+                        r.restore_failed = true;
+                        r.last_error = "清除主动 io.max 后读回未确认一致".to_string();
+                    }
+                }
+            }
+            let _ = self.save_state();
+        }
     }
 
     pub(crate) fn execute_actions(
@@ -1017,6 +1886,63 @@ impl IoGuardEnforcer {
                     let (_, inst_id) = container_identity_strings(c);
                     let rt = c.runtime.trim().to_ascii_lowercase();
                     let target_str = format_io_max_values(target);
+                    if let Some(existing) = self.records.get(key).cloned() {
+                        if existing.manual_active {
+                            let manual_io = parse_io_max_str(&existing.manual_limit);
+                            let combined = combine_io_limits(&manual_io, target);
+                            let combined_str = format_io_max_values(&combined);
+                            let use_device = if existing.device.is_empty() {
+                                device.as_str()
+                            } else {
+                                existing.device.as_str()
+                            };
+                            if existing.manual_mode == ManualLimitMode::Lock
+                                || combined_str == existing.manual_limit
+                            {
+                                if let Some(r) = self.records.get_mut(key) {
+                                    r.auto_active = true;
+                                    r.auto_limit = target_str;
+                                    r.tier = *tier;
+                                    r.effective_source = "manual".to_string();
+                                }
+                                let _ = self.save_state();
+                                continue;
+                            }
+                            if let Ok((boundary, _)) =
+                                read_io_max_device_line(c, use_device, proc_root, cgroup_root)
+                            {
+                                let write_res =
+                                    write_io_max_device_line(&boundary, use_device, &combined_str);
+                                let readback_res =
+                                    read_io_max_device_line(c, use_device, proc_root, cgroup_root);
+                                if let Some(r) = self.records.get_mut(key) {
+                                    r.auto_active = true;
+                                    r.auto_limit = target_str;
+                                    r.tier = *tier;
+                                    match (write_res, readback_res) {
+                                        (Ok(()), Ok((_, after))) if after == combined_str => {
+                                            r.applied_limit = combined_str;
+                                            r.effective_source = "auto_over_manual".to_string();
+                                            r.readback_confirmed = true;
+                                            r.last_error.clear();
+                                        }
+                                        (Err(e), _) | (Ok(()), Err(e)) => {
+                                            r.readback_confirmed = false;
+                                            r.last_error = e;
+                                        }
+                                        (Ok(()), Ok((_, after))) => {
+                                            r.readback_confirmed = false;
+                                            r.last_error = format!(
+                                                "联合收紧 io.max 读回不一致: 期望 {combined_str}, 实际 {after}"
+                                            );
+                                        }
+                                    }
+                                }
+                                let _ = self.save_state();
+                            }
+                            continue;
+                        }
+                    }
                     let (boundary, original) =
                         match read_io_max_device_line(c, device, proc_root, cgroup_root) {
                             Ok(res) => res,
@@ -1037,6 +1963,13 @@ impl IoGuardEnforcer {
                                         restore_failed: false,
                                         last_error: err,
                                         applied_at: timestamp,
+                                        manual_active: false,
+                                        manual_mode: ManualLimitMode::Cooperate,
+                                        manual_limit: String::new(),
+                                        auto_active: true,
+                                        auto_limit: String::new(),
+                                        effective_source: "auto".to_string(),
+                                        manual_revision: 0,
                                     },
                                 );
                                 let _ = self.save_state();
@@ -1059,6 +1992,13 @@ impl IoGuardEnforcer {
                             restore_failed: false,
                             last_error: String::new(),
                             applied_at: timestamp,
+                            manual_active: false,
+                            manual_mode: ManualLimitMode::Cooperate,
+                            manual_limit: String::new(),
+                            auto_active: true,
+                            auto_limit: target_str.clone(),
+                            effective_source: "auto".to_string(),
+                            manual_revision: 0,
                         },
                     );
                     if let Err(err) = self.save_state() {
@@ -1108,7 +2048,40 @@ impl IoGuardEnforcer {
                     if existing.manual_override {
                         continue;
                     }
-                    match read_io_max_device_line(c, device, proc_root, cgroup_root) {
+                    let raw_next_str = format_io_max_values(target);
+                    let use_device = if existing.manual_active && !existing.device.is_empty() {
+                        existing.device.as_str()
+                    } else {
+                        device.as_str()
+                    };
+                    let desired_next = if existing.manual_active {
+                        if existing.manual_mode == ManualLimitMode::Lock {
+                            if let Some(r) = self.records.get_mut(key) {
+                                r.auto_active = true;
+                                r.auto_limit = raw_next_str;
+                                r.tier = *tier;
+                                r.effective_source = "manual".to_string();
+                            }
+                            let _ = self.save_state();
+                            continue;
+                        }
+                        let combined = combine_io_limits(&parse_io_max_str(&existing.manual_limit), target);
+                        let combined_str = format_io_max_values(&combined);
+                        if combined_str == existing.manual_limit {
+                            if let Some(r) = self.records.get_mut(key) {
+                                r.auto_active = true;
+                                r.auto_limit = raw_next_str;
+                                r.tier = *tier;
+                                r.effective_source = "manual".to_string();
+                            }
+                            let _ = self.save_state();
+                            continue;
+                        }
+                        combined_str
+                    } else {
+                        raw_next_str.clone()
+                    };
+                    match read_io_max_device_line(c, use_device, proc_root, cgroup_root) {
                         Ok((boundary, before)) => {
                             if !existing.applied_limit.is_empty()
                                 && before != existing.applied_limit
@@ -1122,15 +2095,22 @@ impl IoGuardEnforcer {
                                 let _ = self.save_state();
                                 continue;
                             }
-                            let next_str = format_io_max_values(target);
-                            let write_res = write_io_max_device_line(&boundary, device, &next_str);
+                            let write_res =
+                                write_io_max_device_line(&boundary, use_device, &desired_next);
                             let readback_res =
-                                read_io_max_device_line(c, device, proc_root, cgroup_root);
+                                read_io_max_device_line(c, use_device, proc_root, cgroup_root);
                             if let Some(r) = self.records.get_mut(key) {
                                 match (write_res, readback_res) {
-                                    (Ok(()), Ok((_, after))) if after == next_str => {
-                                        r.applied_limit = next_str;
+                                    (Ok(()), Ok((_, after))) if after == desired_next => {
+                                        r.applied_limit = desired_next;
+                                        r.auto_active = true;
+                                        r.auto_limit = raw_next_str;
                                         r.tier = *tier;
+                                        r.effective_source = if existing.manual_active {
+                                            "auto_over_manual".to_string()
+                                        } else {
+                                            "auto".to_string()
+                                        };
                                         r.readback_confirmed = true;
                                         r.last_error.clear();
                                     }
@@ -1161,7 +2141,59 @@ impl IoGuardEnforcer {
                         continue;
                     };
                     if existing.manual_override {
-                        self.records.remove(key);
+                        if !existing.manual_active {
+                            self.records.remove(key);
+                            let _ = self.save_state();
+                        }
+                        continue;
+                    }
+                    if existing.manual_active {
+                        let use_device = if existing.device.is_empty() {
+                            device.as_str()
+                        } else {
+                            existing.device.as_str()
+                        };
+                        let target_restore = existing.manual_limit.clone();
+                        let write_res = if target_restore.is_empty() || use_device.is_empty() {
+                            Ok(())
+                        } else {
+                            match read_io_max_device_line(c, use_device, proc_root, cgroup_root) {
+                                Ok((_, before)) if before == target_restore => Ok(()),
+                                Ok((boundary, _)) => write_io_max_device_line(
+                                    &boundary,
+                                    use_device,
+                                    &target_restore,
+                                ),
+                                Err(e) => Err(e),
+                            }
+                        };
+                        let readback_res =
+                            read_io_max_device_line(c, use_device, proc_root, cgroup_root);
+                        if let Some(r) = self.records.get_mut(key) {
+                            r.auto_active = false;
+                            r.auto_limit.clear();
+                            r.tier = 0;
+                            match (write_res, readback_res) {
+                                (Ok(()), Ok((_, after)))
+                                    if target_restore.is_empty() || after == target_restore =>
+                                {
+                                    r.applied_limit = target_restore;
+                                    r.effective_source = "manual".to_string();
+                                    r.readback_confirmed = true;
+                                    r.restore_failed = false;
+                                    r.last_error.clear();
+                                }
+                                (Err(e), _) | (Ok(()), Err(e)) => {
+                                    r.restore_failed = true;
+                                    r.last_error = e;
+                                }
+                                (Ok(()), Ok(_)) => {
+                                    r.restore_failed = true;
+                                    r.last_error =
+                                        "自动压力恢复至主动 io.max 后读回未确认一致".to_string();
+                                }
+                            }
+                        }
                         let _ = self.save_state();
                         continue;
                     }
@@ -1283,15 +2315,41 @@ impl IoGuardEnforcer {
                             true,
                         )
                     } else if r.readback_confirmed {
-                        (
-                            "limited",
-                            "容器持续产生高磁盘 I/O 压力，已临时限制 io.max 并读回确认。",
-                            true,
-                            r.original_limit.as_str(),
-                            r.applied_limit.as_str(),
-                            r.last_error.as_str(),
-                            false,
-                        )
+                        if r.manual_active && r.effective_source == "manual" {
+                            (
+                                "manual_limited",
+                                if r.auto_active {
+                                    "已启用容器主动 io.max 限额并读回确认（当前严于自动压力限额）。"
+                                } else {
+                                    "已启用容器主动 io.max 限额并读回确认。"
+                                },
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        } else if r.manual_active && r.effective_source == "auto_over_manual" {
+                            (
+                                "limited",
+                                "主动 io.max 生效中，且因持续磁盘压力由自动保护进一步收紧。",
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        } else {
+                            (
+                                "limited",
+                                "容器持续产生高磁盘 I/O 压力，已临时限制 io.max 并读回确认。",
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        }
                     } else {
                         (
                             "apply_failed",
@@ -1382,8 +2440,27 @@ impl IoGuardEnforcer {
                     ("normal", "磁盘 I/O 运行正常。", false, "", "", "", false)
                 };
 
+            let manual_active = rec.map(|r| r.manual_active).unwrap_or(false);
+            let manual_mode_str = rec
+                .filter(|r| r.manual_active)
+                .map(|r| r.manual_mode.as_str())
+                .unwrap_or("");
+            let manual_limit_str = rec
+                .filter(|r| r.manual_active)
+                .map(|r| r.manual_limit.as_str())
+                .unwrap_or("");
+            let effective_source_str = rec
+                .map(|r| r.effective_source.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(if dec.is_some_and(|d| d.stage == GuardStage::Active) {
+                    "auto"
+                } else {
+                    "none"
+                });
+            let actual_limit_str = if readback_confirmed { active_limit } else { "" };
+
             let status_json = format!(
-                "{{\"state\":\"{}\",\"device\":\"{}\",\"tier\":{},\"high_samples\":{},\"required_samples\":{},\"cooldown_remaining_seconds\":{},\"pressure_basis\":\"{}\",\"original_limit\":\"{}\",\"active_limit\":\"{}\",\"expected_limit\":\"{}\",\"readback_confirmed\":{},\"last_error\":\"{}\",\"message\":\"{}\"}}",
+                "{{\"state\":\"{}\",\"device\":\"{}\",\"tier\":{},\"high_samples\":{},\"required_samples\":{},\"cooldown_remaining_seconds\":{},\"pressure_basis\":\"{}\",\"original_limit\":\"{}\",\"active_limit\":\"{}\",\"expected_limit\":\"{}\",\"actual_limit\":\"{}\",\"readback_confirmed\":{},\"manual_active\":{},\"manual_mode\":\"{}\",\"manual_limit\":\"{}\",\"effective_source\":\"{}\",\"last_error\":\"{}\",\"message\":\"{}\"}}",
                 json_escape(state_str),
                 json_escape(device),
                 tier,
@@ -1394,7 +2471,12 @@ impl IoGuardEnforcer {
                 json_escape(orig_limit),
                 json_escape(active_limit),
                 json_escape(active_limit),
+                json_escape(actual_limit_str),
                 readback_confirmed,
+                manual_active,
+                json_escape(manual_mode_str),
+                json_escape(manual_limit_str),
+                json_escape(effective_source_str),
                 json_escape(last_error),
                 json_escape(message),
             );
@@ -1402,7 +2484,8 @@ impl IoGuardEnforcer {
 
             let watching_alert = dec
                 .map(|d| d.stage == GuardStage::Watching && d.high_samples >= 2)
-                .unwrap_or(false);
+                .unwrap_or(false)
+                && !manual_active;
             let active_or_failed = matches!(state_str, "limited" | "apply_failed" | "restore_failed");
             if watching_alert || active_or_failed {
                 let (_, inst_id) = container_identity_strings(c);

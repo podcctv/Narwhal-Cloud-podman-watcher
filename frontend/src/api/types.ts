@@ -143,10 +143,18 @@ export interface ContainerSecurity {
     top_process?: { pid?: number; process?: string; cpu_percent?: number; available?: boolean; reason?: string };
     action?: { attempted?: boolean; succeeded?: boolean; message?: string; original_limit?: string; active_limit?: string };
     last_error?: string;
+    manual_active?: boolean;
+    manual_mode?: 'cooperate' | 'lock' | string;
+    manual_limit?: string;
+    manual_cpus?: number | null;
+    effective_source?: 'auto' | 'manual' | 'auto_over_manual' | 'none' | string;
+    actual_limit?: string;
+    expected_limit?: string;
+    readback_confirmed?: boolean;
     [key: string]: any;
   };
   io_guard?: {
-    state?: 'normal' | 'watching' | 'waiting_for_host_psi' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'limit_failed' | 'limit_readback_unavailable' | 'waiting_for_other_limit' | 'retry_wait' | 'manual_override' | 'orphaned_cgroup' | 'unavailable' | 'warming' | 'state_unavailable' | 'disabled' | string;
+    state?: 'normal' | 'watching' | 'waiting_for_host_psi' | 'active' | 'limited' | 'manual_limited' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'limit_failed' | 'apply_failed' | 'limit_readback_unavailable' | 'waiting_for_other_limit' | 'retry_wait' | 'manual_override' | 'orphaned_cgroup' | 'unavailable' | 'warming' | 'state_unavailable' | 'disabled' | string;
     message?: string;
     device?: string;
     device_busy_percent?: number | null;
@@ -158,8 +166,8 @@ export interface ContainerSecurity {
     observed_rates?: Record<string, number>;
     tier?: number;
     tier_percent_of_baseline?: number;
-    original_limit?: Record<string, string>;
-    active_limit?: Record<string, string>;
+    original_limit?: string | Record<string, string>;
+    active_limit?: string | Record<string, string>;
     recovery_samples?: number;
     recovery_samples_required?: number;
     recovery_duration_seconds?: number;
@@ -170,10 +178,17 @@ export interface ContainerSecurity {
     sample_count?: number;
     required_samples?: number;
     last_error?: string;
+    manual_active?: boolean;
+    manual_mode?: 'cooperate' | 'lock' | string;
+    manual_limit?: string;
+    effective_source?: 'auto' | 'manual' | 'auto_over_manual' | 'none' | string;
+    actual_limit?: string;
+    expected_limit?: string;
+    readback_confirmed?: boolean;
     [key: string]: any;
   };
   memory_guard?: {
-    state?: 'normal' | 'watching' | 'waiting_for_pressure' | 'waiting_for_other_limit' | 'active' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'manual_override' | 'unsupported' | 'psi_unavailable' | 'existing_limit_stricter' | 'orphaned_cgroup' | 'sampling_unavailable' | 'state_unavailable' | 'disabled' | 'limit_failed' | 'apply_unverified' | string;
+    state?: 'normal' | 'watching' | 'waiting_for_pressure' | 'waiting_for_other_limit' | 'active' | 'limited' | 'manual_limited' | 'applying' | 'escalating' | 'restoring' | 'restore_failed' | 'restored' | 'cooldown' | 'manual_override' | 'unsupported' | 'psi_unavailable' | 'existing_limit_stricter' | 'orphaned_cgroup' | 'sampling_unavailable' | 'state_unavailable' | 'disabled' | 'limit_failed' | 'apply_failed' | 'apply_unverified' | string;
     message?: string;
     memory_current_bytes?: number;
     memory_max_bytes?: number | null;
@@ -194,6 +209,14 @@ export interface ContainerSecurity {
     cooldown_until?: number;
     restore_failed?: boolean;
     limit_applied?: boolean;
+    manual_active?: boolean;
+    manual_mode?: 'cooperate' | 'lock' | string;
+    manual_limit?: string;
+    manual_mb?: number | null;
+    effective_source?: 'auto' | 'manual' | 'auto_over_manual' | 'none' | string;
+    actual_limit?: string;
+    expected_limit?: string;
+    readback_confirmed?: boolean;
     [key: string]: any;
   };
   admission?: {
@@ -888,6 +911,61 @@ export interface ManualBandwidthLimitResponse {
       threshold_percent?: number; trigger_seconds?: number; tier_percentages?: number[];
       minimum_mbps?: number; recovery_percent?: number; recovery_seconds?: number;
     };
+  };
+}
+
+export interface ManualContainerResourceLimit {
+  runtime: 'incus' | 'podman' | 'runman';
+  project: string;
+  container_name: string;
+  container_id: string;
+  mode: 'cooperate' | 'lock';
+  cpu_cpus: number | null;
+  memory_high_mb: number | null;
+  io_device: string;
+  io_read_mbps: number | null;
+  io_write_mbps: number | null;
+  io_read_iops: number | null;
+  io_write_iops: number | null;
+  note: string;
+}
+
+export interface ManualResourceLimitsResponse {
+  host_id: string;
+  expected_node_id: string;
+  agent_version?: string;
+  host_online: boolean;
+  sample_at: number;
+  containers: Array<{
+    runtime: 'incus' | 'podman' | 'runman';
+    project: string;
+    container_name: string;
+    container_id: string;
+    cpu_guard?: Record<string, any> | null;
+    memory_guard?: Record<string, any> | null;
+    io_guard?: Record<string, any> | null;
+  }>;
+  policy: {
+    schema: 1;
+    revision: number;
+    limits: ManualContainerResourceLimit[];
+  };
+  reported: {
+    revision?: number;
+    state?: string;
+    updated_at?: number;
+    items?: Array<{
+      runtime?: string;
+      project?: string;
+      container_name?: string;
+      container_id?: string;
+      mode?: string;
+      state?: string;
+      message?: string;
+      effective_cpu?: string;
+      effective_memory?: string;
+      effective_io?: string;
+    }>;
   };
 }
 

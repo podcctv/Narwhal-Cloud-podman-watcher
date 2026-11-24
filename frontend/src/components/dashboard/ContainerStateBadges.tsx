@@ -65,10 +65,13 @@ const resourceGuardSignal = (label: string, guard: GuardLike | undefined): Conta
   if (['limited', 'active'].includes(state)) {
     summary = '限额已读回';
     tone = 'info';
+  } else if (state === 'manual_limited') {
+    summary = '主动限额';
+    tone = 'info';
   } else if (['watching', 'warming', 'waiting_for_host_pressure', 'waiting_for_host_psi', 'waiting_for_pressure', 'waiting_for_other_limit', 'applying', 'escalating', 'restoring', 'retry_wait', 'cooldown'].includes(state)) {
     summary = state === 'watching' || state === 'warming' ? '持续观察' : '保护处理中';
     tone = 'warning';
-  } else if (['limit_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'limit_readback_unavailable', 'orphaned_cgroup', 'apply_unverified'].includes(state)) {
+  } else if (['limit_failed', 'apply_failed', 'limited_unverified', 'limit_unverified', 'restore_failed', 'limit_readback_unavailable', 'orphaned_cgroup', 'apply_unverified'].includes(state)) {
     summary = '保护核验异常';
     tone = 'danger';
   } else if (['restored', 'manual_reset'].includes(state)) {

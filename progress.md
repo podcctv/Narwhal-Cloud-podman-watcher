@@ -2,6 +2,17 @@
 
 更新时间：2026-11-24（Asia/Shanghai）
 
+## Phase 46：容器主动资源限额与 Watcher 自动限制双向联动闭环（v2.2.8）
+
+- **Server 策略下发与单容器原子 API（`server/operations_api.py`、`server/app.py`、`server/control_reconciliation.py`）**：
+  - 新增主机级 `manual_resource_limits:{host_id}` 配置与 `GET/PUT /api/v1/ops/hosts/{host_id}/resource-limits`、`PUT /api/v1/ops/hosts/{host_id}/resource-limits/container`、`PUT /api/v1/ops/hosts/{host_id}/bandwidth-limits/container` 接口（支持 Runman 代次 `instance_id` 精确绑定，单容器保存/清除互不覆盖）；
+  - 在 `/api/v1/actions/poll` 中随 `operations.resource_limits` 下发策略，`control_reconciliation.py` 将 `manual_limited` 纳入已核实活动状态。
+- **Rust 端主动限制与自动保护双向联动（`rust/crates/agent-core/src/manual_resource_limits.rs`、`cpu_guard_exec.rs`、`resource_guard_exec.rs`、`lib.rs`）**：
+  - 支持 `cooperate`（协同联动：`min(主动, 自动)` 取更严上限，自动压力缓解后精确回退至 `manual_limit` 而非放开原配额）与 `lock`（锁定主动上限，禁止自动保护继续收紧）；
+  - 接管自动保护时保留最初采集的 `original_limit`，消除平台主动限额触发虚假 `manual_override` 状态，并在 `security.manual_resource_limits` 与各 guard 状态中上报 `effective_source` 与读回结果。
+- **前端容器抽屉操作闭环（`frontend/src/components/container/ContainerResourceLimitControls.tsx`、`ContainerDrawer.tsx`、`ContainerStateBadges.tsx`）**：
+  - 在容器详情抽屉内提供四维裁决来源展示、一键“接管当前自动限额”、CPU/内存/磁盘 I/O 主动限额及联动模式表单、单容器 `tc` 网卡带宽限速与 `ConfirmDialog` 解除确认。
+
 ## Phase 45：移除正常代理程序在可疑恶意进程检测中的误报（v2.2.7）
 
 - **解除 `sing-box` 等常规代理二进制的恶意/可疑进程误报（`rust/crates/guard-core/src/security.rs`、`rust/crates/agent-core/src/lib.rs`）**：

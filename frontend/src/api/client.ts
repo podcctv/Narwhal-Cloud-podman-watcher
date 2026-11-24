@@ -20,6 +20,8 @@ import {
   HostFirewallAbusePolicy,
   ManualBandwidthLimit,
   ManualBandwidthLimitResponse,
+  ManualContainerResourceLimit,
+  ManualResourceLimitsResponse,
   IPReputationSettings,
   IPReputationResult,
   ConnectionEvidenceResponse,
@@ -290,6 +292,64 @@ export const api = {
   updateManualBandwidthLimits: (hostId: string, limits: ManualBandwidthLimit[], autoThrottle: { enabled: boolean }) =>
     request<{ ok: boolean; revision: number; limits: ManualBandwidthLimit[]; auto_throttle: ManualBandwidthLimitResponse['policy']['auto_throttle']; apply: string }>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/bandwidth-limits`, {
       method: 'PUT', body: JSON.stringify({ limits, auto_throttle: autoThrottle }),
+    }),
+
+  updateContainerBandwidthLimit: (
+    hostId: string,
+    payload: {
+      runtime: 'incus' | 'podman' | 'runman';
+      project: string;
+      container_name: string;
+      container_id: string;
+      upload_mbps: number;
+      download_mbps: number;
+      clear?: boolean;
+    },
+  ) =>
+    request<{
+      ok: boolean;
+      revision: number;
+      cleared: boolean;
+      limits: ManualBandwidthLimit[];
+      auto_throttle: ManualBandwidthLimitResponse['policy']['auto_throttle'];
+      apply: string;
+    }>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/bandwidth-limits/container`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  getHostResourceLimits: (hostId: string) =>
+    request<ManualResourceLimitsResponse>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/resource-limits`),
+
+  updateContainerResourceLimit: (
+    hostId: string,
+    payload: {
+      runtime: 'incus' | 'podman' | 'runman';
+      project: string;
+      container_name: string;
+      container_id: string;
+      mode?: 'cooperate' | 'lock';
+      cpu_cpus?: number | null;
+      memory_high_mb?: number | null;
+      io_device?: string;
+      io_read_mbps?: number | null;
+      io_write_mbps?: number | null;
+      io_read_iops?: number | null;
+      io_write_iops?: number | null;
+      note?: string;
+      clear?: boolean;
+    },
+  ) =>
+    request<{
+      ok: boolean;
+      revision: number;
+      cleared: boolean;
+      limit: ManualContainerResourceLimit | null;
+      limits: ManualContainerResourceLimit[];
+      apply: string;
+    }>(`/api/v1/ops/hosts/${encodeURIComponent(hostId)}/resource-limits/container`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
     }),
 
   updateHostFirewallPolicy: (hostId: string, policy: { rules: HostFirewallRule[]; abuse: HostFirewallAbusePolicy }) =>

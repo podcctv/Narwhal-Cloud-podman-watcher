@@ -3152,9 +3152,27 @@ def _poll_security_actions_sync(
             "recovery_percent": 50,
             "recovery_seconds": 600,
         }
+        resource_row = conn.execute("SELECT payload FROM ops_settings WHERE key=?", (f"manual_resource_limits:{host_id}",)).fetchone()
+        saved_resource_policy = operations.loads(resource_row[0], {}) if resource_row else {}
+        if (not isinstance(saved_resource_policy, dict)
+                or saved_resource_policy.get("host_id") != host_id
+                or saved_resource_policy.get("expected_node_id") != node_id):
+            resource_limits_policy = {
+                "schema": 1, "host_id": host_id,
+                "expected_node_id": node_id, "revision": 0, "limits": [],
+            }
+        else:
+            raw_res_limits = saved_resource_policy.get("limits")
+            resource_limits_policy = {
+                "schema": 1,
+                "host_id": host_id,
+                "expected_node_id": node_id,
+                "revision": int(saved_resource_policy.get("revision") or 0),
+                "limits": raw_res_limits if isinstance(raw_res_limits, list) else [],
+            }
     finally:
         conn.close()
-    return {"ok": True, "actions": actions, "operations": {"services": ops_services,'disk_cleanup':cleanup_policy,'bandwidth_limits':bandwidth_policy}, "tcp_probe": tcp_probe, "gfw_probe": gfw_probe}
+    return {"ok": True, "actions": actions, "operations": {"services": ops_services, 'disk_cleanup': cleanup_policy, 'bandwidth_limits': bandwidth_policy, 'resource_limits': resource_limits_policy}, "tcp_probe": tcp_probe, "gfw_probe": gfw_probe}
 
 
 @app.post("/api/v1/actions/poll")

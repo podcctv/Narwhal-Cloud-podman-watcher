@@ -12,6 +12,9 @@ use guard_core::{
 };
 use runtime_drivers::{ContainerSample, JsonVal};
 
+use crate::manual_resource_limits::{
+    find_matching_rule, ManualLimitMode, ManualResourceLimitsPolicy,
+};
 use crate::{container_guard_key, json_escape};
 
 const DEFAULT_CPU_GUARD_STATE_PATH: &str = "/var/lib/narwhal-agent/cpu-guard-limits.json";
@@ -51,6 +54,15 @@ pub(crate) struct EnforcedCpuRecord {
     pub restore_failed: bool,
     pub last_error: String,
     pub applied_at: u64,
+    pub manual_active: bool,
+    pub manual_mode: ManualLimitMode,
+    pub manual_cpus: Option<f64>,
+    pub manual_limit: String,
+    pub auto_active: bool,
+    pub auto_cpus: Option<f64>,
+    pub auto_limit: String,
+    pub effective_source: String,
+    pub manual_revision: i64,
 }
 
 pub(crate) fn cpu_auto_limit_enabled_from_env() -> bool {
@@ -552,6 +564,36 @@ fn compute_target_limit_str(rt: &str, original: &str, target_cpus: f64) -> Optio
     }
 }
 
+fn compute_manual_target_limit_str(rt: &str, original: &str, target_cpus: f64) -> Option<String> {
+    if !target_cpus.is_finite() || target_cpus <= 0.0 {
+        return None;
+    }
+    match rt {
+        "runman" => {
+            let (orig_quota, period) = parse_runman_cpu_max(original)?;
+            let mut applied_quota = ((target_cpus * period as f64).floor() as u64).max(1000);
+            if let Some(oq) = orig_quota {
+                applied_quota = applied_quota.min(oq);
+            }
+            Some(format!("{applied_quota} {period}"))
+        }
+        "incus" => format_incus_target_allowance(original, target_cpus),
+        "podman" => {
+            let (orig_quota, orig_period, nano_cpus) = parse_podman_quota_str(original)?;
+            if nano_cpus > 0 {
+                return None;
+            }
+            let period = if orig_period > 0 { orig_period } else { 100_000 };
+            let mut quota = ((target_cpus * period as f64).floor() as i64).max(1000);
+            if orig_quota > 0 {
+                quota = quota.min(orig_quota);
+            }
+            Some(format!("{quota}|{period}|0|"))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) struct CpuGuardEnforcer {
     state_path: PathBuf,
     pub(crate) records: HashMap<String, EnforcedCpuRecord>,
@@ -586,12 +628,33 @@ impl CpuGuardEnforcer {
                 original_limit: v.get_str("original_limit").unwrap_or("").to_string(),
                 applied_limit: v.get_str("applied_limit").unwrap_or("").to_string(),
                 applied_cpus: v.get("applied_cpus").and_then(JsonVal::as_f64).unwrap_or(0.0),
-                tier: v.get_u64("tier").unwrap_or(1).clamp(1, 3) as u8,
+                tier: v.get_u64("tier").unwrap_or(0).clamp(0, 3) as u8,
                 readback_confirmed: v.get_bool("readback_confirmed").unwrap_or(false),
                 manual_override: v.get_bool("manual_override").unwrap_or(false),
                 restore_failed: v.get_bool("restore_failed").unwrap_or(false),
                 last_error: v.get_str("last_error").unwrap_or("").to_string(),
                 applied_at: v.get_u64("applied_at").unwrap_or(0),
+                manual_active: v.get_bool("manual_active").unwrap_or(false),
+                manual_mode: ManualLimitMode::parse(v.get_str("manual_mode").unwrap_or("cooperate"))
+                    .unwrap_or_default(),
+                manual_cpus: v.get("manual_cpus").and_then(JsonVal::as_f64),
+                manual_limit: v.get_str("manual_limit").unwrap_or("").to_string(),
+                auto_active: v.get_bool("auto_active").unwrap_or(false),
+                auto_cpus: v.get("auto_cpus").and_then(JsonVal::as_f64),
+                auto_limit: v.get_str("auto_limit").unwrap_or("").to_string(),
+                effective_source: {
+                    let s = v.get_str("effective_source").unwrap_or("");
+                    if s.is_empty() {
+                        if v.get_bool("manual_active").unwrap_or(false) {
+                            "manual".to_string()
+                        } else {
+                            "auto".to_string()
+                        }
+                    } else {
+                        s.to_string()
+                    }
+                },
+                manual_revision: v.get("manual_revision").and_then(JsonVal::as_i64).unwrap_or(0),
             };
             self.records.insert(k.clone(), rec);
         }
@@ -609,9 +672,17 @@ impl CpuGuardEnforcer {
             if idx > 0 {
                 json.push(',');
             }
+            let manual_cpus_json = r
+                .manual_cpus
+                .map(|c| format!("{c:.4}"))
+                .unwrap_or_else(|| "null".to_string());
+            let auto_cpus_json = r
+                .auto_cpus
+                .map(|c| format!("{c:.4}"))
+                .unwrap_or_else(|| "null".to_string());
             let _ = write!(
                 json,
-                "\"{}\":{{\"runtime\":\"{}\",\"project\":\"{}\",\"name\":\"{}\",\"instance_id\":\"{}\",\"original_limit\":\"{}\",\"applied_limit\":\"{}\",\"applied_cpus\":{:.4},\"tier\":{},\"readback_confirmed\":{},\"manual_override\":{},\"restore_failed\":{},\"last_error\":\"{}\",\"applied_at\":{}}}",
+                "\"{}\":{{\"runtime\":\"{}\",\"project\":\"{}\",\"name\":\"{}\",\"instance_id\":\"{}\",\"original_limit\":\"{}\",\"applied_limit\":\"{}\",\"applied_cpus\":{:.4},\"tier\":{},\"readback_confirmed\":{},\"manual_override\":{},\"restore_failed\":{},\"last_error\":\"{}\",\"applied_at\":{},\"manual_active\":{},\"manual_mode\":\"{}\",\"manual_cpus\":{},\"manual_limit\":\"{}\",\"auto_active\":{},\"auto_cpus\":{},\"auto_limit\":\"{}\",\"effective_source\":\"{}\",\"manual_revision\":{}}}",
                 json_escape(k),
                 json_escape(&r.runtime),
                 json_escape(&r.project),
@@ -626,6 +697,15 @@ impl CpuGuardEnforcer {
                 r.restore_failed,
                 json_escape(&r.last_error),
                 r.applied_at,
+                r.manual_active,
+                r.manual_mode.as_str(),
+                manual_cpus_json,
+                json_escape(&r.manual_limit),
+                r.auto_active,
+                auto_cpus_json,
+                json_escape(&r.auto_limit),
+                json_escape(&r.effective_source),
+                r.manual_revision,
             );
         }
         json.push_str("}}");
@@ -642,6 +722,288 @@ impl CpuGuardEnforcer {
         fs::rename(&tmp, &self.state_path)
             .map_err(|e| format!("替换 CPU guard 状态失败: {e}"))?;
         Ok(())
+    }
+
+    pub(crate) fn reconcile_manual_limits(
+        &mut self,
+        containers: &[ContainerSample],
+        policy: &ManualResourceLimitsPolicy,
+        proc_root: &Path,
+        cgroup_root: &Path,
+        timestamp: u64,
+    ) {
+        let mut by_key: HashMap<String, &ContainerSample> = HashMap::with_capacity(containers.len());
+        for c in containers {
+            let k = container_guard_key(c);
+            if !k.is_empty() {
+                by_key.insert(k, c);
+            }
+        }
+
+        // 1. Apply/update manual CPU limits for matched running containers.
+        for c in containers {
+            let key = container_guard_key(c);
+            if key.is_empty() {
+                continue;
+            }
+            let Some(rule) = find_matching_rule(policy, c) else {
+                continue;
+            };
+            let Some(manual_cpus) = rule.cpu_cpus else {
+                continue;
+            };
+            let rt = c.runtime.trim().to_ascii_lowercase();
+            let inst_id = if !c.instance_id.is_empty() {
+                c.instance_id.clone()
+            } else if !c.stable_id.is_empty() {
+                c.stable_id.clone()
+            } else {
+                c.id.clone()
+            };
+
+            let existing_opt = self.records.get(&key).cloned();
+            let (original, current_live) = match read_runtime_cpu_limit(c, proc_root, cgroup_root) {
+                Ok(live) => {
+                    if let Some(ref ex) = existing_opt {
+                        let orig = if !ex.original_limit.is_empty() {
+                            ex.original_limit.clone()
+                        } else {
+                            live.clone()
+                        };
+                        (orig, live)
+                    } else {
+                        (live.clone(), live)
+                    }
+                }
+                Err(err) => {
+                    let mut rec = existing_opt.unwrap_or(EnforcedCpuRecord {
+                        runtime: rt,
+                        project: c.project.clone(),
+                        name: c.name.clone(),
+                        instance_id: inst_id,
+                        original_limit: String::new(),
+                        applied_limit: String::new(),
+                        applied_cpus: 0.0,
+                        tier: 0,
+                        readback_confirmed: false,
+                        manual_override: false,
+                        restore_failed: false,
+                        last_error: String::new(),
+                        applied_at: timestamp,
+                        manual_active: true,
+                        manual_mode: rule.mode,
+                        manual_cpus: Some(manual_cpus),
+                        manual_limit: String::new(),
+                        auto_active: false,
+                        auto_cpus: None,
+                        auto_limit: String::new(),
+                        effective_source: "manual".to_string(),
+                        manual_revision: policy.revision,
+                    });
+                    rec.manual_active = true;
+                    rec.manual_mode = rule.mode;
+                    rec.manual_cpus = Some(manual_cpus);
+                    rec.manual_revision = policy.revision;
+                    rec.readback_confirmed = false;
+                    rec.last_error = err;
+                    self.records.insert(key, rec);
+                    let _ = self.save_state();
+                    continue;
+                }
+            };
+
+            let Some(manual_limit_str) =
+                compute_manual_target_limit_str(&rt, &original, manual_cpus)
+            else {
+                continue;
+            };
+
+            let (auto_active, auto_cpus, auto_limit) = existing_opt
+                .as_ref()
+                .map(|ex| (ex.auto_active, ex.auto_cpus, ex.auto_limit.clone()))
+                .unwrap_or((false, None, String::new()));
+
+            let auto_is_stricter = rule.mode == ManualLimitMode::Cooperate
+                && auto_active
+                && auto_cpus.is_some_and(|ac| ac < manual_cpus && !auto_limit.is_empty());
+
+            let (desired_limit, desired_cpus, desired_source) = if auto_is_stricter {
+                (
+                    auto_limit.clone(),
+                    auto_cpus.unwrap_or(manual_cpus),
+                    "auto_over_manual".to_string(),
+                )
+            } else {
+                (manual_limit_str.clone(), manual_cpus, "manual".to_string())
+            };
+
+            let revision_changed = existing_opt
+                .as_ref()
+                .map(|ex| {
+                    !ex.manual_active
+                        || ex.manual_revision != policy.revision
+                        || ex.manual_mode != rule.mode
+                        || ex.manual_limit != manual_limit_str
+                })
+                .unwrap_or(true);
+
+            if !revision_changed
+                && existing_opt
+                    .as_ref()
+                    .is_some_and(|ex| ex.readback_confirmed && limits_match(&rt, &current_live, &desired_limit))
+            {
+                continue;
+            }
+
+            let mut rec = existing_opt.unwrap_or(EnforcedCpuRecord {
+                runtime: rt.clone(),
+                project: c.project.clone(),
+                name: c.name.clone(),
+                instance_id: inst_id,
+                original_limit: original.clone(),
+                applied_limit: desired_limit.clone(),
+                applied_cpus: desired_cpus,
+                tier: 0,
+                readback_confirmed: false,
+                manual_override: false,
+                restore_failed: false,
+                last_error: String::new(),
+                applied_at: timestamp,
+                manual_active: true,
+                manual_mode: rule.mode,
+                manual_cpus: Some(manual_cpus),
+                manual_limit: manual_limit_str.clone(),
+                auto_active,
+                auto_cpus,
+                auto_limit,
+                effective_source: desired_source.clone(),
+                manual_revision: policy.revision,
+            });
+            rec.original_limit = original;
+            rec.manual_active = true;
+            rec.manual_mode = rule.mode;
+            rec.manual_cpus = Some(manual_cpus);
+            rec.manual_limit = manual_limit_str;
+            rec.manual_override = false;
+            rec.restore_failed = false;
+            rec.manual_revision = policy.revision;
+            rec.applied_limit = desired_limit.clone();
+            rec.applied_cpus = desired_cpus;
+            rec.effective_source = desired_source;
+            rec.applied_at = timestamp;
+            self.records.insert(key.clone(), rec);
+            if let Err(err) = self.save_state() {
+                if let Some(r) = self.records.get_mut(&key) {
+                    r.last_error = err;
+                }
+                continue;
+            }
+
+            let write_res = if limits_match(&rt, &current_live, &desired_limit) {
+                Ok(())
+            } else {
+                write_runtime_cpu_limit(c, &desired_limit, proc_root, cgroup_root)
+            };
+            let readback_res = read_runtime_cpu_limit(c, proc_root, cgroup_root);
+            if let Some(r) = self.records.get_mut(&key) {
+                match (write_res, readback_res) {
+                    (Ok(()), Ok(after)) if limits_match(&rt, &after, &desired_limit) => {
+                        r.readback_confirmed = true;
+                        r.last_error.clear();
+                    }
+                    (Err(e), _) => {
+                        r.readback_confirmed = false;
+                        r.last_error = e;
+                    }
+                    (Ok(()), Err(e)) => {
+                        r.readback_confirmed = false;
+                        r.last_error = format!("应用主动 CPU 限额后读回失败: {e}");
+                    }
+                    (Ok(()), Ok(after)) => {
+                        r.readback_confirmed = false;
+                        r.last_error = format!(
+                            "主动 CPU 限额读回不一致: 期望 {desired_limit}, 实际 {after}"
+                        );
+                    }
+                }
+            }
+            let _ = self.save_state();
+        }
+
+        // 2. Clear manual CPU limits removed from policy.
+        let manual_keys: Vec<String> = self
+            .records
+            .iter()
+            .filter_map(|(k, r)| if r.manual_active { Some(k.clone()) } else { None })
+            .collect();
+
+        for key in manual_keys {
+            let Some(c) = by_key.get(&key).copied() else {
+                continue;
+            };
+            let still_has_manual_cpu = find_matching_rule(policy, c)
+                .and_then(|r| r.cpu_cpus)
+                .is_some();
+            if still_has_manual_cpu {
+                continue;
+            }
+            let Some(existing) = self.records.get(&key).cloned() else {
+                continue;
+            };
+            let rt = c.runtime.trim().to_ascii_lowercase();
+            let (restore_target, keep_auto) = if existing.auto_active && !existing.auto_limit.is_empty()
+            {
+                (existing.auto_limit.clone(), true)
+            } else {
+                (existing.original_limit.clone(), false)
+            };
+            if restore_target.is_empty() {
+                if !keep_auto {
+                    self.records.remove(&key);
+                    let _ = self.save_state();
+                }
+                continue;
+            }
+            let write_res = match read_runtime_cpu_limit(c, proc_root, cgroup_root) {
+                Ok(before) if limits_match(&rt, &before, &restore_target) => Ok(()),
+                Ok(_) => write_runtime_cpu_limit(c, &restore_target, proc_root, cgroup_root),
+                Err(e) => Err(e),
+            };
+            let readback_res = read_runtime_cpu_limit(c, proc_root, cgroup_root);
+            match (write_res, readback_res) {
+                (Ok(()), Ok(after)) if limits_match(&rt, &after, &restore_target) => {
+                    if keep_auto {
+                        if let Some(r) = self.records.get_mut(&key) {
+                            r.manual_active = false;
+                            r.manual_cpus = None;
+                            r.manual_limit.clear();
+                            r.manual_revision = policy.revision;
+                            r.applied_limit = restore_target;
+                            r.applied_cpus = existing.auto_cpus.unwrap_or(0.0);
+                            r.effective_source = "auto".to_string();
+                            r.readback_confirmed = true;
+                            r.restore_failed = false;
+                            r.last_error.clear();
+                        }
+                    } else {
+                        self.records.remove(&key);
+                    }
+                }
+                (Err(e), _) | (Ok(()), Err(e)) => {
+                    if let Some(r) = self.records.get_mut(&key) {
+                        r.restore_failed = true;
+                        r.last_error = e;
+                    }
+                }
+                (Ok(()), Ok(_)) => {
+                    if let Some(r) = self.records.get_mut(&key) {
+                        r.restore_failed = true;
+                        r.last_error = "清除主动 CPU 限额后读回未确认一致".to_string();
+                    }
+                }
+            }
+            let _ = self.save_state();
+        }
     }
 
     pub(crate) fn execute_actions(
@@ -672,6 +1034,62 @@ impl CpuGuardEnforcer {
                         continue;
                     };
                     let rt = c.runtime.trim().to_ascii_lowercase();
+                    if let Some(existing) = self.records.get(key).cloned() {
+                        if existing.manual_active {
+                            let auto_str = compute_target_limit_str(
+                                &rt,
+                                &existing.original_limit,
+                                *target_cpus,
+                            )
+                            .unwrap_or_default();
+                            if existing.manual_mode == ManualLimitMode::Lock
+                                || existing.manual_cpus.is_some_and(|mc| *target_cpus >= mc)
+                            {
+                                if let Some(r) = self.records.get_mut(key) {
+                                    r.auto_active = true;
+                                    r.auto_cpus = Some(*target_cpus);
+                                    r.auto_limit = auto_str;
+                                    r.tier = *tier;
+                                    r.effective_source = "manual".to_string();
+                                }
+                                let _ = self.save_state();
+                                continue;
+                            }
+                            if !auto_str.is_empty() {
+                                let write_res =
+                                    write_runtime_cpu_limit(c, &auto_str, proc_root, cgroup_root);
+                                let readback_res =
+                                    read_runtime_cpu_limit(c, proc_root, cgroup_root);
+                                if let Some(r) = self.records.get_mut(key) {
+                                    r.auto_active = true;
+                                    r.auto_cpus = Some(*target_cpus);
+                                    r.auto_limit = auto_str.clone();
+                                    r.tier = *tier;
+                                    match (write_res, readback_res) {
+                                        (Ok(()), Ok(after)) if limits_match(&rt, &after, &auto_str) => {
+                                            r.applied_limit = auto_str;
+                                            r.applied_cpus = *target_cpus;
+                                            r.effective_source = "auto_over_manual".to_string();
+                                            r.readback_confirmed = true;
+                                            r.last_error.clear();
+                                        }
+                                        (Err(e), _) | (Ok(()), Err(e)) => {
+                                            r.readback_confirmed = false;
+                                            r.last_error = e;
+                                        }
+                                        (Ok(()), Ok(after)) => {
+                                            r.readback_confirmed = false;
+                                            r.last_error = format!(
+                                                "联合收紧读回不一致: 期望 {auto_str}, 实际 {after}"
+                                            );
+                                        }
+                                    }
+                                }
+                                let _ = self.save_state();
+                            }
+                            continue;
+                        }
+                    }
                     let inst_id = if !c.instance_id.is_empty() {
                         c.instance_id.clone()
                     } else if !c.stable_id.is_empty() {
@@ -698,6 +1116,15 @@ impl CpuGuardEnforcer {
                                     restore_failed: false,
                                     last_error: err,
                                     applied_at: timestamp,
+                                    manual_active: false,
+                                    manual_mode: ManualLimitMode::Cooperate,
+                                    manual_cpus: None,
+                                    manual_limit: String::new(),
+                                    auto_active: true,
+                                    auto_cpus: Some(*target_cpus),
+                                    auto_limit: String::new(),
+                                    effective_source: "auto".to_string(),
+                                    manual_revision: 0,
                                 },
                             );
                             let _ = self.save_state();
@@ -722,6 +1149,15 @@ impl CpuGuardEnforcer {
                         restore_failed: false,
                         last_error: String::new(),
                         applied_at: timestamp,
+                        manual_active: false,
+                        manual_mode: ManualLimitMode::Cooperate,
+                        manual_cpus: None,
+                        manual_limit: String::new(),
+                        auto_active: true,
+                        auto_cpus: Some(*target_cpus),
+                        auto_limit: target_limit.clone(),
+                        effective_source: "auto".to_string(),
+                        manual_revision: 0,
                     };
                     self.records.insert(key.clone(), rec);
                     if let Err(err) = self.save_state() {
@@ -770,6 +1206,27 @@ impl CpuGuardEnforcer {
                         continue;
                     }
                     let rt = c.runtime.trim().to_ascii_lowercase();
+                    if existing.manual_active {
+                        let auto_str = compute_target_limit_str(
+                            &rt,
+                            &existing.original_limit,
+                            *target_cpus,
+                        )
+                        .unwrap_or_default();
+                        if existing.manual_mode == ManualLimitMode::Lock
+                            || existing.manual_cpus.is_some_and(|mc| *target_cpus >= mc)
+                        {
+                            if let Some(r) = self.records.get_mut(key) {
+                                r.auto_active = true;
+                                r.auto_cpus = Some(*target_cpus);
+                                r.auto_limit = auto_str;
+                                r.tier = *tier;
+                                r.effective_source = "manual".to_string();
+                            }
+                            let _ = self.save_state();
+                            continue;
+                        }
+                    }
                     match read_runtime_cpu_limit(c, proc_root, cgroup_root) {
                         Ok(before) => {
                             if !existing.applied_limit.is_empty()
@@ -797,9 +1254,17 @@ impl CpuGuardEnforcer {
                                     (Ok(()), Ok(after))
                                         if limits_match(&rt, &after, &next_limit) =>
                                     {
-                                        r.applied_limit = next_limit;
+                                        r.applied_limit = next_limit.clone();
                                         r.applied_cpus = *target_cpus;
+                                        r.auto_active = true;
+                                        r.auto_cpus = Some(*target_cpus);
+                                        r.auto_limit = next_limit;
                                         r.tier = *tier;
+                                        r.effective_source = if existing.manual_active {
+                                            "auto_over_manual".to_string()
+                                        } else {
+                                            "auto".to_string()
+                                        };
                                         r.readback_confirmed = true;
                                         r.last_error.clear();
                                     }
@@ -832,11 +1297,61 @@ impl CpuGuardEnforcer {
                         continue;
                     };
                     if existing.manual_override {
-                        self.records.remove(key);
-                        let _ = self.save_state();
+                        if !existing.manual_active {
+                            self.records.remove(key);
+                            let _ = self.save_state();
+                        }
                         continue;
                     }
                     let rt = c.runtime.trim().to_ascii_lowercase();
+                    if existing.manual_active {
+                        let target_restore = existing.manual_limit.clone();
+                        let write_res = if target_restore.is_empty() {
+                            Ok(())
+                        } else {
+                            match read_runtime_cpu_limit(c, proc_root, cgroup_root) {
+                                Ok(before) if limits_match(&rt, &before, &target_restore) => Ok(()),
+                                Ok(_) => write_runtime_cpu_limit(
+                                    c,
+                                    &target_restore,
+                                    proc_root,
+                                    cgroup_root,
+                                ),
+                                Err(e) => Err(e),
+                            }
+                        };
+                        let readback_res = read_runtime_cpu_limit(c, proc_root, cgroup_root);
+                        if let Some(r) = self.records.get_mut(key) {
+                            r.auto_active = false;
+                            r.auto_cpus = None;
+                            r.auto_limit.clear();
+                            r.tier = 0;
+                            match (write_res, readback_res) {
+                                (Ok(()), Ok(after))
+                                    if target_restore.is_empty()
+                                        || limits_match(&rt, &after, &target_restore) =>
+                                {
+                                    r.applied_limit = target_restore;
+                                    r.applied_cpus = existing.manual_cpus.unwrap_or(0.0);
+                                    r.effective_source = "manual".to_string();
+                                    r.readback_confirmed = true;
+                                    r.restore_failed = false;
+                                    r.last_error.clear();
+                                }
+                                (Err(e), _) | (Ok(()), Err(e)) => {
+                                    r.restore_failed = true;
+                                    r.last_error = e;
+                                }
+                                (Ok(()), Ok(_)) => {
+                                    r.restore_failed = true;
+                                    r.last_error =
+                                        "自动压力恢复至主动 CPU 限额后读回未确认一致".to_string();
+                                }
+                            }
+                        }
+                        let _ = self.save_state();
+                        continue;
+                    }
                     match read_runtime_cpu_limit(c, proc_root, cgroup_root) {
                         Ok(before) => {
                             if limits_match(&rt, &before, &existing.original_limit) {
@@ -966,15 +1481,41 @@ impl CpuGuardEnforcer {
                             true,
                         )
                     } else if r.readback_confirmed {
-                        (
-                            "limited",
-                            "容器 CPU 持续达到保护条件，已应用临时 CPU 限额并读回确认。",
-                            true,
-                            r.original_limit.as_str(),
-                            r.applied_limit.as_str(),
-                            r.last_error.as_str(),
-                            false,
-                        )
+                        if r.manual_active && r.effective_source == "manual" {
+                            (
+                                "manual_limited",
+                                if r.auto_active {
+                                    "已启用容器主动 CPU 限额并读回确认（当前严于自动压力限额）。"
+                                } else {
+                                    "已启用容器主动 CPU 限额并读回确认。"
+                                },
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        } else if r.manual_active && r.effective_source == "auto_over_manual" {
+                            (
+                                "limited",
+                                "主动 CPU 限额生效中，且因持续高负载由自动保护进一步收紧。",
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        } else {
+                            (
+                                "limited",
+                                "容器 CPU 持续达到保护条件，已应用临时 CPU 限额并读回确认。",
+                                true,
+                                r.original_limit.as_str(),
+                                r.applied_limit.as_str(),
+                                r.last_error.as_str(),
+                                false,
+                            )
+                        }
                     } else {
                         (
                             "apply_failed",
@@ -1065,8 +1606,32 @@ impl CpuGuardEnforcer {
                     ("normal", "CPU 运行正常。", false, "", "", "", false)
                 };
 
+            let manual_active = rec.map(|r| r.manual_active).unwrap_or(false);
+            let manual_mode_str = rec
+                .filter(|r| r.manual_active)
+                .map(|r| r.manual_mode.as_str())
+                .unwrap_or("");
+            let manual_limit_str = rec
+                .filter(|r| r.manual_active)
+                .map(|r| r.manual_limit.as_str())
+                .unwrap_or("");
+            let manual_cpus_json = rec
+                .filter(|r| r.manual_active)
+                .and_then(|r| r.manual_cpus)
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "null".to_string());
+            let effective_source_str = rec
+                .map(|r| r.effective_source.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(if dec.is_some_and(|d| d.stage == GuardStage::Active) {
+                    "auto"
+                } else {
+                    "none"
+                });
+            let actual_limit_str = if readback_confirmed { active_limit } else { "" };
+
             let status_json = format!(
-                "{{\"state\":\"{}\",\"tier\":{},\"effective_cpus\":{:.3},\"high_samples\":{},\"required_samples\":{},\"cooldown_remaining_seconds\":{},\"host_pressure_basis\":\"{}\",\"original_limit\":\"{}\",\"active_limit\":\"{}\",\"expected_limit\":\"{}\",\"readback_confirmed\":{},\"last_error\":\"{}\",\"message\":\"{}\"}}",
+                "{{\"state\":\"{}\",\"tier\":{},\"effective_cpus\":{:.3},\"high_samples\":{},\"required_samples\":{},\"cooldown_remaining_seconds\":{},\"host_pressure_basis\":\"{}\",\"original_limit\":\"{}\",\"active_limit\":\"{}\",\"expected_limit\":\"{}\",\"actual_limit\":\"{}\",\"readback_confirmed\":{},\"manual_active\":{},\"manual_mode\":\"{}\",\"manual_limit\":\"{}\",\"manual_cpus\":{},\"effective_source\":\"{}\",\"last_error\":\"{}\",\"message\":\"{}\"}}",
                 json_escape(state_str),
                 tier,
                 effective_cpus,
@@ -1077,7 +1642,13 @@ impl CpuGuardEnforcer {
                 json_escape(orig_limit),
                 json_escape(active_limit),
                 json_escape(active_limit),
+                json_escape(actual_limit_str),
                 readback_confirmed,
+                manual_active,
+                json_escape(manual_mode_str),
+                json_escape(manual_limit_str),
+                manual_cpus_json,
+                json_escape(effective_source_str),
                 json_escape(last_error),
                 json_escape(message),
             );
@@ -1085,7 +1656,8 @@ impl CpuGuardEnforcer {
 
             let watching_alert = dec
                 .map(|d| d.stage == GuardStage::Watching && d.high_samples >= 2)
-                .unwrap_or(false);
+                .unwrap_or(false)
+                && !manual_active;
             let active_or_failed = matches!(state_str, "limited" | "apply_failed" | "restore_failed");
             if watching_alert || active_or_failed {
                 let top_proc_json = sample_top_cpu_process_json(proc_root, c.pid);

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 
-_ACTIVE_GUARD_STATES = {"active", "limited", "restore_failed", "enforced"}
+_ACTIVE_GUARD_STATES = {"active", "limited", "manual_limited", "restore_failed", "enforced"}
 _ISSUE_GUARD_STATES = {
     "unverified", "limit_unverified", "limited_unverified", "apply_unverified",
     "limit_failed", "restore_failed", "state_unavailable", "readback_unavailable",
