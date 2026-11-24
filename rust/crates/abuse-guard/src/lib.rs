@@ -16,7 +16,7 @@ pub use collection::{
     collect, collect_host, collect_host_with, host_metadata, host_metadata_from,
     inspect_host_executable_under, parse_processes, posix_normpath, process_script,
     python_entrypoint, read_host_entrypoint, read_host_entrypoint_under, resolve_targets,
-    scoped_host_processes, shlex_quote, verify_host_processes, verify_host_processes_with,
+    scoped_host_processes, scoped_host_processes_batch, shlex_quote, verify_host_processes, verify_host_processes_with,
     verify_live_processes, ScopedHostProcess, PROCESS_SCRIPT,
 };
 pub use detection::{

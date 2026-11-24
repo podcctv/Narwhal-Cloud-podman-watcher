@@ -512,17 +512,40 @@ pub fn inspect_host_executable_under(
     (Some(sha), marker)
 }
 
-/// Select by kernel PID namespace, not ancestry (`podman exec` has another parent).
+/// Select by kernel PID namespace in a single `/proc` pass across multiple containers.
 #[cfg(unix)]
-pub fn scoped_host_processes(
-    init_pid: u32,
+pub fn scoped_host_processes_batch(
+    init_pids: &[u32],
     proc_root: &Path,
     scan_limit: usize,
-) -> Result<Vec<ScopedHostProcess>, String> {
-    let init_ns_path = proc_root.join(init_pid.to_string()).join("ns/pid");
-    let namespace = fs::metadata(&init_ns_path)
-        .map_err(|e| format!("unable to inspect container PID namespace: {e}"))?
-        .ino();
+) -> Result<std::collections::HashMap<u32, Result<Vec<ScopedHostProcess>, String>>, String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut out: HashMap<u32, Result<Vec<ScopedHostProcess>, String>> = HashMap::new();
+    let mut ns_to_init_pids: HashMap<u64, Vec<u32>> = HashMap::new();
+    let mut unique_inits: Vec<u32> = Vec::with_capacity(init_pids.len());
+    let mut seen_inits: HashSet<u32> = HashSet::with_capacity(init_pids.len());
+    for &init_pid in init_pids {
+        if !seen_inits.insert(init_pid) {
+            continue;
+        }
+        unique_inits.push(init_pid);
+        let init_ns_path = proc_root.join(init_pid.to_string()).join("ns/pid");
+        match fs::metadata(&init_ns_path) {
+            Ok(meta) => {
+                ns_to_init_pids.entry(meta.ino()).or_default().push(init_pid);
+            }
+            Err(e) => {
+                out.insert(
+                    init_pid,
+                    Err(format!("unable to inspect container PID namespace: {e}")),
+                );
+            }
+        }
+    }
+    if ns_to_init_pids.is_empty() {
+        return Ok(out);
+    }
 
     let mut pids: Vec<u32> = Vec::new();
     let entries = fs::read_dir(proc_root)
@@ -544,13 +567,14 @@ pub fn scoped_host_processes(
         );
     }
 
-    let mut result = Vec::new();
+    let mut by_ns: HashMap<u64, Vec<ScopedHostProcess>> = HashMap::new();
     for host_pid in pids {
         let base = proc_root.join(host_pid.to_string());
         let Ok(ns_meta) = fs::metadata(base.join("ns/pid")) else {
             continue;
         };
-        if ns_meta.ino() != namespace {
+        let ns_ino = ns_meta.ino();
+        if !ns_to_init_pids.contains_key(&ns_ino) {
             continue;
         }
         let Ok(status_bytes) = read_bounded_bytes(&base.join("status"), 16384) else {
@@ -570,17 +594,50 @@ pub fn scoped_host_processes(
             .chars()
             .take(120)
             .collect();
-        result.push(ScopedHostProcess {
+        by_ns.entry(ns_ino).or_default().push(ScopedHostProcess {
             host_pid,
             pid,
             process: comm,
         });
     }
 
-    if !result.iter().any(|p| p.host_pid == init_pid) {
-        return Err("container init incarnation disappeared during process discovery".to_string());
+    for (ns_ino, inits) in ns_to_init_pids {
+        let procs = by_ns.remove(&ns_ino).unwrap_or_default();
+        for init_pid in inits {
+            if !procs.iter().any(|p| p.host_pid == init_pid) {
+                out.insert(
+                    init_pid,
+                    Err("container init incarnation disappeared during process discovery".to_string()),
+                );
+            } else {
+                out.insert(init_pid, Ok(procs.clone()));
+            }
+        }
     }
-    Ok(result)
+    Ok(out)
+}
+
+#[cfg(not(unix))]
+pub fn scoped_host_processes_batch(
+    init_pids: &[u32],
+    _proc_root: &Path,
+    _scan_limit: usize,
+) -> Result<std::collections::HashMap<u32, Result<Vec<ScopedHostProcess>, String>>, String> {
+    let _ = init_pids;
+    Err("kernel PID namespace inspection requires Unix".to_string())
+}
+
+/// Select by kernel PID namespace, not ancestry (`podman exec` has another parent).
+#[cfg(unix)]
+pub fn scoped_host_processes(
+    init_pid: u32,
+    proc_root: &Path,
+    scan_limit: usize,
+) -> Result<Vec<ScopedHostProcess>, String> {
+    let mut batch = scoped_host_processes_batch(&[init_pid], proc_root, scan_limit)?;
+    batch
+        .remove(&init_pid)
+        .unwrap_or_else(|| Err("container init incarnation disappeared during process discovery".to_string()))
 }
 
 #[cfg(not(unix))]

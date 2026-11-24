@@ -2,6 +2,15 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 41：`auto-update.sh` Git 锁防半合并卡死与 Rust `/proc` 单遍批量扫描优化（v2.2.3）
+
+- **修复 `scripts/auto-update.sh` 因 `.git/HEAD.lock` 导致工作区半合并污染**：
+  - 在 `git fetch` 与 `git merge --ff-only` 之前显式检查 `.git/HEAD.lock` / `.git/index.lock` 是否仍存在；若存在则立即安全退出，避免 `merge` 更新工作区后 `update_ref` 失败造成 `HEAD` 滞后、后续被误判为“本地有未提交修改”而永久拒绝更新。
+- **Rust `abuse-guard` / `agent-core` 单遍 `/proc` 批量进程扫描优化（`rust/crates/abuse-guard/src/collection.rs`、`rust/crates/agent-core/src/lib.rs`）**：
+  - 新增 `scoped_host_processes_batch`（并让 `scoped_host_processes` 复用同一实现），将多容器场景下 `build_container_telemetry_and_alerts` 与 `run_security_guard_cycles` 的每容器一次全量 `/proc` 扫描合并为每轮单次扫描，大幅降低单核宿主机 syscall 与 CPU 开销。
+- **防滥用策略全链路核查**：
+  - 核对 `admission-guard`（SNI 白名单 + CN 无 SNI 阻断 + GeoIP + `security_policy` 热更新）、`service-audit`（脱敏审计 + 违规协议/开放代理/隧道告警与服务端自动限流）、`abuse-guard`（恶意进程/P2P 挂机/自动隔离）、`vmess`/`trojan`/`speedtest`/`pasarguard`/`microburst`/`udp_blackhole`/`anti_spoof` 与资源守卫，均已在 Rust 主线正常接线生效。
+
 ## Phase 40：修复 Rust `narwhal-agent` 缺失 `operations.managed_upgrade` 上报导致托管升级跳过节点（v2.2.2）
 
 - **Rust `agent-core` 补齐托管升级能力声明（`rust/crates/agent-core/src/lib.rs`、`tests.rs`）**：

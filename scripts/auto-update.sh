@@ -269,12 +269,20 @@ if [[ "$UPDATE_MODE" == "git" ]]; then
     log "ERROR tracked local changes detected in $REPO_DIR; refusing automatic update to preserve operator changes"
     exit 1
   fi
+  if [[ -e "$REPO_DIR/.git/HEAD.lock" || -e "$REPO_DIR/.git/index.lock" ]]; then
+    log "ERROR active or recent git lock present in $REPO_DIR/.git; deferring update to avoid partial merge"
+    exit 1
+  fi
 
   log "update found: ${deployed_commit:-unknown} -> $remote_commit"
   git -C "$REPO_DIR" fetch --prune origin "$BRANCH"
   local_commit="$(git -C "$REPO_DIR" rev-parse HEAD)"
   if ! git -C "$REPO_DIR" merge-base --is-ancestor "$local_commit" "$remote_commit"; then
     log "ERROR local branch cannot be fast-forwarded to origin/$BRANCH"
+    exit 1
+  fi
+  if [[ -e "$REPO_DIR/.git/HEAD.lock" || -e "$REPO_DIR/.git/index.lock" ]]; then
+    log "ERROR git lock appeared before merge; deferring update to avoid partial merge"
     exit 1
   fi
   git -C "$REPO_DIR" merge --ff-only "$remote_commit"

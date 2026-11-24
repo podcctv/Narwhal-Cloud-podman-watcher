@@ -2193,6 +2193,16 @@ impl AgentState {
         let mut security_jsons = Vec::with_capacity(containers.len());
         let mut alert_jsons: Vec<String> = Vec::new();
         let pid_ns_map = service_audit::collect_pid_ns_map(&self.proc_root);
+        let batch_init_pids: Vec<u32> = containers
+            .iter()
+            .filter_map(|c| c.pid.filter(|&p| p > 1))
+            .collect();
+        let scoped_procs_by_pid = if batch_init_pids.is_empty() {
+            HashMap::new()
+        } else {
+            abuse_guard::scoped_host_processes_batch(&batch_init_pids, &self.proc_root, 20_000)
+                .unwrap_or_default()
+        };
 
         for c in containers {
             let rt = c.runtime.trim().to_ascii_lowercase();
@@ -2227,11 +2237,13 @@ impl AgentState {
             }
             let abuse_json = abuse_res.to_json();
 
-            // 2. vmess_guard & trojan_guard (single scoped_host_processes pass per container)
+            // 2. vmess_guard & trojan_guard (single-pass /proc batch lookup per container)
             let scoped_procs = c
                 .pid
                 .filter(|&p| p > 1)
-                .and_then(|p| abuse_guard::scoped_host_processes(p, &self.proc_root, 20_000).ok())
+                .and_then(|p| scoped_procs_by_pid.get(&p))
+                .and_then(|r| r.as_ref().ok())
+                .cloned()
                 .unwrap_or_default();
             let (listeners, listener_inventory_complete, _) =
                 extract_live_listeners_and_sockets_with_procs(c, &self.proc_root, &scoped_procs);
@@ -2704,6 +2716,15 @@ impl AgentState {
                         })
                         .collect();
                     let proc_root = self.proc_root.clone();
+                    let cycle_init_pids: Vec<u32> = targets
+                        .iter()
+                        .filter_map(|t| t.pid.filter(|&p| p > 1))
+                        .collect();
+                    let batch_scoped_res = if cycle_init_pids.is_empty() {
+                        Ok(HashMap::new())
+                    } else {
+                        abuse_guard::scoped_host_processes_batch(&cycle_init_pids, &proc_root, 20_000)
+                    };
                     let transport_cfg = config.to_transport_config();
                     let host_id = config.host_id.clone();
                     let node_id = config.node_id.clone();
@@ -2719,7 +2740,14 @@ impl AgentState {
                             } else {
                                 t.id.clone()
                             };
-                            let scoped = abuse_guard::scoped_host_processes(pid, &proc_root, 20_000)?;
+                            let scoped = match &batch_scoped_res {
+                                Ok(map) => match map.get(&pid) {
+                                    Some(Ok(list)) => list.clone(),
+                                    Some(Err(err)) => return Err(err.clone()),
+                                    None => abuse_guard::scoped_host_processes(pid, &proc_root, 20_000)?,
+                                },
+                                Err(err) => return Err(err.clone()),
+                            };
                             let sockets = sample_by_key
                                 .get(&(t.runtime.clone(), t.project.clone(), t.name.clone()))
                                 .map(|s| {
