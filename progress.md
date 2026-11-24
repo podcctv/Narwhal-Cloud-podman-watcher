@@ -2,6 +2,17 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 42：修复 Rust `agent-core` 缺失容器顶层指标、`cpu_guard` 动作未执行及单核高负载阈值缺口（v2.2.4）
+
+- **补齐 Rust `agent-core` 容器顶层资源指标（`rust/crates/agent-core/src/lib.rs`）**：
+  - `serialize_containers_with_security_json` 补齐顶层 `cpu_percent`、`cpu_effective_cpus`、`mem_bytes`、`mem_limit_bytes`、`mem_percent`、`net_rx_bps`、`net_tx_bps` 与 `conn_count`，使服务端 `reports` 与 `ALERT_CPU_THRESHOLD_PERCENT`（80%）及前端卡片恢复准确数据；
+  - 同步修正 `sample_host_cpu()` 首次采样即返回 `ready=true, busy_percent=0.0` 的预热误判。
+- **落地 Rust 端 `cpu_guard` 真实限额执行、读回核验与告警上报（`rust/crates/agent-core/src/cpu_guard_exec.rs`、`lib.rs`）**：
+  - 新增 `CpuGuardEnforcer` 与安全 cgroup v2 边界解析（支持 Runman `system.slice/runman-<uuid>.service/ct/cpu.max`、Incus `limits.cpu.allowance` 与 Podman `cpu-quota`），在 `build_report_json_with_containers` 与 `sample_guards_tick` 中真实执行 `ApplyLimit` / `EscalateLimit` / `RestoreLimit` 并持久化原配额、人工修改保护与读回校验；
+  - 为容器填充真实 `cgroup_cpu_psi_some_avg10`、每容器 `security.cpu_guard` 状态与 `cpu_pressure_protection` 告警。
+- **修复单核（1 vCPU）高负载下 70%–85% 区间竞争判定（`rust/crates/guard-core/src/lib.rs`、`client/cpu_guard.py`）**：
+  - 在 1 vCPU 宿主机极度饱和（`busy >= 95%` 或 `busy >= 85% && load_1m >= 1.0`）时，将单核判定门槛由 `85%` 下调至 `70%`，防止因其它进程争用导致容器在 `73%–88%` 间波动时反复清零观察计数。
+
 ## Phase 41：`auto-update.sh` Git 锁防半合并卡死与 Rust `/proc` 单遍批量扫描优化（v2.2.3）
 
 - **修复 `scripts/auto-update.sh` 因 `.git/HEAD.lock` 导致工作区半合并污染**：

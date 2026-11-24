@@ -484,6 +484,62 @@ class ResourceProtectionPressureTests(unittest.TestCase):
             (ct_dir / "cpu.max").write_text("max 100000\n", encoding="ascii")
             self.assertEqual(cpu_guard._runman_effective_cpus_from_cgroup(ct_dir, 4.0), 1.0)
 
+    def test_single_core_saturated_host_triggers_73_to_88_percent_container(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = os.path.join(tmpdir, "cpu-guard.json")
+            cgroup_dir = Path(tmpdir) / "cgroup"
+            cgroup_dir.mkdir()
+            (cgroup_dir / "cpu.max").write_text("max 100000\n", encoding="ascii")
+            (cgroup_dir / "cpu.pressure").write_text("some avg10=0.20 avg60=0.10 avg300=0.05 total=10\n", encoding="ascii")
+            host_cpu = {
+                "available": True,
+                "status": "ready",
+                "busy_percent": 100.0,
+                "iowait_percent": 0.0,
+                "logical_cpus": 1,
+                "load_1m": 2.44,
+                "psi": {"cpu": {"status": "ready", "some": {"avg10": 0.5}}},
+            }
+            sampled_process = {
+                "available": True,
+                "source": "host_proc_snapshot",
+                "pid": 100,
+                "cpu_percent": 88.0,
+                "process": "sing-box",
+                "command": "sing-box run -c /etc/sing-box/config.json",
+            }
+            env_clean = {k: v for k, v in os.environ.items() if k != "CPU_AUTO_LIMIT_REQUIRED_SECONDS"}
+            with mock.patch.dict(os.environ, env_clean, clear=True), mock.patch.object(
+                cpu_guard, "resolve_container_cgroup", return_value=(cgroup_dir, "")
+            ):
+                for ts, cpu_val in ((1000, 73.0), (1090, 88.0), (1180, 73.0)):
+                    c = {
+                        "id": "4a4c84c1-2c2a-4793-93c6-12160fcca350",
+                        "stable_id": "4a4c84c1-2c2a-4793-93c6-12160fcca350",
+                        "instance_id": "4a4c84c1-2c2a-4793-93c6-12160fcca350",
+                        "name": "4a4c84c1-2c2a-4793-93c6-12160fcca350",
+                        "runtime": "runman",
+                        "runtime_bin": "runman",
+                        "project": "default",
+                        "pid": 4321,
+                        "pid_start_ticks": "999",
+                        "cpu_percent": cpu_val,
+                        "cpu_pressure_percent": cpu_val,
+                        "cpu_pressure_sample_available": True,
+                        "cpu_effective_cpus": 0.0,
+                        "security": {},
+                    }
+                    summary = cpu_guard.observe(
+                        [c], host_cpu, 90.0, {"runman": "runman"},
+                        process_sampler=lambda _c: sampled_process, now=ts, state_path=state_path,
+                    )
+                self.assertEqual(c["security"]["cpu_guard"]["state"], "limited")
+                self.assertTrue(c["security"]["cpu_guard"]["readback_confirmed"])
+                self.assertEqual(c["security"]["cpu_guard"]["host_pressure_basis"], "single_core_host_cpu_saturation")
+                self.assertEqual((cgroup_dir / "cpu.max").read_text(encoding="ascii").strip(), "50000 100000")
+                self.assertEqual(len(summary["alerts"]), 1)
+                self.assertEqual(summary["alerts"][0]["cpu_guard"]["top_process"]["process"], "sing-box")
+
 
 if __name__ == "__main__":
     unittest.main()

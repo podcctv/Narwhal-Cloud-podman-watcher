@@ -1055,3 +1055,214 @@ fn test_build_report_payload_includes_managed_upgrade_field() {
     let payload = state.build_report_json(&Config::default(), 1_700_000_000);
     assert!(payload.contains("\"managed_upgrade\":false") || payload.contains("\"managed_upgrade\":true"));
 }
+
+#[test]
+fn test_cpu_guard_enforcer_runman_apply_escalate_manual_override_and_restore() {
+    let base = std::env::temp_dir().join(format!("narwhal_cpu_enf_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let cgroup_root = base.join("cgroup");
+    let vm_id = "4a4c84c1-2c2a-4793-93c6-12160fcca350";
+    let cg_rel = format!("/system.slice/runman-{vm_id}.service/ct");
+    let cg_dir = cgroup_root.join("system.slice").join(format!("runman-{vm_id}.service")).join("ct");
+    let pid_dir = proc_root.join("4242");
+    fs::create_dir_all(&cg_dir).unwrap();
+    fs::create_dir_all(&pid_dir).unwrap();
+    fs::write(pid_dir.join("cgroup"), format!("0::{cg_rel}\n")).unwrap();
+    fs::write(cg_dir.join("cpu.max"), "max 100000\n").unwrap();
+    fs::write(cg_dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+
+    let vm_id2 = "1ad00944-2c2a-4793-93c6-12160fcca350";
+    let cg_rel2 = format!("/system.slice/runman-{vm_id2}.service/ct");
+    let cg_dir2 = cgroup_root.join("system.slice").join(format!("runman-{vm_id2}.service")).join("ct");
+    let pid_dir2 = proc_root.join("4343");
+    fs::create_dir_all(&cg_dir2).unwrap();
+    fs::create_dir_all(&pid_dir2).unwrap();
+    fs::write(pid_dir2.join("cgroup"), format!("0::{cg_rel2}\n")).unwrap();
+    fs::write(cg_dir2.join("cpu.max"), "100000 100000\n").unwrap();
+    fs::write(cg_dir2.join("cgroup.events"), "populated 1\n").unwrap();
+
+    let c1 = ContainerSample {
+        id: vm_id.to_string(),
+        stable_id: vm_id.to_string(),
+        name: vm_id.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(4242),
+        status: "running".to_string(),
+        instance_id: vm_id.to_string(),
+        network_addresses: vec![],
+        pid_metrics_json: None,
+        socket_tables_json: None,
+        cgroup_metrics_json: None,
+    };
+    let c2 = ContainerSample {
+        id: vm_id2.to_string(),
+        stable_id: vm_id2.to_string(),
+        name: vm_id2.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(4343),
+        status: "running".to_string(),
+        instance_id: vm_id2.to_string(),
+        network_addresses: vec![],
+        pid_metrics_json: None,
+        socket_tables_json: None,
+        cgroup_metrics_json: None,
+    };
+    let containers = vec![c1, c2];
+    let state_file = base.join("cpu-guard-limits.json");
+    let mut enforcer = CpuGuardEnforcer::new(state_file.clone());
+
+    enforcer.execute_actions(
+        &containers,
+        &[
+            guard_core::CpuGuardAction::ApplyLimit {
+                key: vm_id.to_string(),
+                tier: 1,
+                target_cpus: 0.5,
+                fair_share_cpus: None,
+                pressure_basis: "single_core_host_cpu_saturation",
+            },
+            guard_core::CpuGuardAction::ApplyLimit {
+                key: vm_id2.to_string(),
+                tier: 1,
+                target_cpus: 0.5,
+                fair_share_cpus: None,
+                pressure_basis: "host_busy_and_psi_confirmed",
+            },
+        ],
+        &proc_root,
+        &cgroup_root,
+        1_700_000_000,
+    );
+    assert_eq!(fs::read_to_string(cg_dir.join("cpu.max")).unwrap().trim(), "50000 100000");
+    assert_eq!(fs::read_to_string(cg_dir2.join("cpu.max")).unwrap().trim(), "50000 100000");
+    assert!(enforcer.records.get(vm_id).unwrap().readback_confirmed);
+
+    // Escalate c1 to Tier 2 (0.25 CPUs)
+    enforcer.execute_actions(
+        &containers,
+        &[guard_core::CpuGuardAction::EscalateLimit {
+            key: vm_id.to_string(),
+            tier: 2,
+            target_cpus: 0.25,
+        }],
+        &proc_root,
+        &cgroup_root,
+        1_700_000_600,
+    );
+    assert_eq!(fs::read_to_string(cg_dir.join("cpu.max")).unwrap().trim(), "25000 100000");
+
+    // Simulate operator manual override on c1, then RestoreLimit must NOT overwrite it
+    fs::write(cg_dir.join("cpu.max"), "80000 100000\n").unwrap();
+    enforcer.execute_actions(
+        &containers,
+        &[
+            guard_core::CpuGuardAction::RestoreLimit {
+                key: vm_id.to_string(),
+                original_cpus: 1.0,
+                cooldown_until: 1_700_002_000,
+            },
+            guard_core::CpuGuardAction::RestoreLimit {
+                key: vm_id2.to_string(),
+                original_cpus: 1.0,
+                cooldown_until: 1_700_002_000,
+            },
+        ],
+        &proc_root,
+        &cgroup_root,
+        1_700_001_100,
+    );
+    assert_eq!(fs::read_to_string(cg_dir.join("cpu.max")).unwrap().trim(), "80000 100000");
+    assert!(enforcer.records.get(vm_id).unwrap().manual_override);
+    assert_eq!(fs::read_to_string(cg_dir2.join("cpu.max")).unwrap().trim(), "100000 100000");
+    assert!(!enforcer.records.contains_key(vm_id2));
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_build_report_json_emits_top_level_metrics_cpu_guard_and_alerts() {
+    let base = std::env::temp_dir().join(format!("narwhal_cpu_rep_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let cgroup_root = base.join("cgroup");
+    let vm_id = "4a4c84c1-2c2a-4793-93c6-12160fcca350";
+    let cg_dir = cgroup_root.join("system.slice").join(format!("runman-{vm_id}.service")).join("ct");
+    let pid_dir = proc_root.join("5151");
+    fs::create_dir_all(proc_root.join("pressure")).unwrap();
+    fs::create_dir_all(&cg_dir).unwrap();
+    fs::create_dir_all(&pid_dir).unwrap();
+
+    fs::write(proc_root.join("loadavg"), "2.44 2.51 2.44 3/120 5151\n").unwrap();
+    fs::write(proc_root.join("pressure").join("cpu"), "some avg10=12.00 avg60=8.00 avg300=4.00 total=1000\n").unwrap();
+    fs::write(proc_root.join("pressure").join("memory"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+    fs::write(proc_root.join("pressure").join("io"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+    fs::write(pid_dir.join("cgroup"), format!("0::/system.slice/runman-{vm_id}.service/ct\n")).unwrap();
+    fs::write(cg_dir.join("cpu.max"), "100000 100000\n").unwrap();
+    fs::write(cg_dir.join("cgroup.events"), "populated 1\n").unwrap();
+    fs::write(cg_dir.join("cpu.pressure"), "some avg10=15.00 avg60=10.00 avg300=5.00 total=200\n").unwrap();
+
+    let cfg = Config {
+        host_id: "los-angeles-test".to_string(),
+        node_id: "node-la-1".to_string(),
+        report_interval: 60,
+        security_monitor_enabled: true,
+        ..Config::default()
+    };
+    let mut state = AgentState::with_paths(&cfg, proc_root.clone(), proc_root.join("nf_conntrack"))
+        .with_cgroup_root(cgroup_root.clone())
+        .with_cpu_guard_state_path(base.join("cpu-guard-limits.json"));
+
+    let make_sample = |usage_usec: u64, rx: u64, tx: u64| vec![ContainerSample {
+        id: vm_id.to_string(),
+        stable_id: vm_id.to_string(),
+        name: vm_id.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(5151),
+        status: "running".to_string(),
+        instance_id: vm_id.to_string(),
+        network_addresses: vec!["10.91.16.9".to_string()],
+        pid_metrics_json: Some(format!(
+            r#"{{"available":true,"mem_bytes":134217728,"net":{{"rx_bytes":{rx},"tx_bytes":{tx},"rx_packets":10,"tx_packets":10}}}}"#
+        )),
+        socket_tables_json: Some(r#"{"available":true,"tcp_established":12,"tcp_time_wait":0,"syn_sent_count":0,"syn_recv_count":0,"udp_sockets":2}"#.to_string()),
+        cgroup_metrics_json: Some(format!(
+            r#"{{"available":true,"cpu_stat":{{"usage_usec":{usage_usec}}},"cpu_max":{{"raw":"100000 100000","quota_usec":100000,"period_usec":100000}},"memory":{{"current_bytes":134217728,"max_bytes":268435456}}}}"#
+        )),
+    }];
+
+    // Feed 5 ticks over 240s with host busy = 100% and container usage = 88% of its 1-CPU quota
+    let mut final_report = String::new();
+    for (idx, ts) in [1_700_000_000u64, 1_700_000_060, 1_700_000_120, 1_700_000_180, 1_700_000_240].iter().enumerate() {
+        let busy_ticks = (idx as u64 + 1) * 6000;
+        fs::write(proc_root.join("stat"), format!("cpu  {busy_ticks} 0 0 0 0 0 0 0 0 0\n")).unwrap();
+        let usage_usec = (idx as u64 + 1) * 60 * 880_000;
+        let rx = (idx as u64 + 1) * 6000;
+        let tx = (idx as u64 + 1) * 12000;
+        final_report = state.build_report_json_with_containers(&cfg, *ts, &make_sample(usage_usec, rx, tx));
+    }
+
+    assert!(final_report.contains("\"cpu_percent\":88.00"), "missing top-level cpu_percent: {final_report}");
+    assert!(final_report.contains("\"cpu_effective_cpus\":1.000"));
+    assert!(final_report.contains("\"mem_bytes\":134217728"));
+    assert!(final_report.contains("\"mem_limit_bytes\":268435456"));
+    assert!(final_report.contains("\"mem_percent\":50.00"));
+    assert!(final_report.contains("\"net_rx_bps\":100.00"));
+    assert!(final_report.contains("\"net_tx_bps\":200.00"));
+    assert!(final_report.contains("\"conn_count\":12"));
+    assert!(final_report.contains("\"cpu_guard\":{\"state\":\"limited\""), "missing container cpu_guard limited status: {final_report}");
+    assert!(final_report.contains("\"readback_confirmed\":true"));
+    assert!(final_report.contains("\"type\":\"cpu_pressure_protection\""), "missing cpu_pressure_protection alert: {final_report}");
+    assert_eq!(fs::read_to_string(cg_dir.join("cpu.max")).unwrap().trim(), "50000 100000");
+
+    let _ = fs::remove_dir_all(&base);
+}

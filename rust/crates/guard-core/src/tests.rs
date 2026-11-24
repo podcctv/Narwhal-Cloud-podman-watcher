@@ -301,3 +301,54 @@ use super::*;
             }]
         );
     }
+
+    #[test]
+    fn cpu_guard_single_core_saturated_host_triggers_above_70_without_reset() {
+        let mut cfg = CpuGuardConfig::default();
+        cfg.interval_seconds = 60.0;
+        let mut tracker = CpuGuardTracker::new(cfg);
+
+        let host_saturated = HostCpuSample {
+            ready: true,
+            busy_percent: 100.0,
+            logical_cpus: 1,
+            load_1m: Some(2.44),
+            psi_some_avg10: Some(0.5),
+        };
+        let c_73 = vec![CpuContainerSample {
+            key: "runman|default|4a4c84c1".into(),
+            cpu_percent: Some(73.0),
+            effective_cpus: 1.0,
+            cgroup_cpu_psi_some_avg10: Some(0.2),
+        }];
+        let c_88 = vec![CpuContainerSample {
+            key: "runman|default|4a4c84c1".into(),
+            cpu_percent: Some(88.0),
+            effective_cpus: 1.0,
+            cgroup_cpu_psi_some_avg10: Some(0.2),
+        }];
+
+        let o1 = tracker.observe(1000, &host_saturated, &c_73, true);
+        assert_eq!(o1.decisions[0].stage, GuardStage::Watching);
+        assert_eq!(o1.decisions[0].high_samples, 1);
+        assert_eq!(o1.decisions[0].pressure_basis, "single_core_host_cpu_saturation");
+
+        let o2 = tracker.observe(1060, &host_saturated, &c_88, true);
+        assert_eq!(o2.decisions[0].high_samples, 2);
+
+        let o3 = tracker.observe(1120, &host_saturated, &c_73, true);
+        assert_eq!(o3.decisions[0].high_samples, 3);
+
+        let o4 = tracker.observe(1180, &host_saturated, &c_88, true);
+        assert_eq!(o4.decisions[0].stage, GuardStage::Active);
+        assert_eq!(
+            o4.actions,
+            vec![CpuGuardAction::ApplyLimit {
+                key: "runman|default|4a4c84c1".into(),
+                tier: 1,
+                target_cpus: 0.5,
+                fair_share_cpus: None,
+                pressure_basis: "single_core_host_cpu_saturation",
+            }]
+        );
+    }

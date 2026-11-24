@@ -383,6 +383,14 @@ impl CpuGuardTracker {
             }
         }
         let busy_85 = self.config.host_busy_threshold_percent.max(85.0);
+        let busy_95 = self.config.host_busy_threshold_percent.max(95.0);
+        let single_core_threshold = self.config.high_threshold_percent.max(70.0).min(runaway_threshold);
+        if logical_cpus <= 1.0
+            && (busy >= busy_95 || (busy >= busy_85 && load_1m >= 1.0))
+            && (metrics_cpu >= single_core_threshold || saturation * 100.0 >= single_core_threshold)
+        {
+            return (true, "single_core_host_cpu_saturation", true);
+        }
         if logical_cpus <= 1.0
             && busy >= busy_85
             && (metrics_cpu >= runaway_threshold || saturation * 100.0 >= runaway_threshold)

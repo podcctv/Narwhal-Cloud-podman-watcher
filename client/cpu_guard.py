@@ -112,6 +112,13 @@ def _container_cpu_pressure_confirmed(
     cgroup_cpu_psi = _psi_avg10(cgroup_psi, "cpu")
     if cgroup_cpu_psi is not None and cgroup_cpu_psi >= host_psi_threshold:
         return True, "host_busy_and_container_psi_confirmed", is_runaway
+    single_core_threshold = min(runaway_threshold, max(70.0, high_threshold))
+    if (
+        logical_cpus <= 1
+        and (busy >= max(host_threshold, 95.0) or (busy >= max(host_threshold, 85.0) and load_1m >= 1.0))
+        and (metrics_cpu >= single_core_threshold or saturation * 100.0 >= single_core_threshold)
+    ):
+        return True, "single_core_host_cpu_saturation", True
     if logical_cpus <= 1 and busy >= max(host_threshold, 85.0) and (
         metrics_cpu >= runaway_threshold or saturation * 100.0 >= runaway_threshold
     ):
