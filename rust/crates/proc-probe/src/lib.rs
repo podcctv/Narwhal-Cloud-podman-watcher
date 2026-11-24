@@ -175,13 +175,37 @@ pub fn collect_proc_snapshot_from_root(
     scan_limit: usize,
     clock_ticks: f64,
 ) -> String {
+    collect_proc_snapshot_inner(proc_root, Some(init_pid), scan_limit, clock_ticks)
+}
+
+pub fn collect_host_proc_snapshot_from_root(
+    proc_root: &Path,
+    scan_limit: usize,
+    clock_ticks: f64,
+) -> String {
+    collect_proc_snapshot_inner(proc_root, None, scan_limit, clock_ticks)
+}
+
+fn collect_proc_snapshot_inner(
+    proc_root: &Path,
+    root_pid: Option<u32>,
+    scan_limit: usize,
+    clock_ticks: f64,
+) -> String {
     let safe_clock_ticks = if clock_ticks.is_finite() && clock_ticks > 0.0 {
         clock_ticks
     } else {
         100.0
     };
 
-    if init_pid <= 1 || !proc_root.join(init_pid.to_string()).is_dir() {
+    if let Some(init_pid) = root_pid {
+        if init_pid <= 1 || !proc_root.join(init_pid.to_string()).is_dir() {
+            return format!(
+                "{{\"available\":false,\"proc_scan_complete\":false,\"status_scan_complete\":false,\"uptime\":0.0,\"clock_ticks\":{},\"items\":[]}}",
+                format_f64(safe_clock_ticks)
+            );
+        }
+    } else if !proc_root.is_dir() {
         return format!(
             "{{\"available\":false,\"proc_scan_complete\":false,\"status_scan_complete\":false,\"uptime\":0.0,\"clock_ticks\":{},\"items\":[]}}",
             format_f64(safe_clock_ticks)
@@ -239,42 +263,50 @@ pub fn collect_proc_snapshot_from_root(
         .filter(|v| v.is_finite() && *v >= 0.0)
         .unwrap_or(0.0);
 
-    let mut descendants: HashSet<u32> = HashSet::new();
-    descendants.insert(init_pid);
-    let mut queue: VecDeque<u32> = VecDeque::new();
-    queue.push_back(init_pid);
+    let sorted_pids: Vec<u32> = if let Some(init_pid) = root_pid {
+        let mut descendants: HashSet<u32> = HashSet::new();
+        descendants.insert(init_pid);
+        let mut queue: VecDeque<u32> = VecDeque::new();
+        queue.push_back(init_pid);
 
-    while let Some(current_pid) = queue.pop_front() {
-        if descendants.len() > scan_limit {
-            break;
-        }
-        if let Some(children) = children_map.get(&current_pid) {
-            for &child_pid in children {
-                if descendants.insert(child_pid) {
-                    queue.push_back(child_pid);
-                    if descendants.len() > scan_limit {
-                        break;
+        while let Some(current_pid) = queue.pop_front() {
+            if descendants.len() > scan_limit {
+                break;
+            }
+            if let Some(children) = children_map.get(&current_pid) {
+                for &child_pid in children {
+                    if descendants.insert(child_pid) {
+                        queue.push_back(child_pid);
+                        if descendants.len() > scan_limit {
+                            break;
+                        }
                     }
                 }
             }
         }
-    }
 
-    if descendants.len() > scan_limit {
-        proc_scan_complete = false;
-    }
+        if descendants.len() > scan_limit {
+            proc_scan_complete = false;
+        }
 
-    let mut sorted_descendants: Vec<u32> = descendants.into_iter().collect();
-    sorted_descendants.sort_unstable();
+        let mut sorted_descendants: Vec<u32> = descendants.into_iter().collect();
+        sorted_descendants.sort_unstable();
+        sorted_descendants
+    } else {
+        all_proc_ids
+    };
 
-    let mut items: Vec<ProcItem> = Vec::with_capacity(sorted_descendants.len());
-    for host_pid in sorted_descendants {
+    let mut items: Vec<ProcItem> = Vec::with_capacity(sorted_pids.len());
+    for host_pid in sorted_pids {
         let pid_dir = proc_root.join(host_pid.to_string());
         let status = match status_map.get(&host_pid) {
             Some(s) => s.clone(),
             None => read_bounded_text(&pid_dir.join("status"), 8192),
         };
-        let namespace_pid = extract_nspid(&status, host_pid, init_pid);
+        let namespace_pid = match root_pid {
+            Some(init_pid) => extract_nspid(&status, host_pid, init_pid),
+            None => host_pid,
+        };
         let user = extract_uid(&status);
         let state = extract_state(&status);
         let rss_bytes = extract_vm_rss_bytes(&status);
@@ -323,10 +355,12 @@ pub fn collect_proc_snapshot_from_root(
         });
     }
 
-    let namespace_by_host: HashMap<u32, u32> =
-        items.iter().map(|item| (item.host_pid, item.pid)).collect();
-    for item in &mut items {
-        item.ppid = *namespace_by_host.get(&item.ppid).unwrap_or(&0);
+    if root_pid.is_some() {
+        let namespace_by_host: HashMap<u32, u32> =
+            items.iter().map(|item| (item.host_pid, item.pid)).collect();
+        for item in &mut items {
+            item.ppid = *namespace_by_host.get(&item.ppid).unwrap_or(&0);
+        }
     }
 
     items.sort_by(|a, b| {
@@ -855,6 +889,43 @@ mod tests {
         assert!(json.contains("\"rss_bytes\":2097152"));
         assert!(json.contains("\"command\":\"/usr/bin/xray -c config.json\""));
         assert!(!json.contains("sshd"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_host_proc_snapshot_enumerates_all_pids() {
+        let root = make_temp_proc("host_proc_snap");
+        fs::write(root.join("uptime"), "200.00 150.00\n").unwrap();
+
+        for (pid, ppid, comm, cmd, ticks) in [
+            ("1", "0", "systemd", "/sbin/init\0", "10"),
+            ("100", "1", "xmrig", "/usr/bin/xmrig\0-o\0pool.example:3333\0", "500"),
+            ("200", "100", "worker", "worker\0--threads=2\0", "200"),
+        ] {
+            let pdir = root.join(pid);
+            fs::create_dir_all(&pdir).unwrap();
+            fs::write(
+                pdir.join("status"),
+                format!("Name:\t{comm}\nState:\tR (running)\nPid:\t{pid}\nPPid:\t{ppid}\nUid:\t0\t0\nVmRSS:\t1024 kB\n"),
+            )
+            .unwrap();
+            fs::write(pdir.join("comm"), format!("{comm}\n")).unwrap();
+            fs::write(pdir.join("cmdline"), cmd).unwrap();
+            fs::write(
+                pdir.join("stat"),
+                format!("{pid} ({comm}) R {ppid} {pid} {pid} 0 -1 0 0 0 0 0 {ticks} 0 0 0 20 0 1 0 100 0 0"),
+            )
+            .unwrap();
+        }
+
+        let scoped_one = collect_proc_snapshot_from_root(&root, 1, 1000, 100.0);
+        assert!(scoped_one.contains("\"available\":false"));
+
+        let host_snap = collect_host_proc_snapshot_from_root(&root, 1000, 100.0);
+        assert!(host_snap.contains("\"available\":true"));
+        assert!(host_snap.contains("\"process\":\"xmrig\""));
+        assert!(host_snap.contains("\"process\":\"worker\""));
 
         let _ = fs::remove_dir_all(&root);
     }

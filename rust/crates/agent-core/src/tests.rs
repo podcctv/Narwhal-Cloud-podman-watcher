@@ -1266,3 +1266,324 @@ fn test_build_report_json_emits_top_level_metrics_cpu_guard_and_alerts() {
 
     let _ = fs::remove_dir_all(&base);
 }
+
+#[test]
+fn test_host_proc_snapshot_detects_suspicious_xmrig_process() {
+    let base = std::env::temp_dir().join(format!("narwhal_host_xmrig_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let p_xmrig = proc_root.join("9001");
+    fs::create_dir_all(proc_root.join("pressure")).unwrap();
+    fs::create_dir_all(&p_xmrig).unwrap();
+
+    fs::write(proc_root.join("uptime"), "500.00 100.00\n").unwrap();
+    fs::write(proc_root.join("stat"), "cpu  1000 0 100 8000 0 0 0 0 0 0\n").unwrap();
+    fs::write(proc_root.join("loadavg"), "1.50 1.20 1.00 2/100 9001\n").unwrap();
+    for res in ["cpu", "memory", "io"] {
+        fs::write(
+            proc_root.join("pressure").join(res),
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        p_xmrig.join("status"),
+        "Name:\txmrig\nState:\tR (running)\nPid:\t9001\nPPid:\t1\nUid:\t0\t0\nVmRSS:\t65536 kB\n",
+    )
+    .unwrap();
+    fs::write(p_xmrig.join("comm"), "xmrig\n").unwrap();
+    fs::write(p_xmrig.join("cmdline"), "xmrig\0-o\0pool.example:3333\0").unwrap();
+    fs::write(
+        p_xmrig.join("stat"),
+        "9001 (xmrig) R 1 9001 9001 0 -1 0 0 0 0 0 25000 0 0 0 20 0 1 0 100 0 0",
+    )
+    .unwrap();
+
+    let cfg = Config {
+        host_id: "h-xmrig".to_string(),
+        node_id: "n-xmrig".to_string(),
+        security_monitor_enabled: true,
+        ..Config::default()
+    };
+    let mut state = AgentState::with_paths(&cfg, proc_root.clone(), proc_root.join("nf_conntrack"));
+    let report = state.build_report_json_with_containers(&cfg, 1_700_000_000, &[]);
+    assert!(report.contains("\"process\":\"xmrig\""), "missing xmrig in suspicious_processes: {report}");
+    assert!(report.contains("\"suspicious_process\""), "missing suspicious_process alert: {report}");
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_memory_and_io_guard_enforcers_apply_escalate_manual_override_and_restore() {
+    let base = std::env::temp_dir().join(format!("narwhal_mem_io_enf_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let cgroup_root = base.join("cgroup");
+    let vm1 = "4a4c84c1-2c2a-4793-93c6-12160fcca350";
+    let vm2 = "1ad00944-2c2a-4793-93c6-12160fcca350";
+    let cg1 = cgroup_root.join("system.slice").join(format!("runman-{vm1}.service")).join("ct");
+    let cg2 = cgroup_root.join("system.slice").join(format!("runman-{vm2}.service")).join("ct");
+    let p1 = proc_root.join("6161");
+    let p2 = proc_root.join("6262");
+    fs::create_dir_all(&cg1).unwrap();
+    fs::create_dir_all(&cg2).unwrap();
+    fs::create_dir_all(&p1).unwrap();
+    fs::create_dir_all(&p2).unwrap();
+
+    fs::write(p1.join("cgroup"), format!("0::/system.slice/runman-{vm1}.service/ct\n")).unwrap();
+    fs::write(p2.join("cgroup"), format!("0::/system.slice/runman-{vm2}.service/ct\n")).unwrap();
+    for cg in [&cg1, &cg2] {
+        fs::write(cg.join("cgroup.events"), "populated 1\n").unwrap();
+        fs::write(cg.join("memory.high"), "max\n").unwrap();
+        fs::write(cg.join("io.max"), "").unwrap();
+    }
+
+    let make_c = |id: &str, pid: u32| ContainerSample {
+        id: id.to_string(),
+        stable_id: id.to_string(),
+        name: id.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(pid),
+        status: "running".to_string(),
+        instance_id: id.to_string(),
+        network_addresses: vec![],
+        pid_metrics_json: None,
+        socket_tables_json: None,
+        cgroup_metrics_json: None,
+    };
+    let containers = vec![make_c(vm1, 6161), make_c(vm2, 6262)];
+
+    let mut mem_enf = MemoryGuardEnforcer::new(base.join("mem.json"));
+    mem_enf.execute_actions(
+        &containers,
+        &[
+            guard_core::MemoryGuardAction::ApplyMemoryHigh {
+                key: vm1.to_string(),
+                tier: 1,
+                target_bytes: 200_000_000,
+            },
+            guard_core::MemoryGuardAction::ApplyMemoryHigh {
+                key: vm2.to_string(),
+                tier: 1,
+                target_bytes: 200_000_000,
+            },
+        ],
+        &proc_root,
+        &cgroup_root,
+        1_700_000_000,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "200000000");
+    assert!(mem_enf.records.get(vm1).unwrap().readback_confirmed);
+
+    mem_enf.execute_actions(
+        &containers,
+        &[guard_core::MemoryGuardAction::EscalateMemoryHigh {
+            key: vm1.to_string(),
+            tier: 2,
+            target_bytes: 160_000_000,
+        }],
+        &proc_root,
+        &cgroup_root,
+        1_700_000_600,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "160000000");
+
+    // Manual override on vm1, clean restore on vm2
+    fs::write(cg1.join("memory.high"), "300000000\n").unwrap();
+    mem_enf.execute_actions(
+        &containers,
+        &[
+            guard_core::MemoryGuardAction::RestoreMemoryHigh {
+                key: vm1.to_string(),
+                original_high_bytes: None,
+                cooldown_until: 1_700_002_000,
+            },
+            guard_core::MemoryGuardAction::RestoreMemoryHigh {
+                key: vm2.to_string(),
+                original_high_bytes: None,
+                cooldown_until: 1_700_002_000,
+            },
+        ],
+        &proc_root,
+        &cgroup_root,
+        1_700_001_500,
+    );
+    assert_eq!(fs::read_to_string(cg1.join("memory.high")).unwrap().trim(), "300000000");
+    assert!(mem_enf.records.get(vm1).unwrap().manual_override);
+    assert_eq!(fs::read_to_string(cg2.join("memory.high")).unwrap().trim(), "max");
+    assert!(!mem_enf.records.contains_key(vm2));
+
+    // IoGuardEnforcer
+    let mut io_enf = IoGuardEnforcer::new(base.join("io.json"));
+    let tier1_io = guard_core::IoMaxLimits {
+        rbps: Some(52_428_800),
+        wbps: None,
+        riops: Some(400),
+        wiops: None,
+    };
+    io_enf.execute_actions(
+        &containers,
+        &[
+            guard_core::IoGuardAction::ApplyIoMax {
+                key: vm1.to_string(),
+                device: "8:0".to_string(),
+                tier: 1,
+                target: tier1_io.clone(),
+            },
+            guard_core::IoGuardAction::ApplyIoMax {
+                key: vm2.to_string(),
+                device: "8:0".to_string(),
+                tier: 1,
+                target: tier1_io,
+            },
+        ],
+        &proc_root,
+        &cgroup_root,
+        1_700_000_000,
+    );
+    assert_eq!(
+        fs::read_to_string(cg1.join("io.max")).unwrap().trim(),
+        "8:0 rbps=52428800 wbps=max riops=400 wiops=max"
+    );
+    assert!(io_enf.records.get(vm1).unwrap().readback_confirmed);
+
+    io_enf.execute_actions(
+        &containers,
+        &[guard_core::IoGuardAction::EscalateIoMax {
+            key: vm1.to_string(),
+            device: "8:0".to_string(),
+            tier: 2,
+            target: guard_core::IoMaxLimits {
+                rbps: Some(26_214_400),
+                wbps: None,
+                riops: Some(200),
+                wiops: None,
+            },
+        }],
+        &proc_root,
+        &cgroup_root,
+        1_700_000_300,
+    );
+    assert_eq!(
+        fs::read_to_string(cg1.join("io.max")).unwrap().trim(),
+        "8:0 rbps=26214400 wbps=max riops=200 wiops=max"
+    );
+
+    fs::write(cg1.join("io.max"), "8:0 rbps=99999999 wbps=max riops=max wiops=max\n").unwrap();
+    io_enf.execute_actions(
+        &containers,
+        &[
+            guard_core::IoGuardAction::RestoreIoMax {
+                key: vm1.to_string(),
+                device: "8:0".to_string(),
+                original: guard_core::IoMaxLimits::default(),
+                cooldown_until: 1_700_002_000,
+            },
+            guard_core::IoGuardAction::RestoreIoMax {
+                key: vm2.to_string(),
+                device: "8:0".to_string(),
+                original: guard_core::IoMaxLimits::default(),
+                cooldown_until: 1_700_002_000,
+            },
+        ],
+        &proc_root,
+        &cgroup_root,
+        1_700_001_000,
+    );
+    assert_eq!(
+        fs::read_to_string(cg1.join("io.max")).unwrap().trim(),
+        "8:0 rbps=99999999 wbps=max riops=max wiops=max"
+    );
+    assert!(io_enf.records.get(vm1).unwrap().manual_override);
+    assert_eq!(
+        fs::read_to_string(cg2.join("io.max")).unwrap().trim(),
+        "8:0 rbps=max wbps=max riops=max wiops=max"
+    );
+    assert!(!io_enf.records.contains_key(vm2));
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_build_report_json_emits_memory_and_io_guard_status_and_alerts() {
+    let base = std::env::temp_dir().join(format!("narwhal_mem_io_rep_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let cgroup_root = base.join("cgroup");
+    let vm_id = "4a4c84c1-2c2a-4793-93c6-12160fcca350";
+    let cg_dir = cgroup_root.join("system.slice").join(format!("runman-{vm_id}.service")).join("ct");
+    let pid_dir = proc_root.join("7171");
+    fs::create_dir_all(proc_root.join("pressure")).unwrap();
+    fs::create_dir_all(&cg_dir).unwrap();
+    fs::create_dir_all(&pid_dir).unwrap();
+
+    fs::write(proc_root.join("loadavg"), "1.00 1.00 1.00 1/100 7171\n").unwrap();
+    fs::write(proc_root.join("pressure").join("cpu"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").unwrap();
+    fs::write(proc_root.join("pressure").join("memory"), "some avg10=12.00 avg60=8.00 avg300=4.00 total=100\n").unwrap();
+    fs::write(proc_root.join("pressure").join("io"), "some avg10=12.00 avg60=8.00 avg300=4.00 total=100\n").unwrap();
+    fs::write(pid_dir.join("cgroup"), format!("0::/system.slice/runman-{vm_id}.service/ct\n")).unwrap();
+    fs::write(cg_dir.join("cgroup.events"), "populated 1\n").unwrap();
+    fs::write(cg_dir.join("memory.high"), "max\n").unwrap();
+    fs::write(cg_dir.join("memory.pressure"), "some avg10=12.00 avg60=8.00 avg300=4.00 total=200\n").unwrap();
+    fs::write(cg_dir.join("io.max"), "").unwrap();
+
+    let cfg = Config {
+        host_id: "mem-io-test".to_string(),
+        node_id: "node-mem-io".to_string(),
+        report_interval: 300,
+        security_monitor_enabled: true,
+        ..Config::default()
+    };
+    let mut state = AgentState::with_paths(&cfg, proc_root.clone(), proc_root.join("nf_conntrack"))
+        .with_cgroup_root(cgroup_root.clone())
+        .with_cpu_guard_state_path(base.join("cpu-guard.json"))
+        .with_memory_guard_state_path(base.join("mem-guard.json"))
+        .with_io_guard_state_path(base.join("io-guard.json"));
+
+    let make_sample = |rbytes: u64, rios: u64| vec![ContainerSample {
+        id: vm_id.to_string(),
+        stable_id: vm_id.to_string(),
+        name: vm_id.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(7171),
+        status: "running".to_string(),
+        instance_id: vm_id.to_string(),
+        network_addresses: vec![],
+        pid_metrics_json: None,
+        socket_tables_json: None,
+        cgroup_metrics_json: Some(format!(
+            r#"{{"available":true,"memory":{{"current_bytes":241591910,"max_bytes":268435456}},"io":{{"available":true,"devices":[{{"dev":"8:0","rbytes":{rbytes},"wbytes":0,"rios":{rios},"wios":0}}]}}}}"#
+        )),
+    }];
+
+    let mut final_report = String::new();
+    for (idx, ts) in [1_700_000_000u64, 1_700_000_300, 1_700_000_600].iter().enumerate() {
+        let step = idx as u64 + 1;
+        fs::write(proc_root.join("stat"), format!("cpu  {} 0 0 {} 0 0 0 0 0 0\n", step * 1000, step * 9000)).unwrap();
+        let rbytes = step * 300 * 50_000_000;
+        let rios = step * 300 * 500;
+        let rsectors = rbytes / 512;
+        let busy_ms = step * 270_000; // 90% of 300s
+        fs::write(
+            proc_root.join("diskstats"),
+            format!("   8       0 sda {rios} 0 {rsectors} 0 0 0 0 0 0 {busy_ms} 0\n"),
+        )
+        .unwrap();
+        final_report = state.build_report_json_with_containers(&cfg, *ts, &make_sample(rbytes, rios));
+    }
+
+    assert!(final_report.contains("\"memory_guard\":{\"state\":\"limited\""), "missing memory_guard limited status: {final_report}");
+    assert!(final_report.contains("\"io_guard\":{\"state\":\"limited\""), "missing io_guard limited status: {final_report}");
+    assert!(final_report.contains("\"type\":\"memory_pressure_protection\""), "missing memory_pressure_protection alert: {final_report}");
+    assert!(final_report.contains("\"type\":\"io_pressure_protection\""), "missing io_pressure_protection alert: {final_report}");
+    assert_ne!(fs::read_to_string(cg_dir.join("memory.high")).unwrap().trim(), "max");
+    assert!(fs::read_to_string(cg_dir.join("io.max")).unwrap().contains("8:0 rbps="));
+
+    let _ = fs::remove_dir_all(&base);
+}

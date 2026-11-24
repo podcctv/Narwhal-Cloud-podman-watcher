@@ -3,11 +3,13 @@
 pub mod actions;
 mod banner;
 mod cpu_guard_exec;
+mod resource_guard_exec;
 pub use banner::{build_shell_banner_install_script, build_ssh_banner_install_script};
 use banner::MotdDeliveryState;
 #[cfg(any(unix, test))]
 use banner::fnv1a_hex;
 use cpu_guard_exec::{ContainerMetricsSummary, CpuGuardEnforcer};
+use resource_guard_exec::{IoGuardEnforcer, MemoryGuardEnforcer};
 pub mod gfw_probe;
 pub mod host_audit;
 
@@ -38,7 +40,7 @@ use host_metrics::{
     collect_diskstats, collect_host_metrics, parse_loadavg, parse_proc_stat_cpu, CpuMetrics,
 };
 use net_probe::is_allowed_host;
-use proc_probe::{collect_proc_snapshot_from_root, json_escape};
+use proc_probe::{collect_host_proc_snapshot_from_root, json_escape};
 use runtime_drivers::{discover_and_sample_containers, ContainerSample};
 use socket_sec::collect_conntrack;
 use transport::{TransportClient, TransportConfig, TransportError};
@@ -425,6 +427,8 @@ pub struct AgentState {
     cgroup_root: PathBuf,
     conntrack_path: PathBuf,
     cpu_guard_enforcer: CpuGuardEnforcer,
+    memory_guard_enforcer: MemoryGuardEnforcer,
+    io_guard_enforcer: IoGuardEnforcer,
     geoip_db_path: Option<PathBuf>,
     rfw_restart_observation: Option<RfwRestartObservation>,
     access_log_states: HashMap<String, AccessLogCursor>,
@@ -556,14 +560,61 @@ impl AgentState {
             cpu_cfg.required_duration_seconds = v.max(60);
             cpu_cfg.explicit_required_duration_override = true;
         }
-        let mem_cfg = MemoryGuardConfig {
+        let mut mem_cfg = MemoryGuardConfig {
             interval_seconds: interval,
             ..MemoryGuardConfig::default()
         };
-        let io_cfg = IoGuardConfig {
+        if let Some(v) = std::env::var("MEMORY_AUTO_LIMIT_USAGE_PERCENT")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+        {
+            mem_cfg.start_usage_percent = v;
+        }
+        if let Some(v) = std::env::var("MEMORY_AUTO_LIMIT_HOST_PSI_PERCENT")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+        {
+            mem_cfg.host_psi_threshold_percent = v;
+        }
+        if let Some(v) = std::env::var("MEMORY_AUTO_LIMIT_CGROUP_PSI_PERCENT")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+        {
+            mem_cfg.container_psi_threshold_percent = v;
+        }
+        if let Some(v) = std::env::var("MEMORY_AUTO_LIMIT_REQUIRED_SECONDS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            mem_cfg.required_duration_seconds = v;
+        }
+        let mut io_cfg = IoGuardConfig {
             interval_seconds: interval,
             ..IoGuardConfig::default()
         };
+        if let Some(v) = std::env::var("IO_AUTO_LIMIT_DEVICE_BUSY_PERCENT")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+        {
+            io_cfg.device_busy_threshold_percent = v;
+        }
+        if let Some(v) = std::env::var("IO_AUTO_LIMIT_HOST_PSI_PERCENT")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+        {
+            io_cfg.host_psi_threshold_percent = v;
+        }
+        if let Some(v) = std::env::var("IO_AUTO_LIMIT_REQUIRED_SECONDS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            io_cfg.required_duration_seconds = v;
+        }
         let geoip_db_path = resolve_default_geoip_db_path();
         let sni_enabled = std::env::var("NARWHAL_SNI_WHITELIST_ENABLED")
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
@@ -609,6 +660,8 @@ impl AgentState {
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             conntrack_path,
             cpu_guard_enforcer: CpuGuardEnforcer::new(cpu_guard_exec::default_cpu_guard_state_path()),
+            memory_guard_enforcer: MemoryGuardEnforcer::new(resource_guard_exec::default_memory_guard_state_path()),
+            io_guard_enforcer: IoGuardEnforcer::new(resource_guard_exec::default_io_guard_state_path()),
             geoip_db_path,
             rfw_restart_observation: None,
             access_log_states: HashMap::new(),
@@ -672,6 +725,18 @@ impl AgentState {
     #[cfg(test)]
     pub(crate) fn with_cpu_guard_state_path(mut self, state_path: PathBuf) -> Self {
         self.cpu_guard_enforcer = CpuGuardEnforcer::new(state_path);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_memory_guard_state_path(mut self, state_path: PathBuf) -> Self {
+        self.memory_guard_enforcer = MemoryGuardEnforcer::new(state_path);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_io_guard_state_path(mut self, state_path: PathBuf) -> Self {
+        self.io_guard_enforcer = IoGuardEnforcer::new(state_path);
         self
     }
 
@@ -757,7 +822,7 @@ impl AgentState {
         let conntrack_json =
             collect_conntrack(&self.conntrack_path.to_string_lossy(), 50_000);
         let proc_snapshot_json =
-            collect_proc_snapshot_from_root(&self.proc_root, 1, 20_000, 100.0);
+            collect_host_proc_snapshot_from_root(&self.proc_root, 20_000, 100.0);
 
         let host_cpu_sample = self.sample_host_cpu();
         let host_mem_psi = read_psi_sample(&self.proc_root.join("pressure").join("memory"));
@@ -785,6 +850,11 @@ impl AgentState {
 
         let allow_new_limits = config.security_monitor_enabled;
         let allow_cpu_limits = allow_new_limits && cpu_guard_exec::cpu_auto_limit_enabled_from_env();
+        let allow_mem_limits =
+            allow_new_limits && resource_guard_exec::memory_auto_limit_enabled_from_env();
+        let allow_io_limits =
+            allow_new_limits && resource_guard_exec::io_auto_limit_enabled_from_env();
+
         let cpu_out = self
             .cpu_guard
             .observe(timestamp, &host_cpu_sample, &cpu_samples, allow_cpu_limits);
@@ -795,6 +865,35 @@ impl AgentState {
             &self.cgroup_root,
             timestamp,
         );
+        let (mem_decisions, mem_actions) = self.memory_guard.observe(
+            timestamp,
+            host_mem_psi,
+            &mem_samples,
+            allow_mem_limits,
+        );
+        self.memory_guard_enforcer.execute_actions(
+            containers,
+            &mem_actions,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
+        let (io_decisions, io_actions) = self.io_guard.observe(
+            timestamp,
+            host_cpu_sample.ready,
+            &host_devices,
+            host_io_psi,
+            &io_samples,
+            allow_io_limits,
+        );
+        self.io_guard_enforcer.execute_actions(
+            containers,
+            &io_actions,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
+
         let cpu_cfg = self.cpu_guard.config().clone();
         let (cpu_guard_status_by_key, cpu_guard_alerts) = self
             .cpu_guard_enforcer
@@ -809,30 +908,34 @@ impl AgentState {
                 &self.proc_root,
                 timestamp,
             );
+        let (mem_guard_status_by_key, mem_guard_alerts) = self
+            .memory_guard_enforcer
+            .build_status_and_alerts(
+                containers,
+                &metrics_by_key,
+                &mem_decisions,
+                host_mem_psi.avg10,
+            );
+        let (io_guard_status_by_key, io_guard_alerts) = self
+            .io_guard_enforcer
+            .build_status_and_alerts(containers, &io_decisions, host_io_psi);
+
         let (containers_json, container_alerts_base_json) =
-            self.build_container_telemetry_and_alerts_with_cpu_guard(
+            self.build_container_telemetry_and_alerts_with_guards(
                 config,
                 containers,
                 timestamp,
                 &metrics_by_key,
                 &cpu_guard_status_by_key,
+                &mem_guard_status_by_key,
+                &io_guard_status_by_key,
             );
         let cpu_guard_alerts_json = format!("[{}]", cpu_guard_alerts.join(","));
-        let container_alerts_json =
-            merge_json_arrays(&container_alerts_base_json, &cpu_guard_alerts_json);
-        let (mem_decisions, mem_actions) = self.memory_guard.observe(
-            timestamp,
-            host_mem_psi,
-            &mem_samples,
-            allow_new_limits,
-        );
-        let (io_decisions, io_actions) = self.io_guard.observe(
-            timestamp,
-            host_cpu_sample.ready,
-            &host_devices,
-            host_io_psi,
-            &io_samples,
-            allow_new_limits,
+        let mem_guard_alerts_json = format!("[{}]", mem_guard_alerts.join(","));
+        let io_guard_alerts_json = format!("[{}]", io_guard_alerts.join(","));
+        let container_alerts_json = merge_json_arrays(
+            &merge_json_arrays(&container_alerts_base_json, &cpu_guard_alerts_json),
+            &merge_json_arrays(&mem_guard_alerts_json, &io_guard_alerts_json),
         );
 
         let effective_interval = interval_secs.max(1.0);
@@ -1192,10 +1295,15 @@ impl AgentState {
             }
 
             if !device_rates.is_empty() {
+                let original_limits = resource_guard_exec::read_container_io_max_map(
+                    &self.proc_root,
+                    &self.cgroup_root,
+                    c,
+                );
                 samples.push(IoContainerSample {
                     key: key.clone(),
                     device_rates,
-                    original_limits: HashMap::new(),
+                    original_limits,
                 });
             }
             next_io.insert(key, next_devs);
@@ -2286,23 +2394,28 @@ impl AgentState {
         timestamp: u64,
     ) -> (String, String) {
         let empty_metrics = HashMap::new();
-        let empty_cpu_guard = HashMap::new();
-        self.build_container_telemetry_and_alerts_with_cpu_guard(
+        let empty_guard = HashMap::new();
+        self.build_container_telemetry_and_alerts_with_guards(
             config,
             containers,
             timestamp,
             &empty_metrics,
-            &empty_cpu_guard,
+            &empty_guard,
+            &empty_guard,
+            &empty_guard,
         )
     }
 
-    fn build_container_telemetry_and_alerts_with_cpu_guard(
+    #[allow(clippy::too_many_arguments)]
+    fn build_container_telemetry_and_alerts_with_guards(
         &mut self,
         config: &Config,
         containers: &[ContainerSample],
         timestamp: u64,
         metrics_by_key: &HashMap<String, ContainerMetricsSummary>,
         cpu_guard_status_by_key: &HashMap<String, String>,
+        mem_guard_status_by_key: &HashMap<String, String>,
+        io_guard_status_by_key: &HashMap<String, String>,
     ) -> (String, String) {
         if containers.is_empty() {
             return ("[]".to_string(), "[]".to_string());
@@ -2768,13 +2881,22 @@ impl AgentState {
                 String::new()
             };
 
+            let guard_key = container_guard_key(c);
             let cpu_guard_field = cpu_guard_status_by_key
-                .get(&container_guard_key(c))
+                .get(&guard_key)
                 .map(|s| format!(",\"cpu_guard\":{s}"))
+                .unwrap_or_default();
+            let mem_guard_field = mem_guard_status_by_key
+                .get(&guard_key)
+                .map(|s| format!(",\"memory_guard\":{s}"))
+                .unwrap_or_default();
+            let io_guard_field = io_guard_status_by_key
+                .get(&guard_key)
+                .map(|s| format!(",\"io_guard\":{s}"))
                 .unwrap_or_default();
 
             let sec_json = format!(
-                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}{}{}{}}}",
+                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}{}{}{}{}{}}}",
                 abuse_json,
                 vmess_status.to_json(),
                 trojan_status.to_json(),
@@ -2787,6 +2909,8 @@ impl AgentState {
                 motd_delivery_field,
                 service_audit_field,
                 cpu_guard_field,
+                mem_guard_field,
+                io_guard_field,
             );
             security_jsons.push(sec_json);
         }
@@ -4484,12 +4608,19 @@ fn extract_container_guard_samples_and_metrics(
         };
 
         if let Some(current_bytes) = cg_current.or(pm_mem) {
+            let (original_high_bytes, container_psi) = match psi_roots {
+                Some((proc_root, cgroup_root)) => (
+                    resource_guard_exec::read_container_memory_high(proc_root, cgroup_root, c),
+                    resource_guard_exec::read_container_memory_psi(proc_root, cgroup_root, c),
+                ),
+                None => (None, PsiSample::default()),
+            };
             mem_samples.push(MemoryContainerSample {
                 key: key.clone(),
                 current_bytes,
                 max_bytes: cg_max,
-                original_high_bytes: None,
-                container_psi: PsiSample::default(),
+                original_high_bytes,
+                container_psi,
             });
         }
 
@@ -5000,6 +5131,10 @@ impl AgentState {
 
         let allow_new_limits = config.security_monitor_enabled;
         let allow_cpu_limits = allow_new_limits && cpu_guard_exec::cpu_auto_limit_enabled_from_env();
+        let allow_mem_limits =
+            allow_new_limits && resource_guard_exec::memory_auto_limit_enabled_from_env();
+        let allow_io_limits =
+            allow_new_limits && resource_guard_exec::io_auto_limit_enabled_from_env();
         let cpu_out = self
             .cpu_guard
             .observe(timestamp, &host_cpu_sample, &cpu_samples, allow_cpu_limits);
@@ -5012,14 +5147,28 @@ impl AgentState {
         );
         let (_, mem_actions) =
             self.memory_guard
-                .observe(timestamp, host_mem_psi, &mem_samples, allow_new_limits);
+                .observe(timestamp, host_mem_psi, &mem_samples, allow_mem_limits);
+        self.memory_guard_enforcer.execute_actions(
+            &containers,
+            &mem_actions,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
+        );
         let (_, io_actions) = self.io_guard.observe(
             timestamp,
             host_cpu_sample.ready,
             &host_devices,
             host_io_psi,
             &io_samples,
-            allow_new_limits,
+            allow_io_limits,
+        );
+        self.io_guard_enforcer.execute_actions(
+            &containers,
+            &io_actions,
+            &self.proc_root,
+            &self.cgroup_root,
+            timestamp,
         );
         (cpu_out.actions.len(), mem_actions.len(), io_actions.len())
     }

@@ -2,6 +2,14 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 43：修复 Rust 宿主机可疑进程扫描为空并补齐 `memory_guard` / `io_guard` 真实限额执行与告警（v2.2.5）
+
+- **修复宿主机可疑进程扫描返回空列表（`rust/crates/proc-probe/src/lib.rs`、`rust/crates/agent-core/src/lib.rs`）**：
+  - 在 `proc-probe` 新增 `collect_host_proc_snapshot_from_root` 枚举宿主机全部活动进程（保留 `collect_proc_snapshot_from_root` 对 `init_pid <= 1` 的安全拒绝），并将 `agent-core` `build_report_json_with_containers` 切换至该入口，恢复 XMRig、P2P 挂机卖带宽与恶意代理进程的宿主机级告警检测。
+- **落地 Rust 端 `memory_guard` 与 `io_guard` 真实限额执行、读回核验与告警上报（`rust/crates/agent-core/src/resource_guard_exec.rs`、`lib.rs`）**：
+  - 新增 `MemoryGuardEnforcer` 与 `IoGuardEnforcer`，在 `build_report_json_with_containers` 与 30s `sample_guards_tick` 中真实写入并读回校验 cgroup v2 `memory.high` 与 `io.max`（支持原值持久化、阶梯加严、人工修改保护与恢复还原）；
+  - 为容器填充真实 `memory.pressure` PSI、`memory.high` 与 `io.max` 原始值，并在容器 `security` 中上报 `memory_guard` / `io_guard` 状态，在 `security.alerts` 中发出 `memory_pressure_protection` 与 `io_pressure_protection` 告警。
+
 ## Phase 42：修复 Rust `agent-core` 缺失容器顶层指标、`cpu_guard` 动作未执行及单核高负载阈值缺口（v2.2.4）
 
 - **补齐 Rust `agent-core` 容器顶层资源指标（`rust/crates/agent-core/src/lib.rs`）**：
