@@ -2,6 +2,17 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 44：容器遥测字段全量对齐、Conntrack 载荷压缩与单核 `/proc` + 30s 巡检轻量化（v2.2.6）
+
+- **Conntrack 载荷压缩与 NAT 感知去重 IP 统计（`rust/crates/socket-sec/src/lib.rs`、`rust/crates/agent-core/src/lib.rs`）**：
+  - 新增 `collect_conntrack_entries`，将上报载荷中的 `security.conntrack` 压缩为摘要 `{"available":...,"count":...,"truncated":...}`（消除单次上报最多 50,000 条 conntrack 原始 JSON 造成的传输与主控 SQLite `reports` 磁盘膨胀）；
+  - 在内存中结合 `conntrack` 五元组与容器 `socket_tables` 计算每容器 `security.inbound_unique_ips`、`outbound_unique_ips` 与 `process_count`，恢复服务端多源 CC/扫段排行。
+- **容器顶层 `traffic_counters` 与 `top_cpu_process` 对齐（`rust/crates/agent-core/src/lib.rs`、`cpu_guard_exec.rs`）**：
+  - 从 `pid_metrics_json.net` 输出容器顶层 `traffic_counters`（恢复 `server/operations.py` 小时/天流量账本），并零开销复用已采样的主机 `proc_infos` 匹配每容器 `top_cpu_process`（展示实时最高 CPU 进程）。
+- **单核宿主机 `/proc` 去重与 30s `sample_guards_tick` 轻量化（`rust/crates/runtime-drivers/src/lib.rs`、`rust/crates/agent-core/src/lib.rs`）**：
+  - `build_container_telemetry_and_alerts_with_guards` 直接复用 `scoped_procs_by_pid` 构造 `service_audit` 的 `pid_ns_map`，消除一次全量 `/proc` `read_dir` 遍历；
+  - 新增 `discover_and_sample_containers_lightweight`，使 30 秒资源守卫巡检跳过全量容器 `socket_tables` 解析，`run_security_guard_cycles` 仅对实际被调度的容器按需延迟采集。
+
 ## Phase 43：修复 Rust 宿主机可疑进程扫描为空并补齐 `memory_guard` / `io_guard` 真实限额执行与告警（v2.2.5）
 
 - **修复宿主机可疑进程扫描返回空列表（`rust/crates/proc-probe/src/lib.rs`、`rust/crates/agent-core/src/lib.rs`）**：

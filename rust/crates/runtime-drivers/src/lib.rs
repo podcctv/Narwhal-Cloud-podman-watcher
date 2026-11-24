@@ -885,7 +885,7 @@ pub fn resolve_cgroup_dir_from_proc(
     None
 }
 
-fn enrich_sample(sample: &mut ContainerSample) {
+fn enrich_sample(sample: &mut ContainerSample, include_sockets: bool) {
     let Some(pid) = sample.pid else {
         return;
     };
@@ -893,7 +893,9 @@ fn enrich_sample(sample: &mut ContainerSample) {
         return;
     }
     sample.pid_metrics_json = Some(proc_probe::collect_pid_metrics(pid));
-    sample.socket_tables_json = Some(socket_sec::collect_socket_tables(pid));
+    if include_sockets {
+        sample.socket_tables_json = Some(socket_sec::collect_socket_tables(pid));
+    }
     if let Some(cg_dir) =
         resolve_cgroup_dir_from_proc(Path::new("/proc"), Path::new("/sys/fs/cgroup"), pid)
     {
@@ -925,21 +927,21 @@ fn parse_enabled_runtimes(runtimes_cfg: &str) -> BTreeSet<String> {
 
 const MAX_ENRICH_THREADS: usize = 4;
 
-fn enrich_sample_with_oci_fallback(sample: &mut ContainerSample) {
+fn enrich_sample_with_oci_fallback(sample: &mut ContainerSample, include_sockets: bool) {
     if sample.pid.is_none()
         && (sample.runtime == "podman" || sample.runtime == "docker")
         && !sample.runtime_bin.is_empty()
     {
         sample.pid = inspect_oci_pid(&sample.runtime_bin, &sample.id);
     }
-    enrich_sample(sample);
+    enrich_sample(sample, include_sockets);
 }
 
-fn enrich_samples_parallel(samples: &mut [ContainerSample]) {
+fn enrich_samples_parallel(samples: &mut [ContainerSample], include_sockets: bool) {
     let n = samples.len();
     if n <= 1 {
         for item in samples {
-            enrich_sample_with_oci_fallback(item);
+            enrich_sample_with_oci_fallback(item, include_sockets);
         }
         return;
     }
@@ -950,7 +952,7 @@ fn enrich_samples_parallel(samples: &mut [ContainerSample]) {
         for chunk in samples.chunks_mut(chunk_size) {
             scope.spawn(move || {
                 for item in chunk {
-                    enrich_sample_with_oci_fallback(item);
+                    enrich_sample_with_oci_fallback(item, include_sockets);
                 }
             });
         }
@@ -958,6 +960,17 @@ fn enrich_samples_parallel(samples: &mut [ContainerSample]) {
 }
 
 pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample> {
+    discover_and_sample_containers_inner(runtimes_cfg, true)
+}
+
+pub fn discover_and_sample_containers_lightweight(runtimes_cfg: &str) -> Vec<ContainerSample> {
+    discover_and_sample_containers_inner(runtimes_cfg, false)
+}
+
+fn discover_and_sample_containers_inner(
+    runtimes_cfg: &str,
+    include_sockets: bool,
+) -> Vec<ContainerSample> {
     let enabled = parse_enabled_runtimes(runtimes_cfg);
     let mut all = Vec::new();
 
@@ -1019,7 +1032,7 @@ pub fn discover_and_sample_containers(runtimes_cfg: &str) -> Vec<ContainerSample
         }
     }
 
-    enrich_samples_parallel(&mut all);
+    enrich_samples_parallel(&mut all, include_sockets);
     all
 }
 
@@ -1285,7 +1298,7 @@ mod tests {
             })
             .collect();
 
-        enrich_samples_parallel(&mut samples);
+        enrich_samples_parallel(&mut samples, true);
 
         assert_eq!(samples.len(), 6);
         for (i, s) in samples.iter().enumerate() {

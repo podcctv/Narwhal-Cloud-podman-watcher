@@ -340,14 +340,19 @@ pub fn parse_conntrack_line(line: &str) -> Option<ConntrackEntry> {
     })
 }
 
-pub fn collect_conntrack(path: &str, max_lines: usize) -> String {
+pub fn collect_conntrack_entries(
+    path: &str,
+    max_lines: usize,
+) -> (bool, Vec<ConntrackEntry>, bool) {
     let Ok(file) = fs::File::open(path) else {
-        return "{\"available\":false,\"entries\":[]}".to_string();
+        return (false, Vec::new(), false);
     };
     let reader = BufReader::new(file);
     let mut entries: Vec<ConntrackEntry> = Vec::new();
+    let mut non_empty_count = 0usize;
+    let mut truncated = false;
 
-    for line_res in reader.lines().take(max_lines) {
+    for line_res in reader.lines() {
         let Ok(line) = line_res else {
             break;
         };
@@ -355,9 +360,23 @@ pub fn collect_conntrack(path: &str, max_lines: usize) -> String {
         if trimmed.is_empty() {
             continue;
         }
+        non_empty_count += 1;
+        if non_empty_count > max_lines {
+            truncated = true;
+            break;
+        }
         if let Some(entry) = parse_conntrack_line(trimmed) {
             entries.push(entry);
         }
+    }
+
+    (true, entries, truncated)
+}
+
+pub fn collect_conntrack(path: &str, max_lines: usize) -> String {
+    let (available, entries, _) = collect_conntrack_entries(path, max_lines);
+    if !available {
+        return "{\"available\":false,\"entries\":[]}".to_string();
     }
 
     let mut out = String::with_capacity(64 + entries.len() * 192);
@@ -485,6 +504,18 @@ mod tests {
         assert!(json.contains("\"proto\":\"tcp\",\"state\":\"ESTABLISHED\",\"src\":\"203.0.113.5\",\"dst\":\"10.0.0.2\",\"sport\":51234,\"dport\":443"));
         assert!(json.contains("\"proto\":\"udp\",\"state\":\"\",\"src\":\"198.51.100.9\",\"dst\":\"10.0.0.2\",\"sport\":40000,\"dport\":53"));
         assert!(json.contains("\"unreplied\":true"));
+
+        let (avail_all, entries_all, trunc_false) =
+            collect_conntrack_entries(path.to_str().unwrap(), 10);
+        assert!(avail_all);
+        assert!(!trunc_false);
+        assert_eq!(entries_all.len(), 2);
+
+        let (avail_lim, entries_lim, trunc_true) =
+            collect_conntrack_entries(path.to_str().unwrap(), 1);
+        assert!(avail_lim);
+        assert!(trunc_true);
+        assert_eq!(entries_lim.len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
     }

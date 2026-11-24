@@ -1587,3 +1587,102 @@ fn test_build_report_json_emits_memory_and_io_guard_status_and_alerts() {
 
     let _ = fs::remove_dir_all(&base);
 }
+
+#[test]
+fn test_report_emits_compact_conntrack_unique_ips_traffic_counters_and_top_cpu_process() {
+    let base = std::env::temp_dir().join(format!("narwhal_batch2_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let proc_root = base.join("proc");
+    let p_sb = proc_root.join("5151");
+    fs::create_dir_all(proc_root.join("pressure")).unwrap();
+    fs::create_dir_all(&p_sb).unwrap();
+
+    fs::write(proc_root.join("uptime"), "600.00 100.00\n").unwrap();
+    fs::write(proc_root.join("stat"), "cpu  1000 0 100 8000 0 0 0 0 0 0\n").unwrap();
+    fs::write(proc_root.join("loadavg"), "1.00 1.00 1.00 1/50 5151\n").unwrap();
+    for res in ["cpu", "memory", "io"] {
+        fs::write(
+            proc_root.join("pressure").join(res),
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        p_sb.join("status"),
+        "Name:\tsing-box\nState:\tR (running)\nPid:\t5151\nPPid:\t1\nUid:\t0\t0\nVmRSS:\t32768 kB\n",
+    )
+    .unwrap();
+    fs::write(p_sb.join("comm"), "sing-box\n").unwrap();
+    fs::write(p_sb.join("cmdline"), "sing-box\0run\0-c\0/etc/sb.json\0").unwrap();
+    fs::write(
+        p_sb.join("stat"),
+        "5151 (sing-box) R 1 5151 5151 0 -1 0 0 0 0 0 40000 0 0 0 20 0 1 0 100 0 0",
+    )
+    .unwrap();
+
+    let conntrack_path = base.join("nf_conntrack");
+    fs::write(
+        &conntrack_path,
+        concat!(
+            "ipv4     2 tcp      6 431999 ESTABLISHED src=1.2.3.4 dst=10.91.16.9 sport=51234 dport=443 packets=12 bytes=1024 src=10.91.16.9 dst=1.2.3.4 sport=443 dport=51234 packets=10 bytes=2048 [ASSURED] mark=0\n",
+            "ipv4     2 tcp      6 431999 ESTABLISHED src=5.6.7.8 dst=10.91.16.9 sport=51235 dport=443 packets=12 bytes=1024 src=10.91.16.9 dst=5.6.7.8 sport=443 dport=51235 packets=10 bytes=2048 [ASSURED] mark=0\n",
+            "ipv4     2 tcp      6 431999 ESTABLISHED src=10.91.16.9 dst=9.9.9.9 sport=40000 dport=53 packets=5 bytes=256 src=9.9.9.9 dst=10.91.16.9 sport=53 dport=40000 packets=5 bytes=256 [ASSURED] mark=0\n",
+        ),
+    )
+    .unwrap();
+
+    let cfg = Config {
+        host_id: "h-batch2".to_string(),
+        node_id: "n-batch2".to_string(),
+        security_monitor_enabled: true,
+        ..Config::default()
+    };
+    let mut state = AgentState::with_paths(&cfg, proc_root.clone(), conntrack_path);
+    let vm_id = "4a4c84c1-2c2a-4793-93c6-12160fcca350";
+    let containers = vec![ContainerSample {
+        id: vm_id.to_string(),
+        stable_id: vm_id.to_string(),
+        name: vm_id.to_string(),
+        image: "alpine".to_string(),
+        runtime: "runman".to_string(),
+        runtime_bin: "runman".to_string(),
+        project: "default".to_string(),
+        pid: Some(5151),
+        status: "running".to_string(),
+        instance_id: vm_id.to_string(),
+        network_addresses: vec!["10.91.16.9/24".to_string()],
+        pid_metrics_json: Some(
+            r#"{"available":true,"mem_bytes":33554432,"net":{"rx_bytes":12345,"tx_bytes":67890,"rx_packets":10,"tx_packets":20}}"#
+                .to_string(),
+        ),
+        socket_tables_json: Some(
+            r#"{"available":true,"tcp_established":3,"tcp_time_wait":0,"syn_sent_count":0,"syn_recv_count":0,"udp_sockets":0,"listening_ports":[443],"udp_listening_ports":[]}"#
+                .to_string(),
+        ),
+        cgroup_metrics_json: None,
+    }];
+
+    let report = state.build_report_json_with_containers(&cfg, 1_700_000_000, &containers);
+    assert!(
+        report.contains("\"conntrack\":{\"available\":true,\"count\":3,\"truncated\":false}"),
+        "expected compact conntrack summary: {report}"
+    );
+    assert!(!report.contains("\"entries\":[{\"proto\""), "raw conntrack entries should not be embedded");
+    assert!(report.contains("\"inbound_unique_ips\":2"), "expected inbound_unique_ips=2: {report}");
+    assert!(report.contains("\"outbound_unique_ips\":1"), "expected outbound_unique_ips=1: {report}");
+    assert!(report.contains("\"process_count\":1"), "expected process_count=1: {report}");
+    assert!(
+        report.contains(&format!("\"traffic_counters\":{{\"available\":true,\"rx\":12345,\"tx\":67890,\"epoch\":\"{vm_id}\"}}")),
+        "expected traffic_counters: {report}"
+    );
+    assert!(
+        report.contains("\"top_cpu_process\":{\"pid\":5151,"),
+        "expected top_cpu_process pid=5151: {report}"
+    );
+    assert!(
+        report.contains("\"process\":\"sing-box\""),
+        "expected top_cpu_process sing-box: {report}"
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}

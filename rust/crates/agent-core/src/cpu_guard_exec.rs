@@ -26,6 +26,14 @@ pub(crate) struct ContainerMetricsSummary {
     pub net_rx_bps: f64,
     pub net_tx_bps: f64,
     pub conn_count: u64,
+    pub traffic_counters_available: bool,
+    pub traffic_rx_bytes: u64,
+    pub traffic_tx_bytes: u64,
+    pub traffic_epoch: String,
+    pub top_cpu_pid: u32,
+    pub top_cpu_percent: f64,
+    pub top_cpu_process: String,
+    pub top_cpu_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

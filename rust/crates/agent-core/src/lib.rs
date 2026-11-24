@@ -41,8 +41,10 @@ use host_metrics::{
 };
 use net_probe::is_allowed_host;
 use proc_probe::{collect_host_proc_snapshot_from_root, json_escape};
-use runtime_drivers::{discover_and_sample_containers, ContainerSample};
-use socket_sec::collect_conntrack;
+use runtime_drivers::{
+    discover_and_sample_containers, discover_and_sample_containers_lightweight, ContainerSample,
+};
+use socket_sec::{collect_conntrack_entries, ConntrackEntry};
 use transport::{TransportClient, TransportConfig, TransportError};
 
 pub const DEFAULT_ENV_FILE: &str = "/opt/narwhal-monitor/client.env";
@@ -819,10 +821,17 @@ impl AgentState {
 
         let host_metrics_json = collect_host_metrics(&self.proc_root);
         let psi_snapshot_json = collect_psi_snapshot(&self.proc_root, None);
-        let conntrack_json =
-            collect_conntrack(&self.conntrack_path.to_string_lossy(), 50_000);
+        let (ct_available, ct_entries, ct_truncated) =
+            collect_conntrack_entries(&self.conntrack_path.to_string_lossy(), 50_000);
+        let conntrack_json = format!(
+            "{{\"available\":{},\"count\":{},\"truncated\":{}}}",
+            ct_available,
+            ct_entries.len(),
+            ct_truncated,
+        );
         let proc_snapshot_json =
             collect_host_proc_snapshot_from_root(&self.proc_root, 20_000, 100.0);
+        let proc_infos = extract_proc_infos_from_snapshot(&proc_snapshot_json);
 
         let host_cpu_sample = self.sample_host_cpu();
         let host_mem_psi = read_psi_sample(&self.proc_root.join("pressure").join("memory"));
@@ -841,11 +850,14 @@ impl AgentState {
         let io_samples = self.extract_container_io_samples(containers, dt);
         let ((total_rx_bps, total_tx_bps, total_rx_pps, total_tx_pps), per_container_net) =
             self.compute_container_net_rates_with_per_container(containers, dt);
-        for (key, (rx_bps, tx_bps)) in per_container_net {
-            if let Some(m) = metrics_by_key.get_mut(&key) {
-                m.net_rx_bps = rx_bps;
-                m.net_tx_bps = tx_bps;
-            }
+        for (key, (rx_bps, tx_bps, tc_avail, tc_rx, tc_tx, tc_epoch)) in per_container_net {
+            let m = metrics_by_key.entry(key).or_default();
+            m.net_rx_bps = rx_bps;
+            m.net_tx_bps = tx_bps;
+            m.traffic_counters_available = tc_avail;
+            m.traffic_rx_bytes = tc_rx;
+            m.traffic_tx_bytes = tc_tx;
+            m.traffic_epoch = tc_epoch;
         }
 
         let allow_new_limits = config.security_monitor_enabled;
@@ -925,10 +937,12 @@ impl AgentState {
                 config,
                 containers,
                 timestamp,
-                &metrics_by_key,
+                &mut metrics_by_key,
                 &cpu_guard_status_by_key,
                 &mem_guard_status_by_key,
                 &io_guard_status_by_key,
+                &ct_entries,
+                &proc_infos,
             );
         let cpu_guard_alerts_json = format!("[{}]", cpu_guard_alerts.join(","));
         let mem_guard_alerts_json = format!("[{}]", mem_guard_alerts.join(","));
@@ -949,7 +963,6 @@ impl AgentState {
         let access_log_json = access_stats.to_json();
         let access_sources_json = access_stats.to_sources_json();
         let suspicious_findings = if config.security_monitor_enabled {
-            let proc_infos = extract_proc_infos_from_snapshot(&proc_snapshot_json);
             detect_suspicious_processes(&proc_infos)
         } else {
             Vec::new()
@@ -1325,14 +1338,17 @@ impl AgentState {
         &mut self,
         containers: &[ContainerSample],
         dt: Option<f64>,
-    ) -> ((f64, f64, f64, f64), HashMap<String, (f64, f64)>) {
+    ) -> (
+        (f64, f64, f64, f64),
+        HashMap<String, (f64, f64, bool, u64, u64, String)>,
+    ) {
         let mut total_rx_bps = 0.0;
         let mut total_tx_bps = 0.0;
         let mut total_rx_pps = 0.0;
         let mut total_tx_pps = 0.0;
         let mut next_net: HashMap<String, (u64, u64, u64, u64)> =
             HashMap::with_capacity(containers.len());
-        let mut per_container_rates: HashMap<String, (f64, f64)> =
+        let mut per_container_rates: HashMap<String, (f64, f64, bool, u64, u64, String)> =
             HashMap::with_capacity(containers.len());
         let mut traffic_samples = Vec::with_capacity(containers.len());
 
@@ -1368,9 +1384,26 @@ impl AgentState {
                     total_tx_pps += tx_packets.saturating_sub(p_tp) as f64 / dt_secs;
                     net_rx_bps = Some(c_rx_bps);
                     net_tx_bps = Some(c_tx_bps);
-                    per_container_rates.insert(key.clone(), (c_rx_bps, c_tx_bps));
                 }
             }
+            let epoch = if !c.instance_id.is_empty() {
+                c.instance_id.clone()
+            } else if let Some(p) = c.pid {
+                format!("pid-{p}")
+            } else {
+                c.id.clone()
+            };
+            per_container_rates.insert(
+                key.clone(),
+                (
+                    net_rx_bps.unwrap_or(0.0),
+                    net_tx_bps.unwrap_or(0.0),
+                    true,
+                    rx_bytes,
+                    tx_bytes,
+                    epoch,
+                ),
+            );
             traffic_samples.push(tc_guard::TrafficSampleInput {
                 runtime: c.runtime.clone(),
                 project: c.project.clone(),
@@ -1760,7 +1793,7 @@ fn serialize_containers_with_security_json(
 
         let _ = write!(
             out,
-            "{{\"id\":\"{}\",\"stable_id\":\"{}\",\"name\":\"{}\",\"image\":\"{}\",\"runtime\":\"{}\",\"runtime_bin\":\"{}\",\"project\":\"{}\",\"pid\":{},\"status\":\"{}\",\"instance_id\":\"{}\",\"network_addresses\":{},\"cpu_percent\":{:.2},\"cpu_effective_cpus\":{:.3},\"mem_bytes\":{},\"mem_limit_bytes\":{},\"mem_percent\":{:.2},\"net_rx_bps\":{:.2},\"net_tx_bps\":{:.2},\"conn_count\":{}",
+            "{{\"id\":\"{}\",\"stable_id\":\"{}\",\"name\":\"{}\",\"image\":\"{}\",\"runtime\":\"{}\",\"runtime_bin\":\"{}\",\"project\":\"{}\",\"pid\":{},\"status\":\"{}\",\"instance_id\":\"{}\",\"network_addresses\":{},\"cpu_percent\":{:.2},\"cpu_effective_cpus\":{:.3},\"mem_bytes\":{},\"mem_limit_bytes\":{},\"mem_percent\":{:.2},\"net_rx_bps\":{:.2},\"net_tx_bps\":{:.2},\"conn_count\":{},\"traffic_counters\":{{\"available\":{},\"rx\":{},\"tx\":{},\"epoch\":\"{}\"}}",
             json_escape(&c.id),
             json_escape(&c.stable_id),
             json_escape(&c.name),
@@ -1780,7 +1813,23 @@ fn serialize_containers_with_security_json(
             m.net_rx_bps,
             m.net_tx_bps,
             m.conn_count,
+            m.traffic_counters_available,
+            m.traffic_rx_bytes,
+            m.traffic_tx_bytes,
+            json_escape(&m.traffic_epoch),
         );
+        if m.top_cpu_pid > 0 {
+            let _ = write!(
+                out,
+                ",\"top_cpu_process\":{{\"pid\":{},\"cpu_percent\":{:.2},\"process\":\"{}\",\"command\":\"{}\"}}",
+                m.top_cpu_pid,
+                m.top_cpu_percent,
+                json_escape(&m.top_cpu_process),
+                json_escape(&m.top_cpu_command),
+            );
+        } else {
+            out.push_str(",\"top_cpu_process\":{}");
+        }
         if let Some(ref pid_metrics) = c.pid_metrics_json {
             let _ = write!(out, ",\"pid_metrics\":{pid_metrics}");
         }
@@ -2386,6 +2435,125 @@ impl net_guard::IsolationDriver for LiveIsolationDriver {
     }
 }
 
+fn is_public_or_non_loopback_ip(ip: &str) -> bool {
+    let clean = ip.trim().split('/').next().unwrap_or("").trim();
+    if clean.is_empty()
+        || clean == "0.0.0.0"
+        || clean == "::"
+        || clean == "::1"
+        || clean.starts_with("127.")
+    {
+        return false;
+    }
+    true
+}
+
+fn compute_container_unique_ips(
+    c: &ContainerSample,
+    conntrack_entries: &[ConntrackEntry],
+) -> (usize, usize) {
+    use std::collections::HashSet;
+
+    let container_ips: HashSet<&str> = c
+        .network_addresses
+        .iter()
+        .filter_map(|raw| raw.trim().split('/').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut inbound_ips: HashSet<String> = HashSet::new();
+    let mut outbound_ips: HashSet<String> = HashSet::new();
+
+    if !container_ips.is_empty() && !conntrack_entries.is_empty() {
+        for e in conntrack_entries {
+            let src = e.src.trim();
+            let dst = e.dst.trim();
+            let reply_src = e.reply_src.trim();
+            if (container_ips.contains(dst) || container_ips.contains(reply_src))
+                && is_public_or_non_loopback_ip(src)
+                && !container_ips.contains(src)
+            {
+                inbound_ips.insert(src.to_string());
+            } else if container_ips.contains(src)
+                && is_public_or_non_loopback_ip(dst)
+                && !container_ips.contains(dst)
+            {
+                outbound_ips.insert(dst.to_string());
+            }
+        }
+    }
+
+    if let Some(ref raw) = c.socket_tables_json {
+        if let Ok(st) = actions::parse_json(raw) {
+            let mut tcp_listen: HashSet<u64> = HashSet::new();
+            if let Some(arr) = st.get("listening_ports").and_then(|v| v.as_array()) {
+                for v in arr {
+                    if let Some(p) = v.as_u64() {
+                        tcp_listen.insert(p);
+                    }
+                }
+            }
+            let mut udp_listen: HashSet<u64> = HashSet::new();
+            if let Some(arr) = st.get("udp_listening_ports").and_then(|v| v.as_array()) {
+                for v in arr {
+                    if let Some(p) = v.as_u64() {
+                        udp_listen.insert(p);
+                    }
+                }
+            }
+
+            let conntrack_had_inbound = !inbound_ips.is_empty();
+            let conntrack_had_outbound = !outbound_ips.is_empty();
+
+            if let Some(arr) = st.get("tcp_entries").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    let state = entry.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                    if state == "0A" {
+                        continue;
+                    }
+                    let remote_ip = entry.get("remote_ip").and_then(|v| v.as_str()).unwrap_or("");
+                    if !is_public_or_non_loopback_ip(remote_ip) || container_ips.contains(remote_ip)
+                    {
+                        continue;
+                    }
+                    let local_port = entry.get("local_port").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if state == "03" || (local_port > 0 && tcp_listen.contains(&local_port)) {
+                        if !conntrack_had_inbound {
+                            inbound_ips.insert(remote_ip.to_string());
+                        }
+                    } else if !conntrack_had_outbound {
+                        outbound_ips.insert(remote_ip.to_string());
+                    }
+                }
+            }
+            if let Some(arr) = st.get("udp_entries").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    let remote_port = entry.get("remote_port").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if remote_port == 0 {
+                        continue;
+                    }
+                    let remote_ip = entry.get("remote_ip").and_then(|v| v.as_str()).unwrap_or("");
+                    if !is_public_or_non_loopback_ip(remote_ip) || container_ips.contains(remote_ip)
+                    {
+                        continue;
+                    }
+                    let local_port = entry.get("local_port").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if local_port > 0 && udp_listen.contains(&local_port) {
+                        if !conntrack_had_inbound {
+                            inbound_ips.insert(remote_ip.to_string());
+                        }
+                    } else if !conntrack_had_outbound {
+                        outbound_ips.insert(remote_ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    (inbound_ips.len(), outbound_ips.len())
+}
+
 impl AgentState {
     pub fn build_container_telemetry_and_alerts(
         &mut self,
@@ -2393,16 +2561,18 @@ impl AgentState {
         containers: &[ContainerSample],
         timestamp: u64,
     ) -> (String, String) {
-        let empty_metrics = HashMap::new();
+        let mut empty_metrics = HashMap::new();
         let empty_guard = HashMap::new();
         self.build_container_telemetry_and_alerts_with_guards(
             config,
             containers,
             timestamp,
-            &empty_metrics,
+            &mut empty_metrics,
             &empty_guard,
             &empty_guard,
             &empty_guard,
+            &[],
+            &[],
         )
     }
 
@@ -2412,10 +2582,12 @@ impl AgentState {
         config: &Config,
         containers: &[ContainerSample],
         timestamp: u64,
-        metrics_by_key: &HashMap<String, ContainerMetricsSummary>,
+        metrics_by_key: &mut HashMap<String, ContainerMetricsSummary>,
         cpu_guard_status_by_key: &HashMap<String, String>,
         mem_guard_status_by_key: &HashMap<String, String>,
         io_guard_status_by_key: &HashMap<String, String>,
+        conntrack_entries: &[ConntrackEntry],
+        proc_infos: &[ProcInfo],
     ) -> (String, String) {
         if containers.is_empty() {
             return ("[]".to_string(), "[]".to_string());
@@ -2432,7 +2604,6 @@ impl AgentState {
 
         let mut security_jsons = Vec::with_capacity(containers.len());
         let mut alert_jsons: Vec<String> = Vec::new();
-        let pid_ns_map = service_audit::collect_pid_ns_map(&self.proc_root);
         let batch_init_pids: Vec<u32> = containers
             .iter()
             .filter_map(|c| c.pid.filter(|&p| p > 1))
@@ -2443,6 +2614,17 @@ impl AgentState {
             abuse_guard::scoped_host_processes_batch(&batch_init_pids, &self.proc_root, 20_000)
                 .unwrap_or_default()
         };
+        let mut pid_ns_map: HashMap<String, Vec<u32>> = HashMap::new();
+        for &init_pid in &batch_init_pids {
+            if let Ok(ns) = fs::read_link(self.proc_root.join(init_pid.to_string()).join("ns").join("pid")) {
+                let host_pids: Vec<u32> = scoped_procs_by_pid
+                    .get(&init_pid)
+                    .and_then(|r| r.as_ref().ok())
+                    .map(|list| list.iter().map(|p| p.host_pid).collect())
+                    .unwrap_or_else(|| vec![init_pid]);
+                pid_ns_map.insert(ns.to_string_lossy().into_owned(), host_pids);
+            }
+        }
 
         for c in containers {
             let rt = c.runtime.trim().to_ascii_lowercase();
@@ -2882,6 +3064,48 @@ impl AgentState {
             };
 
             let guard_key = container_guard_key(c);
+            let process_count = if !scoped_procs.is_empty() {
+                scoped_procs.len()
+            } else if let Some(cpid) = c.pid {
+                proc_infos.iter().filter(|p| p.pid == cpid).count()
+            } else {
+                0
+            };
+            if !proc_infos.is_empty() {
+                let best_proc = if !scoped_procs.is_empty() {
+                    let host_pid_set: std::collections::HashSet<u32> =
+                        scoped_procs.iter().map(|sp| sp.host_pid).collect();
+                    proc_infos
+                        .iter()
+                        .filter(|pi| host_pid_set.contains(&pi.pid))
+                        .max_by(|a, b| {
+                            a.cpu_percent
+                                .partial_cmp(&b.cpu_percent)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                } else if let Some(cpid) = c.pid {
+                    proc_infos
+                        .iter()
+                        .filter(|pi| pi.pid == cpid)
+                        .max_by(|a, b| {
+                            a.cpu_percent
+                                .partial_cmp(&b.cpu_percent)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                } else {
+                    None
+                };
+                if let Some(top) = best_proc {
+                    let m = metrics_by_key.entry(guard_key.clone()).or_default();
+                    m.top_cpu_pid = top.pid;
+                    m.top_cpu_percent = top.cpu_percent;
+                    m.top_cpu_process = top.process.clone();
+                    m.top_cpu_command = top.command.clone();
+                }
+            }
+            let (inbound_unique_ips, outbound_unique_ips) =
+                compute_container_unique_ips(c, conntrack_entries);
+
             let cpu_guard_field = cpu_guard_status_by_key
                 .get(&guard_key)
                 .map(|s| format!(",\"cpu_guard\":{s}"))
@@ -2896,7 +3120,10 @@ impl AgentState {
                 .unwrap_or_default();
 
             let sec_json = format!(
-                "{{\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}{}{}{}{}{}}}",
+                "{{\"process_count\":{},\"inbound_unique_ips\":{},\"outbound_unique_ips\":{},\"abuse_guard\":{},\"vmess_guard\":{},\"trojan_guard\":{}{},\"sensitive_file_events\":{},\"microburst\":{},\"udp_blackhole\":{},\"anti_spoof\":{}{}{}{}{}{}{}}}",
+                process_count,
+                inbound_unique_ips,
+                outbound_unique_ips,
                 abuse_json,
                 vmess_status.to_json(),
                 trojan_status.to_json(),
@@ -3009,12 +3236,24 @@ impl AgentState {
                             let sockets = sample_by_key
                                 .get(&(t.runtime.clone(), t.project.clone(), t.name.clone()))
                                 .map(|s| {
-                                    extract_live_listeners_and_sockets_with_procs(
-                                        s,
-                                        &proc_root,
-                                        &scoped,
-                                    )
-                                    .2
+                                    if s.socket_tables_json.is_some() {
+                                        extract_live_listeners_and_sockets_with_procs(
+                                            s,
+                                            &proc_root,
+                                            &scoped,
+                                        )
+                                        .2
+                                    } else {
+                                        let mut enriched = s.clone();
+                                        enriched.socket_tables_json =
+                                            Some(socket_sec::collect_socket_tables(pid));
+                                        extract_live_listeners_and_sockets_with_procs(
+                                            &enriched,
+                                            &proc_root,
+                                            &scoped,
+                                        )
+                                        .2
+                                    }
                                 })
                                 .unwrap_or_default();
                             let procs = abuse_guard::collect_host(
@@ -4692,9 +4931,8 @@ fn extract_container_guard_samples_and_metrics(
                 mem_bytes,
                 mem_limit_bytes,
                 mem_percent,
-                net_rx_bps: 0.0,
-                net_tx_bps: 0.0,
                 conn_count,
+                ..ContainerMetricsSummary::default()
             },
         );
 
@@ -5116,7 +5354,7 @@ impl AgentState {
         let host_mem_psi = read_psi_sample(&self.proc_root.join("pressure").join("memory"));
         let host_io_psi = read_psi_sample(&self.proc_root.join("pressure").join("io"))
             .effective_avg();
-        let containers = discover_and_sample_containers(&config.container_runtimes);
+        let containers = discover_and_sample_containers_lightweight(&config.container_runtimes);
         let (mem_samples, cpu_samples, _) = extract_container_guard_samples_and_metrics(
             &mut self.prev_container_cpu,
             &containers,
