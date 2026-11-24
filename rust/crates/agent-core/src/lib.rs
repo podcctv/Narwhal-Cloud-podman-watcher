@@ -463,6 +463,7 @@ pub struct AgentState {
     disallowed_protocols: Option<Vec<String>>,
     last_bandwidth_reconcile_ts: u64,
     last_bandwidth_revision: i64,
+    last_managed_upgrade_check: Option<(u64, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,6 +609,7 @@ impl AgentState {
             disallowed_protocols: None,
             last_bandwidth_reconcile_ts: 0,
             last_bandwidth_revision: -1,
+            last_managed_upgrade_check: None,
         }
     }
 
@@ -850,6 +852,14 @@ impl AgentState {
         };
         let ops_arch = normalize_arch(std::env::consts::ARCH);
         let upgrade_result_json = read_managed_upgrade_result_json(Path::new(MANAGED_UPDATE_RESULT_FILE));
+        let managed_upgrade = match self.last_managed_upgrade_check {
+            Some((prev_ts, cached)) if timestamp.saturating_sub(prev_ts) < 60 => cached,
+            _ => {
+                let avail = managed_upgrade_available(Path::new("/opt/narwhal-monitor"));
+                self.last_managed_upgrade_check = Some((timestamp, avail));
+                avail
+            }
+        };
         let auto_update_json = collect_auto_update_status_json(Path::new("/opt/narwhal-monitor"));
         let ops_services_json = probe_operations_services_json(&self.operations_services, timestamp);
         let ops_disk_cleanup_json = self.build_disk_cleanup_summary_json(timestamp);
@@ -871,7 +881,7 @@ impl AgentState {
         let mut out = String::with_capacity(8192);
         let _ = write!(
             out,
-            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"manual_bandwidth_limits\":{}{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"disk_cleanup\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"auto_update\":{},\"capabilities\":{},\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
+            "{{\"host_id\":\"{}\",\"node_id\":\"{}\",\"client_config\":{{\"host_id\":\"{}\",\"report_interval\":{},\"action_poll_interval\":{},\"container_runtimes\":\"{}\",\"docker_monitor_mode\":\"{}\",\"incus_project\":\"{}\",\"security_monitor_enabled\":{}}},\"agent_version\":\"{}\",\"timestamp\":{},\"container_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"podman_network\":{{\"ipv4_ok\":{},\"ipv6_ok\":{}}},\"containers\":{},\"security\":{{\"enabled\":{},\"interval_seconds\":{:.3},\"total_rx_bps\":{:.3},\"total_tx_bps\":{:.3},\"total_rx_pps\":{:.3},\"total_tx_pps\":{:.3},\"syn_recv_count\":{},\"access_log\":{},\"access_sources\":{},\"alerts\":{},\"suspicious_processes\":{},\"socket_abuse\":{},\"rfw_service_health\":{},\"host_firewall\":{},\"host_audit\":{},\"manual_bandwidth_limits\":{}{},\"conntrack\":{},\"psi_snapshot\":{},\"cpu_guard\":{{\"multi_container_contention\":{},\"decisions\":{},\"actions\":{}}},\"memory_guard\":{{\"decisions\":{},\"actions\":{}}},\"io_guard\":{{\"decisions\":{},\"actions\":{}}}}},\"operations\":{{\"host_metrics\":{},\"psi_snapshot\":{},\"proc_snapshot\":{},\"health\":{},\"runtime_inventory\":{},\"services\":{},\"disk_cleanup\":{},\"architecture\":\"{}\",\"interval_seconds\":{:.3},\"upgrade_result\":{},\"managed_upgrade\":{},\"auto_update\":{},\"capabilities\":{},\"schema_version\":1,\"guard_actions\":{{\"cpu\":{},\"memory\":{},\"io\":{}}}}}}}",
             json_escape(&config.host_id),
             json_escape(&config.node_id),
             json_escape(&config.host_id),
@@ -924,6 +934,7 @@ impl AgentState {
             json_escape(ops_arch),
             effective_interval,
             upgrade_result_json,
+            managed_upgrade,
             auto_update_json,
             ops_capabilities_json,
             cpu_out.actions.len(),
@@ -1389,6 +1400,85 @@ fn collect_rfw_service_health_json(
             reason
         )
     }
+}
+
+pub fn command_in_path(name: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            if dir.join(format!("{name}.exe")).is_file() {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+pub fn managed_upgrade_available(base_dir: &Path) -> bool {
+    managed_upgrade_available_with_cmd_check(base_dir, command_in_path)
+}
+
+pub fn managed_upgrade_available_with_cmd_check<F>(base_dir: &Path, has_cmd: F) -> bool
+where
+    F: Fn(&str) -> bool,
+{
+    let script = base_dir.join("managed-client-update.sh");
+    let config = base_dir.join("client-auto-update.env");
+    if !script.is_file() || !has_cmd("systemd-run") || !config.is_file() {
+        return false;
+    }
+    let Ok(raw_env) = fs::read_to_string(&config) else {
+        return false;
+    };
+    let mut mode = String::from("git");
+    let mut repo_value = String::new();
+    for line in raw_env.lines() {
+        let trimmed = line.trim();
+        if let Some(v) = trimmed.strip_prefix("AUTO_UPDATE_MODE=") {
+            mode = v.trim().trim_matches('"').trim_matches('\'').to_string();
+        } else if let Some(v) = trimmed.strip_prefix("AUTO_UPDATE_REPO_DIR=") {
+            repo_value = v.trim().trim_matches('"').trim_matches('\'').to_string();
+        }
+    }
+    if mode == "archive" {
+        return base_dir.join("update_archive.py").is_file() && has_cmd("python3");
+    }
+    if mode != "git" || !has_cmd("git") {
+        return false;
+    }
+    let repo = Path::new(&repo_value);
+    if !repo.is_absolute() || !repo.join(".git").is_dir() {
+        return false;
+    }
+    let Ok(dirty) = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain"])
+        .output()
+    else {
+        return false;
+    };
+    if !dirty.status.success() || !String::from_utf8_lossy(&dirty.stdout).trim().is_empty() {
+        return false;
+    }
+    let Ok(origin) = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["remote", "get-url", "origin"])
+        .output()
+    else {
+        return false;
+    };
+    origin.status.success()
+        && String::from_utf8_lossy(&origin.stdout).trim()
+            == "https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git"
 }
 
 pub fn collect_auto_update_status_json(base_dir: &Path) -> String {

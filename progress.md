@@ -2,6 +2,12 @@
 
 更新时间：2026-11-23（Asia/Shanghai）
 
+## Phase 40：修复 Rust `narwhal-agent` 缺失 `operations.managed_upgrade` 上报导致托管升级跳过节点（v2.2.2）
+
+- **Rust `agent-core` 补齐托管升级能力声明（`rust/crates/agent-core/src/lib.rs`、`tests.rs`）**：
+  - 新增 `managed_upgrade_available` / `managed_upgrade_available_with_cmd_check`（与 `client/operations.py` 保持一致，校验 `managed-client-update.sh`、`systemd-run`、`client-auto-update.env` 及 `archive`/`git` 可信源与干净工作区），并在 `AgentState` 中缓存 60 秒以减少单核宿主机进程开销；
+  - 在 `build_report_payload` 的 `operations` 载荷中输出 `"managed_upgrade": <bool>`，使已切流至 Rust 主线的托管节点重新被 `server/fleet_updates.py` 与 `server/operations_api.py` 识别并纳入灰度/分批升级；补充 Rust 单元测试覆盖 `archive`/`git` 模式与上报载荷校验。
+
 ## Phase 39：单核宿主机 Agent CPU 尖峰治理与历史 Python 节点自动切流 Rust 主线（v2.2.1）
 
 - **历史节点自动切流纯 Rust 主线（`scripts/install-client.sh`、`scripts/managed-client-update.sh`）**：

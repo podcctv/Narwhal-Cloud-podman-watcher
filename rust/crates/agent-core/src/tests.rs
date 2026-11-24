@@ -994,3 +994,64 @@ fn test_dynamic_security_policy_hot_reload_and_service_audit() {
         state.sni_whitelist.as_deref()
     ));
 }
+
+#[test]
+fn test_managed_upgrade_available_archive_and_git_modes() {
+    let base = std::env::temp_dir().join(format!("narwhal_managed_upd_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+
+    assert!(!managed_upgrade_available_with_cmd_check(&base, |_| true));
+
+    fs::write(base.join("managed-client-update.sh"), "#!/bin/bash\n").unwrap();
+    fs::write(base.join("update_archive.py"), "print('ok')\n").unwrap();
+    fs::write(
+        base.join("client-auto-update.env"),
+        "AUTO_UPDATE_ENABLED=true\nAUTO_UPDATE_MODE=archive\n",
+    )
+    .unwrap();
+
+    assert!(managed_upgrade_available_with_cmd_check(&base, |_| true));
+    assert!(!managed_upgrade_available_with_cmd_check(&base, |c| c != "systemd-run"));
+    assert!(!managed_upgrade_available_with_cmd_check(&base, |c| c != "python3"));
+
+    let repo = base.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert!(Command::new("git").arg("-C").arg(&repo).arg("init").output().unwrap().status.success());
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["remote", "add", "origin", "https://github.com/podcctv/Narwhal-Cloud-podman-watcher.git"])
+        .output()
+        .unwrap();
+    fs::write(
+        base.join("client-auto-update.env"),
+        format!(
+            "AUTO_UPDATE_ENABLED=true\nAUTO_UPDATE_MODE=git\nAUTO_UPDATE_REPO_DIR={}\n",
+            repo.display()
+        ),
+    )
+    .unwrap();
+    assert!(managed_upgrade_available_with_cmd_check(&base, |_| true));
+
+    fs::write(repo.join("untracked.txt"), "dirty").unwrap();
+    assert!(!managed_upgrade_available_with_cmd_check(&base, |_| true));
+    let _ = fs::remove_file(repo.join("untracked.txt"));
+
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["remote", "set-url", "origin", "https://github.com/example/other.git"])
+        .output()
+        .unwrap();
+    assert!(!managed_upgrade_available_with_cmd_check(&base, |_| true));
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_build_report_payload_includes_managed_upgrade_field() {
+    let mut state = AgentState::new(&Config::default());
+    let payload = state.build_report_json(&Config::default(), 1_700_000_000);
+    assert!(payload.contains("\"managed_upgrade\":false") || payload.contains("\"managed_upgrade\":true"));
+}
