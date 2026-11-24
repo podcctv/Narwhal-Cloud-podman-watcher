@@ -1,6 +1,13 @@
 # 当前进展与待办
 
-更新时间：2026-11-23（Asia/Shanghai）
+更新时间：2026-11-24（Asia/Shanghai）
+
+## Phase 45：移除正常代理程序在可疑恶意进程检测中的误报（v2.2.7）
+
+- **解除 `sing-box` 等常规代理二进制的恶意/可疑进程误报（`rust/crates/guard-core/src/security.rs`、`rust/crates/agent-core/src/lib.rs`）**：
+  - 将 `PROXY_BINARIES` 匹配分支从 `detect_suspicious_processes` 中移除，与 Python `client/agent.py` 语义对齐：`sing-box`、`xray`、`v2ray` 等代理核心不再触发 `suspicious_process` 恶意进程告警；
+  - 保留 `PROXY_BINARIES` / `is_proxy_binary` 供 4D `evaluate_socket_abuse` 使用，并保持挖矿（`xmrig` 等）、反弹 shell、P2P 挂机卖带宽（`traffmonetizer`/`honeygain`/`bitping`/`myst` 等）及 `app-guard`/`protocol-guard` 的策略检测不变；
+  - 将 `build_security_alerts_json` 的 `suspicious_process` 告警标题调整为 `"发现疑似恶意/违规进程：{} (PID {})"`，并补充单元测试验证。
 
 ## Phase 44：容器遥测字段全量对齐、Conntrack 载荷压缩与单核 `/proc` + 30s 巡检轻量化（v2.2.6）
 

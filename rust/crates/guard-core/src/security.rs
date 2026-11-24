@@ -884,7 +884,7 @@ pub struct ProcInfo {
     pub command: String,
 }
 
-/// Finding emitted for a detected miner, proxy, or reverse-shell process.
+/// Finding emitted for a detected miner, reverse-shell, or bandwidth-monetization process.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SuspiciousProcFinding {
     pub pid: u32,
@@ -912,8 +912,10 @@ impl SuspiciousProcFinding {
     }
 }
 
-/// Detect crypto-miners, reverse shells, and proxy binaries in a process list,
+/// Detect crypto-miners, reverse shells, and bandwidth-monetization processes in a process list,
 /// returning findings with command-line secrets redacted.
+/// Legitimate proxy binaries (such as `sing-box`, `xray`, `v2ray`) are not flagged here;
+/// proxy abuse is handled separately by `evaluate_socket_abuse`, `app-guard`, and `protocol-guard`.
 pub fn detect_suspicious_processes(procs: &[ProcInfo]) -> Vec<SuspiciousProcFinding> {
     let mut findings = Vec::new();
     for proc_info in procs {
@@ -956,16 +958,6 @@ pub fn detect_suspicious_processes(procs: &[ProcInfo]) -> Vec<SuspiciousProcFind
             for &bm in BANDWIDTH_MONETIZATION_BINARIES {
                 if proc_base == bm || argv0 == bm {
                     matched = Some(("bandwidth_monetization", bm.to_string(), "critical"));
-                    break;
-                }
-            }
-        }
-
-        // 5. Proxy binary match (process name or argv[0])
-        if matched.is_none() {
-            for &proxy in PROXY_BINARIES {
-                if proc_base == proxy || argv0 == proxy {
-                    matched = Some(("proxy", proxy.to_string(), "warning"));
                     break;
                 }
             }
@@ -1367,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_xmrig_miner_and_proxy_binaries_without_script_false_positives() {
+    fn detects_xmrig_miner_without_proxy_or_script_false_positives() {
         let procs = vec![
             ProcInfo {
                 pid: 101,
@@ -1388,6 +1380,14 @@ mod tests {
                     .to_string(),
             },
             ProcInfo {
+                pid: 105,
+                ppid: 1,
+                cpu_percent: 8.0,
+                rss_bytes: 24 * 1024 * 1024,
+                process: "xray".to_string(),
+                command: "/usr/bin/xray run -c /etc/xray/config.json".to_string(),
+            },
+            ProcInfo {
                 pid: 103,
                 ppid: 1,
                 cpu_percent: 0.1,
@@ -1406,7 +1406,7 @@ mod tests {
         ];
 
         let findings = detect_suspicious_processes(&procs);
-        assert_eq!(findings.len(), 2);
+        assert_eq!(findings.len(), 1);
 
         assert_eq!(findings[0].pid, 101);
         assert_eq!(findings[0].category, "miner");
@@ -1414,13 +1414,6 @@ mod tests {
         assert_eq!(findings[0].severity, "critical");
         assert!(!findings[0].redacted_command.contains("secretpass"));
         assert!(findings[0].redacted_command.contains("-p [REDACTED]"));
-
-        assert_eq!(findings[1].pid, 102);
-        assert_eq!(findings[1].category, "proxy");
-        assert_eq!(findings[1].pattern, "sing-box");
-        assert_eq!(findings[1].severity, "warning");
-        assert!(!findings[1].redacted_command.contains("my_secret_tok"));
-        assert!(findings[1].redacted_command.contains("--token=[REDACTED]"));
     }
 
     #[test]

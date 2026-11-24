@@ -1683,6 +1683,68 @@ fn test_report_emits_compact_conntrack_unique_ips_traffic_counters_and_top_cpu_p
         report.contains("\"process\":\"sing-box\""),
         "expected top_cpu_process sing-box: {report}"
     );
+    assert!(
+        !report.contains("\"type\":\"suspicious_process\""),
+        "sing-box should not trigger suspicious_process alert: {report}"
+    );
 
     let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_suspicious_process_alerts_exclude_proxy_binaries_but_keep_malicious_ones() {
+    let benign_procs = vec![
+        ProcInfo {
+            pid: 201,
+            ppid: 1,
+            cpu_percent: 15.0,
+            rss_bytes: 32 * 1024 * 1024,
+            process: "sing-box".to_string(),
+            command: "/usr/bin/sing-box run -c /etc/sing-box/config.json".to_string(),
+        },
+        ProcInfo {
+            pid: 202,
+            ppid: 1,
+            cpu_percent: 10.0,
+            rss_bytes: 24 * 1024 * 1024,
+            process: "xray".to_string(),
+            command: "/usr/bin/xray run -c /etc/xray/config.json".to_string(),
+        },
+    ];
+    let benign_findings = detect_suspicious_processes(&benign_procs);
+    assert!(
+        benign_findings.is_empty(),
+        "expected no suspicious findings for sing-box/xray: {:?}",
+        benign_findings
+    );
+    let empty_verdict = evaluate_socket_abuse(&SocketAbuseInput::default());
+    let benign_alerts = build_security_alerts_json(&empty_verdict, &benign_findings);
+    assert!(
+        !benign_alerts.contains("\"type\":\"suspicious_process\""),
+        "unexpected suspicious_process alert for proxy binaries: {benign_alerts}"
+    );
+
+    let malicious_procs = vec![
+        ProcInfo {
+            pid: 301,
+            ppid: 1,
+            cpu_percent: 99.0,
+            rss_bytes: 128 * 1024 * 1024,
+            process: "xmrig".to_string(),
+            command: "/tmp/xmrig -o stratum+tcp://pool.example:3333".to_string(),
+        },
+        ProcInfo {
+            pid: 302,
+            ppid: 1,
+            cpu_percent: 2.0,
+            rss_bytes: 20 * 1024 * 1024,
+            process: "traffmonetizer-cli".to_string(),
+            command: "./traffmonetizer-cli start accept --token secret123".to_string(),
+        },
+    ];
+    let malicious_findings = detect_suspicious_processes(&malicious_procs);
+    assert_eq!(malicious_findings.len(), 2);
+    let malicious_alerts = build_security_alerts_json(&empty_verdict, &malicious_findings);
+    assert!(malicious_alerts.contains("\"type\":\"suspicious_process\""));
+    assert!(malicious_alerts.contains("发现疑似恶意/违规进程：xmrig (PID 301)"));
 }

@@ -3795,7 +3795,7 @@ pub fn build_security_alerts_json(
             first.severity.as_str()
         };
         let title = format!(
-            "发现疑似恶意/代理进程：{} (PID {})",
+            "发现疑似恶意/违规进程：{} (PID {})",
             first.process, first.pid
         );
         let message = format!(
